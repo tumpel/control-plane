@@ -269,6 +269,18 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.secret_set_id ?? null;
   }
 
+  private refusedSetDetail(session: SessionRow, hostDetail: string): string {
+    const [row] = this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT s.name FROM personas p JOIN secret_sets s ON s.secret_set_id = p.secret_set_id WHERE p.persona_id = ?",
+        session.persona_id,
+      )
+      .toArray();
+    const set = row === undefined ? `the secret set of persona ${session.persona_id}` : `secret set ${row.name}`;
+    const rewrite = row === undefined ? "--rewrite-secrets <set name>" : `--rewrite-secrets ${row.name}`;
+    return `${hostDetail}. The credential comes from ${set}; replace its value with tumpel config apply ${rewrite}, then send the turn again`;
+  }
+
   private refusedCredential(session: SessionRow, now: number): CredentialRefusal | null {
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) throw new Error(`${session.harness} ${session.harness_version} left the harness catalog`);
@@ -714,7 +726,9 @@ export class TenantSessions extends DurableObject<Env> {
       });
     }
     if (message.type === "TurnFailed") {
-      return this.failTurn(tenantId, turn.turn_id, message.reason, message.detail, message.failedAt);
+      const detail =
+        message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
+      return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
     }
     if (turn.state !== "Running") return;
     if (message.type === "TurnLine")
