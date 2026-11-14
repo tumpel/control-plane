@@ -6,8 +6,11 @@ fails when an operation lacks a tool or a command, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Personas `persona`, SecretSets `secret-set`.
-`EnrolmentTokens_mint` takes the verb `mint-token`.
+Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Personas `persona`, SecretSets `secret-set`, Sessions `session`, Turns `turn`, Snapshots `snapshot`.
+`EnrolmentTokens_mint` takes the verb `mint-token` and `Turns_getFailure` the verb `failure`. The session's
+turn, snapshot and transcript reads take the noun they return: `Sessions_sendTurn` and `Sessions_listTurns` are
+`turn send` and `turn list`, `Sessions_listSnapshots` is `snapshot list`, and `Sessions_readTranscript` is
+`transcript`, which the CLI takes by turnId.
 
 `tumpel_secret_set_create` and `_update` take key names and `valueFrom.env` names only and write
 nothing: the server cannot read your environment, so they return the config entry for
@@ -37,9 +40,18 @@ nothing: the server cannot read your environment, so they return the config entr
 | `SecretSets_get`          | `tumpel_secret_set_get`    | `tumpel secret-set get`    |
 | `SecretSets_list`         | `tumpel_secret_set_list`   | `tumpel secret-set list`   |
 | `SecretSets_update`       | `tumpel_secret_set_update` | `tumpel secret-set update` |
+| `Sessions_get`            | `tumpel_session_get`       | `tumpel session get`       |
+| `Sessions_list`           | `tumpel_session_list`      | `tumpel session list`      |
+| `Sessions_listSnapshots`  | `tumpel_snapshot_list`     | `tumpel snapshot list`     |
+| `Sessions_listTurns`      | `tumpel_turn_list`         | `tumpel turn list`         |
+| `Sessions_readTranscript` | `tumpel_transcript`        | `tumpel transcript`        |
+| `Sessions_sendTurn`       | `tumpel_turn_send`         | `tumpel turn send`         |
+| `Sessions_start`          | `tumpel_session_start`     | `tumpel session start`     |
+| `Snapshots_get`           | `tumpel_snapshot_get`      | `tumpel snapshot get`      |
+| `Turns_get`               | `tumpel_turn_get`          | `tumpel turn get`          |
+| `Turns_getFailure`        | `tumpel_turn_failure`      | `tumpel turn failure`      |
 
 Excluded by rule:
 
 - browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `Tenants_signUp`.
 - OAuth, device-flow and enrolment wire: no principal: `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`.
-- not served yet: no control-plane route: `Sessions_start`, `Sessions_list`, `Sessions_get`, `Sessions_listSnapshots`, `Sessions_readTranscript`, `Sessions_sendTurn`, `Sessions_listTurns`, `Snapshots_get`, `Turns_get`, `Turns_getFailure`.
