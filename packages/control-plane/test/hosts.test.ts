@@ -118,7 +118,16 @@ before(async () => {
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
-    workers: [{ configPath: "./wrangler.jsonc", vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE } }],
+    workers: [
+      {
+        configPath: "./wrangler.jsonc",
+        vars: {
+          ACCESS_ISSUER: issuer,
+          ACCESS_AUD: AUDIENCE,
+          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+        },
+      },
+    ],
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");

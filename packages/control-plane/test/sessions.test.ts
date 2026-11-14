@@ -15,6 +15,7 @@ import {
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
+  ProblemSchema,
   SecretSetSchema,
   SnapshotSchema,
   StartedSessionSchema,
@@ -502,7 +503,7 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
 });
 
-test("a turn whose subscription token has expired fails CredentialExpired when it is offered, and its key never reaches the host", async () => {
+test("a session whose subscription token has expired is refused CredentialExpired at start, and no offer reaches the host", async () => {
   await createPersona("Expired", [
     {
       kind: "SubscriptionToken",
@@ -513,20 +514,10 @@ test("a turn whose subscription token has expired fails CredentialExpired when i
     },
   ]);
   const response = await postJson("/v1/sessions", { ...(await sessionStart("Expired")), prompt: "too late" }, bearer);
-  assert.equal(response.status, 200);
-  const started = StartedSessionSchema.parse(await response.json());
-  const withdrawn = await host.next("TurnWithdrawn");
-  assert.equal(withdrawn.turnId, started.turn.turnId);
-  const failure = await eventually(
-    "the turn's failure",
-    async () => {
-      const read = await server.fetch(`${origin}/v1/turns/${started.turn.turnId}/failure`, { headers: bearer });
-      return read.status === 200 ? TurnFailureSchema.parse(await read.json()) : null;
-    },
-    (read) => read !== null,
-  );
-  assert.equal(failure?.reason, "CredentialExpired");
-  assert.match(failure?.detail ?? "", /CLAUDE_SUBSCRIPTION/);
+  assert.equal(response.status, 422);
+  const refused = ProblemSchema.parse(await response.json());
+  assert.equal(refused.code, "CredentialExpired");
+  assert.match(refused.detail, /CLAUDE_SUBSCRIPTION/);
 });
 
 test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {

@@ -18,7 +18,7 @@ export interface CheckedFile extends StoredFile {
 
 export interface BlobStore {
   put(key: string, bytes: Uint8Array<ArrayBuffer>): Promise<unknown>;
-  head(key: string): Promise<{ size: number } | null>;
+  get(key: string): Promise<{ size: number; arrayBuffer(): Promise<ArrayBuffer> } | null>;
 }
 
 export type Checked = { ok: true; files: CheckedFile[] } | { ok: false; problem: Problem };
@@ -117,8 +117,8 @@ export const storeFiles = async (
       await store.put(key, file.bytes);
       continue;
     }
-    const head = await store.head(key);
-    if (head === null) {
+    const held = await store.get(key);
+    if (held === null) {
       return {
         ok: false,
         problem: {
@@ -129,14 +129,26 @@ export const storeFiles = async (
         },
       };
     }
-    if (head.size !== file.sizeBytes) {
+    if (held.size !== file.sizeBytes) {
       return {
         ok: false,
         problem: {
           code: "InvalidRequest",
           title: "Persona file size differs",
-          detail: `${operation} names ${file.path} with ${file.sizeBytes} bytes, and the store holds ${head.size} bytes under digest ${file.digest}`,
+          detail: `${operation} names ${file.path} with ${file.sizeBytes} bytes, and the store holds ${held.size} bytes under digest ${file.digest}`,
           fix: "Upload the file again to a fresh presigned URL and name it with its own digest and size",
+        },
+      };
+    }
+    const digest = await sha256Hex(new Uint8Array(await held.arrayBuffer()));
+    if (digest !== file.digest) {
+      return {
+        ok: false,
+        problem: {
+          code: "InvalidRequest",
+          title: "Persona file digest differs",
+          detail: `${operation} names ${file.path} by digest ${file.digest}, and the bytes the store holds under it hash to ${digest}`,
+          fix: "Upload the file's own bytes again to a fresh presigned URL for its digest, then repeat the write",
         },
       };
     }

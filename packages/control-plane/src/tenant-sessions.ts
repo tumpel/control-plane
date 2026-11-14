@@ -1,6 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  CredentialHandoverSchema,
   SecretSetCreateSchema,
   SecretSetSchema,
   SessionSchema,
@@ -20,10 +19,17 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
-import { credentialFor, dispatchVariables, type SecretKey, type SecretMember } from "./dispatch-variables.ts";
-import { importKeyEncryptionKey, newDataKey, unseal, unwrapDataKey } from "./envelope.ts";
+import {
+  type CredentialRefusal,
+  checkCredential,
+  dispatchVariables,
+  type SecretKey,
+  type SecretMember,
+} from "./dispatch-variables.ts";
+import { generateDataKey, unseal } from "./envelope.ts";
 import { catalogEntry } from "./harness-catalog";
 import type { Env } from "./index";
+import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
 import { signerOf } from "./presign";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
@@ -57,7 +63,7 @@ export type Sent =
   | { kind: "Sent"; turn: Turn }
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
-  | { kind: "NoCredential"; personaId: string; provider: string };
+  | { kind: "CredentialRefused"; personaId: string; refusal: CredentialRefusal };
 
 export type TranscriptCursor =
   | { kind: "Chunk"; sessionState: SessionState; storageKey: string; range: Range }
@@ -263,13 +269,15 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.secret_set_id ?? null;
   }
 
-  private missingCredential(session: SessionRow): string | null {
+  private refusedCredential(session: SessionRow, now: number): CredentialRefusal | null {
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) throw new Error(`${session.harness} ${session.harness_version} left the harness catalog`);
     const secretSetId = this.personaSecretSet(session.persona_id);
-    if (secretSetId === null) return entry.provider;
-    const keys = memberRows(this.ctx.storage.sql, secretSetId).map(toKey);
-    return credentialFor(entry, keys) === undefined ? entry.provider : null;
+    if (secretSetId === null) {
+      throw new Error(`session ${session.session_id} runs on persona ${session.persona_id}, which is gone`);
+    }
+    const checked = checkCredential(entry, memberRows(this.ctx.storage.sql, secretSetId).map(toKey), now);
+    return checked.kind === "Usable" ? null : checked;
   }
 
   private wrappedDataKey(): string | null {
@@ -277,26 +285,21 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.wrapped ?? null;
   }
 
-  private async heldOrNewDataKey(keyEncryptionKey: CryptoKey): Promise<string> {
-    const held = this.wrappedDataKey();
-    if (held !== null) return held;
-    const created = await newDataKey(keyEncryptionKey);
+  protected async holdDataKey(): Promise<void> {
+    if (this.wrappedDataKey() !== null) return;
+    const wrapped = await keyStoreOf(this.env).wrap(await generateDataKey());
     this.ctx.storage.sql.exec(
       "INSERT INTO data_keys (data_key_id, wrapped, created_at) VALUES (1, ?, ?)",
-      created,
+      wrapped,
       Date.now(),
     );
-    return created;
   }
 
-  protected async dataKey(blocking: "Block" | "AlreadyBlocked" = "Block"): Promise<CryptoKey> {
-    const keyEncryptionKey = await importKeyEncryptionKey(this.env.SECRETS_KEK);
-    const wrapped =
-      this.wrappedDataKey() ??
-      (blocking === "AlreadyBlocked"
-        ? await this.heldOrNewDataKey(keyEncryptionKey)
-        : await this.ctx.blockConcurrencyWhile(() => this.heldOrNewDataKey(keyEncryptionKey)));
-    return unwrapDataKey(keyEncryptionKey, wrapped);
+  protected dataKey(): Promise<CryptoKey> {
+    const wrapped = this.wrappedDataKey();
+    if (wrapped === null)
+      throw new Error("the tenant holds no data key; the Durable Object constructor creates it before any request");
+    return keyStoreOf(this.env).unwrap(wrapped);
   }
 
   private async members(secretSetId: string): Promise<SecretMember[]> {
@@ -422,8 +425,8 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (running !== undefined) return { kind: "InFlight", turnId: running.turn_id };
-    const missing = this.missingCredential(session);
-    if (missing !== null) return { kind: "NoCredential", personaId: session.persona_id, provider: missing };
+    const refusal = this.refusedCredential(session, now);
+    if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?",
@@ -565,6 +568,11 @@ export class TenantSessions extends DurableObject<Env> {
         `secret set ${secretSetId} holds no ${dispatch.provider} credential for turn ${turnId}; add one with tumpel config apply`,
       );
     }
+    if (dispatch.kind === "Unsupported") {
+      throw new Error(
+        `secret set ${secretSetId} holds ${dispatch.name}, a ${dispatch.credentialKind}, which ${session.harness} does not accept for turn ${turnId}; it accepts ${dispatch.supported.join(", ")}`,
+      );
+    }
     if (dispatch.kind === "Expired") {
       await this.failTurn(
         tenantId,
@@ -576,14 +584,13 @@ export class TenantSessions extends DurableObject<Env> {
       return { kind: "Withdrawn" };
     }
     const settings = settingsOf(this.env);
-    const handover = CredentialHandoverSchema.parse({
+    const handover = {
       dispatchCredentialId: crypto.randomUUID(),
-      tenantId,
       turnId,
       hostId,
       variableNames: dispatch.variables.map((variable) => variable.name),
       createdAt: now,
-    });
+    };
     this.ctx.storage.sql.exec(
       "INSERT INTO credential_handovers (dispatch_credential_id, turn_id, host_id, variable_names, created_at) VALUES (?, ?, ?, ?, ?)",
       handover.dispatchCredentialId,
