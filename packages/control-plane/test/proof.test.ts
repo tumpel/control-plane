@@ -123,7 +123,12 @@ before(async () => {
     workers: [
       {
         configPath: "./wrangler.jsonc",
-        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, ACCESS_PROOF_COMMON_NAME: PROOF_CLIENT_ID },
+        vars: {
+          ACCESS_ISSUER: issuer,
+          ACCESS_AUD: AUDIENCE,
+          ACCESS_PROOF_COMMON_NAME: PROOF_CLIENT_ID,
+          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+        },
       },
     ],
   });
