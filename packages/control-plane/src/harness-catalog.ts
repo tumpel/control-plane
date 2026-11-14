@@ -9,8 +9,6 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: "2.0.0",
     provider: "Anthropic",
     providerKeyName: "ANTHROPIC_API_KEY",
-    providerBaseUrlName: "ANTHROPIC_BASE_URL",
-    providerUrl: "https://api.anthropic.com",
     installRecipe: "npm:@anthropic-ai/claude-code@2.0.0",
   },
   {
@@ -18,8 +16,6 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: "0.50.0",
     provider: "OpenAi",
     providerKeyName: "OPENAI_API_KEY",
-    providerBaseUrlName: "OPENAI_BASE_URL",
-    providerUrl: "https://api.openai.com/v1",
     installRecipe: "npm:@openai/codex@0.50.0",
   },
   {
@@ -27,8 +23,6 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: "1.0.0",
     provider: "Anthropic",
     providerKeyName: "ANTHROPIC_API_KEY",
-    providerBaseUrlName: "ANTHROPIC_BASE_URL",
-    providerUrl: "https://api.anthropic.com",
     installRecipe: "npm:opencode-ai@1.0.0",
   },
   {
@@ -36,8 +30,6 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: "0.10.0",
     provider: "Anthropic",
     providerKeyName: "ANTHROPIC_API_KEY",
-    providerBaseUrlName: "ANTHROPIC_BASE_URL",
-    providerUrl: "https://api.anthropic.com",
     installRecipe: "npm:@mariozechner/pi-coding-agent@0.10.0",
   },
 ]);
