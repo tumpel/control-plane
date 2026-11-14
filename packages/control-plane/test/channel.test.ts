@@ -1,35 +1,33 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { test } from "node:test";
+import { CloseCode } from "@tumpel/api/schemas";
 import * as control from "../src/channel/control.ts";
-import * as host from "../src/channel/host.ts";
 import {
-  CloseCode,
   type ControlEnvelope,
-  type ControlMessage,
+  type DispatchGrant,
   emptyLedger,
   type HostEnvelope,
   type HostMessage,
+  helloBytes,
   type Ledger,
   type LedgerStore,
+  type StoredControlMessage,
 } from "../src/channel/protocol.ts";
 
 const HOST_ID = "host-1";
 
-const keyPair = (): { publicKey: string; sign: (bytes: Uint8Array) => Promise<string> } => {
+const keyPair = (): { publicKey: string; privateKey: KeyObject } => {
   const pair = generateKeyPairSync("ed25519");
   const x = pair.publicKey.export({ format: "jwk" }).x ?? "";
-  return {
-    publicKey: Buffer.from(x, "base64url").toString("base64"),
-    sign: async (bytes) => sign(null, bytes, pair.privateKey).toString("base64"),
-  };
+  return { publicKey: Buffer.from(x, "base64url").toString("base64"), privateKey: pair.privateKey };
 };
 
 const memoryLedger = <M>(): LedgerStore<M> & { current: Ledger<M> } => {
   const store = {
     current: emptyLedger<M>(),
-    load: () => store.current,
-    save: (ledger: Ledger<M>) => {
+    load: async () => structuredClone(store.current),
+    save: async (ledger: Ledger<M>) => {
       store.current = structuredClone(ledger);
     },
   };
@@ -41,33 +39,7 @@ interface Closed {
   reason: string;
 }
 
-class Wire {
-  toControl: string[] = [];
-  toHost: string[] = [];
-  closed: Closed | null = null;
-
-  hostPort = {
-    send: (envelope: HostEnvelope) => {
-      if (this.closed === null) this.toControl.push(JSON.stringify(envelope));
-    },
-    close: (code: number, reason: string) => {
-      this.closed ??= { code, reason };
-    },
-  };
-
-  controlPort = {
-    send: (envelope: ControlEnvelope) => {
-      if (this.closed === null) this.toHost.push(JSON.stringify(envelope));
-    },
-    close: (code: number, reason: string) => {
-      this.closed ??= { code, reason };
-    },
-  };
-}
-
-const closure = (wire: Wire): Closed | null => wire.closed;
-
-const snapshotRequest = (snapshotId: string): ControlMessage => ({
+const snapshotRequest = (snapshotId: string): StoredControlMessage => ({
   type: "SnapshotRequest",
   snapshotId,
   sessionId: "session-1",
@@ -79,154 +51,187 @@ const snapshotRequest = (snapshotId: string): ControlMessage => ({
   uploadExpiresAt: "2026-11-14T12:00:00+01:00",
 });
 
+const turnOffer: StoredControlMessage = {
+  type: "TurnOffer",
+  turnId: "turn-1",
+  sessionId: "session-1",
+  boxId: "box-1",
+  repository: "https://git.example.test/repo.git",
+  harness: "ClaudeCode",
+  harnessVersion: "1.0.0",
+  model: "claude-test",
+  prompt: "hello",
+};
+
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, sizeBytes: 10 });
+
+const frame = (seq: number, ack: number, message: HostMessage): HostEnvelope => ({ type: "Frame", seq, ack, message });
 
 const setup = (revoked = false) => {
   const keys = keyPair();
-  const controlLedger = memoryLedger<ControlMessage>();
-  const hostLedger = memoryLedger<HostMessage>();
-  const now = () => new Date("2026-11-14T10:00:00+00:00");
-  const toHost: host.HostEvent[] = [];
-  const toControl: control.ControlEvent[] = [];
+  const ledger = memoryLedger<StoredControlMessage>();
   const peer = { hostId: HOST_ID, publicKey: keys.publicKey, revoked };
+  let minted = 0;
+  const mintGrant = async (): Promise<DispatchGrant> => {
+    minted += 1;
+    return {
+      dispatchCredentialId: `grant-${minted}`,
+      expiresAt: "2026-11-14T12:00:00+01:00",
+      variables: [{ name: "API_KEY", value: `secret-${minted}` }],
+    };
+  };
 
   const connect = () => {
-    const wire = new Wire();
-    const controlContext: control.ControlContext = {
-      port: wire.controlPort,
-      host: peer,
-      ledger: controlLedger,
-      now,
-    };
-    const hostContext: host.HostContext = {
-      port: wire.hostPort,
-      hostId: HOST_ID,
-      supervisorVersion: "0.1.0",
-      ledger: hostLedger,
-      sign: keys.sign,
-      now,
-    };
+    const sent: ControlEnvelope[] = [];
     const link = {
-      wire,
-      controlContext,
-      hostContext,
-      control: control.challenge(wire.controlPort),
-      host: host.connecting(),
-      pump: async () => {
-        while (wire.toControl.length > 0 || wire.toHost.length > 0) {
-          const forHost = wire.toHost.shift();
-          if (forHost !== undefined) {
-            const received = await host.receive(link.host, forHost, hostContext);
-            link.host = received.connection;
-            if (received.event.kind !== "None") toHost.push(received.event);
-          }
-          const forControl = wire.toControl.shift();
-          if (forControl !== undefined) {
-            const received = await control.receive(link.control, forControl, controlContext);
-            link.control = received.connection;
-            if (received.event.kind !== "None") toControl.push(received.event);
-          }
-        }
+      sent,
+      closed: null as Closed | null,
+      events: [] as control.ControlEvent[],
+      connection: { phase: "Closed" } as control.ControlConnection,
+      context: {
+        port: {
+          send: (envelope: ControlEnvelope) => {
+            if (link.closed === null) sent.push(structuredClone(envelope));
+          },
+          close: (code: number, reason: string) => {
+            link.closed ??= { code, reason };
+          },
+        },
+        host: peer,
+        ledger,
+        mintGrant,
+        now: () => new Date("2026-11-14T10:00:00+00:00"),
+      } satisfies control.ControlContext,
+      deliver: async (envelope: HostEnvelope) => {
+        const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
+        link.connection = received.connection;
+        if (received.event.kind !== "None") link.events.push(received.event);
+      },
+      hello: async (privateKey: KeyObject = keys.privateKey) => {
+        const [challenge] = sent;
+        assert.equal(challenge?.type, "Challenge");
+        await link.deliver({
+          type: "Hello",
+          hostId: HOST_ID,
+          protocolVersion: 1,
+          supervisorVersion: "0.1.0",
+          signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
+        });
       },
     };
+    link.connection = control.challenge(link.context.port);
     return link;
   };
-  return { connect, toHost, toControl, controlLedger, hostLedger, peer };
+  return { connect, ledger, peer };
 };
 
-test("the handshake signs the nonce, welcomes the host and carries frames both ways", async () => {
+const closure = (link: { closed: Closed | null }): Closed | null => link.closed;
+
+const frames = (sent: ControlEnvelope[]) => sent.filter((envelope) => envelope.type === "Frame");
+
+test("the handshake verifies the signed nonce, welcomes the host and carries frames both ways", async () => {
   const channel = setup();
   const link = channel.connect();
-  await link.pump();
-  assert.equal(link.control.phase, "Open");
-  assert.equal(link.host.phase, "Open");
-  assert.deepEqual(channel.toHost, [{ kind: "Welcomed" }]);
-  assert.deepEqual(channel.toControl, [{ kind: "Welcomed" }]);
+  await link.hello();
+  assert.equal(link.connection.phase, "Open");
+  assert.deepEqual(link.events, [{ kind: "Welcomed" }]);
+  assert.deepEqual(
+    link.sent.map((envelope) => envelope.type),
+    ["Challenge", "Welcome"],
+  );
 
-  control.send(link.control, snapshotRequest("snap-1"), link.controlContext);
-  host.send(link.host, snapshotDone("snap-1"), link.hostContext);
-  await link.pump();
-  assert.deepEqual(channel.toHost.at(-1), { kind: "Message", message: snapshotRequest("snap-1") });
-  assert.deepEqual(channel.toControl.at(-1), { kind: "Message", message: snapshotDone("snap-1") });
-
-  host.send(link.host, snapshotDone("snap-2"), link.hostContext);
-  await link.pump();
-  assert.deepEqual(channel.controlLedger.current.unacked, []);
-  assert.equal(channel.controlLedger.current.received, 2);
-  assert.equal(link.wire.closed, null);
+  await control.send(link.connection, snapshotRequest("snap-1"), link.context);
+  assert.deepEqual(frames(link.sent), [{ type: "Frame", seq: 1, ack: 0, message: snapshotRequest("snap-1") }]);
+  await link.deliver(frame(1, 1, snapshotDone("snap-1")));
+  assert.deepEqual(link.events.at(-1), { kind: "Message", message: snapshotDone("snap-1") });
+  assert.deepEqual(channel.ledger.current, { received: 1, sent: 1, unacked: [] });
+  assert.equal(link.closed, null);
 });
 
 test("a Hello signed by another key is closed as a bad signature", async () => {
-  const channel = setup();
-  const link = channel.connect();
-  link.hostContext.sign = keyPair().sign;
-  await link.pump();
-  assert.equal(closure(link.wire)?.code, CloseCode.BadSignature);
-  assert.equal(link.control.phase, "Closed");
+  const link = setup().connect();
+  await link.hello(keyPair().privateKey);
+  assert.equal(link.closed?.code, CloseCode.BadSignature);
+  assert.equal(link.connection.phase, "Closed");
 });
 
 test("a duplicate frame is dropped and a gap closes the connection", async () => {
-  const channel = setup();
-  const link = channel.connect();
-  await link.pump();
-  host.send(link.host, snapshotDone("snap-1"), link.hostContext);
-  const [frame] = link.wire.toControl;
-  assert.ok(frame);
-  link.wire.toControl.push(frame);
-  await link.pump();
+  const link = setup().connect();
+  await link.hello();
+  await link.deliver(frame(1, 0, snapshotDone("snap-1")));
+  await link.deliver(frame(1, 0, snapshotDone("snap-1")));
   assert.deepEqual(
-    channel.toControl.filter((event) => event.kind === "Message"),
+    link.events.filter((event) => event.kind === "Message"),
     [{ kind: "Message", message: snapshotDone("snap-1") }],
   );
-  assert.equal(link.wire.closed, null);
+  assert.equal(link.closed, null);
 
-  link.wire.toControl.push(JSON.stringify({ type: "Frame", seq: 5, ack: 0, message: snapshotDone("snap-5") }));
-  await link.pump();
-  assert.equal(closure(link.wire)?.code, CloseCode.ProtocolError);
-  assert.match(closure(link.wire)?.reason ?? "", /expected seq 2, got 5/);
+  await link.deliver(frame(5, 0, snapshotDone("snap-5")));
+  const closed = closure(link);
+  assert.equal(closed?.code, CloseCode.ProtocolError);
+  assert.match(closed?.reason ?? "", /expected seq 2, got 5/);
 });
 
-test("after a reconnect both sides resend unacked frames and each is delivered once", async () => {
+test("after a reconnect the control plane resends unacked frames, each turn offer with a freshly minted grant", async () => {
   const channel = setup();
   const first = channel.connect();
-  await first.pump();
-  control.send(first.control, snapshotRequest("snap-1"), first.controlContext);
-  host.send(first.host, snapshotDone("snap-1"), first.hostContext);
-  await first.pump();
-  first.wire.closed = { code: 1006, reason: "dropped" };
+  await first.hello();
+  await control.send(first.connection, turnOffer, first.context);
+  await first.deliver(frame(1, 0, snapshotDone("snap-1")));
+  const [offered] = frames(first.sent);
+  assert.equal(offered?.type === "Frame" && offered.message.type === "TurnOffer" && offered.seq, 1);
+  first.closed = { code: 1006, reason: "dropped" };
 
-  control.send({ phase: "Closed" }, snapshotRequest("snap-2"), first.controlContext);
-  host.send({ phase: "Closed" }, snapshotDone("snap-2"), first.hostContext);
-  assert.equal(channel.controlLedger.current.unacked.length, 2);
-  assert.equal(channel.hostLedger.current.unacked.length, 2);
+  await control.send({ phase: "Closed" }, snapshotRequest("snap-2"), first.context);
+  assert.equal(JSON.stringify(channel.ledger.current).includes("grant-"), false);
+  assert.equal(JSON.stringify(channel.ledger.current).includes("secret-"), false);
 
   const second = channel.connect();
-  await second.pump();
-  const messages = (events: { kind: string }[]) => events.filter((event) => event.kind === "Message");
-  assert.deepEqual(messages(channel.toHost), [
-    { kind: "Message", message: snapshotRequest("snap-1") },
-    { kind: "Message", message: snapshotRequest("snap-2") },
-  ]);
-  assert.deepEqual(messages(channel.toControl), [
-    { kind: "Message", message: snapshotDone("snap-1") },
-    { kind: "Message", message: snapshotDone("snap-2") },
-  ]);
-  assert.equal(second.wire.closed, null);
+  await second.hello();
+  const resent = frames(second.sent);
+  assert.deepEqual(
+    resent.map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.ack, envelope.message.type]),
+    [
+      [1, 1, "TurnOffer"],
+      [2, 1, "SnapshotRequest"],
+    ],
+  );
+  const [again] = resent;
+  assert.ok(offered?.type === "Frame" && offered.message.type === "TurnOffer");
+  assert.ok(again?.type === "Frame" && again.message.type === "TurnOffer");
+  assert.equal(offered.message.credential.dispatchCredentialId, "grant-1");
+  assert.equal(again.message.credential.dispatchCredentialId, "grant-2");
+  assert.deepEqual({ ...again.message, credential: offered.message.credential }, offered.message);
+
+  await second.deliver(frame(1, 0, snapshotDone("snap-1")));
+  await second.deliver(frame(2, 2, snapshotDone("snap-2")));
+  assert.deepEqual(
+    [...first.events, ...second.events].filter((event) => event.kind === "Message"),
+    [
+      { kind: "Message", message: snapshotDone("snap-1") },
+      { kind: "Message", message: snapshotDone("snap-2") },
+    ],
+  );
+  assert.deepEqual(channel.ledger.current, { received: 2, sent: 2, unacked: [] });
+  assert.equal(second.closed, null);
 });
 
-test("revoke closes a live connection and refuses a revoked host's next Hello", async () => {
+test("revoke closes a live connection, and a revoked host's next Hello is closed before any frame", async () => {
   const channel = setup();
   const link = channel.connect();
-  await link.pump();
-  control.revoke(link.control, "retired", link.controlContext);
-  await link.pump();
-  assert.equal(closure(link.wire)?.code, CloseCode.Revoked);
-  assert.deepEqual(channel.toHost.at(-1), { kind: "Revoked", reason: "retired" });
+  await link.hello();
+  await control.send({ phase: "Closed" }, snapshotRequest("snap-1"), link.context);
+  control.revoke(link.context, "retired");
+  assert.equal(link.closed?.code, CloseCode.Revoked);
 
   channel.peer.revoked = true;
+  const before = structuredClone(channel.ledger.current);
   const again = channel.connect();
-  await again.pump();
-  assert.equal(closure(again.wire)?.code, CloseCode.Revoked);
-  assert.equal(channel.toControl.filter((event) => event.kind === "Welcomed").length, 1);
-  assert.deepEqual(channel.toHost.at(-1), { kind: "Revoked", reason: "the tenant revoked this host" });
+  await again.hello();
+  assert.equal(again.closed?.code, CloseCode.Revoked);
+  assert.deepEqual(
+    again.sent.map((envelope) => envelope.type),
+    ["Challenge"],
+  );
+  assert.deepEqual(channel.ledger.current, before);
 });

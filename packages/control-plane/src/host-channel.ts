@@ -1,26 +1,30 @@
 import { DurableObject } from "cloudflare:workers";
+import { CloseCode } from "@tumpel/api/schemas";
 import host0001 from "../migrations/host/0001_host.sql";
+import host0002 from "../migrations/host/0002_host_without_tenant.sql";
 import * as control from "./channel/control.ts";
 import {
-  CloseCode,
   type ControlEnvelope,
-  type ControlMessage,
+  type DispatchGrant,
   emptyLedger,
   HEARTBEAT_DEADLINE_MS,
   HEARTBEAT_INTERVAL_MS,
   type Ledger,
   type LedgerStore,
+  type StoredControlMessage,
 } from "./channel/protocol.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { problem } from "./http";
 import type { Env } from "./index";
 
-const HOST_MIGRATIONS = [{ name: "0001_host", sql: host0001 }];
+const HOST_MIGRATIONS = [
+  { name: "0001_host", sql: host0001 },
+  { name: "0002_host_without_tenant", sql: host0002 },
+];
 const CLOSE_REASON_LIMIT = 120;
 
 interface HostRow {
   host_id: string;
-  tenant_id: string;
   public_key: string;
   revoked: number;
 }
@@ -50,11 +54,10 @@ export class HostChannel extends DurableObject<Env> {
     });
   }
 
-  register(hostId: string, tenantId: string, publicKey: string): void {
+  register(hostId: string, publicKey: string): void {
     this.ctx.storage.sql.exec(
-      "INSERT INTO host (host_id, tenant_id, public_key, revoked) VALUES (?, ?, ?, 0)",
+      "INSERT OR IGNORE INTO host (host_id, public_key, revoked) VALUES (?, ?, 0)",
       hostId,
-      tenantId,
       publicKey,
     );
   }
@@ -64,8 +67,7 @@ export class HostChannel extends DurableObject<Env> {
     if (host === null) throw new Error("revoke reached a host object that was never registered");
     this.ctx.storage.sql.exec("UPDATE host SET revoked = 1");
     for (const socket of this.ctx.getWebSockets()) {
-      const attachment = this.attachment(socket);
-      control.revoke(attachment.connection, reason, this.context(socket, { ...host, revoked: 1 }, attachment));
+      control.revoke(this.context(socket, { ...host, revoked: 1 }, this.attachment(socket)), reason);
     }
   }
 
@@ -153,9 +155,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private host(): HostRow | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ host_id: string; tenant_id: string; public_key: string; revoked: number }>(
-        "SELECT host_id, tenant_id, public_key, revoked FROM host",
-      )
+      .exec<{ host_id: string; public_key: string; revoked: number }>("SELECT host_id, public_key, revoked FROM host")
       .toArray();
     return row ?? null;
   }
@@ -176,10 +176,10 @@ export class HostChannel extends DurableObject<Env> {
     };
   }
 
-  private ledger(): LedgerStore<ControlMessage> {
+  private ledger(): LedgerStore<StoredControlMessage> {
     const sql = this.ctx.storage.sql;
     return {
-      load: (): Ledger<ControlMessage> => {
+      load: async (): Promise<Ledger<StoredControlMessage>> => {
         const [row] = sql
           .exec<{ received: number; sent: number; unacked: string }>(
             "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
@@ -188,7 +188,7 @@ export class HostChannel extends DurableObject<Env> {
         if (row === undefined) return emptyLedger();
         return { received: row.received, sent: row.sent, unacked: JSON.parse(row.unacked) };
       },
-      save: (ledger: Ledger<ControlMessage>) => {
+      save: async (ledger: Ledger<StoredControlMessage>): Promise<void> => {
         sql.exec(
           "INSERT OR REPLACE INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)",
           ledger.received,
@@ -204,6 +204,11 @@ export class HostChannel extends DurableObject<Env> {
       port: this.port(socket, attachment),
       host: { hostId: host.host_id, publicKey: host.public_key, revoked: host.revoked === 1 },
       ledger: this.ledger(),
+      mintGrant: async (): Promise<DispatchGrant> => {
+        throw new Error(
+          `host ${host.host_id} has a turn offer to send, but this control plane mints no dispatch grants yet; deploy a control plane that holds provider keys`,
+        );
+      },
       now: () => new Date(),
     };
   }
