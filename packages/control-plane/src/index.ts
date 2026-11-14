@@ -12,7 +12,6 @@ import {
   HealthSchema,
   HostEnrolSchema,
   HostLabelsSchema,
-  HostPathSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
@@ -60,7 +59,7 @@ import {
 } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
 import { bearerOf, type Caller, callerForDeviceToken, signUp, whoamiForEmail, whoamiOf } from "./identity";
-import { mcpEndpoint, mcpRefusal, type RunTool } from "./mcp";
+import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
 import {
   AUTHORIZATION_SERVER_PATH,
   AUTHORIZE_PATH,
@@ -174,7 +173,11 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   return json(WhoamiSchema.parse(whoami));
 };
 
+const connectorCallers = new WeakMap<Request, Caller>();
+
 const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
+  const connector = connectorCallers.get(request);
+  if (connector !== undefined) return connector;
   const caller = await callerForDeviceToken(env.DB, bearerOf(request), Date.now());
   return caller ?? signedOut("this device token is missing, unknown or revoked", "Run tumpel login");
 };
@@ -585,35 +588,18 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
   return caller;
 };
 
-const runTool =
-  (env: Env, caller: Caller, origin: string): RunTool =>
-  async (call) => {
-    if (call.name === "tumpel_whoami") return { ok: true, text: JSON.stringify(await whoamiOf(env.DB, caller)) };
-    if (call.name === "tumpel_host_list") {
-      return { ok: true, text: JSON.stringify(await listHosts(env.DB, caller.tenantId)) };
-    }
-    if (call.name === "tumpel_host_mint_token") {
-      const args = EnrolmentTokenMintSchema.safeParse(call.arguments);
-      if (!args.success)
-        return { ok: false, error: `tumpel_host_mint_token refused its arguments: ${issues(args.error)}` };
-      const minted = await mintEnrolmentToken(env.DB, caller, args.data.expiresInSeconds, origin, Date.now());
-      return { ok: true, text: JSON.stringify(minted) };
-    }
-    if (call.name === "tumpel_host_revoke") {
-      const args = HostPathSchema.safeParse(call.arguments);
-      if (!args.success) return { ok: false, error: `tumpel_host_revoke refused its arguments: ${issues(args.error)}` };
-      const revoked = await revokeHost(env, caller.tenantId, args.data.hostId, Date.now());
-      if (!revoked.ok) return { ok: false, error: `${revoked.problem.detail}. ${revoked.problem.fix}` };
-      return { ok: true, text: JSON.stringify(revoked.value) };
-    }
-    return { ok: false, error: `no tool ${call.name}` };
+const asConnector =
+  (env: Env, caller: Caller): Dispatch =>
+  async (request) => {
+    connectorCallers.set(request, caller);
+    return dispatch(request, new URL(request.url), env);
   };
 
 const handleMcp = async (request: Request, env: Env): Promise<Response> => {
   if (request.method === "OPTIONS") return preflight(request);
   const answered = await mcpEndpoint(request, async () => {
     const caller = await mcpCaller(request, env);
-    return caller instanceof Response ? caller : runTool(env, caller, new URL(request.url).origin);
+    return caller instanceof Response ? caller : asConnector(env, caller);
   });
   return withHeaders(answered, corsHeaders(request));
 };
@@ -801,38 +787,41 @@ const ROUTES: Record<string, Route> = {
     withHeaders(await handleToken(request, url, env), corsHeaders(request)),
 };
 
+const dispatch = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  if (request.method === "GET" && url.pathname === "/healthz") return json(HealthSchema.parse({ status: "Ok" }));
+  const document = wellKnown(url.pathname);
+  if (request.method === "GET" && document !== null) {
+    return json(document(url.origin), 200, {
+      "cache-control": "public, max-age=3600",
+      "access-control-allow-origin": "*",
+    });
+  }
+  const route = ROUTES[`${request.method} ${url.pathname}`];
+  if (route) return route(request, url, env);
+  if (
+    request.method === "DELETE" &&
+    url.pathname.startsWith(DEVICES_PATH) &&
+    url.pathname.length > DEVICES_PATH.length
+  ) {
+    return handleDeviceRevoke(request, url, env);
+  }
+  const resource =
+    (await handlePersona(request, url, env)) ??
+    (await handleSecretSet(request, url, env)) ??
+    (await handleUnpin(request, url, env));
+  if (resource) return resource;
+  const host = await handleHost(request, url, env);
+  if (host) return host;
+  return problem(404, {
+    code: "NotFound",
+    title: "No such route",
+    detail: `No route for ${request.method} ${url.pathname}`,
+    fix: "Call /healthz or an operation of the tumpel contract in packages/api",
+  });
+};
+
 export default {
   async fetch(request, env): Promise<Response> {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/healthz") return json(HealthSchema.parse({ status: "Ok" }));
-    const document = wellKnown(url.pathname);
-    if (request.method === "GET" && document !== null) {
-      return json(document(url.origin), 200, {
-        "cache-control": "public, max-age=3600",
-        "access-control-allow-origin": "*",
-      });
-    }
-    const route = ROUTES[`${request.method} ${url.pathname}`];
-    if (route) return route(request, url, env);
-    if (
-      request.method === "DELETE" &&
-      url.pathname.startsWith(DEVICES_PATH) &&
-      url.pathname.length > DEVICES_PATH.length
-    ) {
-      return handleDeviceRevoke(request, url, env);
-    }
-    const resource =
-      (await handlePersona(request, url, env)) ??
-      (await handleSecretSet(request, url, env)) ??
-      (await handleUnpin(request, url, env));
-    if (resource) return resource;
-    const host = await handleHost(request, url, env);
-    if (host) return host;
-    return problem(404, {
-      code: "NotFound",
-      title: "No such route",
-      detail: `No route for ${request.method} ${url.pathname}`,
-      fix: "Call /healthz or an operation of the tumpel contract in packages/api",
-    });
+    return dispatch(request, new URL(request.url), env);
   },
 } satisfies ExportedHandler<Env>;
