@@ -28,6 +28,7 @@ import {
   SignUpSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
+import type { z } from "zod";
 import { accessVerifier, cachedAccessKeys, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
 import { randomToken, sameSecret } from "./crypto";
@@ -100,7 +101,7 @@ import {
   readCookie,
   signUpPage,
 } from "./pages";
-import { checkFiles, type PersonaFileWrite, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { type SignerEnv, signerOf } from "./presign";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
@@ -192,8 +193,13 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   const body = await parseBody(request, SignUpSchema, "signUp");
   if (!body.ok) return body.response;
   const now = Date.now();
-  const whoami = await signUp(env.DB, signed.email, body.value.name, now);
-  await env.TENANT.getByName(whoami.tenant.tenantId).open(whoami.tenant.tenantId, now);
+  const { name, gitAuthorName, gitAuthorEmail } = body.value;
+  const whoami = await signUp(env.DB, signed.email, name, now);
+  await env.TENANT.getByName(whoami.tenant.tenantId).open(
+    whoami.tenant.tenantId,
+    { gitAuthorName, gitAuthorEmail },
+    now,
+  );
   return json(WhoamiSchema.parse(whoami));
 };
 
@@ -276,14 +282,7 @@ const unknownSecretSet = (operation: string, secretSetId: string): Response =>
     fix: "List the secret sets with GET /v1/secret-sets and name one of the ids it returns",
   });
 
-type PersonaBody = {
-  name: string;
-  harness: string;
-  secretSetId: string;
-  gitAuthorName: string;
-  gitAuthorEmail: string;
-  files: PersonaFileWrite[];
-};
+type PersonaBody = z.infer<typeof PersonaCreateSchema>;
 
 type PersonaWritten = { ok: true; value: PersonaWrite } | { ok: false; response: Response };
 
@@ -319,12 +318,11 @@ const personaWrite = async (
   if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
   const stored = await storeFiles(env.STORE, caller.tenantId, checked.files, operation);
   if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };
-  const harness = PersonaSchema.shape.harness.parse(body.harness);
   return {
     ok: true,
     value: {
       name: body.name,
-      harness,
+      harness: body.harness,
       secretSetId: body.secretSetId,
       gitAuthorName: body.gitAuthorName,
       gitAuthorEmail: body.gitAuthorEmail,
@@ -613,7 +611,9 @@ const decidingCaller = async (
     if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheProofToken();
     const now = Date.now();
     const proof = await proofCaller(env.DB, signed.commonName, url.hostname, now);
-    if (proof.created) await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, now);
+    if (proof.created) {
+      await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, proof.identity, now);
+    }
     return proof.caller;
   }
   const owner = await whoamiForEmail(env.DB, signed.email);

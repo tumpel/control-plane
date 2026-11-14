@@ -323,24 +323,19 @@ export class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  private personaIdentity(personaId: string): { gitAuthorName: string; gitAuthorEmail: string } | null {
+  private personaRow(personaId: string): { secretSetId: string; gitAuthorName: string; gitAuthorEmail: string } | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ git_author_name: string; git_author_email: string }>(
-        "SELECT git_author_name, git_author_email FROM personas WHERE persona_id = ?",
+      .exec<{ secret_set_id: string; git_author_name: string; git_author_email: string }>(
+        "SELECT secret_set_id, git_author_name, git_author_email FROM personas WHERE persona_id = ?",
         personaId,
       )
       .toArray();
-    return row === undefined ? null : { gitAuthorName: row.git_author_name, gitAuthorEmail: row.git_author_email };
+    return row === undefined
+      ? null
+      : { secretSetId: row.secret_set_id, gitAuthorName: row.git_author_name, gitAuthorEmail: row.git_author_email };
   }
 
-  private personaSecretSet(personaId: string): string | null {
-    const [row] = this.ctx.storage.sql
-      .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM personas WHERE persona_id = ?", personaId)
-      .toArray();
-    return row?.secret_set_id ?? null;
-  }
-
-  private refusedSetDetail(session: SessionRow, hostDetail: string): string {
+  private secretSetName(session: SessionRow): string {
     const [row] = this.ctx.storage.sql
       .exec<{ name: string }>(
         "SELECT s.name FROM personas p JOIN secret_sets s ON s.secret_set_id = p.secret_set_id WHERE p.persona_id = ?",
@@ -350,17 +345,27 @@ export class TenantSessions extends DurableObject<Env> {
     if (row === undefined) {
       throw new Error(`persona ${session.persona_id} of session ${session.session_id} runs on no secret set`);
     }
-    return `${hostDetail}. The credential comes from secret set ${row.name}; replace its value with tumpel config apply --rewrite-secrets ${row.name}, then send the turn again`;
+    return row.name;
+  }
+
+  private refusedSetDetail(session: SessionRow, hostDetail: string): string {
+    const name = this.secretSetName(session);
+    return `${hostDetail}. The credential comes from secret set ${name}; replace its value with tumpel config apply --rewrite-secrets ${name}, then send the turn again`;
+  }
+
+  private cloneSetDetail(session: SessionRow, hostDetail: string): string {
+    const name = this.secretSetName(session);
+    return `${hostDetail}. A private repository needs a Variable member GITHUB_TOKEN with read and write access in secret set ${name}; add it with tumpel config apply, then send the turn again`;
   }
 
   private refusedCredential(session: SessionRow, now: number): CredentialRefusal | null {
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) throw new Error(`${session.harness} ${session.harness_version} left the harness catalog`);
-    const secretSetId = this.personaSecretSet(session.persona_id);
-    if (secretSetId === null) {
+    const persona = this.personaRow(session.persona_id);
+    if (persona === null) {
       throw new Error(`session ${session.session_id} runs on persona ${session.persona_id}, which is gone`);
     }
-    const checked = checkCredential(entry, memberRows(this.ctx.storage.sql, secretSetId).map(toKey), now);
+    const checked = checkCredential(entry, memberRows(this.ctx.storage.sql, persona.secretSetId).map(toKey), now);
     return checked.kind === "Usable" ? null : checked;
   }
 
@@ -766,12 +771,13 @@ export class TenantSessions extends DurableObject<Env> {
         `session ${session.session_id} runs ${session.harness} ${session.harness_version}, which left the catalog`,
       );
     }
-    const secretSetId = this.personaSecretSet(session.persona_id);
-    if (secretSetId === null) {
+    const persona = this.personaRow(session.persona_id);
+    if (persona === null) {
       throw new Error(
         `session ${session.session_id} runs on persona ${session.persona_id}, which is gone; turn ${turnId} has no secret set to run on`,
       );
     }
+    const { secretSetId, gitAuthorName, gitAuthorEmail } = persona;
     const dispatch = dispatchVariables(entry, await this.members(secretSetId), now);
     if (dispatch.kind === "NoCredential") {
       throw new Error(
@@ -817,12 +823,6 @@ export class TenantSessions extends DurableObject<Env> {
       .toArray();
     const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
     const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
-    const identity = this.personaIdentity(session.persona_id);
-    if (identity === null) {
-      throw new Error(
-        `session ${session.session_id} runs on persona ${session.persona_id}, which is gone; turn ${turnId} has no git identity`,
-      );
-    }
     return {
       kind: "Ready",
       credential: {
@@ -833,7 +833,8 @@ export class TenantSessions extends DurableObject<Env> {
       lastLineSeq: session.last_line_seq,
       snapshots,
       personaFiles,
-      ...identity,
+      gitAuthorName,
+      gitAuthorEmail,
     };
   }
 
@@ -937,7 +938,9 @@ export class TenantSessions extends DurableObject<Env> {
       const detail =
         message.reason === "CredentialRefused" && message.detail.startsWith(PROVIDER_REFUSAL)
           ? this.refusedSetDetail(session, message.detail)
-          : message.detail;
+          : message.reason === "RepositoryCloneFailed"
+            ? this.cloneSetDetail(session, message.detail)
+            : message.detail;
       return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
     }
     if (turn.state !== "Running") return;

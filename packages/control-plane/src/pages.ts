@@ -35,12 +35,16 @@ export const signUpPage = (email: string): Response =>
     200,
     "Create your tenant",
     `<p>Signed in as ${escapeHtml(email)}, which owns no tenant yet.</p>
-<form id="signup"><input name="name" placeholder="Tenant name" maxlength="100" required autofocus><button type="submit">Create tenant</button></form>
+<form id="signup"><input name="name" placeholder="Tenant name" maxlength="100" required autofocus>
+<p>The default persona commits to git as:</p>
+<input name="gitAuthorName" placeholder="Git author name" maxlength="100" required>
+<input name="gitAuthorEmail" type="email" placeholder="Git author email" maxlength="320" required>
+<button type="submit">Create tenant</button></form>
 <p id="result" role="alert"></p>
 <script>${POST_JSON}
 document.getElementById("signup").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (await post("/v1/tenants", { name: new FormData(event.target).get("name") })) location.reload();
+  if (await post("/v1/tenants", Object.fromEntries(new FormData(event.target)))) location.reload();
 });</script>`,
   );
 

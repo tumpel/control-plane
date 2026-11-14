@@ -19,6 +19,7 @@ export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId" | "g
   files: StoredFile[];
 };
 export type PersonaChange = Omit<PersonaWrite, "harness">;
+export type GitIdentity = Pick<Persona, "gitAuthorName" | "gitAuthorEmail">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
@@ -47,12 +48,7 @@ const uniquely = <T>(write: () => T): Written<T> => {
   }
 };
 
-const DEFAULT_PERSONA = {
-  name: "Default",
-  harness: "ClaudeCode",
-  gitAuthorName: "Tumpel Agent",
-  gitAuthorEmail: "agent@tumpel.invalid",
-};
+const DEFAULT_PERSONA = { name: "Default", harness: "ClaudeCode" };
 const DEFAULT_SECRET_SET = "Default";
 
 type PersonaRow = {
@@ -170,7 +166,7 @@ export class Tenant extends TenantSessions {
     });
   }
 
-  open(tenantId: string, now: number): void {
+  open(tenantId: string, identity: GitIdentity, now: number): void {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       const [existing] = sql.exec<{ persona_id: string }>("SELECT persona_id FROM personas LIMIT 1").toArray();
@@ -190,8 +186,8 @@ export class Tenant extends TenantSessions {
         DEFAULT_PERSONA.name,
         DEFAULT_PERSONA.harness,
         secretSetId,
-        DEFAULT_PERSONA.gitAuthorName,
-        DEFAULT_PERSONA.gitAuthorEmail,
+        identity.gitAuthorName,
+        identity.gitAuthorEmail,
         now,
         now,
       );
