@@ -25,12 +25,15 @@ interface HostRow {
   memory_bytes: number;
   public_key: string;
   supervisor_version: string;
+  labels: string;
   created_at: number;
   updated_at: number;
 }
 
 const HOST_COLUMNS =
   "host_id, tenant_id, name, state, architecture, cpu_count, memory_bytes, public_key, supervisor_version, created_at, updated_at";
+
+const HOST_SELECT = `${HOST_COLUMNS}, labels`;
 
 const toHost = (row: HostRow): Host =>
   HostSchema.parse({
@@ -43,6 +46,7 @@ const toHost = (row: HostRow): Host =>
     memoryBytes: row.memory_bytes,
     publicKey: row.public_key,
     supervisorVersion: row.supervisor_version,
+    labels: JSON.parse(row.labels),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -152,7 +156,7 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
 
 export const listHosts = async (db: D1Database, tenantId: string): Promise<Host[]> => {
   const { results } = await db
-    .prepare(`SELECT ${HOST_COLUMNS} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
+    .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
     .all<HostRow>();
   return results.map(toHost);
@@ -160,7 +164,7 @@ export const listHosts = async (db: D1Database, tenantId: string): Promise<Host[
 
 export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<Host | null> => {
   const row = await db
-    .prepare(`SELECT ${HOST_COLUMNS} FROM hosts WHERE tenant_id = ? AND host_id = ?`)
+    .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? AND host_id = ?`)
     .bind(tenantId, hostId)
     .first<HostRow>();
   return row === null ? null : toHost(row);
@@ -182,4 +186,28 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
     .run();
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
   return { ok: true, value: { ...host, state: "Revoked", updatedAt: now } };
+};
+
+export const setHostLabels = async (
+  db: D1Database,
+  tenantId: string,
+  hostId: string,
+  labels: string[],
+  now: number,
+): Promise<Outcome<Host>> => {
+  const host = await hostOf(db, tenantId, hostId);
+  if (host === null) return hostNotFound(hostId);
+  if (host.state === "Revoked") {
+    return refuse(410, {
+      code: "HostRevoked",
+      title: "Host revoked",
+      detail: `host ${hostId} is revoked and takes no labels`,
+      fix: "Drop it from your tenant config, or enrol the machine again and label the new host",
+    });
+  }
+  await db
+    .prepare("UPDATE hosts SET labels = ?, updated_at = ? WHERE host_id = ? AND tenant_id = ?")
+    .bind(JSON.stringify(labels), now, hostId, tenantId)
+    .run();
+  return { ok: true, value: { ...host, labels, updatedAt: now } };
 };

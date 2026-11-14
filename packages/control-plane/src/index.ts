@@ -5,14 +5,25 @@ import {
   DeviceTokenRequestSchema,
   DeviceTokenSchema,
   EnrolmentTokenMintSchema,
+  HarnessCatalogEntrySchema,
+  HarnessPathSchema,
+  HarnessPinCreateSchema,
+  HarnessPinSchema,
   HealthSchema,
   HostEnrolSchema,
+  HostLabelsSchema,
   HostPathSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
+  PersonaCreateSchema,
   PersonaPathSchema,
   PersonaSchema,
+  PersonaUpdateSchema,
+  SecretSetCreateSchema,
+  SecretSetPathSchema,
+  SecretSetSchema,
+  SecretSetUpdateSchema,
   SignUpSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
@@ -35,8 +46,18 @@ import {
   revokeDevice,
   startDeviceCode,
 } from "./device";
+import { HARNESS_CATALOG, inCatalog } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
-import { enrolHost, hostNotFound, hostOf, listHosts, mintEnrolmentToken, type Refused, revokeHost } from "./hosts";
+import {
+  enrolHost,
+  hostNotFound,
+  hostOf,
+  listHosts,
+  mintEnrolmentToken,
+  type Refused,
+  revokeHost,
+  setHostLabels,
+} from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
 import { bearerOf, type Caller, callerForDeviceToken, signUp, whoamiForEmail, whoamiOf } from "./identity";
 import { mcpEndpoint, mcpRefusal, type RunTool } from "./mcp";
@@ -177,26 +198,163 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   return json(PersonaSchema.array().parse(personas));
 };
 
-const PERSONAS_PATH = "/v1/personas/";
+const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 
-const handlePersonaGet = async (request: Request, url: URL, env: Env): Promise<Response> => {
+const personaNotFound = (personaId: string): Response =>
+  problem(404, {
+    code: "NotFound",
+    title: "No such persona",
+    detail: `your tenant owns no persona ${personaId}`,
+    fix: "List the personas with GET /v1/personas and use one of the ids it returns",
+  });
+
+const secretSetNotFound = (secretSetId: string): Response =>
+  problem(404, {
+    code: "NotFound",
+    title: "No such secret set",
+    detail: `your tenant owns no secret set ${secretSetId}`,
+    fix: "List the secret sets with GET /v1/secret-sets and use one of the ids it returns",
+  });
+
+const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const path = PersonaPathSchema.safeParse({
-    personaId: decodeURIComponent(url.pathname.slice(PERSONAS_PATH.length)),
+  const body = await parseBody(request, PersonaCreateSchema, "personas.create");
+  if (!body.ok) return body.response;
+  const created = await env.TENANT.getByName(caller.tenantId).createPersona(caller.tenantId, body.value, Date.now());
+  return json(PersonaSchema.parse(created));
+};
+
+const PERSONA_PATH = /^\/v1\/personas\/([^/]+)$/;
+
+const handlePersona = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const matched = PERSONA_PATH.exec(url.pathname)?.[1];
+  if (matched === undefined || !["GET", "PUT", "DELETE"].includes(request.method)) return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const raw = decodeURIComponent(matched);
+  const path = PersonaPathSchema.safeParse({ personaId: raw });
+  if (!path.success) return personaNotFound(raw);
+  const { personaId } = path.data;
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  if (request.method === "DELETE") {
+    return (await tenant.deletePersona(caller.tenantId, personaId)) ? noContent() : personaNotFound(personaId);
+  }
+  if (request.method === "PUT") {
+    const body = await parseBody(request, PersonaUpdateSchema, "personas.update");
+    if (!body.ok) return body.response;
+    const updated = await tenant.updatePersona(caller.tenantId, personaId, body.value, Date.now());
+    return updated === null ? personaNotFound(personaId) : json(PersonaSchema.parse(updated));
+  }
+  const persona = await tenant.getPersona(caller.tenantId, personaId);
+  return persona === null ? personaNotFound(personaId) : json(PersonaSchema.parse(persona));
+};
+
+const repeatedSecret = (secrets: readonly { name: string }[], operation: string): Response | null => {
+  const names = secrets.map((secret) => secret.name);
+  const repeated = names.filter((name, index) => names.indexOf(name) !== index);
+  if (repeated.length === 0) return null;
+  return problem(400, {
+    code: "InvalidRequest",
+    title: "Repeated key",
+    detail: `${operation} names the key ${[...new Set(repeated)].join(", ")} more than once`,
+    fix: "List each key of a secret set once",
   });
-  const persona = path.success
-    ? await env.TENANT.getByName(caller.tenantId).getPersona(caller.tenantId, path.data.personaId)
-    : null;
-  if (persona === null) {
-    return problem(404, {
-      code: "NotFound",
-      title: "No such persona",
-      detail: `your tenant owns no persona ${url.pathname.slice(PERSONAS_PATH.length)}`,
-      fix: "List the personas with GET /v1/personas and use one of the ids it returns",
+};
+
+const handleSecretSetsList = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const sets = await env.TENANT.getByName(caller.tenantId).listSecretSets(caller.tenantId);
+  return json(SecretSetSchema.array().parse(sets));
+};
+
+const handleSecretSetCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, SecretSetCreateSchema, "secretSets.create");
+  if (!body.ok) return body.response;
+  const repeated = repeatedSecret(body.value.secrets, "secretSets.create");
+  if (repeated) return repeated;
+  const created = await env.TENANT.getByName(caller.tenantId).createSecretSet(caller.tenantId, body.value, Date.now());
+  return json(SecretSetSchema.parse(created));
+};
+
+const SECRET_SET_PATH = /^\/v1\/secret-sets\/([^/]+)$/;
+
+const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const matched = SECRET_SET_PATH.exec(url.pathname)?.[1];
+  if (matched === undefined || !["GET", "PUT", "DELETE"].includes(request.method)) return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const raw = decodeURIComponent(matched);
+  const path = SecretSetPathSchema.safeParse({ secretSetId: raw });
+  if (!path.success) return secretSetNotFound(raw);
+  const { secretSetId } = path.data;
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  if (request.method === "DELETE") {
+    return (await tenant.deleteSecretSet(caller.tenantId, secretSetId)) ? noContent() : secretSetNotFound(secretSetId);
+  }
+  if (request.method === "PUT") {
+    const body = await parseBody(request, SecretSetUpdateSchema, "secretSets.update");
+    if (!body.ok) return body.response;
+    const repeated = repeatedSecret(body.value.secrets, "secretSets.update");
+    if (repeated) return repeated;
+    const updated = await tenant.updateSecretSet(caller.tenantId, secretSetId, body.value, Date.now());
+    return updated === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(updated));
+  }
+  const secretSet = await tenant.getSecretSet(caller.tenantId, secretSetId);
+  return secretSet === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(secretSet));
+};
+
+const handleHarnessCatalog = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(HarnessCatalogEntrySchema.array().parse(HARNESS_CATALOG));
+};
+
+const handlePinsList = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const pins = await env.TENANT.getByName(caller.tenantId).listPins(caller.tenantId);
+  return json(HarnessPinSchema.array().parse(pins));
+};
+
+const handlePin = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, HarnessPinCreateSchema, "harnessCatalog.pin");
+  if (!body.ok) return body.response;
+  if (!inCatalog(body.value.harness, body.value.harnessVersion)) {
+    return problem(422, {
+      code: "HarnessNotInCatalog",
+      title: "Harness version not in the catalog",
+      detail: `the catalog has no ${body.value.harness} ${body.value.harnessVersion}`,
+      fix: "Pin a version GET /v1/harnesses lists",
     });
   }
-  return json(PersonaSchema.parse(persona));
+  const pinned = await env.TENANT.getByName(caller.tenantId).pin(caller.tenantId, body.value, Date.now());
+  return json(HarnessPinSchema.parse(pinned));
+};
+
+const PIN_PATH = /^\/v1\/harnesses\/pins\/([^/]+)$/;
+
+const handleUnpin = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const matched = PIN_PATH.exec(url.pathname)?.[1];
+  if (matched === undefined || request.method !== "DELETE") return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const raw = decodeURIComponent(matched);
+  const path = HarnessPathSchema.safeParse({ harness: raw });
+  const unpinned =
+    path.success && (await env.TENANT.getByName(caller.tenantId).unpin(caller.tenantId, path.data.harness));
+  if (unpinned) return noContent();
+  return problem(404, {
+    code: "NotFound",
+    title: "No such pin",
+    detail: `your tenant has no pin for harness ${raw}`,
+    fix: "List the pins with GET /v1/harnesses/pins",
+  });
 };
 
 const DEVICES_PATH = "/v1/devices/";
@@ -239,7 +397,7 @@ const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<R
   return json(await listHosts(env.DB, caller.tenantId));
 };
 
-const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke)?$/;
+const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/labels)?$/;
 
 const handleHost = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   const channel = CHANNEL_PATH.exec(url.pathname);
@@ -248,10 +406,18 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const matched = HOST_PATH.exec(url.pathname);
   const hostId = matched?.[1] === undefined ? "" : decodeURIComponent(matched[1]);
-  const revoking = matched?.[2] !== undefined;
-  if (hostId === "" || request.method !== (revoking ? "POST" : "GET")) return null;
+  const action = matched?.[2];
+  const revoking = action === "/revoke";
+  const method = { "/revoke": "POST", "/labels": "PUT" }[action ?? ""] ?? "GET";
+  if (hostId === "" || request.method !== method) return null;
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
+  if (action === "/labels") {
+    const body = await parseBody(request, HostLabelsSchema, "hosts.setLabels");
+    if (!body.ok) return body.response;
+    const labelled = await setHostLabels(env.DB, caller.tenantId, hostId, body.value.labels, Date.now());
+    return labelled.ok ? json(labelled.value) : refusal(labelled);
+  }
   if (revoking) {
     const revoked = await revokeHost(env, caller.tenantId, hostId, Date.now());
     return revoked.ok ? json(revoked.value) : refusal(revoked);
@@ -608,6 +774,12 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/device/deny": handleDeviceDeny,
   "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
   "GET /v1/personas": (request, _url, env) => handlePersonasList(request, env),
+  "POST /v1/personas": handlePersonaCreate,
+  "GET /v1/secret-sets": handleSecretSetsList,
+  "POST /v1/secret-sets": handleSecretSetCreate,
+  "GET /v1/harnesses": handleHarnessCatalog,
+  "GET /v1/harnesses/pins": handlePinsList,
+  "PUT /v1/harnesses/pins": handlePin,
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
   "POST /v1/hosts/enrol": handleEnrol,
@@ -647,13 +819,11 @@ export default {
     ) {
       return handleDeviceRevoke(request, url, env);
     }
-    if (
-      request.method === "GET" &&
-      url.pathname.startsWith(PERSONAS_PATH) &&
-      url.pathname.length > PERSONAS_PATH.length
-    ) {
-      return handlePersonaGet(request, url, env);
-    }
+    const resource =
+      (await handlePersona(request, url, env)) ??
+      (await handleSecretSet(request, url, env)) ??
+      (await handleUnpin(request, url, env));
+    if (resource) return resource;
     const host = await handleHost(request, url, env);
     if (host) return host;
     return problem(404, {

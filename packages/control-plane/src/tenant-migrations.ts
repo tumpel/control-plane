@@ -1,4 +1,8 @@
 import tenant0001 from "../migrations/tenant/0001_tenant.sql";
+import tenant0002 from "../migrations/tenant/0002_config.sql";
 import type { Migration } from "./durable-migrate";
 
-export const TENANT_MIGRATIONS: readonly Migration[] = [{ name: "0001_tenant", sql: tenant0001 }];
+export const TENANT_MIGRATIONS: readonly Migration[] = [
+  { name: "0001_tenant", sql: tenant0001 },
+  { name: "0002_config", sql: tenant0002 },
+];
