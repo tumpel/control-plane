@@ -1,4 +1,7 @@
-export type Verification = { ok: true; email: string } | { ok: false; reason: string };
+export type Verification =
+  | { ok: true; kind: "Person"; email: string }
+  | { ok: true; kind: "ServiceToken"; commonName: string }
+  | { ok: false; reason: string };
 
 export type Verify = (assertion: string) => Promise<Verification>;
 
@@ -143,7 +146,9 @@ export const accessVerifier =
     if (typeof payload.exp !== "number" || payload.exp + CLOCK_LEEWAY_S <= nowS) return reject("the JWT has expired");
     if (typeof payload.nbf === "number" && payload.nbf - CLOCK_LEEWAY_S > nowS)
       return reject("the JWT is not valid yet");
-    const { email } = payload;
-    if (typeof email === "string" && email.includes("@")) return { ok: true, email: email.toLowerCase() };
-    return reject("the JWT carries no email; sign in to Access as a person, not with a service token");
+    const { email, common_name: commonName } = payload;
+    if (typeof email === "string" && email.includes("@"))
+      return { ok: true, kind: "Person", email: email.toLowerCase() };
+    if (typeof commonName === "string" && commonName !== "") return { ok: true, kind: "ServiceToken", commonName };
+    return reject("the JWT names neither a person nor a service token");
   };

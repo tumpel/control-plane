@@ -98,3 +98,35 @@ export const bearerOf = (request: Request): string => {
   const authorization = request.headers.get("authorization") ?? "";
   return authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
 };
+
+const PROOF_TENANT_NAME = "Tumpel proof";
+
+const derivedId = async (purpose: string, commonName: string): Promise<string> => {
+  const hex = await sha256Hex(`${purpose}:${commonName}`);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+};
+
+export const proofCaller = async (
+  db: D1Database,
+  commonName: string,
+  hostname: string,
+  now: number,
+): Promise<{ caller: Caller; created: boolean }> => {
+  const tenantId = await derivedId("tenant", commonName);
+  const principalId = await derivedId("principal", commonName);
+  const [tenant] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT DO NOTHING RETURNING tenant_id`,
+      )
+      .bind(tenantId, PROOF_TENANT_NAME, now, now),
+    db
+      .prepare(
+        `INSERT INTO principals (principal_id, tenant_id, email, role, created_at, updated_at)
+        VALUES (?, ?, ?, 'Owner', ?, ?) ON CONFLICT DO NOTHING`,
+      )
+      .bind(principalId, tenantId, `proof+${principalId.slice(0, 8)}@${hostname}`, now, now),
+  ]);
+  return { caller: { tenantId, principalId }, created: tenant?.results.length === 1 };
+};
