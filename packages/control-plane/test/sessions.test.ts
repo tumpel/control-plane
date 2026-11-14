@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CredentialHandoverSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
   HostSchema,
@@ -418,6 +419,28 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.deepEqual({ gitAuthorName: offer.gitAuthorName, gitAuthorEmail: offer.gitAuthorEmail }, GIT_IDENTITY);
   const { turnId } = offer;
   const { sessionId } = started.session;
+
+  const handovers = await tool("tumpel_session_handovers", { sessionId }, CredentialHandoverSchema.array());
+  assert.deepEqual(
+    handovers.map(({ sessionId: session, turnId: turn, hostId: host, boxId, variableNames }) => ({
+      session,
+      turn,
+      host,
+      boxId,
+      variableNames,
+    })),
+    [
+      {
+        session: sessionId,
+        turn: turnId,
+        host: hostId,
+        boxId: offer.boxId,
+        variableNames: ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"],
+      },
+    ],
+  );
+  assert.ok(!JSON.stringify(handovers).includes(PROVIDER_KEY));
+  assert.ok(!JSON.stringify(handovers).includes("ghp-e2e"));
 
   host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   await eventually(
