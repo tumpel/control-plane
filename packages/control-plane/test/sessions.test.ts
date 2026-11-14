@@ -525,13 +525,15 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   );
 });
 
-test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends", async () => {
+const deletePersona = (personaId: string) => call(`/v1/personas/${personaId}`, { method: "DELETE", headers: bearer });
+
+test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript, refuses later sends and lets its persona go", async () => {
   const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
-  const started = await tool(
-    "tumpel_session_start",
-    { ...(await sessionStart()), prompt: "stop me" },
-    StartedSessionSchema,
-  );
+  await createPersona("Archivable", [
+    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+  ]);
+  const start = await sessionStart("Archivable");
+  const started = await tool("tumpel_session_start", { ...start, prompt: "stop me" }, StartedSessionSchema);
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   assert.equal(offer.sessionId, sessionId);
@@ -574,6 +576,13 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
     (session) => session.state === "Stopped",
   );
 
+  const inUse = await deletePersona(start.personaId ?? "");
+  assert.equal(inUse.status, 409);
+  assert.match(
+    ProblemSchema.parse(await inUse.json()).detail,
+    new RegExp(`session ${sessionId}, which is not Archived`),
+  );
+
   const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
   assert.equal(archived.state, "Archived");
   assert.equal(await store.head(request.storageKey), null);
@@ -585,6 +594,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   });
   assert.equal(archivedSend.code, "SessionArchived");
   assert.match(archivedSend.detail, new RegExp(`session ${sessionId} is archived`));
+  assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
 });
 
 test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
