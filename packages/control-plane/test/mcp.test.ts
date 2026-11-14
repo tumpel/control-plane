@@ -231,10 +231,9 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   });
   const persona = await toolJson(PersonaSchema, "tumpel_persona_create", {
     name: "Reviewer",
+    harness: "ClaudeCode",
     secretSetId: secretSet.secretSetId,
-    instructions: "Review",
-    settings: "{}",
-    mcpServers: [],
+    files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review").toString("base64") }],
   });
   assert.deepEqual(persona, await rest(PersonaSchema, "GET", `/v1/personas/${persona.personaId}`));
   assert.deepEqual(
@@ -244,12 +243,11 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const updated = await toolJson(PersonaSchema, "tumpel_persona_update", {
     personaId: persona.personaId,
     name: "Reviewer",
+    harness: "ClaudeCode",
     secretSetId: defaultSet.secretSetId,
-    instructions: "Review closely",
-    settings: "{}",
-    mcpServers: [],
+    files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review closely").toString("base64") }],
   });
-  assert.equal(updated.instructions, "Review closely");
+  assert.notEqual(updated.files[0]?.digest, persona.files[0]?.digest);
   assert.equal(updated.secretSetId, defaultSet.secretSetId);
   assert.deepEqual(
     await toolJson(PersonaSchema.array(), "tumpel_persona_list"),

@@ -300,17 +300,18 @@ const sessionStart = async (name = "Default") => {
   const personas = await getJson("/v1/personas", PersonaSchema.array());
   return {
     repository: "https://git.example.test/app.git",
-    harness: "ClaudeCode",
     model: "claude-sonnet-test",
     personaId: personas.find((persona) => persona.name === name)?.personaId,
   };
 };
 
-const createPersona = async (name: string, secrets: unknown[]): Promise<void> => {
+const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
+
+const createPersona = async (name: string, secrets: unknown[], files: unknown[] = []): Promise<void> => {
   const created = await postJson("/v1/secret-sets", { name: `${name} secrets`, secrets }, bearer);
   assert.equal(created.status, 200);
   const { secretSetId } = SecretSetSchema.parse(await created.json());
-  const persona = { name, secretSetId, instructions: "", settings: "{}", mcpServers: [] };
+  const persona = { name, harness: "ClaudeCode", secretSetId, files };
   const personas = await getJson("/v1/personas", PersonaSchema.array());
   const existing = personas.find((candidate) => candidate.name === name);
   const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
@@ -351,10 +352,14 @@ before(async () => {
   assert.equal((await postJson("/v1/tenants", { name: "Sessions" }, browser())).status, 200);
   bearer = { authorization: `Bearer ${await deviceToken()}` };
   mcpToken = await connectorToken();
-  await createPersona("Default", [
-    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
-    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
-  ]);
+  await createPersona(
+    "Default",
+    [
+      { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+      { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
+    ],
+    [{ source: "Inline", path: ".claude/settings.json", content: Buffer.from(SETTINGS_FILE).toString("base64") }],
+  );
 
   const enrolled = await enrol();
   hostId = enrolled.id;
@@ -393,6 +398,13 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.ok(Date.parse(offer.credential.expiresAt) > Date.now());
   assert.equal(offer.lastLineSeq, 0);
   assert.deepEqual(offer.snapshots, []);
+  const digest = createHash("sha256").update(SETTINGS_FILE).digest("hex");
+  assert.deepEqual(
+    offer.personaFiles.map((file) => [file.path, file.digest, file.sizeBytes]),
+    [[".claude/settings.json", digest, SETTINGS_FILE.length]],
+  );
+  assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
+  assert.match(offer.personaFiles[0]?.downloadUrl ?? "", new RegExp(`/persona-files/${digest}\\?X-Tumpel-Method=GET`));
   const { turnId } = offer;
   const { sessionId } = started.session;
 

@@ -3,13 +3,16 @@
   "personas": [
     {
       "name": "Reviewer",
+      "harness": "ClaudeCode",
       "secretSetName": "prod",
-      "instructions": "Review the diff for correctness.",
-      "settings": "{\"permissions\":\"bypass\"}",
-      "mcpServers": [
+      "files": [
         {
-          "label": "docs",
-          "url": "https://docs.example.test/mcp"
+          "path": ".claude/CLAUDE.md",
+          "from": "reviewer/CLAUDE.md"
+        },
+        {
+          "path": ".claude/settings.json",
+          "from": "reviewer/settings.json"
         }
       ]
     }

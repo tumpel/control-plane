@@ -15,6 +15,7 @@ import type { z } from "zod";
 import {
   HEARTBEAT_DEADLINE_MS,
   type HostMessage,
+  type PersonaFileDownload,
   type PreparedOffer,
   type SnapshotDownload,
   type StoredControlMessage,
@@ -23,6 +24,7 @@ import { credentialFor, dispatchVariables, type SecretKey, type SecretMember } f
 import { importKeyEncryptionKey, newDataKey, unseal, unwrapDataKey } from "./envelope.ts";
 import { catalogEntry } from "./harness-catalog";
 import type { Env } from "./index";
+import { personaFileKey } from "./persona-files";
 import { signerOf } from "./presign";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
@@ -40,6 +42,7 @@ type SessionState = Session["state"];
 export interface NewSession {
   principalId: string;
   hostId: string;
+  harness: Session["harness"];
   harnessVersion: string;
   endpoint: string;
   start: SessionStart;
@@ -374,7 +377,7 @@ export class TenantSessions extends DurableObject<Env> {
       box_id: crypto.randomUUID(),
       persona_id: start.personaId,
       repository: start.repository,
-      harness: start.harness,
+      harness: input.harness,
       harness_version: input.harnessVersion,
       model: start.model,
       state: "Starting",
@@ -596,6 +599,7 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
+    const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
     return {
       kind: "Ready",
       credential: {
@@ -605,7 +609,35 @@ export class TenantSessions extends DurableObject<Env> {
       },
       lastLineSeq: session.last_line_seq,
       snapshots,
+      personaFiles,
     };
+  }
+
+  private async personaFiles(
+    tenantId: string,
+    personaId: string,
+    seconds: number,
+    now: number,
+  ): Promise<PersonaFileDownload[]> {
+    const files = this.ctx.storage.sql
+      .exec<{ path: string; digest: string; size_bytes: number }>(
+        "SELECT path, digest, size_bytes FROM persona_files WHERE persona_id = ? ORDER BY path",
+        personaId,
+      )
+      .toArray();
+    if (files.length === 0) return [];
+    const signer = signerOf(this.env);
+    const downloads: PersonaFileDownload[] = [];
+    for (const file of files) {
+      downloads.push({
+        path: file.path,
+        digest: file.digest,
+        sizeBytes: file.size_bytes,
+        downloadUrl: await signer.presign("GET", personaFileKey(tenantId, file.digest), seconds, new Date(now)),
+        downloadExpiresAt: iso(now + seconds * 1000),
+      });
+    }
+    return downloads;
   }
 
   private async downloads(

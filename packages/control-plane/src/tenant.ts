@@ -1,7 +1,6 @@
 import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
-  type PersonaCreateSchema,
   PersonaSchema,
   type SecretSetCreateSchema,
   SecretSetSchema,
@@ -10,11 +9,12 @@ import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal } from "./envelope.ts";
 import type { Env } from "./index";
+import type { StoredFile } from "./persona-files";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext, TenantSessions, toKey } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
-export type PersonaWrite = z.infer<typeof PersonaCreateSchema>;
+export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & { files: StoredFile[] };
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
@@ -41,33 +41,52 @@ const uniquely = <T>(write: () => T): Written<T> => {
   }
 };
 
-const DEFAULT_PERSONA = { name: "Default", instructions: "", settings: "{}", mcpServers: [] };
+const DEFAULT_PERSONA = { name: "Default", harness: "ClaudeCode" };
 const DEFAULT_SECRET_SET = "Default";
 
 type PersonaRow = {
   persona_id: string;
   tenant_id: string;
   name: string;
+  harness: string;
   secret_set_id: string;
-  instructions: string;
-  settings: string;
-  mcp_servers: string;
+  created_at: number;
+  updated_at: number;
+};
+
+type PersonaFileRow = {
+  path: string;
+  digest: string;
+  size_bytes: number;
   created_at: number;
   updated_at: number;
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, secret_set_id, instructions, settings, mcp_servers, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at FROM personas";
 
-const toPersona = (row: PersonaRow): Persona =>
+export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
+  sql
+    .exec<PersonaFileRow>(
+      "SELECT path, digest, size_bytes, created_at, updated_at FROM persona_files WHERE persona_id = ? ORDER BY path",
+      personaId,
+    )
+    .toArray();
+
+const toPersona = (row: PersonaRow, files: PersonaFileRow[]): Persona =>
   PersonaSchema.parse({
     personaId: row.persona_id,
     tenantId: row.tenant_id,
     name: row.name,
+    harness: row.harness,
     secretSetId: row.secret_set_id,
-    instructions: row.instructions,
-    settings: row.settings,
-    mcpServers: JSON.parse(row.mcp_servers),
+    files: files.map((file) => ({
+      path: file.path,
+      digest: file.digest,
+      sizeBytes: file.size_bytes,
+      createdAt: file.created_at,
+      updatedAt: file.updated_at,
+    })),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -155,71 +174,99 @@ export class Tenant extends TenantSessions {
         now,
       );
       sql.exec(
-        `INSERT INTO personas (persona_id, tenant_id, name, secret_set_id, instructions, settings, mcp_servers, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         crypto.randomUUID(),
         tenantId,
         DEFAULT_PERSONA.name,
+        DEFAULT_PERSONA.harness,
         secretSetId,
-        DEFAULT_PERSONA.instructions,
-        DEFAULT_PERSONA.settings,
-        JSON.stringify(DEFAULT_PERSONA.mcpServers),
         now,
         now,
       );
     });
+  }
+
+  private persona(row: PersonaRow): Persona {
+    return toPersona(row, personaFileRows(this.ctx.storage.sql, row.persona_id));
   }
 
   listPersonas(tenantId: string): Persona[] {
     return this.ctx.storage.sql
       .exec<PersonaRow>(`${PERSONA_SELECT} WHERE tenant_id = ? ORDER BY created_at, persona_id`, tenantId)
       .toArray()
-      .map(toPersona);
+      .map((row) => this.persona(row));
   }
 
   getPersona(tenantId: string, personaId: string): Persona | null {
     const [row] = this.ctx.storage.sql
       .exec<PersonaRow>(`${PERSONA_SELECT} WHERE tenant_id = ? AND persona_id = ?`, tenantId, personaId)
       .toArray();
-    return row === undefined ? null : toPersona(row);
+    return row === undefined ? null : this.persona(row);
+  }
+
+  private writeFiles(personaId: string, files: readonly StoredFile[], now: number): void {
+    const sql = this.ctx.storage.sql;
+    const kept = new Set(files.map((file) => file.path));
+    for (const held of personaFileRows(sql, personaId).filter((row) => !kept.has(row.path))) {
+      sql.exec("DELETE FROM persona_files WHERE persona_id = ? AND path = ?", personaId, held.path);
+    }
+    for (const file of files) {
+      sql.exec(
+        `INSERT INTO persona_files (persona_id, path, digest, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (persona_id, path) DO UPDATE SET digest = excluded.digest, size_bytes = excluded.size_bytes, updated_at = excluded.updated_at
+        WHERE persona_files.digest != excluded.digest`,
+        personaId,
+        file.path,
+        file.digest,
+        file.sizeBytes,
+        now,
+        now,
+      );
+    }
   }
 
   createPersona(tenantId: string, persona: PersonaWrite, now: number): Written<Persona> {
     const personaId = crypto.randomUUID();
-    return uniquely(() => {
-      this.ctx.storage.sql.exec(
-        `INSERT INTO personas (persona_id, tenant_id, name, secret_set_id, instructions, settings, mcp_servers, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        personaId,
-        tenantId,
-        persona.name,
-        persona.secretSetId,
-        persona.instructions,
-        persona.settings,
-        JSON.stringify(persona.mcpServers),
-        now,
-        now,
-      );
-      return { ...persona, personaId, tenantId, createdAt: now, updatedAt: now };
-    });
+    const written = uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          personaId,
+          tenantId,
+          persona.name,
+          persona.harness,
+          persona.secretSetId,
+          now,
+          now,
+        );
+        this.writeFiles(personaId, persona.files, now);
+      }),
+    );
+    if (!written.ok) return written;
+    const created = this.getPersona(tenantId, personaId);
+    if (created === null) throw new Error(`persona ${personaId} was created and then not found`);
+    return { ok: true, value: created };
   }
 
   updatePersona(tenantId: string, personaId: string, persona: PersonaWrite, now: number): Written<Persona | null> {
-    return uniquely(() => {
-      const updated = this.ctx.storage.sql.exec(
-        `UPDATE personas SET name = ?, secret_set_id = ?, instructions = ?, settings = ?, mcp_servers = ?, updated_at = ?
-        WHERE tenant_id = ? AND persona_id = ?`,
-        persona.name,
-        persona.secretSetId,
-        persona.instructions,
-        persona.settings,
-        JSON.stringify(persona.mcpServers),
-        now,
-        tenantId,
-        personaId,
-      );
-      return updated.rowsWritten === 0 ? null : this.getPersona(tenantId, personaId);
-    });
+    const written = uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        const updated = this.ctx.storage.sql.exec(
+          "UPDATE personas SET name = ?, harness = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          persona.name,
+          persona.harness,
+          persona.secretSetId,
+          now,
+          tenantId,
+          personaId,
+        );
+        if (updated.rowsWritten === 0) return false;
+        this.writeFiles(personaId, persona.files, now);
+        return true;
+      }),
+    );
+    if (!written.ok) return written;
+    return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
   deletePersona(tenantId: string, personaId: string): boolean {

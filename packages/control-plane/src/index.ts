@@ -16,6 +16,8 @@ import {
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
   PersonaCreateSchema,
+  PersonaFileUploadRequestSchema,
+  PersonaFileUploadSchema,
   PersonaPathSchema,
   PersonaSchema,
   PersonaUpdateSchema,
@@ -45,7 +47,7 @@ import {
   revokeDevice,
   startDeviceCode,
 } from "./device";
-import { HARNESS_CATALOG, inCatalog } from "./harness-catalog";
+import { HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
 import {
   enrolHost,
@@ -97,10 +99,11 @@ import {
   readCookie,
   signUpPage,
 } from "./pages";
-import type { SignerEnv } from "./presign";
+import { checkFiles, type PersonaFileWrite, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { type SignerEnv, signerOf } from "./presign";
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
-import type { Tenant } from "./tenant";
+import type { PersonaWrite, Tenant } from "./tenant";
 
 export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
@@ -260,16 +263,49 @@ const unknownSecretSet = (operation: string, secretSetId: string): Response =>
     fix: "List the secret sets with GET /v1/secret-sets and name one of the ids it returns",
   });
 
+type PersonaBody = { name: string; harness: string; secretSetId: string; files: PersonaFileWrite[] };
+
+type PersonaWritten = { ok: true; value: PersonaWrite } | { ok: false; response: Response };
+
+const personaWrite = async (
+  env: Env,
+  caller: Caller,
+  body: PersonaBody,
+  operation: string,
+): Promise<PersonaWritten> => {
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  if (!(await tenant.hasSecretSet(body.secretSetId))) {
+    return { ok: false, response: unknownSecretSet(operation, body.secretSetId) };
+  }
+  const entry = pinnedEntry(await tenant.listPins(), body.harness);
+  if (entry === undefined) {
+    return {
+      ok: false,
+      response: problem(422, {
+        code: "HarnessNotInCatalog",
+        title: "Harness not in the catalog",
+        detail: `${operation} names ${body.harness}, of which the catalog holds no version your tenant can run`,
+        fix: "Name a harness GET /v1/harnesses lists, or pin one of its listed versions",
+      }),
+    };
+  }
+  const checked = await checkFiles(entry, body.files, operation);
+  if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
+  const stored = await storeFiles(env.STORE, caller.tenantId, checked.files, operation);
+  if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };
+  const harness = PersonaSchema.shape.harness.parse(body.harness);
+  return { ok: true, value: { name: body.name, harness, secretSetId: body.secretSetId, files: stored.files } };
+};
+
 const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, PersonaCreateSchema, "personas.create");
   if (!body.ok) return body.response;
+  const write = await personaWrite(env, caller, body.value, "personas.create");
+  if (!write.ok) return write.response;
   const tenant = env.TENANT.getByName(caller.tenantId);
-  if (!(await tenant.hasSecretSet(body.value.secretSetId))) {
-    return unknownSecretSet("personas.create", body.value.secretSetId);
-  }
-  const created = await tenant.createPersona(caller.tenantId, body.value, Date.now());
+  const created = await tenant.createPersona(caller.tenantId, write.value, Date.now());
   if (!created.ok) return conflict("personas.create", body.value.name, created.constraint);
   return json(PersonaSchema.parse(created.value));
 };
@@ -292,15 +328,30 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "PUT") {
     const body = await parseBody(request, PersonaUpdateSchema, "personas.update");
     if (!body.ok) return body.response;
-    if (!(await tenant.hasSecretSet(body.value.secretSetId))) {
-      return unknownSecretSet("personas.update", body.value.secretSetId);
-    }
-    const updated = await tenant.updatePersona(caller.tenantId, personaId, body.value, Date.now());
+    const write = await personaWrite(env, caller, body.value, "personas.update");
+    if (!write.ok) return write.response;
+    const updated = await tenant.updatePersona(caller.tenantId, personaId, write.value, Date.now());
     if (!updated.ok) return conflict("personas.update", body.value.name, updated.constraint);
     return updated.value === null ? personaNotFound(personaId) : json(PersonaSchema.parse(updated.value));
   }
   const persona = await tenant.getPersona(caller.tenantId, personaId);
   return persona === null ? personaNotFound(personaId) : json(PersonaSchema.parse(persona));
+};
+
+const handlePersonaFileUpload = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, PersonaFileUploadRequestSchema, "personas.uploadFile");
+  if (!body.ok) return body.response;
+  const now = Date.now();
+  const key = personaFileKey(caller.tenantId, body.value.digest);
+  return json(
+    PersonaFileUploadSchema.parse({
+      ...body.value,
+      uploadUrl: await signerOf(env).presign("PUT", key, UPLOAD_TTL_SECONDS, new Date(now)),
+      uploadExpiresAt: new Date(now + UPLOAD_TTL_SECONDS * 1000).toISOString(),
+    }),
+  );
 };
 
 const handleSecretSetsList = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -804,6 +855,7 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
   "GET /v1/personas": (request, _url, env) => handlePersonasList(request, env),
   "POST /v1/personas": handlePersonaCreate,
+  "POST /v1/personas/file-uploads": handlePersonaFileUpload,
   "GET /v1/secret-sets": handleSecretSetsList,
   "POST /v1/secret-sets": handleSecretSetCreate,
   "GET /v1/harnesses": handleHarnessCatalog,
