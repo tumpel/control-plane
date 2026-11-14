@@ -17,6 +17,7 @@ import {
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
+  SessionSchema,
   SnapshotSchema,
   StartedSessionSchema,
   SupervisorHostKeySchema,
@@ -54,6 +55,7 @@ const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256"
 type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
+type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
 
 let certs: Server;
 let server: TestHarness;
@@ -86,6 +88,12 @@ const postJson = (path: string, body: unknown, headers: Record<string, string> =
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
+
+const refused = async (path: string, init: NonNullable<Parameters<TestHarness["fetch"]>[1]> = {}) => {
+  const response = await call(path, { method: "POST", ...init, headers: { ...bearer, ...init.headers } });
+  assert.equal(response.status, 409, `${path}: ${await response.clone().text()}`);
+  return ProblemSchema.parse(await response.json());
+};
 
 const getJson = async <T>(path: string, schema: z.ZodType<T>): Promise<T> => {
   const response = await call(path, { headers: bearer });
@@ -485,6 +493,68 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   );
 });
 
+test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends", async () => {
+  const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
+  const started = await tool(
+    "tumpel_session_start",
+    { ...(await sessionStart()), prompt: "stop me" },
+    StartedSessionSchema,
+  );
+  const { sessionId } = started.session;
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.sessionId, sessionId);
+  const { turnId } = offer;
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  await eventually(
+    "the turn reading Running",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Running",
+  );
+  const inFlight = await refused(`/v1/sessions/${sessionId}/stop`);
+  assert.equal(inFlight.code, "TurnInFlight");
+  assert.match(inFlight.detail, new RegExp(turnId));
+
+  host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+  host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  await eventually(
+    "the turn reading Completed",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Completed",
+  );
+  const notStopped = await refused(`/v1/sessions/${sessionId}/archive`);
+  assert.equal(notStopped.code, "SessionNotStopped");
+  assert.match(notStopped.detail, /is Idle/);
+
+  const stopping = await tool("tumpel_session_stop", { sessionId }, SessionSchema);
+  assert.equal(stopping.state, "Stopping");
+  const request = await host.next("SnapshotRequest");
+  assert.equal(request.sessionId, sessionId);
+  assert.equal(request.turnId, turnId);
+  await store.put(request.storageKey, "snapshot bytes");
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 14 });
+  const teardown = await host.next("BoxTeardown");
+  assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId: offer.boxId });
+  assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).state, "Stopping");
+  host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+  await eventually(
+    "the session reading Stopped",
+    () => tool("tumpel_session_get", { sessionId }, SessionSchema),
+    (session) => session.state === "Stopped",
+  );
+
+  const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
+  assert.equal(archived.state, "Archived");
+  assert.equal(await store.head(request.storageKey), null);
+  assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
+  assert.deepEqual(await readAll(sessionId, turnId, 10), [{ lineSeq: 1, text: '{"type":"result"}' }]);
+  const archivedSend = await refused(`/v1/sessions/${sessionId}/turns`, {
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "one more" }),
+  });
+  assert.equal(archivedSend.code, "SessionArchived");
+  assert.match(archivedSend.detail, new RegExp(`session ${sessionId} is archived`));
+});
+
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
   const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
   assert.equal(response.status, 200);
@@ -544,4 +614,8 @@ test("a claimed turn fails HostOffline when its host disconnects and does not co
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "HostOffline");
   assert.match(failure.detail, new RegExp(`went offline during turn ${offer.turnId}`));
+
+  const offline = await refused(`/v1/sessions/${started.session.sessionId}/stop`);
+  assert.equal(offline.code, "HostOffline");
+  assert.match(offline.detail, new RegExp(`host box \\(${hostId}\\), which is Offline`));
 });

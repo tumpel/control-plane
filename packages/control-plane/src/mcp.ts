@@ -39,7 +39,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -269,7 +269,21 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions/{sessionId}",
     SessionPathSchema,
-    "Read one session. Returns the Session of GET /v1/sessions/{sessionId}; state is Starting, Idle or Running.",
+    "Read one session. Returns the Session of GET /v1/sessions/{sessionId}; state is Starting, Idle, Running, Stopping, Stopped or Archived.",
+  ),
+  rest(
+    "tumpel_session_stop",
+    "POST",
+    "/v1/sessions/{sessionId}/stop",
+    SessionPathSchema,
+    "Stop a session with no turn running: its host snapshots it and frees its box, and the next tumpel_turn_send boots a fresh box from the snapshots. Returns the Session of POST /v1/sessions/{sessionId}/stop, Stopping until the box is gone and then Stopped; refused while a turn runs or the host is offline.",
+  ),
+  rest(
+    "tumpel_session_archive",
+    "POST",
+    "/v1/sessions/{sessionId}/archive",
+    SessionPathSchema,
+    "Archive a Stopped session: delete its snapshots, keep its transcript readable and refuse every later send. Final. Returns the Archived Session of POST /v1/sessions/{sessionId}/archive.",
   ),
   rest(
     "tumpel_turn_send",

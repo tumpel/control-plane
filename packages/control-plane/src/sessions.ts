@@ -45,6 +45,25 @@ const sessionNotFound = (sessionId: string): Refused =>
     fix: "List your sessions with tumpel session list",
   });
 
+const sessionArchived = (sessionId: string, refused: string): Refused =>
+  refuse(409, {
+    code: "SessionArchived",
+    title: "Session archived",
+    detail: `session ${sessionId} is archived and takes no ${refused}`,
+    fix: "Start a new session with tumpel session start; the archived session's transcript stays readable",
+  });
+
+const hostOffline = async (env: Env, caller: Caller, session: Session, retry: string): Promise<Refused | null> => {
+  const host = await hostOf(env.DB, caller.tenantId, session.hostId);
+  if (host?.state === "Online") return null;
+  return refuse(409, {
+    code: "HostOffline",
+    title: "Host offline",
+    detail: `session ${session.sessionId} runs on host ${host === null ? session.hostId : `${host.name} (${host.hostId})`}, which is ${host?.state ?? "gone"}`,
+    fix: `Start tumpel-supervisor run on that host, then ${retry}`,
+  });
+};
+
 const turnNotFound = (turnId: string): Refused =>
   refuse(404, {
     code: "NotFound",
@@ -174,18 +193,21 @@ export const sendTurn = async (
   const tenant = tenantOf(env, caller);
   const session = await tenant.getSession(caller.tenantId, sessionId);
   if (session === null) return sessionNotFound(sessionId);
-  const host = await hostOf(env.DB, caller.tenantId, session.hostId);
-  if (host?.state !== "Online") {
-    return refuse(409, {
-      code: "HostOffline",
-      title: "Host offline",
-      detail: `session ${sessionId} runs on host ${session.hostId}, which is ${host?.state ?? "gone"}`,
-      fix: "Start tumpel-supervisor run on that host, then send the turn again",
-    });
-  }
+  if (session.state === "Archived") return sessionArchived(sessionId, "turns");
+  const offline = await hostOffline(env, caller, session, "send the turn again");
+  if (offline !== null) return offline;
   const sent = await tenant.sendTurn(caller.tenantId, sessionId, prompt, now);
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "NotFound") return sessionNotFound(sessionId);
+  if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");
+  if (sent.kind === "Stopping") {
+    return refuse(409, {
+      code: "SessionStopping",
+      title: "Session stopping",
+      detail: `session ${sessionId} is stopping: its host is snapshotting it and tearing its box down`,
+      fix: `Wait until tumpel session get ${sessionId} reads Stopped or Idle, then send again`,
+    });
+  }
   if (sent.kind === "InFlight") {
     return refuse(409, {
       code: "TurnInFlight",
@@ -195,6 +217,49 @@ export const sendTurn = async (
     });
   }
   return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
+};
+
+export const stopSession = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  now: number,
+): Promise<Outcome<Session>> => {
+  const tenant = tenantOf(env, caller);
+  const session = await tenant.getSession(caller.tenantId, sessionId);
+  if (session === null) return sessionNotFound(sessionId);
+  if (session.state === "Archived") return sessionArchived(sessionId, "stop");
+  if (session.state !== "Stopped" && session.state !== "Stopping") {
+    const offline = await hostOffline(env, caller, session, "stop the session again");
+    if (offline !== null) return offline;
+  }
+  const stopped = await tenant.stopSession(caller.tenantId, sessionId, now);
+  if (stopped.kind === "Stopping") return ok(stopped.session);
+  if (stopped.kind === "NotFound") return sessionNotFound(sessionId);
+  if (stopped.kind === "Archived") return sessionArchived(sessionId, "stop");
+  return refuse(409, {
+    code: "TurnInFlight",
+    title: "A turn is running",
+    detail: `session ${sessionId} is still running turn ${stopped.turnId}, and a stop waits for no turn`,
+    fix: `Wait for turn ${stopped.turnId} to finish (tumpel transcript read ${stopped.turnId} --follow), then stop again`,
+  });
+};
+
+export const archiveSession = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  now: number,
+): Promise<Outcome<Session>> => {
+  const archived = await tenantOf(env, caller).archiveSession(caller.tenantId, sessionId, now);
+  if (archived.kind === "Archived") return ok(archived.session);
+  if (archived.kind === "NotFound") return sessionNotFound(sessionId);
+  return refuse(409, {
+    code: "SessionNotStopped",
+    title: "Session not stopped",
+    detail: `session ${sessionId} is ${archived.state}, and only a Stopped session can be archived`,
+    fix: `Stop it with tumpel session stop ${sessionId}, wait until tumpel session get ${sessionId} reads Stopped, then archive again`,
+  });
 };
 
 export const listTurns = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Turn[]>> => {
@@ -290,7 +355,9 @@ const invalidQuery = (operation: string, error: z.ZodError): Response =>
 const answer = <T>(outcome: Outcome<T>): Response =>
   outcome.ok ? json(outcome.value) : problem(outcome.status, outcome.problem);
 
-const SESSION_PATH = /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots)?$/;
+const SESSION_PATH = /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/stop|\/archive)?$/;
+const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots"];
+const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure)?$/;
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
@@ -312,6 +379,8 @@ const sessionRoute = async (
     if (!body.ok) return body.response;
     return answer(await sendTurn(env, caller, sessionId, body.value.prompt, Date.now()));
   }
+  if (action === "/stop") return answer(await stopSession(env, caller, sessionId, Date.now()));
+  if (action === "/archive") return answer(await archiveSession(env, caller, sessionId, Date.now()));
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
   if (action === "/snapshots") return answer(await listSnapshots(env, caller, sessionId));
   if (action === "/transcript") {
@@ -335,7 +404,8 @@ export const handleSessions = async (
   const posting = request.method === "POST";
   const routed =
     (pathname === "/v1/sessions" && (posting || request.method === "GET")) ||
-    (session !== null && (request.method === "GET" || (posting && session[2] === "/turns"))) ||
+    (session !== null &&
+      (posting ? SESSION_POSTS : request.method === "GET" ? SESSION_GETS : []).includes(session[2] ?? "")) ||
     ((turn !== null || snapshot !== null) && request.method === "GET");
   if (!routed) return null;
   const caller = await authenticate(request, env);
