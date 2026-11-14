@@ -39,9 +39,11 @@ nothing: the server cannot read your environment, so they return the config entr
 | `SecretSets_get`          | `tumpel_secret_set_get`      | `tumpel secret-set get`      |
 | `SecretSets_list`         | `tumpel_secret_set_list`     | `tumpel secret-set list`     |
 | `SecretSets_update`       | `tumpel_secret_set_update`   | `tumpel secret-set update`   |
+| `Sessions_archive`        | `tumpel_session_archive`     | `tumpel session archive`     |
 | `Sessions_get`            | `tumpel_session_get`         | `tumpel session get`         |
 | `Sessions_list`           | `tumpel_session_list`        | `tumpel session list`        |
 | `Sessions_start`          | `tumpel_session_start`       | `tumpel session start`       |
+| `Sessions_stop`           | `tumpel_session_stop`        | `tumpel session stop`        |
 | `Snapshots_get`           | `tumpel_snapshot_get`        | `tumpel snapshot get`        |
 | `Snapshots_list`          | `tumpel_snapshot_list`       | `tumpel snapshot list`       |
 | `Transcripts_read`        | `tumpel_transcript_read`     | `tumpel transcript read`     |

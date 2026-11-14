@@ -63,7 +63,20 @@ export type Sent =
   | { kind: "Sent"; turn: Turn }
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
+  | { kind: "Stopping" }
+  | { kind: "Archived" }
   | { kind: "CredentialRefused"; personaId: string; refusal: CredentialRefusal };
+
+export type Stop =
+  | { kind: "Stopping"; session: Session }
+  | { kind: "NotFound" }
+  | { kind: "InFlight"; turnId: string }
+  | { kind: "Archived" };
+
+export type Archive =
+  | { kind: "Archived"; session: Session }
+  | { kind: "NotFound" }
+  | { kind: "NotStopped"; state: SessionState };
 
 export type TranscriptCursor =
   | { kind: "Chunk"; sessionState: SessionState; storageKey: string; range: Range }
@@ -154,6 +167,7 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 )`;
 
 const IN_FLIGHT = ["Offered", "Running"];
+const STORE_DELETE_BATCH = 1000;
 
 const toSession = (tenantId: string, row: SessionRow): Session =>
   SessionSchema.parse({
@@ -260,6 +274,37 @@ export class TenantSessions extends DurableObject<Env> {
   private turnRow(turnId: string): TurnRow | null {
     const [row] = this.ctx.storage.sql.exec<TurnRow>(`${TURN_SELECT} WHERE turn_id = ?`, turnId).toArray();
     return row ?? null;
+  }
+
+  private inFlightTurn(sessionId: string): string | null {
+    const [running] = this.ctx.storage.sql
+      .exec<{ turn_id: string }>(
+        `SELECT turn_id FROM turns WHERE session_id = ? AND state IN (${IN_FLIGHT.map(() => "?").join(", ")})`,
+        sessionId,
+        ...IN_FLIGHT,
+      )
+      .toArray();
+    return running?.turn_id ?? null;
+  }
+
+  private latestTurn(sessionId: string, state: string | null): TurnRow | null {
+    const [row] = this.ctx.storage.sql
+      .exec<TurnRow>(
+        `${TURN_SELECT} WHERE session_id = ?1 AND (?2 IS NULL OR state = ?2) ORDER BY created_at DESC, turn_id DESC LIMIT 1`,
+        sessionId,
+        state,
+      )
+      .toArray();
+    return row ?? null;
+  }
+
+  private setSessionState(sessionId: string, state: SessionState, now: number): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
+      state,
+      now,
+      sessionId,
+    );
   }
 
   private personaSecretSet(personaId: string): string | null {
@@ -429,26 +474,127 @@ export class TenantSessions extends DurableObject<Env> {
   async sendTurn(tenantId: string, sessionId: string, prompt: string, now: number): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
-    const [running] = this.ctx.storage.sql
-      .exec<{ turn_id: string }>(
-        `SELECT turn_id FROM turns WHERE session_id = ? AND state IN (${IN_FLIGHT.map(() => "?").join(", ")})`,
-        sessionId,
-        ...IN_FLIGHT,
-      )
-      .toArray();
-    if (running !== undefined) return { kind: "InFlight", turnId: running.turn_id };
+    if (session.state === "Archived") return { kind: "Archived" };
+    if (session.state === "Stopping") return { kind: "Stopping" };
+    const running = this.inFlightTurn(sessionId);
+    if (running !== null) return { kind: "InFlight", turnId: running };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
+    const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        "UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?",
+        "UPDATE sessions SET state = 'Running', box_id = ?, updated_at = ? WHERE session_id = ?",
+        boxId,
         now,
         sessionId,
       );
-      return this.insertTurn(sessionId, session.box_id, prompt, now);
+      return this.insertTurn(sessionId, boxId, prompt, now);
     });
-    await this.offer(tenantId, session, turn);
+    await this.offer(tenantId, { ...session, box_id: boxId }, turn);
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
+  }
+
+  async stopSession(tenantId: string, sessionId: string, now: number): Promise<Stop> {
+    const session = this.sessionRow(sessionId);
+    if (session === null) return { kind: "NotFound" };
+    if (session.state === "Archived") return { kind: "Archived" };
+    if (session.state === "Stopping" || session.state === "Stopped") {
+      return { kind: "Stopping", session: toSession(tenantId, session) };
+    }
+    const running = this.inFlightTurn(sessionId);
+    if (running !== null) return { kind: "InFlight", turnId: running };
+    const latest = this.latestTurn(sessionId, null);
+    if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
+    this.setSessionState(sessionId, "Stopping", now);
+    await this.timers(tenantId, sessionId, { Snapshot: null });
+    const stopping = { ...session, state: "Stopping", updated_at: now };
+    const [pending] = this.ctx.storage.sql
+      .exec<{ snapshot_id: string }>(
+        "SELECT snapshot_id FROM snapshot_requests WHERE session_id = ? LIMIT 1",
+        sessionId,
+      )
+      .toArray();
+    if (pending === undefined) await this.snapshotOrTeardown(tenantId, stopping, latest);
+    return { kind: "Stopping", session: toSession(tenantId, stopping) };
+  }
+
+  async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
+    const session = this.sessionRow(sessionId);
+    if (session === null) return { kind: "NotFound" };
+    if (session.state !== "Stopped" && session.state !== "Archived") {
+      return { kind: "NotStopped", state: SessionSchema.shape.state.parse(session.state) };
+    }
+    const sql = this.ctx.storage.sql;
+    if (session.state === "Stopped") this.setSessionState(sessionId, "Archived", now);
+    const keys = sql
+      .exec<{ storage_key: string }>(
+        "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
+        sessionId,
+      )
+      .toArray()
+      .map((row) => row.storage_key);
+    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+    }
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM snapshots WHERE session_id = ?", sessionId);
+      sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
+      sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
+    });
+    await this.timers(tenantId, sessionId, {
+      Claim: null,
+      FirstLine: null,
+      Total: null,
+      Snapshot: null,
+      SnapshotAnswer: null,
+      TeardownAnswer: null,
+      HostOffline: null,
+    });
+    const archived = this.sessionRow(sessionId);
+    if (archived === null) throw new Error(`session ${sessionId} vanished while it was archived`);
+    return { kind: "Archived", session: toSession(tenantId, archived) };
+  }
+
+  private async snapshotOrTeardown(tenantId: string, session: SessionRow, latest: TurnRow): Promise<void> {
+    const completed = this.latestTurn(session.session_id, "Completed");
+    if (completed === null) return this.teardown(tenantId, session, latest.turn_id);
+    const [held] = this.ctx.storage.sql
+      .exec<{ snapshot_id: string }>(
+        "SELECT snapshot_id FROM snapshots WHERE session_id = ? AND turn_id = ? LIMIT 1",
+        session.session_id,
+        completed.turn_id,
+      )
+      .toArray();
+    if (held !== undefined) return this.teardown(tenantId, session, latest.turn_id);
+    return this.requestSnapshot(tenantId, session, completed);
+  }
+
+  private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
+    const seconds = settingsOf(this.env).snapshotDeadlineSeconds;
+    await this.timers(tenantId, session.session_id, {
+      TeardownAnswer: { turnId, at: Date.now() + seconds * 1000 },
+    });
+    await this.host(session.host_id).send({
+      type: "BoxTeardown",
+      sessionId: session.session_id,
+      boxId: session.box_id,
+    });
+  }
+
+  private async teardownAnswer(
+    tenantId: string,
+    hostId: string,
+    message: Extract<HostMessage, { type: "BoxGone" | "BoxTeardownFailed" }>,
+  ): Promise<void> {
+    const session = this.sessionRow(message.sessionId);
+    if (session?.host_id !== hostId) {
+      throw new Error(
+        `host ${hostId} answered the teardown of session ${message.sessionId} of tenant ${tenantId}, which it was not asked for`,
+      );
+    }
+    if (session.state !== "Stopping") return;
+    await this.timers(tenantId, session.session_id, { TeardownAnswer: null });
+    this.setSessionState(session.session_id, message.type === "BoxGone" ? "Stopped" : "Idle", Date.now());
   }
 
   getSession(tenantId: string, sessionId: string): Session | null {
@@ -706,6 +852,9 @@ export class TenantSessions extends DurableObject<Env> {
     if (message.type === "SnapshotDone" || message.type === "SnapshotFailed") {
       return this.snapshotAnswer(tenantId, hostId, message);
     }
+    if (message.type === "BoxGone" || message.type === "BoxTeardownFailed") {
+      return this.teardownAnswer(tenantId, hostId, message);
+    }
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || session.host_id !== hostId) {
@@ -765,6 +914,10 @@ export class TenantSessions extends DurableObject<Env> {
     const failedAt = iso(Date.now());
     if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
     if (name === "SnapshotAnswer") return this.snapshotUnanswered(session, turn, failedAt);
+    if (name === "Teardown" && session.state === "Stopping") return this.teardown(tenantId, session, turnId);
+    if (name === "TeardownAnswer" && session.state === "Stopping") {
+      return this.setSessionState(sessionId, "Idle", Date.now());
+    }
     if (name === "HostOffline" && IN_FLIGHT.includes(turn.state) && (await this.hostOffline(session.host_id))) {
       return this.failTurn(
         tenantId,
@@ -922,7 +1075,7 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   private async requestSnapshot(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
-    if (session.state !== "Idle") return;
+    if (session.state !== "Idle" && session.state !== "Stopping") return;
     const sql = this.ctx.storage.sql;
     const [latest] = sql
       .exec<{ seq: number | null }>(
@@ -980,6 +1133,8 @@ export class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
+    if (requests.length > 0 && session.state === "Stopping")
+      this.setSessionState(session.session_id, "Idle", Date.now());
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -1023,7 +1178,11 @@ export class TenantSessions extends DurableObject<Env> {
     }
     await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
     if (message.type === "SnapshotFailed") {
-      return this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
+      this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
+      if (session.state !== "Stopping") return;
+      if (message.reason === "BoxNotFound")
+        return this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
+      return this.setSessionState(session.session_id, "Idle", Date.now());
     }
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
@@ -1041,5 +1200,7 @@ export class TenantSessions extends DurableObject<Env> {
         now,
       );
     });
+    if (session.state !== "Stopping") return;
+    await this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: now } });
   }
 }
