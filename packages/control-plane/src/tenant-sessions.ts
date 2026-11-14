@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  CredentialHandoverSchema,
   SecretSetCreateSchema,
   SecretSetSchema,
   SessionSchema,
@@ -41,6 +42,7 @@ export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
+export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
 export type SessionStart = z.infer<typeof SessionStartSchema>;
 export type StartedSession = z.infer<typeof StartedSessionSchema>;
 type TurnFailureReason = TurnFailure["reason"];
@@ -118,6 +120,16 @@ type FailureRow = {
   reason: string;
   detail: string;
   failed_at: string;
+  created_at: number;
+};
+
+type HandoverRow = {
+  dispatch_credential_id: string;
+  session_id: string;
+  turn_id: string;
+  host_id: string;
+  box_id: string;
+  variable_names: string;
   created_at: number;
 };
 
@@ -219,6 +231,18 @@ const toSnapshot = (tenantId: string, row: SnapshotRow): Snapshot =>
         : { state: "Stored", sizeBytes: row.size_bytes },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  });
+
+const toHandover = (tenantId: string, row: HandoverRow): CredentialHandover =>
+  CredentialHandoverSchema.parse({
+    credentialHandoverId: row.dispatch_credential_id,
+    tenantId,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    hostId: row.host_id,
+    boxId: row.box_id,
+    variableNames: JSON.parse(row.variable_names),
+    createdAt: row.created_at,
   });
 
 const toLine = (tenantId: string, row: PendingRow): TranscriptLine =>
@@ -708,6 +732,20 @@ export class TenantSessions extends DurableObject<Env> {
       .exec<SnapshotRow>(`${SNAPSHOT_SELECT} WHERE session_id = ? ORDER BY snapshot_seq`, sessionId)
       .toArray()
       .map((row) => toSnapshot(tenantId, row));
+  }
+
+  listCredentialHandovers(tenantId: string, sessionId: string): CredentialHandover[] | null {
+    if (this.sessionRow(sessionId) === null) return null;
+    return this.ctx.storage.sql
+      .exec<HandoverRow>(
+        `SELECT credential_handovers.dispatch_credential_id, turns.session_id, credential_handovers.turn_id,
+          credential_handovers.host_id, turns.box_id, credential_handovers.variable_names, credential_handovers.created_at
+        FROM credential_handovers JOIN turns USING (turn_id)
+        WHERE turns.session_id = ? ORDER BY credential_handovers.created_at DESC, credential_handovers.rowid DESC`,
+        sessionId,
+      )
+      .toArray()
+      .map((row) => toHandover(tenantId, row));
   }
 
   getSnapshot(tenantId: string, snapshotId: string): Snapshot | null {

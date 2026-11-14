@@ -321,6 +321,13 @@ export const TOOLS: ToolDefinition[] = [
     "Read a page of a session's harness-native JSONL transcript; turnId keeps one turn's lines. Pass the cursor of the previous page as after to read on; an empty page means nothing new. Returns the TranscriptPage of GET /v1/sessions/{sessionId}/transcript: {sessionState, lines, cursor}.",
   ),
   rest(
+    "tumpel_session_handovers",
+    "GET",
+    "/v1/sessions/{sessionId}/credential-handovers",
+    SessionPathSchema,
+    "List the credential handovers of a session, newest first: the variable names each turn offer carried, never their values. Returns the CredentialHandover[] of GET /v1/sessions/{sessionId}/credential-handovers.",
+  ),
+  rest(
     "tumpel_snapshot_list",
     "GET",
     "/v1/sessions/{sessionId}/snapshots",

@@ -15,6 +15,7 @@ import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import type {
+  CredentialHandover,
   Session,
   SessionFilter,
   SessionStart,
@@ -325,6 +326,15 @@ export const listSnapshots = async (env: Env, caller: Caller, sessionId: string)
   return snapshots === null ? sessionNotFound(sessionId) : ok(snapshots);
 };
 
+export const listCredentialHandovers = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+): Promise<Outcome<CredentialHandover[]>> => {
+  const handovers = await tenantOf(env, caller).listCredentialHandovers(caller.tenantId, sessionId);
+  return handovers === null ? sessionNotFound(sessionId) : ok(handovers);
+};
+
 export const getSnapshot = async (env: Env, caller: Caller, snapshotId: string): Promise<Outcome<Snapshot>> => {
   const snapshot = await tenantOf(env, caller).getSnapshot(caller.tenantId, snapshotId);
   if (snapshot !== null) return ok(snapshot);
@@ -355,8 +365,9 @@ const invalidQuery = (operation: string, error: z.ZodError): Response =>
 const answer = <T>(outcome: Outcome<T>): Response =>
   outcome.ok ? json(outcome.value) : problem(outcome.status, outcome.problem);
 
-const SESSION_PATH = /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/stop|\/archive)?$/;
-const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots"];
+const SESSION_PATH =
+  /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop|\/archive)?$/;
+const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers"];
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure)?$/;
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
@@ -383,6 +394,7 @@ const sessionRoute = async (
   if (action === "/archive") return answer(await archiveSession(env, caller, sessionId, Date.now()));
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
   if (action === "/snapshots") return answer(await listSnapshots(env, caller, sessionId));
+  if (action === "/credential-handovers") return answer(await listCredentialHandovers(env, caller, sessionId));
   if (action === "/transcript") {
     const query = TranscriptQuerySchema.safeParse(queryOf(url, ["after", "limit"]));
     if (!query.success) return invalidQuery("sessions.readTranscript", query.error);
