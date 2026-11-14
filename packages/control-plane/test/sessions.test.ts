@@ -21,6 +21,7 @@ import {
   SessionSchema,
   SnapshotSchema,
   StartedSessionSchema,
+  StopFailureSchema,
   SupervisorHostKeySchema,
   TranscriptPageSchema,
   TurnFailureSchema,
@@ -196,6 +197,10 @@ class HostSide {
       if (left <= 0) assert.fail(`no ${type} reached the host within 20 s`);
       await Promise.race([new Promise<void>((resolve) => this.waiters.push(resolve)), sleep(left)]);
     }
+  }
+
+  snapshotRequestsFor(sessionId: string): number {
+    return this.inbox.filter((message) => message.type === "SnapshotRequest" && message.sessionId === sessionId).length;
   }
 
   close(): void {
@@ -610,7 +615,12 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
     () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
     (session) => session.state === "Idle",
   );
-  assert.deepEqual(idle.stopFailures, [{ reason: "BoxDirty", detail, failedAt }]);
+  assert.equal(idle.state, "Idle");
+  const failures = await tool("tumpel_session_stop_failures", { sessionId }, StopFailureSchema.array());
+  assert.deepEqual(
+    failures.map((failure) => [failure.sessionId, failure.reason, failure.detail, failure.failedAt]),
+    [[sessionId, "BoxDirty", detail, failedAt]],
+  );
 
   const again = await host.next("SnapshotRequest");
   assert.equal(again.sessionId, sessionId);
@@ -621,6 +631,38 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
     () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
     (snapshots) => snapshots.length === 2,
   );
+});
+
+test("a stop whose snapshot fails returns the session to Idle and does not ask for that snapshot again", async () => {
+  const started = await tool(
+    "tumpel_session_start",
+    { ...(await sessionStart()), prompt: "fail my snapshot" },
+    StartedSessionSchema,
+  );
+  const { sessionId } = started.session;
+  const offer = await host.next("TurnOffer");
+  const { turnId } = offer;
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+  host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const warm = await host.next("SnapshotRequest");
+
+  await tool("tumpel_session_stop", { sessionId }, SessionSchema);
+  host.send({
+    type: "SnapshotFailed",
+    snapshotId: warm.snapshotId,
+    reason: "UploadRejected",
+    detail: "the store refused the upload",
+    failedAt: new Date().toISOString(),
+  });
+  await eventually(
+    "the session reading Idle",
+    () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+    (session) => session.state === "Idle",
+  );
+
+  await sleep(SETTINGS.snapshotDelaySeconds * 3000);
+  assert.equal(host.snapshotRequestsFor(sessionId), 0);
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {

@@ -21,6 +21,7 @@ import type {
   SessionStart,
   Snapshot,
   StartedSession,
+  StopFailure,
   Turn,
   TurnFailure,
 } from "./tenant-sessions";
@@ -321,6 +322,15 @@ export const readTranscript = async (
   );
 };
 
+export const listStopFailures = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+): Promise<Outcome<StopFailure[]>> => {
+  const failures = await tenantOf(env, caller).listStopFailures(caller.tenantId, sessionId);
+  return failures === null ? sessionNotFound(sessionId) : ok(failures);
+};
+
 export const listSnapshots = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Snapshot[]>> => {
   const snapshots = await tenantOf(env, caller).listSnapshots(caller.tenantId, sessionId);
   return snapshots === null ? sessionNotFound(sessionId) : ok(snapshots);
@@ -366,8 +376,8 @@ const answer = <T>(outcome: Outcome<T>): Response =>
   outcome.ok ? json(outcome.value) : problem(outcome.status, outcome.problem);
 
 const SESSION_PATH =
-  /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop|\/archive)?$/;
-const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers"];
+  /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop-failures|\/stop|\/archive)?$/;
+const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers", "/stop-failures"];
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure)?$/;
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
@@ -395,6 +405,7 @@ const sessionRoute = async (
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
   if (action === "/snapshots") return answer(await listSnapshots(env, caller, sessionId));
   if (action === "/credential-handovers") return answer(await listCredentialHandovers(env, caller, sessionId));
+  if (action === "/stop-failures") return answer(await listStopFailures(env, caller, sessionId));
   if (action === "/transcript") {
     const query = TranscriptQuerySchema.safeParse(queryOf(url, ["after", "limit"]));
     if (!query.success) return invalidQuery("sessions.readTranscript", query.error);
