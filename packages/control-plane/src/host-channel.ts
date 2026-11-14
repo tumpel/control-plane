@@ -207,7 +207,7 @@ export class HostChannel extends DurableObject<Env> {
         send: (envelope: ControlEnvelope) => {
           throw new Error(`a ${envelope.type} was sent to a host with no open connection`);
         },
-        close: () => {},
+        close: () => undefined,
       };
     }
     return {
