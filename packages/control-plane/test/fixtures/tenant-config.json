@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/mvhenten/tumpel/main/packages/api/generated/TenantConfig.json",
+  "personas": [
+    {
+      "name": "Reviewer",
+      "instructions": "Review the diff for correctness.",
+      "settings": "{\"permissions\":\"bypass\"}",
+      "mcpServers": [{ "label": "docs", "url": "https://docs.example.test/mcp" }]
+    }
+  ],
+  "secretSets": [
+    {
+      "name": "prod",
+      "secrets": [
+        { "name": "ANTHROPIC_API_KEY", "provider": "Anthropic", "valueFrom": { "env": "TUMPEL_E2E_ANTHROPIC_KEY" } }
+      ]
+    }
+  ],
+  "harnessPins": [{ "harness": "ClaudeCode", "harnessVersion": "2.0.0" }],
+  "hosts": []
+}
