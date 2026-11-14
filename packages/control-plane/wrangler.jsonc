@@ -21,6 +21,7 @@
       "snapshotDelaySeconds": 30,
       "snapshotDeadlineSeconds": 900,
       "turnClaimBudgetSeconds": 60,
+      "turnCloneBudgetSeconds": 120,
       "turnFirstLineBudgetSeconds": 120,
       "turnTotalBudgetSeconds": 3600,
       "transcriptChunkLines": 64
@@ -57,6 +58,7 @@
           "snapshotDelaySeconds": 30,
           "snapshotDeadlineSeconds": 900,
           "turnClaimBudgetSeconds": 60,
+          "turnCloneBudgetSeconds": 120,
           "turnFirstLineBudgetSeconds": 120,
           "turnTotalBudgetSeconds": 3600,
           "transcriptChunkLines": 64
