@@ -14,6 +14,7 @@ import {
   HostSchema,
   MintedEnrolmentTokenSchema,
   PersonaSchema,
+  ProblemSchema,
   SecretSetSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -174,6 +175,12 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   assert.equal(planned.code, 0, planned.stderr);
   assert.equal(planned.stdout.trim(), "no changes; the tenant matches the file");
 
+  const rotated = await tumpel(["config", "apply", file, "--rewrite-secrets", "prod"], {
+    TUMPEL_E2E_ANTHROPIC_KEY: `${SECRET}-rotated`,
+  });
+  assert.equal(rotated.code, 0, rotated.stderr);
+  assert.match(rotated.stdout.trim(), /^rewrite secret set prod \(/);
+
   const personas = PersonaSchema.array().parse(await getJson("/v1/personas"));
   assert.deepEqual(
     personas.map((persona) => [persona.name, persona.settings, persona.mcpServers]),
@@ -210,4 +217,23 @@ test("tumpel config validate names every key that breaks the schema, a pasted se
   assert.match(validated.stderr, /\/secretSets\/0\/secrets\/0: .*value/);
   assert.match(validated.stderr, /\/: .*hosts/);
   assert.ok(!validated.stderr.includes(SECRET));
+});
+
+test("a name the tenant already uses and a repeated key are refused with 409 Conflict", async () => {
+  const persona = { name: "Twin", instructions: "", settings: "{}", mcpServers: [] };
+  assert.equal((await postJson("/v1/personas", persona, bearer)).status, 200);
+  const twin = await postJson("/v1/personas", persona, bearer);
+  assert.equal(twin.status, 409);
+  assert.equal(ProblemSchema.parse(await twin.json()).code, "Conflict");
+
+  const key = { name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET };
+  assert.equal((await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer)).status, 200);
+  const taken = await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer);
+  assert.equal(taken.status, 409);
+  assert.equal(ProblemSchema.parse(await taken.json()).code, "Conflict");
+  const repeated = await postJson("/v1/secret-sets", { name: "repeated", secrets: [key, key] }, bearer);
+  assert.equal(repeated.status, 409);
+  assert.equal(ProblemSchema.parse(await repeated.json()).title, "Repeated key");
+  const sets = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
+  assert.ok(!sets.some((set) => set.name === "repeated"));
 });
