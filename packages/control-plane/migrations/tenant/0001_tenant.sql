@@ -1,8 +1,3 @@
-CREATE TABLE tenant (
-  tenant_id TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL
-);
-
 CREATE TABLE personas (
   persona_id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,

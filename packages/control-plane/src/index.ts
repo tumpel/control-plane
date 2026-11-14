@@ -1,31 +1,36 @@
 import {
-  DeviceApprovalSchema,
   DeviceAuthorizationSchema,
   DeviceCodeRequestSchema,
+  DeviceDecisionSchema,
   DeviceTokenRequestSchema,
   DeviceTokenSchema,
   HealthSchema,
+  OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
-  OAuthTokenRequestSchema,
+  OAuthRefreshTokenRequestSchema,
   SignUpSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
-import { accessVerifier, cachedAccessKeys, type Verify } from "./access";
+import { accessVerifier, cachedAccessKeys, type Verification, type Verify } from "./access";
 import { randomToken, sameSecret } from "./crypto";
 import {
   approveDeviceCode,
   DEVICE_CODE_LIMITS,
   DEVICE_CODE_TTL_MS,
   DEVICE_GRANT,
+  denyDeviceCode,
   formatUserCode,
   GRANT_ERRORS,
+  listDevices,
   POLL_INTERVAL_S,
   parseUserCode,
+  pendingDeviceCode,
   pollDeviceCode,
+  revokeDevice,
   startDeviceCode,
 } from "./device";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
-import { bearerOf, type Caller, callerForDeviceToken, signUp, type Whoami, whoamiForEmail } from "./identity";
+import { bearerOf, type Caller, callerForDeviceToken, signUp, whoamiForEmail, whoamiOf } from "./identity";
 import { mcpEndpoint, mcpRefusal, type RunTool } from "./mcp";
 import {
   AUTHORIZATION_SERVER_PATH,
@@ -55,7 +60,15 @@ import {
   TOKEN_PATH,
   usableRedirect,
 } from "./oauth";
-import { approvePage, CONSENT_CSRF_COOKIE, grantPage, messagePage, readCookie, signUpPage } from "./pages";
+import {
+  CONSENT_CSRF_COOKIE,
+  confirmPage,
+  enterCodePage,
+  grantPage,
+  messagePage,
+  readCookie,
+  signUpPage,
+} from "./pages";
 import type { Tenant } from "./tenant";
 
 export { Tenant } from "./tenant";
@@ -84,14 +97,7 @@ const verifierFor = (env: Env): Verify => {
   return verifier.verify;
 };
 
-const tenantOf = (env: Env, tenantId: string): DurableObjectStub<Tenant> =>
-  env.TENANT.get(env.TENANT.idFromName(tenantId));
-
-const whoami = (env: Env, caller: Caller): Promise<Whoami> => tenantOf(env, caller.tenantId).whoami(caller);
-
-type Signed = { ok: true; email: string } | { ok: false; reason: string };
-
-const assertedEmail = async (request: Request, env: Env): Promise<Signed> => {
+const assertedEmail = async (request: Request, env: Env): Promise<Verification> => {
   const assertion = request.headers.get("cf-access-jwt-assertion");
   if (!assertion) return { ok: false, reason: "no Cloudflare Access sign-in reached this address" };
   const verified = await verifierFor(env)(assertion);
@@ -131,18 +137,41 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   if (refused) return refused;
   const body = await parseBody(request, SignUpSchema, "signUp");
   if (!body.ok) return body.response;
-  const now = Date.now();
-  const answer = await signUp(env.DB, signed.email, body.value.name, now);
-  await tenantOf(env, answer.tenant.tenantId).open(answer.tenant.tenantId, now);
-  return json(WhoamiSchema.parse(answer));
+  return json(WhoamiSchema.parse(await signUp(env.DB, signed.email, body.value.name, Date.now())));
+};
+
+const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
+  const caller = await callerForDeviceToken(env.DB, bearerOf(request), Date.now());
+  return caller ?? signedOut("this device token is missing, unknown or revoked", "Run tumpel login");
 };
 
 const handleWhoami = async (request: Request, env: Env): Promise<Response> => {
-  const caller = await callerForDeviceToken(env.DB, bearerOf(request), Date.now());
-  if (caller === null) {
-    return signedOut("this device token is missing, unknown or revoked", "Run tumpel login");
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(WhoamiSchema.parse(await whoamiOf(env.DB, caller)));
+};
+
+const handleDevicesList = async (request: Request, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(await listDevices(env.DB, caller));
+};
+
+const DEVICES_PATH = "/v1/devices/";
+
+const handleDeviceRevoke = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const deviceId = decodeURIComponent(url.pathname.slice(DEVICES_PATH.length));
+  if (!(await revokeDevice(env.DB, caller, deviceId))) {
+    return problem(404, {
+      code: "NotFound",
+      title: "No such device",
+      detail: `no device ${deviceId} is signed in as you`,
+      fix: "Run tumpel devices list and revoke one of the ids it prints",
+    });
   }
-  return json(WhoamiSchema.parse(await whoami(env, caller)));
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
 const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<Response> => {
@@ -166,27 +195,49 @@ const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<
   );
 };
 
-const handleDeviceApprove = async (request: Request, url: URL, env: Env): Promise<Response> => {
+type Decision =
+  | { ok: true; caller: Caller; userCode: string | null; typed: string }
+  | { ok: false; response: Response };
+
+const readDecision = async (request: Request, url: URL, env: Env, operation: string): Promise<Decision> => {
   const signed = await assertedEmail(request, env);
-  if (!signed.ok) return browserSignedOut(url, signed.reason);
+  if (!signed.ok) return { ok: false, response: browserSignedOut(url, signed.reason) };
   const refused = sameOriginJson(request, url);
-  if (refused) return refused;
-  const body = await parseBody(request, DeviceApprovalSchema, "approve");
-  if (!body.ok) return body.response;
+  if (refused) return { ok: false, response: refused };
+  const body = await parseBody(request, DeviceDecisionSchema, operation);
+  if (!body.ok) return body;
   const owner = await whoamiForEmail(env.DB, signed.email);
-  if (owner === null) return noTenant(url, signed.email);
-  const userCode = parseUserCode(body.value.userCode);
-  const caller = { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId };
+  if (owner === null) return { ok: false, response: noTenant(url, signed.email) };
+  return {
+    ok: true,
+    caller: { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId },
+    userCode: parseUserCode(body.value.userCode),
+    typed: body.value.userCode,
+  };
+};
+
+const codeNotFound = (typed: string): Response =>
+  problem(404, {
+    code: "NotFound",
+    title: "Code not found",
+    detail: `the code ${typed} is wrong, expired or already decided`,
+    fix: "Run tumpel login again and enter the code it prints",
+  });
+
+const handleDeviceApprove = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const decision = await readDecision(request, url, env, "approve");
+  if (!decision.ok) return decision.response;
+  const { caller, userCode, typed } = decision;
   const device = userCode === null ? null : await approveDeviceCode(env.DB, userCode, caller, Date.now());
-  if (device === null) {
-    return problem(404, {
-      code: "NotFound",
-      title: "Code not found",
-      detail: `the code ${body.value.userCode} is wrong, expired or already approved`,
-      fix: "Run tumpel login again and enter the code it prints",
-    });
-  }
-  return json(device);
+  return device === null ? codeNotFound(typed) : json(device);
+};
+
+const handleDeviceDeny = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const decision = await readDecision(request, url, env, "deny");
+  if (!decision.ok) return decision.response;
+  const { userCode, typed } = decision;
+  if (userCode === null || !(await denyDeviceCode(env.DB, userCode, Date.now()))) return codeNotFound(typed);
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
 const handleDeviceToken = async (request: Request, env: Env): Promise<Response> => {
@@ -206,7 +257,14 @@ const handleDevicePage = async (request: Request, url: URL, env: Env): Promise<R
   if (!signed.ok) return messagePage(401, "Sign in again", `${signed.reason}.`);
   const owner = await whoamiForEmail(env.DB, signed.email);
   if (owner === null) return signUpPage(signed.email);
-  return approvePage(signed.email, owner.tenant.name, url.searchParams.get("code") ?? "");
+  const typed = url.searchParams.get("code") ?? "";
+  if (typed === "") return enterCodePage(signed.email, owner.tenant.name);
+  const userCode = parseUserCode(typed);
+  const pending = userCode === null ? null : await pendingDeviceCode(env.DB, userCode, Date.now());
+  if (pending === null) {
+    return messagePage(404, "Code not found", "The code is wrong, expired or already decided. Run tumpel login again.");
+  }
+  return confirmPage(signed.email, owner.tenant.name, formatUserCode(pending.userCode), pending.deviceName);
 };
 
 const corsHeaders = (request: Request): Record<string, string> => {
@@ -275,10 +333,7 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
 
 const runTool =
   (env: Env, caller: Caller): RunTool =>
-  async (call) => {
-    if (call.name === "tumpel_whoami") return { ok: true, text: JSON.stringify(await whoami(env, caller)) };
-    return { ok: false, error: `no tool ${call.name}` };
-  };
+  async () => ({ ok: true, text: JSON.stringify(await whoamiOf(env.DB, caller)) });
 
 const handleMcp = async (request: Request, env: Env): Promise<Response> => {
   if (request.method === "OPTIONS") return preflight(request);
@@ -385,33 +440,46 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
 };
 
+const GRANT_SCHEMAS = {
+  authorization_code: OAuthAuthorizationCodeRequestSchema,
+  refresh_token: OAuthRefreshTokenRequestSchema,
+} as const;
+
+const isGrantType = (value: unknown): value is keyof typeof GRANT_SCHEMAS =>
+  typeof value === "string" && Object.hasOwn(GRANT_SCHEMAS, value);
+
+const resourcesOf = (resource: string | undefined): string[] =>
+  resource === undefined || resource === "" ? [] : [resource];
+
 const handleToken = async (request: Request, url: URL, env: Env): Promise<Response> => {
-  const parsed = OAuthTokenRequestSchema.safeParse(await readParams(request));
-  if (!parsed.success) {
-    return oauthError(
-      "unsupported_grant_type",
-      `grant_type must be authorization_code or refresh_token: ${issues(parsed.error)}`,
-    );
+  const params = await readParams(request);
+  if (params.grant_type === undefined) return oauthError("invalid_request", "grant_type is missing");
+  if (!isGrantType(params.grant_type)) {
+    return oauthError("unsupported_grant_type", "grant_type must be authorization_code or refresh_token");
   }
-  const params = parsed.data;
-  const resources = params.resource === undefined || params.resource === "" ? [] : [params.resource];
-  const outcome =
-    params.grant_type === "authorization_code"
-      ? await redeemCode(
-          env.DB,
-          {
-            code: params.code ?? "",
-            codeVerifier: params.code_verifier ?? "",
-            clientId: params.client_id,
-            redirectUri: params.redirect_uri ?? "",
-            resources,
-          },
-          url.origin,
-          Date.now(),
-        )
-      : await refreshGrant(env.DB, params.refresh_token ?? "", params.client_id, url.origin, resources, Date.now());
-  if (!outcome.ok) return oauthError(outcome.error, outcome.description);
-  return json(outcome.token);
+  if (params.grant_type === "refresh_token") {
+    const parsed = OAuthRefreshTokenRequestSchema.safeParse(params);
+    if (!parsed.success) return oauthError("invalid_request", issues(parsed.error));
+    const { refresh_token, client_id, resource } = parsed.data;
+    const outcome = await refreshGrant(env.DB, refresh_token, client_id, url.origin, resourcesOf(resource), Date.now());
+    return outcome.ok ? json(outcome.token) : oauthError(outcome.error, outcome.description);
+  }
+  const parsed = OAuthAuthorizationCodeRequestSchema.safeParse(params);
+  if (!parsed.success) return oauthError("invalid_request", issues(parsed.error));
+  const { code, code_verifier, client_id, redirect_uri, resource } = parsed.data;
+  const outcome = await redeemCode(
+    env.DB,
+    {
+      code,
+      codeVerifier: code_verifier,
+      clientId: client_id,
+      redirectUri: redirect_uri,
+      resources: resourcesOf(resource),
+    },
+    url.origin,
+    Date.now(),
+  );
+  return outcome.ok ? json(outcome.token) : oauthError(outcome.error, outcome.description);
 };
 
 const wellKnown = (pathname: string): ((origin: string) => unknown) | null => {
@@ -431,6 +499,8 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/whoami": (request, _url, env) => handleWhoami(request, env),
   "POST /v1/device/code": handleDeviceStart,
   "POST /v1/device/approve": handleDeviceApprove,
+  "POST /v1/device/deny": handleDeviceDeny,
+  "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`OPTIONS ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
@@ -460,6 +530,13 @@ export default {
     }
     const route = ROUTES[`${request.method} ${url.pathname}`];
     if (route) return route(request, url, env);
+    if (
+      request.method === "DELETE" &&
+      url.pathname.startsWith(DEVICES_PATH) &&
+      url.pathname.length > DEVICES_PATH.length
+    ) {
+      return handleDeviceRevoke(request, url, env);
+    }
     return problem(404, {
       code: "NotFound",
       title: "No such route",

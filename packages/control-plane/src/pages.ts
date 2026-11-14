@@ -25,7 +25,7 @@ export const messagePage = (status: number, title: string, text: string): Respon
 
 const POST_JSON = `async function post(path, body) {
   const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  const answer = await response.json();
+  const answer = response.status === 204 ? {} : await response.json();
   document.getElementById("result").textContent = response.ok ? "" : answer.detail + ". " + answer.fix;
   return response.ok ? answer : null;
 }`;
@@ -44,18 +44,32 @@ document.getElementById("signup").addEventListener("submit", async (event) => {
 });</script>`,
   );
 
-export const approvePage = (email: string, tenantName: string, code: string): Response =>
+export const enterCodePage = (email: string, tenantName: string): Response =>
   page(
     200,
     "Sign in a device",
     `<p>Signed in as ${escapeHtml(email)} of ${escapeHtml(tenantName)}. Enter the code your terminal shows.</p>
-<form id="approve"><input name="userCode" value="${escapeHtml(code)}" autocomplete="off" required autofocus><button type="submit">Approve</button></form>
+<form method="get" action="/device"><input name="code" autocomplete="off" required autofocus><button type="submit">Continue</button></form>`,
+  );
+
+export const confirmPage = (email: string, tenantName: string, userCode: string, deviceName: string): Response =>
+  page(
+    200,
+    "Sign in a device",
+    `<p>The device <strong>${escapeHtml(deviceName)}</strong> asks to use tumpel as ${escapeHtml(email)} of ${escapeHtml(tenantName)}.</p>
+<p>Check that your terminal shows this code:</p><p><code>${escapeHtml(userCode)}</code></p>
+<form id="decide"><button type="submit" value="approve">Approve</button><button type="submit" value="deny">Deny</button></form>
 <p id="result" role="alert"></p>
 <script>${POST_JSON}
-document.getElementById("approve").addEventListener("submit", async (event) => {
+document.getElementById("decide").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const device = await post("/v1/device/approve", { userCode: new FormData(event.target).get("userCode") });
-  if (device) document.getElementById("result").textContent = "Approved " + device.name + ". Return to your terminal.";
+  const action = event.submitter.value;
+  const answer = await post("/v1/device/" + action, { userCode: ${JSON.stringify(userCode)} });
+  if (answer === null) return;
+  event.target.remove();
+  document.getElementById("result").textContent = action === "approve"
+    ? "Approved " + answer.name + ". Return to your terminal."
+    : "Denied. The device gets no access.";
 });</script>`,
   );
 
