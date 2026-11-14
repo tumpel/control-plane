@@ -15,9 +15,11 @@
   ],
   "r2_buckets": [{ "binding": "STORE", "bucket_name": "tumpel-sessions" }],
   "vars": {
+    "R2_BUCKET_NAME": "tumpel-sessions",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
+      "snapshotDeadlineSeconds": 900,
       "turnClaimBudgetSeconds": 60,
       "turnFirstLineBudgetSeconds": 120,
       "turnTotalBudgetSeconds": 3600,

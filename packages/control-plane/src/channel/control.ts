@@ -3,7 +3,6 @@ import {
   accept,
   type ControlEnvelope,
   type ControlMessage,
-  type DispatchGrant,
   decodeBase64,
   type Hello,
   HostEnvelopeSchema,
@@ -13,12 +12,13 @@ import {
   type LedgerStore,
   type Port,
   PROTOCOL_VERSION,
+  type PreparedOffer,
   parseEnvelope,
   randomNonce,
   resend,
   type StoredControlMessage,
+  type StoredOffer,
   sequence,
-  type TurnOffer,
 } from "./protocol.ts";
 
 export type ControlConnection = { phase: "AwaitingHello"; nonce: string } | { phase: "Open" } | { phase: "Closed" };
@@ -33,7 +33,7 @@ export interface ControlContext {
   port: Port<ControlEnvelope>;
   host: ControlHost;
   ledger: LedgerStore<StoredControlMessage>;
-  mintGrant(offer: Omit<TurnOffer, "credential">): Promise<DispatchGrant>;
+  prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   now(): Date;
 }
 
@@ -70,8 +70,13 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> =>
-  stored.type === "TurnOffer" ? { ...stored, credential: await context.mintGrant(stored) } : stored;
+const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
+  if (stored.type !== "TurnOffer") return stored;
+  const prepared = await context.prepareOffer(stored);
+  if (prepared.kind === "Withdrawn") return { type: "TurnWithdrawn", turnId: stored.turnId };
+  const { credential, lastLineSeq, snapshots } = prepared;
+  return { ...stored, credential, lastLineSeq, snapshots };
+};
 
 export const send = async (
   connection: ControlConnection,

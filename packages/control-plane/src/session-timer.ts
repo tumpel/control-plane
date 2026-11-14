@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index";
 
-export type DeadlineName = "Claim" | "FirstLine" | "Total" | "Snapshot";
+export type DeadlineName = "Claim" | "FirstLine" | "Total" | "Snapshot" | "SnapshotAnswer" | "HostOffline";
 
 export interface Deadline {
   turnId: string;

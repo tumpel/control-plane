@@ -36,7 +36,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, and tumpel_transcript reads what the harness wrote, page by page: pass the cursor of the last page as after.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -282,7 +282,7 @@ export const TOOLS: ToolDefinition[] = [
     "Read why a Failed turn failed. Returns the TurnFailure of GET /v1/turns/{turnId}/failure: {reason, detail}.",
   ),
   rest(
-    "tumpel_transcript",
+    "tumpel_transcript_read",
     "GET",
     "/v1/sessions/{sessionId}/transcript",
     SessionPathSchema.extend(TranscriptQuerySchema.shape),
@@ -293,14 +293,14 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions/{sessionId}/snapshots",
     SessionPathSchema,
-    "List a session's stored snapshots in order. Returns the Snapshot[] of GET /v1/sessions/{sessionId}/snapshots.",
+    "List a session's snapshots in order, each stored or failed with its reason. Returns the Snapshot[] of GET /v1/sessions/{sessionId}/snapshots.",
   ),
   rest(
     "tumpel_snapshot_get",
     "GET",
     "/v1/snapshots/{snapshotId}",
     SnapshotPathSchema,
-    "Read one stored snapshot. Returns the Snapshot of GET /v1/snapshots/{snapshotId}.",
+    "Read one snapshot: its stored size, or why it was not stored. Returns the Snapshot of GET /v1/snapshots/{snapshotId}.",
   ),
 ];
 

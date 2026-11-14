@@ -33,11 +33,14 @@ const EMAIL = "sessions@example.test";
 const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-sessions-e2e-provider-key";
 const CLAIM_BUDGET_SECONDS = 3;
+const R2_STUB_ORIGIN = "https://r2.example.test";
+const HOST_OFFLINE_GRACE_MS = 30_000;
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
 const SETTINGS = {
   dispatchGrantTtlSeconds: 300,
   snapshotDelaySeconds: 1,
+  snapshotDeadlineSeconds: 60,
   turnClaimBudgetSeconds: CLAIM_BUDGET_SECONDS,
   turnFirstLineBudgetSeconds: 10,
   turnTotalBudgetSeconds: 60,
@@ -106,13 +109,18 @@ const tool = async <T>(name: string, args: Record<string, unknown>, schema: z.Zo
   return schema.parse(JSON.parse(text));
 };
 
-const eventually = async <T>(what: string, read: () => Promise<T>, done: (value: T) => boolean): Promise<T> => {
+const eventually = async <T>(
+  what: string,
+  read: () => Promise<T>,
+  done: (value: T) => boolean,
+  withinMs = 20_000,
+): Promise<T> => {
   const started = Date.now();
   for (;;) {
     const value = await read();
     if (done(value)) return value;
-    if (Date.now() - started > 20_000)
-      assert.fail(`${what} did not happen within 20 s; last read ${JSON.stringify(value)}`);
+    if (Date.now() - started > withinMs)
+      assert.fail(`${what} did not happen within ${withinMs / 1000} s; last read ${JSON.stringify(value)}`);
     await sleep(100);
   }
 };
@@ -272,7 +280,11 @@ const readAll = async (sessionId: string, turnId: string, limit: number) => {
   const lines: { lineSeq: number; text: string }[] = [];
   let cursor = 0;
   for (;;) {
-    const page = await tool("tumpel_transcript", { sessionId, turnId, after: cursor, limit }, TranscriptPageSchema);
+    const page = await tool(
+      "tumpel_transcript_read",
+      { sessionId, turnId, after: cursor, limit },
+      TranscriptPageSchema,
+    );
     if (page.lines.length === 0) {
       assert.equal(page.cursor, cursor);
       return lines;
@@ -310,7 +322,7 @@ before(async () => {
     workers: [
       {
         configPath: "./wrangler.jsonc",
-        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, TUMPEL_SETTINGS: SETTINGS },
+        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, TUMPEL_SETTINGS: SETTINGS, R2_STUB_ORIGIN },
       },
     ],
   });
@@ -359,6 +371,8 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(offer.prompt, "fix the build");
   assert.deepEqual(offer.credential.variables, [{ name: "ANTHROPIC_API_KEY", value: PROVIDER_KEY }]);
   assert.ok(Date.parse(offer.credential.expiresAt) > Date.now());
+  assert.equal(offer.lastLineSeq, 0);
+  assert.deepEqual(offer.snapshots, []);
   const { turnId } = offer;
   const { sessionId } = started.session;
 
@@ -395,6 +409,11 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(request.sessionId, sessionId);
   assert.equal(request.turnId, turnId);
   assert.equal(request.snapshotSeq, 1);
+  const upload = new URL(request.uploadUrl);
+  assert.equal(upload.origin, R2_STUB_ORIGIN);
+  assert.equal(upload.pathname, `/tumpel-sessions/${request.storageKey}`);
+  assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
+  assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 4096 });
   const [snapshot] = await eventually(
     "a stored snapshot",
@@ -411,12 +430,26 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
       turnId,
       snapshotSeq: 1,
       storageKey: request.storageKey,
-      sizeBytes: 4096,
+      outcome: { state: "Stored", sizeBytes: 4096 },
       createdAt: 0,
       updatedAt: 0,
     },
   );
   assert.deepEqual(await tool("tumpel_snapshot_get", { snapshotId: request.snapshotId }, SnapshotSchema), snapshot);
+
+  await tool("tumpel_turn_send", { sessionId, prompt: "and now the tests" }, TurnSchema);
+  const next = await host.next("TurnOffer");
+  assert.equal(next.lastLineSeq, 3);
+  assert.deepEqual(
+    next.snapshots.map(({ snapshotId, snapshotSeq, storageKey }) => ({ snapshotId, snapshotSeq, storageKey })),
+    [{ snapshotId: request.snapshotId, snapshotSeq: 1, storageKey: request.storageKey }],
+  );
+  assert.equal(new URL(next.snapshots[0]?.downloadUrl ?? "").searchParams.get("X-Tumpel-Method"), "GET");
+  await eventually(
+    "the unclaimed second turn reading Failed",
+    () => getJson(`/v1/turns/${next.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
@@ -435,4 +468,30 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NotClaimed");
   assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
+});
+
+test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "host goes away" }, bearer);
+  assert.equal(response.status, 200);
+  const started = StartedSessionSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.turnId, started.turn.turnId);
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
+  await eventually(
+    "the turn reading Running",
+    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+    (turn) => turn.state === "Running" && turn.lineCount === 1,
+  );
+
+  host.close();
+  await eventually(
+    "the turn reading Failed",
+    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+    HOST_OFFLINE_GRACE_MS + 20_000,
+  );
+  const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+  assert.equal(failure.reason, "HostOffline");
+  assert.match(failure.detail, new RegExp(`went offline during turn ${offer.turnId}`));
 });

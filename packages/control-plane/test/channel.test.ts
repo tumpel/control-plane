@@ -5,13 +5,13 @@ import { CloseCode } from "@tumpel/api/schemas";
 import * as control from "../src/channel/control.ts";
 import {
   type ControlEnvelope,
-  type DispatchGrant,
   emptyLedger,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
   type Ledger,
   type LedgerStore,
+  type PreparedOffer,
   type StoredControlMessage,
 } from "../src/channel/protocol.ts";
 
@@ -71,13 +71,20 @@ const setup = (revoked = false) => {
   const keys = keyPair();
   const ledger = memoryLedger<StoredControlMessage>();
   const peer = { hostId: HOST_ID, publicKey: keys.publicKey, revoked };
+  const turn = { offered: true };
   let minted = 0;
-  const mintGrant = async (): Promise<DispatchGrant> => {
+  const prepareOffer = async (): Promise<PreparedOffer> => {
+    if (!turn.offered) return { kind: "Withdrawn" };
     minted += 1;
     return {
-      dispatchCredentialId: `grant-${minted}`,
-      expiresAt: "2026-11-14T12:00:00+01:00",
-      variables: [{ name: "API_KEY", value: `secret-${minted}` }],
+      kind: "Ready",
+      credential: {
+        dispatchCredentialId: `grant-${minted}`,
+        expiresAt: "2026-11-14T12:00:00+01:00",
+        variables: [{ name: "API_KEY", value: `secret-${minted}` }],
+      },
+      lastLineSeq: 0,
+      snapshots: [],
     };
   };
 
@@ -99,7 +106,7 @@ const setup = (revoked = false) => {
         },
         host: peer,
         ledger,
-        mintGrant,
+        prepareOffer,
         now: () => new Date("2026-11-14T10:00:00+00:00"),
       } satisfies control.ControlContext,
       deliver: async (envelope: HostEnvelope) => {
@@ -122,7 +129,7 @@ const setup = (revoked = false) => {
     link.connection = control.challenge(link.context.port);
     return link;
   };
-  return { connect, ledger, peer };
+  return { connect, ledger, peer, turn };
 };
 
 const closure = (link: { closed: Closed | null }): Closed | null => link.closed;
@@ -214,6 +221,24 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   );
   assert.deepEqual(channel.ledger.current, { received: 2, sent: 2, unacked: [] });
   assert.equal(second.closed, null);
+});
+
+test("a turn that ended while its offer was unacked is resent as TurnWithdrawn, with no key", async () => {
+  const channel = setup();
+  const first = channel.connect();
+  await first.hello();
+  await control.send(first.connection, turnOffer, first.context);
+  first.closed = { code: 1006, reason: "dropped" };
+  channel.turn.offered = false;
+
+  const second = channel.connect();
+  await second.hello();
+  const resent = frames(second.sent);
+  assert.deepEqual(
+    resent.map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.message]),
+    [[1, { type: "TurnWithdrawn", turnId: "turn-1" }]],
+  );
+  assert.equal(JSON.stringify(second.sent).includes("secret-"), false);
 });
 
 test("revoke closes a live connection, and a revoked host's next Hello is closed before any frame", async () => {

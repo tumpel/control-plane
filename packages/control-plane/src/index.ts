@@ -97,6 +97,7 @@ import {
   readCookie,
   signUpPage,
 } from "./pages";
+import type { SignerEnv } from "./presign";
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import type { Tenant } from "./tenant";
@@ -105,7 +106,7 @@ export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 
-export interface Env {
+export interface Env extends SignerEnv {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   HOST: DurableObjectNamespace<HostChannel>;

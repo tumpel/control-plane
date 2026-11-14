@@ -9,9 +9,16 @@ import {
   TurnSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import type { DispatchGrant, HostMessage, StoredControlMessage } from "./channel/protocol.ts";
+import {
+  HEARTBEAT_DEADLINE_MS,
+  type HostMessage,
+  type PreparedOffer,
+  type SnapshotDownload,
+  type StoredControlMessage,
+} from "./channel/protocol.ts";
 import { catalogEntry } from "./harness-catalog";
 import type { Env } from "./index";
+import { signerOf } from "./presign";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
 import { chunkKey, encodeChunk, type Range, rangeAfter, type TranscriptLine } from "./transcript";
@@ -107,7 +114,10 @@ type SnapshotRow = {
   turn_id: string;
   snapshot_seq: number;
   storage_key: string;
-  size_bytes: number;
+  size_bytes: number | null;
+  reason: string | null;
+  detail: string | null;
+  failed_at: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -124,10 +134,13 @@ type SnapshotRequestRow = {
 const SESSION_SELECT =
   "SELECT session_id, principal_id, host_id, box_id, secret_set_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at FROM sessions";
 const TURN_SELECT = "SELECT turn_id, session_id, box_id, prompt, state, line_count, created_at, updated_at FROM turns";
-const SNAPSHOT_SELECT =
-  "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at FROM snapshots";
+const SNAPSHOT_SELECT = `SELECT * FROM (
+  SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, NULL AS reason, NULL AS detail, NULL AS failed_at, created_at, updated_at FROM snapshots
+  UNION ALL
+  SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, NULL, reason, detail, failed_at, created_at, created_at FROM snapshot_failures
+)`;
 
-const IN_FLIGHT = ["Queued", "Offered", "Running"];
+const IN_FLIGHT = ["Offered", "Running"];
 
 const toSession = (tenantId: string, row: SessionRow): Session =>
   SessionSchema.parse({
@@ -169,7 +182,10 @@ const toSnapshot = (tenantId: string, row: SnapshotRow): Snapshot =>
     turnId: row.turn_id,
     snapshotSeq: row.snapshot_seq,
     storageKey: row.storage_key,
-    sizeBytes: row.size_bytes,
+    outcome:
+      row.size_bytes === null
+        ? { state: "Failed", reason: row.reason, detail: row.detail, failedAt: row.failed_at }
+        : { state: "Stored", sizeBytes: row.size_bytes },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -226,6 +242,7 @@ export class TenantSessions extends DurableObject<Env> {
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: now + settings.turnTotalBudgetSeconds * 1000 },
       Snapshot: null,
+      HostOffline: null,
     });
     const offer: StoredControlMessage = {
       type: "TurnOffer",
@@ -440,12 +457,13 @@ export class TenantSessions extends DurableObject<Env> {
     return { kind: "Lines", sessionState, lines };
   }
 
-  mintGrant(tenantId: string, turnId: string, hostId: string, now: number): DispatchGrant {
+  async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null) {
       throw new Error(`host ${hostId} has an offer for turn ${turnId}, which tenant ${tenantId} does not hold`);
     }
+    if (turn.state !== "Offered") return { kind: "Withdrawn" };
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) {
       throw new Error(
@@ -464,18 +482,67 @@ export class TenantSessions extends DurableObject<Env> {
         `secret set ${session.secret_set_id} has no ${entry.providerKeyName} for turn ${turnId}; add it with tumpel config apply`,
       );
     }
-    const dispatchCredentialId = crypto.randomUUID();
-    const expiresAt = iso(now + settingsOf(this.env).dispatchGrantTtlSeconds * 1000);
-    this.ctx.storage.sql.exec(
-      "INSERT INTO dispatch_credentials (dispatch_credential_id, turn_id, secret_set_id, host_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      dispatchCredentialId,
-      turnId,
-      session.secret_set_id,
-      hostId,
-      expiresAt,
-      now,
-    );
-    return { dispatchCredentialId, expiresAt, variables: [{ name: entry.providerKeyName, value: secret.value }] };
+    const settings = settingsOf(this.env);
+    const stored = this.ctx.storage.sql
+      .exec<{ snapshot_id: string; snapshot_seq: number; storage_key: string }>(
+        "SELECT snapshot_id, snapshot_seq, storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq",
+        session.session_id,
+      )
+      .toArray();
+    const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
+    return {
+      kind: "Ready",
+      credential: {
+        dispatchCredentialId: crypto.randomUUID(),
+        expiresAt: iso(now + settings.dispatchGrantTtlSeconds * 1000),
+        variables: [{ name: entry.providerKeyName, value: secret.value }],
+      },
+      lastLineSeq: session.last_line_seq,
+      snapshots,
+    };
+  }
+
+  private async downloads(
+    stored: { snapshot_id: string; snapshot_seq: number; storage_key: string }[],
+    seconds: number,
+    now: number,
+  ): Promise<SnapshotDownload[]> {
+    if (stored.length === 0) return [];
+    const signer = signerOf(this.env);
+    const snapshots: SnapshotDownload[] = [];
+    for (const row of stored) {
+      snapshots.push({
+        snapshotId: row.snapshot_id,
+        snapshotSeq: row.snapshot_seq,
+        storageKey: row.storage_key,
+        downloadUrl: await signer.presign("GET", row.storage_key, seconds, new Date(now)),
+        downloadExpiresAt: iso(now + seconds * 1000),
+      });
+    }
+    return snapshots;
+  }
+
+  async hostPresence(tenantId: string, hostId: string, presence: "Online" | "Offline", now: number): Promise<void> {
+    const inFlight = this.ctx.storage.sql
+      .exec<{ session_id: string; turn_id: string }>(
+        `SELECT turns.session_id, turns.turn_id FROM turns JOIN sessions ON sessions.session_id = turns.session_id
+        WHERE sessions.host_id = ? AND turns.state IN (${IN_FLIGHT.map(() => "?").join(", ")})`,
+        hostId,
+        ...IN_FLIGHT,
+      )
+      .toArray();
+    for (const { session_id, turn_id } of inFlight) {
+      await this.timers(tenantId, session_id, {
+        HostOffline: presence === "Offline" ? { turnId: turn_id, at: now + HEARTBEAT_DEADLINE_MS } : null,
+      });
+    }
+  }
+
+  private async hostOffline(hostId: string): Promise<boolean> {
+    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ state: string }>();
+    return row?.state === "Offline";
   }
 
   async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<void> {
@@ -507,6 +574,16 @@ export class TenantSessions extends DurableObject<Env> {
     if (turn.state !== "Running") return;
     if (message.type === "TurnLine")
       return this.appendLine(tenantId, session, turn, message.lineSeq, message.text, now);
+    const held = this.sessionRow(session.session_id)?.last_line_seq ?? 0;
+    if (message.lastLineSeq !== held) {
+      return this.failTurn(
+        tenantId,
+        turn.turn_id,
+        "TranscriptGap",
+        `turn ${turn.turn_id} completed at lineSeq ${message.lastLineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
+        iso(now),
+      );
+    }
     await this.flush(tenantId, session.session_id, turn.turn_id);
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
@@ -516,6 +593,7 @@ export class TenantSessions extends DurableObject<Env> {
       Claim: null,
       FirstLine: null,
       Total: null,
+      HostOffline: null,
       Snapshot: { turnId: turn.turn_id, at: now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
     });
   }
@@ -527,6 +605,16 @@ export class TenantSessions extends DurableObject<Env> {
     const settings = settingsOf(this.env);
     const failedAt = iso(Date.now());
     if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
+    if (name === "SnapshotAnswer") return this.snapshotUnanswered(session, turn, failedAt);
+    if (name === "HostOffline" && IN_FLIGHT.includes(turn.state) && (await this.hostOffline(session.host_id))) {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "HostOffline",
+        `host ${session.host_id} went offline during turn ${turnId} and did not reconnect within ${HEARTBEAT_DEADLINE_MS / 1000} seconds; check that its supervisor runs with tumpel host list, then send the turn again`,
+        failedAt,
+      );
+    }
     if (name === "Claim" && turn.state === "Offered") {
       return this.failTurn(
         tenantId,
@@ -565,6 +653,16 @@ export class TenantSessions extends DurableObject<Env> {
     now: number,
   ): Promise<void> {
     const sql = this.ctx.storage.sql;
+    const held = this.sessionRow(session.session_id)?.last_line_seq ?? 0;
+    if (lineSeq > held + 1) {
+      return this.failTurn(
+        tenantId,
+        turn.turn_id,
+        "TranscriptGap",
+        `turn ${turn.turn_id} sent lineSeq ${lineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
+        iso(now),
+      );
+    }
     const pending = this.ctx.storage.transactionSync(() => {
       const [current] = sql
         .exec<{ last_line_seq: number }>("SELECT last_line_seq FROM sessions WHERE session_id = ?", session.session_id)
@@ -661,7 +759,7 @@ export class TenantSessions extends DurableObject<Env> {
         now,
       );
     });
-    await this.timers(tenantId, turn.session_id, { Claim: null, FirstLine: null, Total: null });
+    await this.timers(tenantId, turn.session_id, { Claim: null, FirstLine: null, Total: null, HostOffline: null });
   }
 
   private async requestSnapshot(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
@@ -669,7 +767,7 @@ export class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const [latest] = sql
       .exec<{ seq: number | null }>(
-        "SELECT MAX(seq) AS seq FROM (SELECT snapshot_seq AS seq FROM snapshots WHERE session_id = ?1 UNION ALL SELECT snapshot_seq FROM snapshot_requests WHERE session_id = ?1)",
+        "SELECT MAX(seq) AS seq FROM (SELECT snapshot_seq AS seq FROM snapshots WHERE session_id = ?1 UNION ALL SELECT snapshot_seq FROM snapshot_requests WHERE session_id = ?1 UNION ALL SELECT snapshot_seq FROM snapshot_failures WHERE session_id = ?1)",
         session.session_id,
       )
       .toArray();
@@ -687,6 +785,11 @@ export class TenantSessions extends DurableObject<Env> {
       storageKey,
       now,
     );
+    const deadlineSeconds = settingsOf(this.env).snapshotDeadlineSeconds;
+    const uploadUrl = await signerOf(this.env).presign("PUT", storageKey, deadlineSeconds, new Date(now));
+    await this.timers(tenantId, session.session_id, {
+      SnapshotAnswer: { turnId: turn.turn_id, at: now + deadlineSeconds * 1000 },
+    });
     await this.host(session.host_id).send({
       type: "SnapshotRequest",
       snapshotId,
@@ -695,16 +798,56 @@ export class TenantSessions extends DurableObject<Env> {
       turnId: turn.turn_id,
       snapshotSeq,
       storageKey,
-      uploadUrl: `${session.endpoint}/v1/snapshots/${snapshotId}/content`,
-      uploadExpiresAt: iso(now + settingsOf(this.env).dispatchGrantTtlSeconds * 1000),
+      uploadUrl,
+      uploadExpiresAt: iso(now + deadlineSeconds * 1000),
     });
   }
 
-  private snapshotAnswer(
+  private snapshotUnanswered(session: SessionRow, turn: TurnRow, failedAt: string): void {
+    const sql = this.ctx.storage.sql;
+    const requests = sql
+      .exec<SnapshotRequestRow>(
+        "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ? AND turn_id = ?",
+        session.session_id,
+        turn.turn_id,
+      )
+      .toArray();
+    const seconds = settingsOf(this.env).snapshotDeadlineSeconds;
+    for (const request of requests) {
+      this.recordSnapshotFailure(
+        request,
+        "NotAnswered",
+        `host ${session.host_id} did not answer snapshot ${request.snapshot_id} within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs with tumpel host list`,
+        failedAt,
+      );
+    }
+  }
+
+  private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
+      sql.exec(
+        "INSERT INTO snapshot_failures (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        request.snapshot_id,
+        request.session_id,
+        request.box_id,
+        request.turn_id,
+        request.snapshot_seq,
+        request.storage_key,
+        reason,
+        detail,
+        failedAt,
+        Date.now(),
+      );
+    });
+  }
+
+  private async snapshotAnswer(
     tenantId: string,
     hostId: string,
     message: Extract<HostMessage, { type: "SnapshotDone" | "SnapshotFailed" }>,
-  ): void {
+  ): Promise<void> {
     const sql = this.ctx.storage.sql;
     const [request] = sql
       .exec<SnapshotRequestRow>(
@@ -719,23 +862,13 @@ export class TenantSessions extends DurableObject<Env> {
         `host ${hostId} answered snapshot ${message.snapshotId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
+    await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
+    if (message.type === "SnapshotFailed") {
+      return this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
+    }
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
-      if (message.type === "SnapshotFailed") {
-        sql.exec(
-          "INSERT INTO snapshot_failures (snapshot_id, session_id, turn_id, snapshot_seq, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          request.snapshot_id,
-          request.session_id,
-          request.turn_id,
-          request.snapshot_seq,
-          message.reason,
-          message.detail,
-          message.failedAt,
-          now,
-        );
-        return;
-      }
       sql.exec(
         "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         request.snapshot_id,

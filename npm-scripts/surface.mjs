@@ -20,21 +20,15 @@ const NOUNS = {
   SecretSets: "secret-set",
   Sessions: "session",
   Turns: "turn",
+  Transcripts: "transcript",
   Snapshots: "snapshot",
 };
 const VERBS = { EnrolmentTokens_mint: "mint-token", Turns_getFailure: "failure" };
-const NAMES = {
-  Sessions_sendTurn: ["turn", "send"],
-  Sessions_listTurns: ["turn", "list"],
-  Sessions_listSnapshots: ["snapshot", "list"],
-  Sessions_readTranscript: ["transcript"],
-};
-
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
 const namesFor = (operationId) => {
   const [group, op] = operationId.split("_");
-  const parts = NAMES[operationId] ?? [NOUNS[group] ?? kebab(group), VERBS[operationId] ?? kebab(op)].filter(Boolean);
+  const parts = [NOUNS[group] ?? kebab(group), VERBS[operationId] ?? kebab(op)].filter(Boolean);
   return { tool: `tumpel_${parts.join("_").replaceAll("-", "_")}`, command: `tumpel ${parts.join(" ")}` };
 };
 
@@ -112,10 +106,8 @@ const render = (rows, excluded) =>
     `${Object.entries(NOUNS)
       .map(([group, noun]) => `${group} \`${noun || "(none)"}\``)
       .join(", ")}.`,
-    "`EnrolmentTokens_mint` takes the verb `mint-token` and `Turns_getFailure` the verb `failure`. The session's",
-    "turn, snapshot and transcript reads take the noun they return: `Sessions_sendTurn` and `Sessions_listTurns` are",
-    "`turn send` and `turn list`, `Sessions_listSnapshots` is `snapshot list`, and `Sessions_readTranscript` is",
-    "`transcript`, which the CLI takes by turnId.",
+    "`EnrolmentTokens_mint` takes the verb `mint-token` and `Turns_getFailure` the verb `failure`. The CLI's",
+    "`transcript read` takes a turnId and reads that turn's lines of its session.",
     "",
     "`tumpel_secret_set_create` and `_update` take key names and `valueFrom.env` names only and write",
     "nothing: the server cannot read your environment, so they return the config entry for",
