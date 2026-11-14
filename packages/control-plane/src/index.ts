@@ -60,7 +60,7 @@ import {
   setHostLabels,
 } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
-import { bearerOf, type Caller, callerForDeviceToken, signUp, whoamiForEmail, whoamiOf } from "./identity";
+import { bearerOf, type Caller, callerForDeviceToken, proofCaller, signUp, whoamiForEmail, whoamiOf } from "./identity";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
 import {
   AUTHORIZATION_SERVER_PATH,
@@ -118,6 +118,7 @@ export interface Env extends SignerEnv {
   TUMPEL_SETTINGS: unknown;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
+  ACCESS_PROOF_COMMON_NAME?: string;
   SECRETS_KEK?: string;
 }
 
@@ -138,13 +139,24 @@ const verifierFor = (env: Env): Verify => {
   return verifier.verify;
 };
 
-const assertedEmail = async (request: Request, env: Env): Promise<Verification> => {
+const assertedSigner = async (request: Request, env: Env): Promise<Verification> => {
   const assertion = request.headers.get("cf-access-jwt-assertion");
   if (!assertion) return { ok: false, reason: "no Cloudflare Access sign-in reached this address" };
   const verified = await verifierFor(env)(assertion);
   return verified.ok
     ? verified
     : { ok: false, reason: `the Cloudflare Access sign-in was rejected: ${verified.reason}` };
+};
+
+type PersonVerification = Extract<Verification, { kind: "Person" }> | { ok: false; reason: string };
+
+const assertedEmail = async (request: Request, env: Env): Promise<PersonVerification> => {
+  const signed = await assertedSigner(request, env);
+  if (!signed.ok || signed.kind === "Person") return signed;
+  return {
+    ok: false,
+    reason: "a service token signs in only to approve or deny a device code; sign in to Access as a person",
+  };
 };
 
 const browserSignedOut = (url: URL, reason: string): Response =>
@@ -548,21 +560,42 @@ type Decision =
   | { ok: true; caller: Caller; userCode: string | null; typed: string }
   | { ok: false; response: Response };
 
+const notTheProofToken = (): Response =>
+  problem(403, {
+    code: "Forbidden",
+    title: "Unknown service token",
+    detail: "this Cloudflare Access service token is not the proof's service token",
+    fix: "Sign in to Access as a person, or sign the proof in with the tumpel-proof service token of this stage",
+  });
+
+const decidingCaller = async (
+  signed: Extract<Verification, { ok: true }>,
+  url: URL,
+  env: Env,
+): Promise<Caller | Response> => {
+  if (signed.kind === "ServiceToken") {
+    const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
+    if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheProofToken();
+    const now = Date.now();
+    const proof = await proofCaller(env.DB, signed.commonName, url.hostname, now);
+    if (proof.created) await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, now);
+    return proof.caller;
+  }
+  const owner = await whoamiForEmail(env.DB, signed.email);
+  if (owner === null) return noTenant(url, signed.email);
+  return { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId };
+};
+
 const readDecision = async (request: Request, url: URL, env: Env, operation: string): Promise<Decision> => {
-  const signed = await assertedEmail(request, env);
+  const signed = await assertedSigner(request, env);
   if (!signed.ok) return { ok: false, response: browserSignedOut(url, signed.reason) };
   const refused = sameOriginJson(request, url);
   if (refused) return { ok: false, response: refused };
   const body = await parseBody(request, DeviceDecisionSchema, operation);
   if (!body.ok) return body;
-  const owner = await whoamiForEmail(env.DB, signed.email);
-  if (owner === null) return { ok: false, response: noTenant(url, signed.email) };
-  return {
-    ok: true,
-    caller: { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId },
-    userCode: parseUserCode(body.value.userCode),
-    typed: body.value.userCode,
-  };
+  const caller = await decidingCaller(signed, url, env);
+  if (caller instanceof Response) return { ok: false, response: caller };
+  return { ok: true, caller, userCode: parseUserCode(body.value.userCode), typed: body.value.userCode };
 };
 
 const codeNotFound = (typed: string): Response =>
