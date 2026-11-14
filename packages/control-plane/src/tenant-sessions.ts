@@ -307,6 +307,16 @@ export class TenantSessions extends DurableObject<Env> {
     );
   }
 
+  private personaIdentity(personaId: string): { gitAuthorName: string; gitAuthorEmail: string } | null {
+    const [row] = this.ctx.storage.sql
+      .exec<{ git_author_name: string; git_author_email: string }>(
+        "SELECT git_author_name, git_author_email FROM personas WHERE persona_id = ?",
+        personaId,
+      )
+      .toArray();
+    return row === undefined ? null : { gitAuthorName: row.git_author_name, gitAuthorEmail: row.git_author_email };
+  }
+
   private personaSecretSet(personaId: string): string | null {
     const [row] = this.ctx.storage.sql
       .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM personas WHERE persona_id = ?", personaId)
@@ -765,6 +775,12 @@ export class TenantSessions extends DurableObject<Env> {
       .toArray();
     const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
     const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
+    const identity = this.personaIdentity(session.persona_id);
+    if (identity === null) {
+      throw new Error(
+        `session ${session.session_id} runs on persona ${session.persona_id}, which is gone; turn ${turnId} has no git identity`,
+      );
+    }
     return {
       kind: "Ready",
       credential: {
@@ -775,6 +791,7 @@ export class TenantSessions extends DurableObject<Env> {
       lastLineSeq: session.last_line_seq,
       snapshots,
       personaFiles,
+      ...identity,
     };
   }
 

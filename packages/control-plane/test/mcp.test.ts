@@ -233,6 +233,8 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     name: "Reviewer",
     harness: "ClaudeCode",
     secretSetId: secretSet.secretSetId,
+    gitAuthorName: "Reviewer",
+    gitAuthorEmail: "reviewer@example.test",
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review").toString("base64") }],
   });
   assert.deepEqual(persona, await rest(PersonaSchema, "GET", `/v1/personas/${persona.personaId}`));
@@ -244,6 +246,8 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     personaId: persona.personaId,
     name: "Reviewer",
     secretSetId: defaultSet.secretSetId,
+    gitAuthorName: "Reviewer",
+    gitAuthorEmail: "reviewer@example.test",
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review closely").toString("base64") }],
   });
   assert.notEqual(updated.files[0]?.digest, persona.files[0]?.digest);

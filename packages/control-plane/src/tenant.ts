@@ -15,7 +15,9 @@ import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext, TenantSessions, toKey } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
-export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & { files: StoredFile[] };
+export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId" | "gitAuthorName" | "gitAuthorEmail"> & {
+  files: StoredFile[];
+};
 export type PersonaChange = Omit<PersonaWrite, "harness">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
@@ -45,7 +47,12 @@ const uniquely = <T>(write: () => T): Written<T> => {
   }
 };
 
-const DEFAULT_PERSONA = { name: "Default", harness: "ClaudeCode" };
+const DEFAULT_PERSONA = {
+  name: "Default",
+  harness: "ClaudeCode",
+  gitAuthorName: "Tumpel Agent",
+  gitAuthorEmail: "agent@tumpel.invalid",
+};
 const DEFAULT_SECRET_SET = "Default";
 
 type PersonaRow = {
@@ -54,6 +61,8 @@ type PersonaRow = {
   name: string;
   harness: string;
   secret_set_id: string;
+  git_author_name: string;
+  git_author_email: string;
   created_at: number;
   updated_at: number;
 };
@@ -67,7 +76,7 @@ type PersonaFileRow = {
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, git_author_name, git_author_email, created_at, updated_at FROM personas";
 
 export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
   sql
@@ -84,6 +93,8 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[]): Persona =>
     name: row.name,
     harness: row.harness,
     secretSetId: row.secret_set_id,
+    gitAuthorName: row.git_author_name,
+    gitAuthorEmail: row.git_author_email,
     files: files.map((file) => ({
       path: file.path,
       digest: file.digest,
@@ -173,12 +184,14 @@ export class Tenant extends TenantSessions {
         now,
       );
       sql.exec(
-        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, git_author_name, git_author_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         crypto.randomUUID(),
         tenantId,
         DEFAULT_PERSONA.name,
         DEFAULT_PERSONA.harness,
         secretSetId,
+        DEFAULT_PERSONA.gitAuthorName,
+        DEFAULT_PERSONA.gitAuthorEmail,
         now,
         now,
       );
@@ -229,12 +242,14 @@ export class Tenant extends TenantSessions {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, git_author_name, git_author_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           persona.name,
           persona.harness,
           persona.secretSetId,
+          persona.gitAuthorName,
+          persona.gitAuthorEmail,
           now,
           now,
         );
@@ -251,9 +266,11 @@ export class Tenant extends TenantSessions {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, git_author_name = ?, git_author_email = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
           persona.secretSetId,
+          persona.gitAuthorName,
+          persona.gitAuthorEmail,
           now,
           tenantId,
           personaId,

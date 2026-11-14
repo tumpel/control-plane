@@ -315,12 +315,13 @@ const sessionStart = async (name = "Default") => {
 };
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
+const GIT_IDENTITY = { gitAuthorName: "Ticket Worker", gitAuthorEmail: "ticket-worker@example.test" };
 
 const createPersona = async (name: string, secrets: unknown[], files: unknown[] = []): Promise<void> => {
   const created = await postJson("/v1/secret-sets", { name: `${name} secrets`, secrets }, bearer);
   assert.equal(created.status, 200);
   const { secretSetId } = SecretSetSchema.parse(await created.json());
-  const persona = { name, harness: "ClaudeCode", secretSetId, files };
+  const persona = { name, harness: "ClaudeCode", secretSetId, files, ...GIT_IDENTITY };
   const personas = await getJson("/v1/personas", PersonaSchema.array());
   const existing = personas.find((candidate) => candidate.name === name);
   const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
@@ -414,6 +415,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   );
   assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
   assert.match(offer.personaFiles[0]?.downloadUrl ?? "", new RegExp(`/persona-files/${digest}\\?X-Tumpel-Method=GET`));
+  assert.deepEqual({ gitAuthorName: offer.gitAuthorName, gitAuthorEmail: offer.gitAuthorEmail }, GIT_IDENTITY);
   const { turnId } = offer;
   const { sessionId } = started.session;
 

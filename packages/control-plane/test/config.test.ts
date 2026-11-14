@@ -267,7 +267,14 @@ test("a taken name, a repeated member, two credentials for one provider and dele
   const sets = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.ok(!sets.some((set) => set.name === "repeated" || set.name === "doubled"));
 
-  const persona = { name: "Twin", harness: "ClaudeCode", secretSetId, files: [] };
+  const persona = {
+    name: "Twin",
+    harness: "ClaudeCode",
+    secretSetId,
+    gitAuthorName: "Tumpel Agent",
+    gitAuthorEmail: "agent@tumpel.invalid",
+    files: [],
+  };
   assert.equal((await postJson("/v1/personas", persona, bearer)).status, 200);
   const twin = await postJson("/v1/personas", persona, bearer);
   assert.equal(twin.status, 409);
@@ -284,7 +291,13 @@ test("a persona file at a path its harness does not read is refused, and a store
   const [set] = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.ok(set);
   const content = Buffer.from("{}").toString("base64");
-  const base = { name: "Files", harness: "ClaudeCode", secretSetId: set.secretSetId };
+  const base = {
+    name: "Files",
+    harness: "ClaudeCode",
+    secretSetId: set.secretSetId,
+    gitAuthorName: "Tumpel Agent",
+    gitAuthorEmail: "agent@tumpel.invalid",
+  };
   const misplaced = await postJson(
     "/v1/personas",
     { ...base, files: [{ source: "Inline", path: ".bashrc", content }] },

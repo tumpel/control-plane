@@ -5,6 +5,7 @@ import tenant0004 from "../migrations/tenant/0004_sessions.sql";
 import tenant0005 from "../migrations/tenant/0005_snapshot_outcomes.sql";
 import tenant0006 from "../migrations/tenant/0006_persona_secret_sets.sql";
 import tenant0007 from "../migrations/tenant/0007_persona_files.sql";
+import tenant0008 from "../migrations/tenant/0008_persona_git_identity.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -15,4 +16,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0005_snapshot_outcomes", sql: tenant0005 },
   { name: "0006_persona_secret_sets", sql: tenant0006 },
   { name: "0007_persona_files", sql: tenant0007 },
+  { name: "0008_persona_git_identity", sql: tenant0008 },
 ];
