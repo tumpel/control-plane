@@ -1,8 +1,9 @@
+import { CloseCode } from "@tumpel/api/schemas";
 import {
   accept,
-  CloseCode,
   type ControlEnvelope,
   type ControlMessage,
+  type DispatchGrant,
   decodeBase64,
   type Hello,
   HostEnvelopeSchema,
@@ -15,7 +16,9 @@ import {
   parseEnvelope,
   randomNonce,
   resend,
+  type StoredControlMessage,
   sequence,
+  type TurnOffer,
 } from "./protocol.ts";
 
 export type ControlConnection = { phase: "AwaitingHello"; nonce: string } | { phase: "Open" } | { phase: "Closed" };
@@ -29,7 +32,8 @@ export interface ControlHost {
 export interface ControlContext {
   port: Port<ControlEnvelope>;
   host: ControlHost;
-  ledger: LedgerStore<ControlMessage>;
+  ledger: LedgerStore<StoredControlMessage>;
+  mintGrant(offer: Omit<TurnOffer, "credential">): Promise<DispatchGrant>;
   now(): Date;
 }
 
@@ -66,22 +70,23 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-export const send = (connection: ControlConnection, message: ControlMessage, context: ControlContext): void => {
-  const { ledger, frame } = sequence(context.ledger.load(), message);
-  context.ledger.save(ledger);
-  if (connection.phase === "Open") context.port.send(frame);
+const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> =>
+  stored.type === "TurnOffer" ? { ...stored, credential: await context.mintGrant(stored) } : stored;
+
+export const send = async (
+  connection: ControlConnection,
+  message: StoredControlMessage,
+  context: ControlContext,
+): Promise<void> => {
+  const { ledger, frame } = sequence(await context.ledger.load(), message);
+  await context.ledger.save(ledger);
+  if (connection.phase === "Open") {
+    context.port.send({ ...frame, message: await outbound(frame.message, context) });
+  }
 };
 
-const revokeMessage = (context: ControlContext, reason: string): ControlMessage => ({
-  type: "Revoke",
-  hostId: context.host.hostId,
-  reason,
-});
-
-export const revoke = (connection: ControlConnection, reason: string, context: ControlContext): Received => {
-  if (connection.phase === "Open") send(connection, revokeMessage(context, reason), context);
-  return close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked: ${reason}`);
-};
+export const revoke = (context: ControlContext, reason: string): Received =>
+  close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked: ${reason}`);
 
 const hello = async (
   connection: { phase: "AwaitingHello"; nonce: string },
@@ -106,14 +111,10 @@ const hello = async (
       `the Hello signature does not verify against the key host ${envelope.hostId} enrolled with; enrol the host again`,
     );
   }
-  if (context.host.revoked) {
-    const open: ControlConnection = { phase: "Open" };
-    for (const frame of resend(context.ledger.load())) context.port.send(frame);
-    send(open, revokeMessage(context, "the tenant revoked this host"), context);
-    return close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked`);
-  }
+  if (context.host.revoked) return revoke(context, "the tenant revoked this host");
+  const resent = await resend(await context.ledger.load(), (stored) => outbound(stored, context));
   context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: PROTOCOL_VERSION });
-  for (const frame of resend(context.ledger.load())) context.port.send(frame);
+  for (const frame of resent) context.port.send(frame);
   return { connection: { phase: "Open" }, event: { kind: "Welcomed" } };
 };
 
@@ -136,7 +137,7 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") return { connection, event: { kind: "Heartbeat" } };
-  const outcome = accept(context.ledger.load(), envelope);
+  const outcome = accept(await context.ledger.load(), envelope);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -145,7 +146,7 @@ export const receive = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  context.ledger.save(outcome.ledger);
+  await context.ledger.save(outcome.ledger);
   return { connection, event: { kind: "Message", message: outcome.message } };
 };
 

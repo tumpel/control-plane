@@ -13,15 +13,6 @@ export const HEARTBEAT_INTERVAL_MS = 10_000;
 export const HEARTBEAT_DEADLINE_MS = 30_000;
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
-export const CloseCode = {
-  ProtocolError: 4400,
-  BadSignature: 4401,
-  Revoked: 4403,
-  HeartbeatDeadline: 4408,
-  Replaced: 4409,
-  UnsupportedVersion: 4426,
-} as const;
-
 export const HostEnvelopeSchema = z.discriminatedUnion("type", [HelloSchema, HeartbeatSchema, HostFrameSchema]);
 export const ControlEnvelopeSchema = z.discriminatedUnion("type", [
   ChallengeSchema,
@@ -37,6 +28,9 @@ export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];
 export type ControlMessage = ControlFrame["message"];
+export type TurnOffer = Extract<ControlMessage, { type: "TurnOffer" }>;
+export type DispatchGrant = TurnOffer["credential"];
+export type StoredControlMessage = Exclude<ControlMessage, { type: "TurnOffer" }> | Omit<TurnOffer, "credential">;
 
 export interface Port<Out> {
   send(envelope: Out): void;
@@ -57,8 +51,8 @@ export interface Ledger<M> {
 }
 
 export interface LedgerStore<M> {
-  load(): Ledger<M>;
-  save(ledger: Ledger<M>): void;
+  load(): Promise<Ledger<M>>;
+  save(ledger: Ledger<M>): Promise<void>;
 }
 
 export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });
@@ -102,8 +96,16 @@ export const accept = <Own, Theirs>(ledger: Ledger<Own>, frame: Frame<Theirs>): 
   };
 };
 
-export const resend = <M>(ledger: Ledger<M>): Frame<M>[] =>
-  ledger.unacked.map((frame) => ({ ...frame, ack: ledger.received }));
+export const resend = async <Stored, M>(
+  ledger: Ledger<Stored>,
+  restore: (stored: Stored) => Promise<M>,
+): Promise<Frame<M>[]> => {
+  const frames: Frame<M>[] = [];
+  for (const frame of ledger.unacked) {
+    frames.push({ ...frame, ack: ledger.received, message: await restore(frame.message) });
+  }
+  return frames;
+};
 
 export const heartbeat = (now: Date): { type: "Heartbeat"; sentAt: string } => ({
   type: "Heartbeat",

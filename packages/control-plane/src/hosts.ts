@@ -125,6 +125,7 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
     });
   }
   const hostId = crypto.randomUUID();
+  await env.HOST.get(env.HOST.idFromName(hostId)).register(hostId, body.publicKey);
   const [inserted] = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO hosts (${HOST_COLUMNS})
@@ -148,7 +149,6 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
     ).bind(now, tokenHash),
   ]);
   if (!inserted?.meta.changes) return spent;
-  await env.HOST.get(env.HOST.idFromName(hostId)).register(hostId, token.tenant_id, body.publicKey);
   const host = await hostOf(env.DB, token.tenant_id, hostId);
   if (host === null) throw new Error(`host ${hostId} was enrolled and then not found`);
   return { ok: true, value: host };
