@@ -46,6 +46,7 @@ const assertion = (): string => {
 };
 
 const browser = (): Record<string, string> => ({ "cf-access-jwt-assertion": assertion(), origin });
+const IDENTITY = { gitAuthorName: "Ticket Worker", gitAuthorEmail: "ticket-worker@example.test" };
 
 const call = (path: string, init: NonNullable<Parameters<TestHarness["fetch"]>[1]> = {}) =>
   server.fetch(`${origin}${path}`, { redirect: "manual", ...init });
@@ -181,7 +182,7 @@ before(async () => {
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
-  assert.equal((await send("POST", "/v1/tenants", { name: "Mcp" }, browser())).status, 200);
+  assert.equal((await send("POST", "/v1/tenants", { name: "Mcp", ...IDENTITY }, browser())).status, 200);
   bearer = { authorization: `Bearer ${await deviceToken()}` };
   connector = await connectorToken();
 });

@@ -359,7 +359,7 @@ before(async () => {
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
 
-  assert.equal((await postJson("/v1/tenants", { name: "Sessions" }, browser())).status, 200);
+  assert.equal((await postJson("/v1/tenants", { name: "Sessions", ...GIT_IDENTITY }, browser())).status, 200);
   bearer = { authorization: `Bearer ${await deviceToken()}` };
   mcpToken = await connectorToken();
   await createPersona(

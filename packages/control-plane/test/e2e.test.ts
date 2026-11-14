@@ -56,6 +56,7 @@ const postJson = (path: string, body: unknown, headers: Record<string, string> =
   });
 
 const browser = (): Record<string, string> => ({ "cf-access-jwt-assertion": assertion(EMAIL), origin });
+const IDENTITY = { gitAuthorName: "Ticket Worker", gitAuthorEmail: "ticket-worker@example.test" };
 
 const form = (path: string, params: Record<string, string>): HarnessResponse =>
   call(path, {
@@ -104,17 +105,19 @@ after(async () => {
 });
 
 test("a signed-in owner signs up, logs a device in, and is the same principal over REST and MCP", async () => {
-  const refused = await postJson("/v1/tenants", { name: "Acme" });
+  const refused = await postJson("/v1/tenants", { name: "Acme", ...IDENTITY });
   assert.equal(refused.status, 401);
   assert.equal(ProblemSchema.parse(await refused.json()).code, "SignedOut");
 
-  const signedUp = await postJson("/v1/tenants", { name: "Acme" }, browser());
+  const signedUp = await postJson("/v1/tenants", { name: "Acme", ...IDENTITY }, browser());
   assert.equal(signedUp.status, 200);
   const owner = WhoamiSchema.parse(await signedUp.json());
   assert.equal(owner.principal.email, EMAIL);
   assert.equal(owner.principal.role, "Owner");
 
-  const again = WhoamiSchema.parse(await (await postJson("/v1/tenants", { name: "Other" }, browser())).json());
+  const again = WhoamiSchema.parse(
+    await (await postJson("/v1/tenants", { name: "Other", ...IDENTITY }, browser())).json(),
+  );
   assert.deepEqual(again, owner);
 
   const started = DeviceAuthorizationSchema.parse(
@@ -276,7 +279,11 @@ test("sign-up refuses an identity assertion that is forged, meant for another au
     ["expired", assertion(EMAIL, { iat: now - 1200, nbf: now - 1200, exp: now - 600 }), /has expired/],
   ];
   for (const [name, signed, reason] of cases) {
-    const refused = await postJson("/v1/tenants", { name: "Acme" }, { "cf-access-jwt-assertion": signed, origin });
+    const refused = await postJson(
+      "/v1/tenants",
+      { name: "Acme", ...IDENTITY },
+      { "cf-access-jwt-assertion": signed, origin },
+    );
     assert.equal(refused.status, 401, name);
     const problem = ProblemSchema.parse(await refused.json());
     assert.equal(problem.code, "SignedOut", name);

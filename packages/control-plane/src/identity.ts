@@ -1,6 +1,7 @@
 import { WhoamiSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
+import type { GitIdentity } from "./tenant";
 
 export type Whoami = z.infer<typeof WhoamiSchema>;
 
@@ -111,9 +112,10 @@ export const proofCaller = async (
   commonName: string,
   hostname: string,
   now: number,
-): Promise<{ caller: Caller; created: boolean }> => {
+): Promise<{ caller: Caller; created: boolean; identity: GitIdentity }> => {
   const tenantId = await derivedId("tenant", commonName);
   const principalId = await derivedId("principal", commonName);
+  const email = `proof+${principalId.slice(0, 8)}@${hostname}`;
   const [tenant] = await db.batch([
     db
       .prepare(
@@ -126,7 +128,11 @@ export const proofCaller = async (
         `INSERT INTO principals (principal_id, tenant_id, email, role, created_at, updated_at)
         VALUES (?, ?, ?, 'Owner', ?, ?) ON CONFLICT DO NOTHING`,
       )
-      .bind(principalId, tenantId, `proof+${principalId.slice(0, 8)}@${hostname}`, now, now),
+      .bind(principalId, tenantId, email, now, now),
   ]);
-  return { caller: { tenantId, principalId }, created: tenant?.results.length === 1 };
+  return {
+    caller: { tenantId, principalId },
+    created: tenant?.results.length === 1,
+    identity: { gitAuthorName: PROOF_TENANT_NAME, gitAuthorEmail: email },
+  };
 };
