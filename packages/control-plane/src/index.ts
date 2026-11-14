@@ -8,6 +8,8 @@ import {
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
+  PersonaPathSchema,
+  PersonaSchema,
   SignUpSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
@@ -137,7 +139,10 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   if (refused) return refused;
   const body = await parseBody(request, SignUpSchema, "signUp");
   if (!body.ok) return body.response;
-  return json(WhoamiSchema.parse(await signUp(env.DB, signed.email, body.value.name, Date.now())));
+  const now = Date.now();
+  const whoami = await signUp(env.DB, signed.email, body.value.name, now);
+  await env.TENANT.getByName(whoami.tenant.tenantId).open(whoami.tenant.tenantId, now);
+  return json(WhoamiSchema.parse(whoami));
 };
 
 const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
@@ -155,6 +160,35 @@ const handleDevicesList = async (request: Request, env: Env): Promise<Response> 
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   return json(await listDevices(env.DB, caller));
+};
+
+const handlePersonasList = async (request: Request, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const personas = await env.TENANT.getByName(caller.tenantId).listPersonas(caller.tenantId);
+  return json(PersonaSchema.array().parse(personas));
+};
+
+const PERSONAS_PATH = "/v1/personas/";
+
+const handlePersonaGet = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const path = PersonaPathSchema.safeParse({
+    personaId: decodeURIComponent(url.pathname.slice(PERSONAS_PATH.length)),
+  });
+  const persona = path.success
+    ? await env.TENANT.getByName(caller.tenantId).getPersona(caller.tenantId, path.data.personaId)
+    : null;
+  if (persona === null) {
+    return problem(404, {
+      code: "NotFound",
+      title: "No such persona",
+      detail: `your tenant owns no persona ${url.pathname.slice(PERSONAS_PATH.length)}`,
+      fix: "List the personas with GET /v1/personas and use one of the ids it returns",
+    });
+  }
+  return json(PersonaSchema.parse(persona));
 };
 
 const DEVICES_PATH = "/v1/devices/";
@@ -501,6 +535,7 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/device/approve": handleDeviceApprove,
   "POST /v1/device/deny": handleDeviceDeny,
   "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
+  "GET /v1/personas": (request, _url, env) => handlePersonasList(request, env),
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`OPTIONS ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
@@ -536,6 +571,13 @@ export default {
       url.pathname.length > DEVICES_PATH.length
     ) {
       return handleDeviceRevoke(request, url, env);
+    }
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith(PERSONAS_PATH) &&
+      url.pathname.length > PERSONAS_PATH.length
+    ) {
+      return handlePersonaGet(request, url, env);
     }
     return problem(404, {
       code: "NotFound",

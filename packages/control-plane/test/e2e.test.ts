@@ -11,6 +11,7 @@ import {
   OAuthClientSchema,
   OAuthErrorSchema,
   OAuthTokenSchema,
+  PersonaSchema,
   ProblemSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
@@ -160,6 +161,20 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
       .map((listed) => [listed.deviceId, listed.name]),
     [[device.deviceId, "e2e laptop"]],
   );
+  const listedPersonas = await call("/v1/personas", { headers: bearer });
+  assert.equal(listedPersonas.status, 200);
+  const personas = PersonaSchema.array().parse(await listedPersonas.json());
+  assert.deepEqual(
+    personas.map((persona) => [persona.tenantId, persona.name]),
+    [[owner.tenant.tenantId, "Default"]],
+  );
+  const [defaultPersona] = personas;
+  const fetchedPersona = await call(`/v1/personas/${defaultPersona?.personaId}`, { headers: bearer });
+  assert.equal(fetchedPersona.status, 200);
+  assert.deepEqual(PersonaSchema.parse(await fetchedPersona.json()), defaultPersona);
+  const unknownPersona = await call("/v1/personas/no-such-persona", { headers: bearer });
+  assert.equal(unknownPersona.status, 404);
+
   const unknownRevoke = await call("/v1/devices/no-such-device", { method: "DELETE", headers: bearer });
   assert.equal(unknownRevoke.status, 404);
 
