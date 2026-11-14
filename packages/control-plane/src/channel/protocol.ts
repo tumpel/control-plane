@@ -8,7 +8,6 @@ import {
 } from "@tumpel/api/schemas";
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = 2;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 export const HEARTBEAT_DEADLINE_MS = 30_000;
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;

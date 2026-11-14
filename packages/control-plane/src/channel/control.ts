@@ -1,4 +1,4 @@
-import { CloseCode } from "@tumpel/api/schemas";
+import { ChannelProtocol, CloseCode } from "@tumpel/api/schemas";
 import {
   accept,
   type ControlEnvelope,
@@ -11,7 +11,6 @@ import {
   helloBytes,
   type LedgerStore,
   type Port,
-  PROTOCOL_VERSION,
   type PreparedOffer,
   parseEnvelope,
   randomNonce,
@@ -98,11 +97,11 @@ const hello = async (
   envelope: Hello,
   context: ControlContext,
 ): Promise<Received> => {
-  if (envelope.protocolVersion !== PROTOCOL_VERSION) {
+  if (envelope.protocolVersion !== ChannelProtocol.Version) {
     return close(
       context.port,
       CloseCode.UnsupportedVersion,
-      `protocol version ${envelope.protocolVersion} is not supported; this control plane speaks ${PROTOCOL_VERSION}, update the supervisor`,
+      `protocol version ${envelope.protocolVersion} is not supported; this control plane speaks ${ChannelProtocol.Version}, update the supervisor`,
     );
   }
   const signed = helloBytes(connection.nonce, envelope.hostId);
@@ -118,7 +117,7 @@ const hello = async (
   }
   if (context.host.revoked) return revoke(context, "the tenant revoked this host");
   const resent = await resend(await context.ledger.load(), (stored) => outbound(stored, context));
-  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: PROTOCOL_VERSION });
+  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: ChannelProtocol.Version });
   for (const frame of resent) context.port.send(frame);
   return { connection: { phase: "Open" }, event: { kind: "Welcomed" } };
 };
