@@ -557,6 +557,49 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   assert.match(archivedSend.detail, new RegExp(`session ${sessionId} is archived`));
 });
 
+test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
+  const started = await tool(
+    "tumpel_session_start",
+    { ...(await sessionStart()), prompt: "keep my box" },
+    StartedSessionSchema,
+  );
+  const { sessionId } = started.session;
+  const offer = await host.next("TurnOffer");
+  const { turnId } = offer;
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+  host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const warm = await host.next("SnapshotRequest");
+  host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, sizeBytes: 14 });
+  await eventually(
+    "a stored snapshot",
+    () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+    (snapshots) => snapshots.length === 1,
+  );
+
+  await tool("tumpel_session_stop", { sessionId }, SessionSchema);
+  const teardown = await host.next("BoxTeardown");
+  const failedAt = new Date().toISOString();
+  const detail = `box ${teardown.boxId} holds turn ${turnId}, which no snapshot holds; snapshot it, then tear it down`;
+  host.send({ type: "BoxTeardownFailed", sessionId, boxId: teardown.boxId, reason: "BoxDirty", detail, failedAt });
+  const idle = await eventually(
+    "the session reading Idle",
+    () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+    (session) => session.state === "Idle",
+  );
+  assert.deepEqual(idle.stopFailures, [{ reason: "BoxDirty", detail, failedAt }]);
+
+  const again = await host.next("SnapshotRequest");
+  assert.equal(again.sessionId, sessionId);
+  assert.equal(again.turnId, turnId);
+  host.send({ type: "SnapshotDone", snapshotId: again.snapshotId, sizeBytes: 14 });
+  await eventually(
+    "a second stored snapshot",
+    () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+    (snapshots) => snapshots.length === 2,
+  );
+});
+
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
   const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
   assert.equal(response.status, 200);
