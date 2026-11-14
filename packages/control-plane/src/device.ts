@@ -24,7 +24,7 @@ export type PollError = "invalid_grant" | "expired_token" | "slow_down" | "autho
 export type PollOutcome = { ok: true; accessToken: string } | { ok: false; error: PollError };
 
 export const GRANT_ERRORS: Record<PollError, string> = {
-  invalid_grant: "the device code is unknown or already used; run tumpel login again",
+  invalid_grant: "the device code is unknown, denied or already used; run tumpel login again",
   expired_token: "the device code expired; run tumpel login again",
   slow_down: "polling too fast; wait the interval plus five seconds",
   authorization_pending: "waiting for approval in the browser",
@@ -87,6 +87,34 @@ export const startDeviceCode = async (
   return inserted?.results.length === 1 ? { deviceCode, userCode } : null;
 };
 
+const UNDECIDED = `user_code = ? AND expires_at > ?
+  AND NOT EXISTS (SELECT 1 FROM device_approvals a WHERE a.device_code_sha256 = device_codes.device_code_sha256)`;
+
+export interface PendingDeviceCode {
+  userCode: string;
+  deviceName: string;
+}
+
+export const pendingDeviceCode = async (
+  db: D1Database,
+  userCode: string,
+  now: number,
+): Promise<PendingDeviceCode | null> => {
+  const row = await db
+    .prepare(`SELECT user_code, device_name FROM device_codes WHERE ${UNDECIDED}`)
+    .bind(userCode, now)
+    .first<{ user_code: string; device_name: string }>();
+  return row === null ? null : { userCode: row.user_code, deviceName: row.device_name };
+};
+
+export const denyDeviceCode = async (db: D1Database, userCode: string, now: number): Promise<boolean> => {
+  const denied = await db
+    .prepare(`DELETE FROM device_codes WHERE ${UNDECIDED} RETURNING user_code`)
+    .bind(userCode, now)
+    .all();
+  return denied.results.length === 1;
+};
+
 export const approveDeviceCode = async (
   db: D1Database,
   userCode: string,
@@ -94,11 +122,7 @@ export const approveDeviceCode = async (
   now: number,
 ): Promise<Device | null> => {
   const pending = await db
-    .prepare(
-      `SELECT device_code_sha256, device_name FROM device_codes dc
-      WHERE user_code = ? AND expires_at > ?
-        AND NOT EXISTS (SELECT 1 FROM device_approvals a WHERE a.device_code_sha256 = dc.device_code_sha256)`,
-    )
+    .prepare(`SELECT device_code_sha256, device_name FROM device_codes WHERE ${UNDECIDED}`)
     .bind(userCode, now)
     .first<{ device_code_sha256: string; device_name: string }>();
   if (pending === null) return null;
@@ -172,4 +196,41 @@ export const pollDeviceCode = async (db: D1Database, deviceCode: string, now: nu
   ]);
   if (issued?.results.length !== 1) return { ok: false, error: "invalid_grant" };
   return { ok: true, accessToken };
+};
+
+interface DeviceRow {
+  device_id: string;
+  tenant_id: string;
+  principal_id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number;
+}
+
+export const listDevices = async (db: D1Database, caller: Caller): Promise<Device[]> => {
+  const rows = await db
+    .prepare(
+      `SELECT device_id, tenant_id, principal_id, name, created_at, last_used_at FROM devices
+      WHERE tenant_id = ? AND principal_id = ? ORDER BY created_at, device_id`,
+    )
+    .bind(caller.tenantId, caller.principalId)
+    .all<DeviceRow>();
+  return rows.results.map((row) =>
+    DeviceSchema.parse({
+      deviceId: row.device_id,
+      tenantId: row.tenant_id,
+      principalId: row.principal_id,
+      name: row.name,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+    }),
+  );
+};
+
+export const revokeDevice = async (db: D1Database, caller: Caller, deviceId: string): Promise<boolean> => {
+  const revoked = await db
+    .prepare("DELETE FROM devices WHERE tenant_id = ? AND principal_id = ? AND device_id = ? RETURNING device_id")
+    .bind(caller.tenantId, caller.principalId, deviceId)
+    .all();
+  return revoked.results.length === 1;
 };

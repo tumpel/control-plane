@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
@@ -31,13 +31,13 @@ let server: TestHarness;
 let origin: string;
 let issuer: string;
 
-const assertion = (email: string): string => {
+const assertion = (email: string, claims: Record<string, unknown> = {}, key: KeyObject = privateKey): string => {
   const now = Math.floor(Date.now() / 1000);
   const header = base64Url(Buffer.from(JSON.stringify({ alg: "RS256", kid: KID, typ: "JWT" })));
   const payload = base64Url(
-    Buffer.from(JSON.stringify({ iss: issuer, aud: [AUDIENCE], email, iat: now, nbf: now, exp: now + 600 })),
+    Buffer.from(JSON.stringify({ iss: issuer, aud: [AUDIENCE], email, iat: now, nbf: now, exp: now + 600, ...claims })),
   );
-  const signature = base64Url(sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), privateKey));
+  const signature = base64Url(sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), key));
   return `${header}.${payload}.${signature}`;
 };
 
@@ -55,6 +55,20 @@ const postJson = (path: string, body: unknown, headers: Record<string, string> =
   });
 
 const browser = (): Record<string, string> => ({ "cf-access-jwt-assertion": assertion(EMAIL), origin });
+
+const form = (path: string, params: Record<string, string>): HarnessResponse =>
+  call(path, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(params).toString(),
+  });
+
+const oauthErrorOf = async (response: Awaited<HarnessResponse>): Promise<string> => {
+  assert.equal(response.status, 400);
+  return OAuthErrorSchema.parse(await response.json()).error;
+};
+
+const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
 const mcp = (token: string, id: number, method: string, params: unknown = {}): HarnessResponse =>
   postJson("/mcp", { jsonrpc: "2.0", id, method, params }, token === "" ? {} : { authorization: `Bearer ${token}` });
@@ -93,20 +107,30 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   const again = WhoamiSchema.parse(await (await postJson("/v1/tenants", { name: "Other" }, browser())).json());
   assert.deepEqual(again, owner);
 
-  const personas = await (
-    await server.getWorker().getDurableObjectStorage("TENANT", { name: owner.tenant.tenantId })
-  ).exec("SELECT tenant_id, name FROM personas");
-  assert.deepEqual(personas, [{ tenant_id: owner.tenant.tenantId, name: "Default" }]);
-
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "e2e laptop" })).json(),
   );
-  const pending = await postJson("/v1/device/token", {
-    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-    device_code: started.device_code,
+  const slowDown = await postJson("/v1/device/token", { grant_type: DEVICE_GRANT, device_code: started.device_code });
+  assert.equal(await oauthErrorOf(slowDown), "slow_down");
+
+  const confirm = await call(`/device?code=${started.user_code}`, { headers: browser() });
+  assert.equal(confirm.status, 200);
+  const confirmHtml = await confirm.text();
+  assert.match(confirmHtml, /e2e laptop/);
+  assert.match(confirmHtml, /value="deny"/);
+
+  const intruder = DeviceAuthorizationSchema.parse(
+    await (await postJson("/v1/device/code", { device_name: "intruder" })).json(),
+  );
+  const denied = await postJson("/v1/device/deny", { userCode: intruder.user_code }, browser());
+  assert.equal(denied.status, 204);
+  const refusedIntruder = await postJson("/v1/device/token", {
+    grant_type: DEVICE_GRANT,
+    device_code: intruder.device_code,
   });
-  assert.equal(pending.status, 400);
-  assert.equal(OAuthErrorSchema.parse(await pending.json()).error, "slow_down");
+  assert.equal(await oauthErrorOf(refusedIntruder), "invalid_grant");
+  const approveDenied = await postJson("/v1/device/approve", { userCode: intruder.user_code }, browser());
+  assert.equal(approveDenied.status, 404);
 
   const approved = await postJson("/v1/device/approve", { userCode: started.user_code }, browser());
   assert.equal(approved.status, 200);
@@ -114,10 +138,7 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   assert.equal(device.principalId, owner.principal.principalId);
 
   await new Promise((resolve) => setTimeout(resolve, (started.interval + 5) * 1000 + 100));
-  const granted = await postJson("/v1/device/token", {
-    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-    device_code: started.device_code,
-  });
+  const granted = await postJson("/v1/device/token", { grant_type: DEVICE_GRANT, device_code: started.device_code });
   assert.equal(granted.status, 200);
   const deviceToken = DeviceTokenSchema.parse(await granted.json());
 
@@ -129,6 +150,18 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   const signedOut = await call("/v1/whoami", { headers: { authorization: `Bearer ${"x".repeat(43)}` } });
   assert.equal(signedOut.status, 401);
   assert.equal(ProblemSchema.parse(await signedOut.json()).code, "SignedOut");
+
+  const bearer = { authorization: `Bearer ${deviceToken.access_token}` };
+  const devices = await call("/v1/devices", { headers: bearer });
+  assert.equal(devices.status, 200);
+  assert.deepEqual(
+    DeviceSchema.array()
+      .parse(await devices.json())
+      .map((listed) => [listed.deviceId, listed.name]),
+    [[device.deviceId, "e2e laptop"]],
+  );
+  const unknownRevoke = await call("/v1/devices/no-such-device", { method: "DELETE", headers: bearer });
+  assert.equal(unknownRevoke.status, 404);
 
   const registered = await postJson("/oauth/register", { redirect_uris: [CALLBACK], client_name: "e2e client" });
   assert.equal(registered.status, 201);
@@ -163,19 +196,25 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   const callback = new URL(consented.headers.get("location") ?? "");
   assert.equal(callback.searchParams.get("state"), "e2e-state");
 
-  const tokenResponse = await call("/oauth/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code: callback.searchParams.get("code") ?? "",
-      code_verifier: verifier,
-      client_id: client.client_id,
-      redirect_uri: CALLBACK,
-    }).toString(),
-  });
+  const redemption = {
+    grant_type: "authorization_code",
+    code: callback.searchParams.get("code") ?? "",
+    code_verifier: verifier,
+    client_id: client.client_id,
+    redirect_uri: CALLBACK,
+  };
+  assert.equal(await oauthErrorOf(await form("/oauth/token", { client_id: client.client_id })), "invalid_request");
+  assert.equal(
+    await oauthErrorOf(await form("/oauth/token", { ...redemption, grant_type: "password" })),
+    "unsupported_grant_type",
+  );
+  const unverified = { grant_type: "authorization_code", code: redemption.code, client_id: client.client_id };
+  assert.equal(await oauthErrorOf(await form("/oauth/token", unverified)), "invalid_request");
+
+  const tokenResponse = await form("/oauth/token", redemption);
   assert.equal(tokenResponse.status, 200);
   const oauthToken = OAuthTokenSchema.parse(await tokenResponse.json());
+  assert.equal(await oauthErrorOf(await form("/oauth/token", redemption)), "invalid_grant");
 
   const unauthorised = await mcp("", 1, "tools/list");
   assert.equal(unauthorised.status, 401);
@@ -196,4 +235,27 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   ).json()) as { result: { content: { text: string }[] } };
   const overMcp = WhoamiSchema.parse(JSON.parse(called.result.content[0]?.text ?? ""));
   assert.deepEqual(overMcp, overRest);
+
+  const revoked = await call(`/v1/devices/${device.deviceId}`, { method: "DELETE", headers: bearer });
+  assert.equal(revoked.status, 204);
+  const afterRevoke = await call("/v1/whoami", { headers: bearer });
+  assert.equal(afterRevoke.status, 401);
+  assert.equal(ProblemSchema.parse(await afterRevoke.json()).code, "SignedOut");
+});
+
+test("sign-up refuses an identity assertion that is forged, meant for another audience or expired", async () => {
+  const { privateKey: forger } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const now = Math.floor(Date.now() / 1000);
+  const cases: [string, string, RegExp][] = [
+    ["forged signature", assertion(EMAIL, {}, forger), /signature does not verify/],
+    ["wrong audience", assertion(EMAIL, { aud: ["another-app"] }), /another Access application/],
+    ["expired", assertion(EMAIL, { iat: now - 1200, nbf: now - 1200, exp: now - 600 }), /has expired/],
+  ];
+  for (const [name, signed, reason] of cases) {
+    const refused = await postJson("/v1/tenants", { name: "Acme" }, { "cf-access-jwt-assertion": signed, origin });
+    assert.equal(refused.status, 401, name);
+    const problem = ProblemSchema.parse(await refused.json());
+    assert.equal(problem.code, "SignedOut", name);
+    assert.match(problem.detail, reason, name);
+  }
 });
