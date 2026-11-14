@@ -97,15 +97,21 @@ import {
   readCookie,
   signUpPage,
 } from "./pages";
+import type { SessionTimer } from "./session-timer";
+import { handleSessions } from "./sessions";
 import type { Tenant } from "./tenant";
 
 export { HostChannel } from "./host-channel";
+export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 
 export interface Env {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   HOST: DurableObjectNamespace<HostChannel>;
+  SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
+  STORE: R2Bucket;
+  TUMPEL_SETTINGS: unknown;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
 }
@@ -810,6 +816,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleSecretSet(request, url, env)) ??
     (await handleUnpin(request, url, env));
   if (resource) return resource;
+  const sessions = await handleSessions(request, url, env, deviceCaller);
+  if (sessions) return sessions;
   const host = await handleHost(request, url, env);
   if (host) return host;
   return problem(404, {

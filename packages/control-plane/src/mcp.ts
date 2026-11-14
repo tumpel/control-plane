@@ -12,6 +12,13 @@ import {
   PersonaUpdateSchema,
   ProblemSchema,
   SecretSetPathSchema,
+  SessionListQuerySchema,
+  SessionPathSchema,
+  SessionStartSchema,
+  SnapshotPathSchema,
+  TranscriptQuerySchema,
+  TurnPathSchema,
+  TurnSendSchema,
 } from "@tumpel/api/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
@@ -29,7 +36,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, and tumpel_transcript reads what the harness wrote, page by page: pass the cursor of the last page as after.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -225,6 +232,76 @@ export const TOOLS: ToolDefinition[] = [
     SecretSetPathSchema,
     "Delete a secret set and its stored values. Calls DELETE /v1/secret-sets/{secretSetId}.",
   ),
+  rest(
+    "tumpel_session_start",
+    "POST",
+    "/v1/sessions",
+    SessionStartSchema,
+    "Start a session on an online host of the tenant with its first prompt. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
+  ),
+  rest(
+    "tumpel_session_list",
+    "GET",
+    "/v1/sessions",
+    SessionListQuerySchema,
+    "List the tenant's sessions, optionally only those in one state or on one host. Returns the Session[] of GET /v1/sessions.",
+  ),
+  rest(
+    "tumpel_session_get",
+    "GET",
+    "/v1/sessions/{sessionId}",
+    SessionPathSchema,
+    "Read one session. Returns the Session of GET /v1/sessions/{sessionId}; state is Starting, Idle or Running.",
+  ),
+  rest(
+    "tumpel_turn_send",
+    "POST",
+    "/v1/sessions/{sessionId}/turns",
+    SessionPathSchema.extend(TurnSendSchema.shape),
+    "Send a session its next prompt. Returns the Turn of POST /v1/sessions/{sessionId}/turns before any output; refused while another turn of the session runs.",
+  ),
+  rest(
+    "tumpel_turn_list",
+    "GET",
+    "/v1/sessions/{sessionId}/turns",
+    SessionPathSchema,
+    "List a session's turns, oldest first. Returns the Turn[] of GET /v1/sessions/{sessionId}/turns.",
+  ),
+  rest(
+    "tumpel_turn_get",
+    "GET",
+    "/v1/turns/{turnId}",
+    TurnPathSchema,
+    "Read one turn. Returns the Turn of GET /v1/turns/{turnId}; state is Offered, Running, Completed or Failed.",
+  ),
+  rest(
+    "tumpel_turn_failure",
+    "GET",
+    "/v1/turns/{turnId}/failure",
+    TurnPathSchema,
+    "Read why a Failed turn failed. Returns the TurnFailure of GET /v1/turns/{turnId}/failure: {reason, detail}.",
+  ),
+  rest(
+    "tumpel_transcript",
+    "GET",
+    "/v1/sessions/{sessionId}/transcript",
+    SessionPathSchema.extend(TranscriptQuerySchema.shape),
+    "Read a page of a session's harness-native JSONL transcript; turnId keeps one turn's lines. Pass the cursor of the previous page as after to read on; an empty page means nothing new. Returns the TranscriptPage of GET /v1/sessions/{sessionId}/transcript: {sessionState, lines, cursor}.",
+  ),
+  rest(
+    "tumpel_snapshot_list",
+    "GET",
+    "/v1/sessions/{sessionId}/snapshots",
+    SessionPathSchema,
+    "List a session's stored snapshots in order. Returns the Snapshot[] of GET /v1/sessions/{sessionId}/snapshots.",
+  ),
+  rest(
+    "tumpel_snapshot_get",
+    "GET",
+    "/v1/snapshots/{snapshotId}",
+    SnapshotPathSchema,
+    "Read one stored snapshot. Returns the Snapshot of GET /v1/snapshots/{snapshotId}.",
+  ),
 ];
 
 const PATH_KEY = /\{(\w+)\}/g;
@@ -241,7 +318,11 @@ const toolRequest = (
   const path = request.path.replace(PATH_KEY, (_, key: string) => encodeURIComponent(String(args[key])));
   const carriesBody = tool.answer === "rest" && (request.method === "POST" || request.method === "PUT");
   const body = Object.fromEntries(Object.entries(args).filter(([key]) => !keys.includes(key)));
-  return new Request(`${origin}${path}`, {
+  const query =
+    request.method === "GET" && Object.keys(body).length > 0
+      ? `?${new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)]))}`
+      : "";
+  return new Request(`${origin}${path}${query}`, {
     method: request.method,
     headers: { "content-type": "application/json" },
     ...(carriesBody ? { body: JSON.stringify(body) } : {}),

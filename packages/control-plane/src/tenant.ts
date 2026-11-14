@@ -1,4 +1,3 @@
-import { DurableObject } from "cloudflare:workers";
 import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
@@ -11,6 +10,7 @@ import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
 import type { Env } from "./index";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
+import { TenantSessions } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
 export type PersonaWrite = z.infer<typeof PersonaCreateSchema>;
@@ -69,7 +69,7 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
-export class Tenant extends DurableObject<Env> {
+export class Tenant extends TenantSessions {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
