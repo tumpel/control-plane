@@ -37,7 +37,7 @@ const EMAIL = "sessions@example.test";
 const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-sessions-e2e-provider-key";
 const CLAIM_BUDGET_SECONDS = 3;
-const CLONE_BUDGET_SECONDS = 2;
+const CLONE_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const HOST_OFFLINE_GRACE_MS = 30_000;
@@ -48,7 +48,6 @@ const SETTINGS = {
   snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
   turnClaimBudgetSeconds: CLAIM_BUDGET_SECONDS,
-  turnCloneBudgetSeconds: CLONE_BUDGET_SECONDS,
   turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
@@ -450,7 +449,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.ok(!JSON.stringify(handovers).includes(PROVIDER_KEY));
   assert.ok(!JSON.stringify(handovers).includes("ghp-e2e"));
 
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   await eventually(
     "the turn reading Running",
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -537,7 +536,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   const offer = await host.next("TurnOffer");
   assert.equal(offer.sessionId, sessionId);
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   await eventually(
     "the turn reading Running",
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -597,7 +596,7 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
   host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const warm = await host.next("SnapshotRequest");
@@ -645,7 +644,7 @@ test("a stop whose snapshot fails returns the session to Idle and does not ask f
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
   host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const warm = await host.next("SnapshotRequest");
@@ -692,35 +691,38 @@ test("a claimed turn whose TurnRepositoryReady is lost fails NoFirstOutput once 
   const started = StartedSessionSchema.parse(await response.json());
   const offer = await host.next("TurnOffer");
   assert.equal(offer.turnId, started.turn.turnId);
-  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   const claimedAt = Date.now();
 
   const failed = await eventually(
     "the turn reading Failed",
     () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
     (turn) => turn.state === "Failed",
-    (CLONE_BUDGET_SECONDS + FIRST_LINE_BUDGET_SECONDS + 10) * 1000,
+    (CLONE_SECONDS + FIRST_LINE_BUDGET_SECONDS + 10) * 1000,
   );
-  assert.ok(failed.updatedAt - claimedAt >= (CLONE_BUDGET_SECONDS + FIRST_LINE_BUDGET_SECONDS) * 1000 - 500);
+  assert.ok(failed.updatedAt - claimedAt >= (CLONE_SECONDS + FIRST_LINE_BUDGET_SECONDS) * 1000 - 500);
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NoFirstOutput");
   assert.match(failure.detail, new RegExp(`no line for turn ${offer.turnId}`));
 });
 
-test("a clone that fails without GITHUB_TOKEN in the handover asks for it in the persona's secret set", async () => {
+test("a clone refused without GITHUB_TOKEN in the handover asks for it in the persona's secret set, and no other clone failure does", async () => {
   await createPersona("NoGithub", [{ kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY }]);
-  for (const [name, asks] of [
-    ["NoGithub", true],
-    ["Default", false],
+  for (const [name, cause, asks] of [
+    ["NoGithub", "Refused", true],
+    ["NoGithub", "TimedOut", false],
+    ["NoGithub", "DirectoryNotEmpty", false],
+    ["NoGithub", "Other", false],
+    ["Default", "Refused", false],
   ] as const) {
     const response = await postJson("/v1/sessions", { ...(await sessionStart(name)), prompt: "clone fails" }, bearer);
     assert.equal(response.status, 200);
     const offer = await host.next("TurnOffer");
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
     host.send({
-      type: "TurnFailed",
+      type: "TurnRepositoryCloneFailed",
       turnId: offer.turnId,
-      reason: "RepositoryCloneFailed",
+      cause,
       detail: "git reported: fatal: could not read Username",
       failedAt: new Date().toISOString(),
     });
@@ -759,7 +761,7 @@ test("a claimed turn fails HostOffline when its host disconnects and does not co
   const started = StartedSessionSchema.parse(await response.json());
   const offer = await host.next("TurnOffer");
   assert.equal(offer.turnId, started.turn.turnId);
-  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
   await eventually(
     "the turn reading Running",

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   CredentialHandoverSchema,
+  type RepositoryCloneFailureCauseSchema,
   SecretSetCreateSchema,
   SecretSetSchema,
   SessionSchema,
@@ -367,21 +368,21 @@ export class TenantSessions extends DurableObject<Env> {
     return row.name;
   }
 
-  private cloneFailureDetail(session: SessionRow, turnId: string, hostDetail: string): string {
+  private cloneFailureDetail(
+    session: SessionRow,
+    turnId: string,
+    cause: z.infer<typeof RepositoryCloneFailureCauseSchema>,
+    hostDetail: string,
+  ): string {
     const name = this.secretSetName(session);
-    const [handover] = this.ctx.storage.sql
+    const handover = this.ctx.storage.sql
       .exec<{ variable_names: string }>(
         "SELECT variable_names FROM credential_handovers WHERE turn_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
         turnId,
       )
-      .toArray();
-    if (handover === undefined) {
-      throw new Error(
-        `host ${session.host_id} reported a clone failure for turn ${turnId}, which no credential was handed over for`,
-      );
-    }
-    const names: unknown = JSON.parse(handover.variable_names);
-    if (Array.isArray(names) && names.includes("GITHUB_TOKEN")) {
+      .one();
+    const names = CredentialHandoverSchema.shape.variableNames.parse(JSON.parse(handover.variable_names));
+    if (cause !== "Refused" || names.includes("GITHUB_TOKEN")) {
       return `${hostDetail}. The persona runs on secret set ${name}`;
     }
     return `${hostDetail}. A private repository needs a Variable member GITHUB_TOKEN with read and write access in secret set ${name}; add it with tumpel config apply, then send the turn again`;
@@ -1011,7 +1012,7 @@ export class TenantSessions extends DurableObject<Env> {
         Claim: null,
         FirstLine: {
           turnId: turn.turn_id,
-          at: now + (settings.turnCloneBudgetSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
+          at: now + (message.cloneSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
         },
       });
     }
@@ -1022,13 +1023,13 @@ export class TenantSessions extends DurableObject<Env> {
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
       });
     }
+    if (message.type === "TurnRepositoryCloneFailed") {
+      const detail = this.cloneFailureDetail(session, turn.turn_id, message.cause, message.detail);
+      return this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt);
+    }
     if (message.type === "TurnFailed") {
       const detail =
-        message.reason === "CredentialRefused"
-          ? this.refusedSetDetail(session, message.detail)
-          : message.reason === "RepositoryCloneFailed"
-            ? this.cloneFailureDetail(session, turn.turn_id, message.detail)
-            : message.detail;
+        message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
       return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
     }
     if (turn.state !== "Running") return;
@@ -1099,7 +1100,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NoFirstOutput",
-        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready, or within ${settings.turnCloneBudgetSeconds + settings.turnFirstLineBudgetSeconds} seconds of the claim (turnCloneBudgetSeconds plus turnFirstLineBudgetSeconds) when no TurnRepositoryReady arrived; check the box on host ${session.host_id}, then send the turn again`,
+        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready, or within the image's cloneSeconds plus turnFirstLineBudgetSeconds of the claim when no TurnRepositoryReady arrived; check the box on host ${session.host_id}, then send the turn again`,
         failedAt,
       );
     }
