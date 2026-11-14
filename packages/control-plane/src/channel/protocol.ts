@@ -1,0 +1,145 @@
+import {
+  ChallengeSchema,
+  ControlFrameSchema,
+  HeartbeatSchema,
+  HelloSchema,
+  HostFrameSchema,
+  WelcomeSchema,
+} from "@tumpel/api/schemas";
+import { z } from "zod";
+
+export const PROTOCOL_VERSION = 1;
+export const HEARTBEAT_INTERVAL_MS = 10_000;
+export const HEARTBEAT_DEADLINE_MS = 30_000;
+export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
+
+export const CloseCode = {
+  ProtocolError: 4400,
+  BadSignature: 4401,
+  Revoked: 4403,
+  HeartbeatDeadline: 4408,
+  Replaced: 4409,
+  UnsupportedVersion: 4426,
+} as const;
+
+export const HostEnvelopeSchema = z.discriminatedUnion("type", [HelloSchema, HeartbeatSchema, HostFrameSchema]);
+export const ControlEnvelopeSchema = z.discriminatedUnion("type", [
+  ChallengeSchema,
+  WelcomeSchema,
+  HeartbeatSchema,
+  ControlFrameSchema,
+]);
+
+export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
+export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
+export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
+export type HostFrame = z.infer<typeof HostFrameSchema>;
+export type ControlFrame = z.infer<typeof ControlFrameSchema>;
+export type HostMessage = HostFrame["message"];
+export type ControlMessage = ControlFrame["message"];
+
+export interface Port<Out> {
+  send(envelope: Out): void;
+  close(code: number, reason: string): void;
+}
+
+export interface Frame<M> {
+  type: "Frame";
+  seq: number;
+  ack: number;
+  message: M;
+}
+
+export interface Ledger<M> {
+  received: number;
+  sent: number;
+  unacked: Frame<M>[];
+}
+
+export interface LedgerStore<M> {
+  load(): Ledger<M>;
+  save(ledger: Ledger<M>): void;
+}
+
+export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });
+
+const HELLO_CONTEXT = "tumpel-channel-hello-v1";
+
+export const helloBytes = (nonce: string, hostId: string): Uint8Array<ArrayBuffer> => {
+  const encoder = new TextEncoder();
+  const separator = new Uint8Array([0]);
+  const parts = [encoder.encode(HELLO_CONTEXT), separator, encoder.encode(nonce), separator, encoder.encode(hostId)];
+  const bytes = new Uint8Array(parts.reduce((length, part) => length + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return bytes;
+};
+
+export const sequence = <M>(ledger: Ledger<M>, message: M): { ledger: Ledger<M>; frame: Frame<M> } => {
+  const frame: Frame<M> = { type: "Frame", seq: ledger.sent + 1, ack: ledger.received, message };
+  return { ledger: { ...ledger, sent: frame.seq, unacked: [...ledger.unacked, frame] }, frame };
+};
+
+export type Accepted<Own, Theirs> =
+  | { kind: "Accepted"; ledger: Ledger<Own>; message: Theirs }
+  | { kind: "Duplicate" }
+  | { kind: "Gap"; expected: number; got: number };
+
+export const accept = <Own, Theirs>(ledger: Ledger<Own>, frame: Frame<Theirs>): Accepted<Own, Theirs> => {
+  if (frame.seq <= ledger.received) return { kind: "Duplicate" };
+  if (frame.seq !== ledger.received + 1) return { kind: "Gap", expected: ledger.received + 1, got: frame.seq };
+  return {
+    kind: "Accepted",
+    ledger: {
+      received: frame.seq,
+      sent: ledger.sent,
+      unacked: ledger.unacked.filter((own) => own.seq > frame.ack),
+    },
+    message: frame.message,
+  };
+};
+
+export const resend = <M>(ledger: Ledger<M>): Frame<M>[] =>
+  ledger.unacked.map((frame) => ({ ...frame, ack: ledger.received }));
+
+export const heartbeat = (now: Date): { type: "Heartbeat"; sentAt: string } => ({
+  type: "Heartbeat",
+  sentAt: now.toISOString(),
+});
+
+export type Parsed<T> = { ok: true; value: T } | { ok: false; reason: string };
+
+export const parseEnvelope = <T>(schema: z.ZodType<T>, text: string): Parsed<T> => {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: "the message is not JSON" };
+  }
+  const parsed = schema.safeParse(json);
+  if (parsed.success) return { ok: true, value: parsed.data };
+  return {
+    ok: false,
+    reason: `the message matches no channel envelope: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "message"}: ${issue.message}`).join("; ")}`,
+  };
+};
+
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+export const decodeBase64 = (text: string): Uint8Array<ArrayBuffer> | null =>
+  BASE64.test(text) ? Uint8Array.from(atob(text), (char) => char.charCodeAt(0)) : null;
+
+export const encodeBase64 = (bytes: Uint8Array): string => {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};
+
+export const randomNonce = (): string =>
+  encodeBase64(crypto.getRandomValues(new Uint8Array(32)))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");

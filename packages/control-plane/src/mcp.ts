@@ -14,7 +14,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Call tumpel_whoami to see which tenant and principal this connector acts as.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Call tumpel_whoami to see which tenant and principal this connector acts as, tumpel_host_mint_token to add a machine, tumpel_host_list to see which hosts are online, and tumpel_host_revoke to retire one.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -38,7 +38,12 @@ export type Authorize = () => Promise<RunTool | Response>;
 interface ToolDefinition {
   name: string;
   description: string;
-  inputSchema: { type: "object"; properties: Record<string, unknown>; additionalProperties: false };
+  inputSchema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+    additionalProperties: false;
+  };
 }
 
 export const TOOLS: ToolDefinition[] = [
@@ -47,6 +52,41 @@ export const TOOLS: ToolDefinition[] = [
     description:
       "Name the tenant and principal this connector acts as. Returns the Whoami document of GET /v1/whoami: {tenant, principal}.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "tumpel_host_mint_token",
+    description:
+      "Mint a one-time enrolment token for a new host. Returns the MintedEnrolmentToken of POST /v1/enrolment-tokens: {enrolmentToken, token, installCommand}. The token is shown once; save it in the file the install command names, on the host.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        expiresInSeconds: {
+          type: "integer",
+          minimum: 60,
+          maximum: 86400,
+          description: "How long the token enrols a host, in seconds.",
+        },
+      },
+      required: ["expiresInSeconds"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "tumpel_host_list",
+    description:
+      "List the tenant's hosts with their presence. Returns the Host[] of GET /v1/hosts; state is Enrolled, Online, Offline or Revoked.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "tumpel_host_revoke",
+    description:
+      "Revoke a host: its channel closes and it cannot connect again. Returns the Host of POST /v1/hosts/{hostId}/revoke.",
+    inputSchema: {
+      type: "object",
+      properties: { hostId: { type: "string", minLength: 1, maxLength: 64 } },
+      required: ["hostId"],
+      additionalProperties: false,
+    },
   },
 ];
 
