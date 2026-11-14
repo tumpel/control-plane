@@ -144,7 +144,7 @@ after(async () => {
   if (scratch) rmSync(scratch, { recursive: true, force: true });
 });
 
-test("a host enrols with a one-time token, holds its channel, drops to Offline when killed, and stops on revoke", async () => {
+test("a host enrols with a one-time token, holds its channel, drops to Offline when it falls silent, and stops on revoke", async () => {
   const token = await mint();
   const first = await enrol("first", token);
   assert.equal(first.finished.code, 0, first.finished.stderr);
@@ -169,16 +169,14 @@ test("a host enrols with a one-time token, holds its channel, drops to Offline w
     [[host.hostId, "Online"]],
   );
 
-  running.child.kill("SIGKILL");
-  await running.finished;
-  await waitForState(host.hostId, "Offline", HEARTBEAT_DEADLINE_MS);
-
-  const again = supervisor(first.dir, ["run"]);
+  running.child.kill("SIGSTOP");
+  await waitForState(host.hostId, "Offline", HEARTBEAT_DEADLINE_MS + 5_000);
+  running.child.kill("SIGCONT");
   await waitForState(host.hostId, "Online", 15_000);
   const revoked = await postJson(`/v1/hosts/${host.hostId}/revoke`, {}, bearer);
   assert.equal(revoked.status, 200);
   assert.equal(HostSchema.parse(await revoked.json()).state, "Revoked");
-  const stopped = await Promise.race([again.finished, sleep(10_000).then(() => null)]);
+  const stopped = await Promise.race([running.finished, sleep(10_000).then(() => null)]);
   assert.ok(stopped, "the supervisor did not stop within 10 s of the revoke");
   assert.equal(stopped.code, 0, stopped.stderr);
   assert.match(stopped.stderr, /was revoked/);
