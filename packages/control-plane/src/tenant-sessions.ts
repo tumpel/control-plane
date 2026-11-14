@@ -21,7 +21,6 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
-import { cloneFailureDetail } from "./clone-failure.ts";
 import {
   type CredentialRefusal,
   checkCredential,
@@ -366,6 +365,26 @@ export class TenantSessions extends DurableObject<Env> {
       throw new Error(`persona ${session.persona_id} of session ${session.session_id} runs on no secret set`);
     }
     return row.name;
+  }
+
+  private cloneFailureDetail(session: SessionRow, turnId: string, hostDetail: string): string {
+    const name = this.secretSetName(session);
+    const [handover] = this.ctx.storage.sql
+      .exec<{ variable_names: string }>(
+        "SELECT variable_names FROM credential_handovers WHERE turn_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        turnId,
+      )
+      .toArray();
+    if (handover === undefined) {
+      throw new Error(
+        `host ${session.host_id} reported a clone failure for turn ${turnId}, which no credential was handed over for`,
+      );
+    }
+    const names: unknown = JSON.parse(handover.variable_names);
+    if (Array.isArray(names) && names.includes("GITHUB_TOKEN")) {
+      return `${hostDetail}. The persona runs on secret set ${name}`;
+    }
+    return `${hostDetail}. A private repository needs a Variable member GITHUB_TOKEN with read and write access in secret set ${name}; add it with tumpel config apply, then send the turn again`;
   }
 
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
@@ -987,7 +1006,14 @@ export class TenantSessions extends DurableObject<Env> {
         sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
         sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
       });
-      return this.timers(tenantId, session.session_id, { Claim: null });
+      const settings = settingsOf(this.env);
+      return this.timers(tenantId, session.session_id, {
+        Claim: null,
+        FirstLine: {
+          turnId: turn.turn_id,
+          at: now + (settings.turnCloneBudgetSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
+        },
+      });
     }
     if (message.type === "TurnRepositoryReady") {
       if (turn.state !== "Running" || turn.line_count > 0) return;
@@ -1001,7 +1027,7 @@ export class TenantSessions extends DurableObject<Env> {
         message.reason === "CredentialRefused"
           ? this.refusedSetDetail(session, message.detail)
           : message.reason === "RepositoryCloneFailed"
-            ? cloneFailureDetail(message.detail, this.secretSetName(session))
+            ? this.cloneFailureDetail(session, turn.turn_id, message.detail)
             : message.detail;
       return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
     }
@@ -1073,7 +1099,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NoFirstOutput",
-        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready; check the box on host ${session.host_id}, then send the turn again`,
+        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready, or within ${settings.turnCloneBudgetSeconds + settings.turnFirstLineBudgetSeconds} seconds of the claim (turnCloneBudgetSeconds plus turnFirstLineBudgetSeconds) when no TurnRepositoryReady arrived; check the box on host ${session.host_id}, then send the turn again`,
         failedAt,
       );
     }

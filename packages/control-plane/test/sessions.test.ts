@@ -37,6 +37,8 @@ const EMAIL = "sessions@example.test";
 const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-sessions-e2e-provider-key";
 const CLAIM_BUDGET_SECONDS = 3;
+const CLONE_BUDGET_SECONDS = 2;
+const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const HOST_OFFLINE_GRACE_MS = 30_000;
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -46,7 +48,8 @@ const SETTINGS = {
   snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
   turnClaimBudgetSeconds: CLAIM_BUDGET_SECONDS,
-  turnFirstLineBudgetSeconds: 10,
+  turnCloneBudgetSeconds: CLONE_BUDGET_SECONDS,
+  turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
 };
@@ -681,6 +684,56 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NotClaimed");
   assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
+});
+
+test("a claimed turn whose TurnRepositoryReady is lost fails NoFirstOutput once the clone and first-line budgets run out", async () => {
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "ready never arrives" }, bearer);
+  assert.equal(response.status, 200);
+  const started = StartedSessionSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.turnId, started.turn.turnId);
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  const claimedAt = Date.now();
+
+  const failed = await eventually(
+    "the turn reading Failed",
+    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+    (CLONE_BUDGET_SECONDS + FIRST_LINE_BUDGET_SECONDS + 10) * 1000,
+  );
+  assert.ok(failed.updatedAt - claimedAt >= (CLONE_BUDGET_SECONDS + FIRST_LINE_BUDGET_SECONDS) * 1000 - 500);
+  const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+  assert.equal(failure.reason, "NoFirstOutput");
+  assert.match(failure.detail, new RegExp(`no line for turn ${offer.turnId}`));
+});
+
+test("a clone that fails without GITHUB_TOKEN in the handover asks for it in the persona's secret set", async () => {
+  await createPersona("NoGithub", [{ kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY }]);
+  for (const [name, asks] of [
+    ["NoGithub", true],
+    ["Default", false],
+  ] as const) {
+    const response = await postJson("/v1/sessions", { ...(await sessionStart(name)), prompt: "clone fails" }, bearer);
+    assert.equal(response.status, 200);
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    host.send({
+      type: "TurnFailed",
+      turnId: offer.turnId,
+      reason: "RepositoryCloneFailed",
+      detail: "git reported: fatal: could not read Username",
+      failedAt: new Date().toISOString(),
+    });
+    await eventually(
+      "the turn reading Failed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "RepositoryCloneFailed");
+    assert.equal(/needs a Variable member GITHUB_TOKEN/.test(failure.detail), asks, failure.detail);
+    assert.match(failure.detail, new RegExp(`secret set ${name} secrets`));
+  }
 });
 
 test("a session whose subscription token has expired is refused CredentialExpired at start, and no offer reaches the host", async () => {
