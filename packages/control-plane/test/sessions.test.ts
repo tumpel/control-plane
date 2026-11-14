@@ -165,7 +165,7 @@ class HostSide {
     side.raw({
       type: "Hello",
       hostId: id,
-      protocolVersion: 1,
+      protocolVersion: 2,
       supervisorVersion: "0.1.0",
       signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
     });
@@ -527,7 +527,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
 
 const deletePersona = (personaId: string) => call(`/v1/personas/${personaId}`, { method: "DELETE", headers: bearer });
 
-test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript, refuses later sends and lets its persona go", async () => {
+test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and its persona stays", async () => {
   const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
   await createPersona("Archivable", [
     { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
@@ -580,7 +580,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   assert.equal(inUse.status, 409);
   assert.match(
     ProblemSchema.parse(await inUse.json()).detail,
-    new RegExp(`session ${sessionId}, which is not Archived`),
+    new RegExp(`persona ${start.personaId} is the persona of session ${sessionId}$`),
   );
 
   const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
@@ -594,7 +594,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   });
   assert.equal(archivedSend.code, "SessionArchived");
   assert.match(archivedSend.detail, new RegExp(`session ${sessionId} is archived`));
-  assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+  assert.equal((await deletePersona(start.personaId ?? "")).status, 409);
 });
 
 test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {

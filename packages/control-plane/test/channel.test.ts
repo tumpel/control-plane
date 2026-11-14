@@ -117,13 +117,13 @@ const setup = (revoked = false) => {
         link.connection = received.connection;
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey) => {
+      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion = 2) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
           type: "Hello",
           hostId: HOST_ID,
-          protocolVersion: 1,
+          protocolVersion,
           supervisorVersion: "0.1.0",
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
         });
@@ -162,6 +162,17 @@ test("a Hello signed by another key is closed as a bad signature", async () => {
   const link = setup().connect();
   await link.hello(keyPair().privateKey);
   assert.equal(link.closed?.code, CloseCode.BadSignature);
+  assert.equal(link.connection.phase, "Closed");
+});
+
+test("a Hello on protocol version 1 is refused and the supervisor told to update", async () => {
+  const link = setup().connect();
+  await link.hello(undefined, 1);
+  assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
+  assert.match(
+    link.closed?.reason ?? "",
+    /protocol version 1 is not supported; this control plane speaks 2, update the supervisor/,
+  );
   assert.equal(link.connection.phase, "Closed");
 });
 
