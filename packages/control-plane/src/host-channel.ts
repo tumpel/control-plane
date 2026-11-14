@@ -5,10 +5,10 @@ import host0002 from "../migrations/host/0002_host_without_tenant.sql";
 import * as control from "./channel/control.ts";
 import {
   type ControlEnvelope,
-  type DispatchGrant,
   emptyLedger,
   HEARTBEAT_DEADLINE_MS,
   HEARTBEAT_INTERVAL_MS,
+  type HostMessage,
   type Ledger,
   type LedgerStore,
   type StoredControlMessage,
@@ -47,6 +47,8 @@ const isAttachment = (value: unknown): value is Attachment =>
   typeof value.lastSentAt === "number";
 
 export class HostChannel extends DurableObject<Env> {
+  private tenantId: string | undefined;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
@@ -69,6 +71,24 @@ export class HostChannel extends DurableObject<Env> {
     for (const socket of this.ctx.getWebSockets()) {
       control.revoke(this.context(socket, { ...host, revoked: 1 }, this.attachment(socket)), reason);
     }
+  }
+
+  async send(message: StoredControlMessage): Promise<void> {
+    const host = this.host();
+    if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
+    const open = this.ctx
+      .getWebSockets()
+      .find(
+        (socket) =>
+          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
+      );
+    if (open === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
+      return;
+    }
+    const attachment = this.attachment(open);
+    await control.send(attachment.connection, message, this.context(open, host, attachment));
+    open.serializeAttachment(attachment);
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -113,8 +133,8 @@ export class HostChannel extends DurableObject<Env> {
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
     if (event.kind === "Message") {
-      control.close(context.port, CloseCode.ProtocolError, `this control plane takes no ${event.message.type} yet`);
-      return this.refreshPresence(socket);
+      const { message: received } = event;
+      await this.ctx.blockConcurrencyWhile(() => this.forward(host.host_id, received));
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (connection.phase === "Open" && now - attachment.lastSentAt >= HEARTBEAT_INTERVAL_MS / 2) control.beat(context);
@@ -153,6 +173,21 @@ export class HostChannel extends DurableObject<Env> {
     if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + HEARTBEAT_DEADLINE_MS);
   }
 
+  private async tenantOf(hostId: string): Promise<string> {
+    if (this.tenantId !== undefined) return this.tenantId;
+    const row = await this.env.DB.prepare("SELECT tenant_id FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ tenant_id: string }>();
+    if (row === null) throw new Error(`host ${hostId} has a channel but no row in the hosts table; enrol it again`);
+    this.tenantId = row.tenant_id;
+    return row.tenant_id;
+  }
+
+  private async forward(hostId: string, message: HostMessage): Promise<void> {
+    const tenantId = await this.tenantOf(hostId);
+    await this.env.TENANT.getByName(tenantId).hostMessage(tenantId, hostId, message);
+  }
+
   private host(): HostRow | null {
     const [row] = this.ctx.storage.sql
       .exec<{ host_id: string; public_key: string; revoked: number }>("SELECT host_id, public_key, revoked FROM host")
@@ -166,7 +201,15 @@ export class HostChannel extends DurableObject<Env> {
     return attachment;
   }
 
-  private port(socket: WebSocket, attachment: Attachment): control.ControlContext["port"] {
+  private port(socket: WebSocket | null, attachment: Attachment | null): control.ControlContext["port"] {
+    if (socket === null || attachment === null) {
+      return {
+        send: (envelope: ControlEnvelope) => {
+          throw new Error(`a ${envelope.type} was sent to a host with no open connection`);
+        },
+        close: () => {},
+      };
+    }
     return {
       send: (envelope: ControlEnvelope) => {
         socket.send(JSON.stringify(envelope));
@@ -199,15 +242,14 @@ export class HostChannel extends DurableObject<Env> {
     };
   }
 
-  private context(socket: WebSocket, host: HostRow, attachment: Attachment): control.ControlContext {
+  private context(socket: WebSocket | null, host: HostRow, attachment: Attachment | null): control.ControlContext {
     return {
       port: this.port(socket, attachment),
       host: { hostId: host.host_id, publicKey: host.public_key, revoked: host.revoked === 1 },
       ledger: this.ledger(),
-      mintGrant: async (): Promise<DispatchGrant> => {
-        throw new Error(
-          `host ${host.host_id} has a turn offer to send, but this control plane mints no dispatch grants yet; deploy a control plane that holds provider keys`,
-        );
+      mintGrant: async (offer) => {
+        const tenantId = await this.tenantOf(host.host_id);
+        return this.env.TENANT.getByName(tenantId).mintGrant(tenantId, offer.turnId, host.host_id, Date.now());
       },
       now: () => new Date(),
     };
