@@ -243,7 +243,6 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const updated = await toolJson(PersonaSchema, "tumpel_persona_update", {
     personaId: persona.personaId,
     name: "Reviewer",
-    harness: "ClaudeCode",
     secretSetId: defaultSet.secretSetId,
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review closely").toString("base64") }],
   });

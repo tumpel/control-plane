@@ -9,12 +9,14 @@ import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal } from "./envelope.ts";
 import type { Env } from "./index";
+import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext, TenantSessions, toKey } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
 export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & { files: StoredFile[] };
+export type PersonaChange = Omit<PersonaWrite, "harness">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
@@ -23,6 +25,8 @@ export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
 export type SecretSetDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; personas: string[] };
+
+export type PersonaDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; sessions: string[] };
 
 type SecretMember = SecretSetWrite["secrets"][number];
 
@@ -92,7 +96,6 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[]): Persona =>
   });
 
 type SecretSetRow = { secret_set_id: string; name: string; created_at: number; updated_at: number };
-type PlaintextRow = { secret_set_id: string; name: string; provider: string; value: string; updated_at: number };
 type HarnessPinRow = { harness: string; harness_version: string; updated_at: number };
 
 const toPin = (row: HarnessPinRow): HarnessPin =>
@@ -103,6 +106,7 @@ export class Tenant extends TenantSessions {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
       migrateDurableObject(ctx.storage.sql, TENANT_MIGRATIONS);
+      await this.holdDataKey();
       await this.sealPlaintext();
     });
   }
@@ -124,35 +128,30 @@ export class Tenant extends TenantSessions {
       sql.exec("DROP TABLE secret_values_plaintext");
       return;
     }
-    const dataKey = await this.dataKey("AlreadyBlocked");
-    const sealed: { row: PlaintextRow; sealed: string; credential: boolean }[] = [];
-    const providers = new Set<string>();
-    for (const row of rows) {
-      const provider = `${row.secret_set_id}/${row.provider}`;
-      const credential = !providers.has(provider);
-      providers.add(provider);
+    const dataKey = await this.dataKey();
+    const sealed: { member: LegacyMember; sealed: string }[] = [];
+    for (const member of legacyMembers(rows)) {
       sealed.push({
-        row,
-        credential,
-        sealed: await seal(dataKey, row.value, sealContext(row.secret_set_id, row.name)),
+        member,
+        sealed: await seal(dataKey, member.row.value, sealContext(member.row.secret_set_id, member.name)),
       });
     }
     this.ctx.storage.transactionSync(() => {
-      for (const { row, credential, sealed: value } of sealed) {
+      for (const { member, sealed: value } of sealed) {
         sql.exec(
           "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
-          row.secret_set_id,
-          row.name,
-          credential ? "ApiKey" : "Variable",
+          member.row.secret_set_id,
+          member.name,
+          member.kind,
           value,
-          row.updated_at,
+          member.row.updated_at,
         );
-        if (credential) {
+        if (member.kind === "ApiKey") {
           sql.exec(
             "INSERT INTO secret_credentials (secret_set_id, name, provider) VALUES (?, ?, ?)",
-            row.secret_set_id,
-            row.name,
-            row.provider,
+            member.row.secret_set_id,
+            member.name,
+            member.row.provider,
           );
         }
       }
@@ -248,13 +247,12 @@ export class Tenant extends TenantSessions {
     return { ok: true, value: created };
   }
 
-  updatePersona(tenantId: string, personaId: string, persona: PersonaWrite, now: number): Written<Persona | null> {
+  updatePersona(tenantId: string, personaId: string, persona: PersonaChange, now: number): Written<Persona | null> {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, harness = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
-          persona.harness,
           persona.secretSetId,
           now,
           tenantId,
@@ -269,11 +267,19 @@ export class Tenant extends TenantSessions {
     return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
-  deletePersona(tenantId: string, personaId: string): boolean {
-    return (
-      this.ctx.storage.sql.exec("DELETE FROM personas WHERE tenant_id = ? AND persona_id = ?", tenantId, personaId)
-        .rowsWritten > 0
-    );
+  deletePersona(tenantId: string, personaId: string): PersonaDeleted {
+    const sql = this.ctx.storage.sql;
+    const sessions = sql
+      .exec<{ session_id: string }>(
+        "SELECT session_id FROM sessions WHERE persona_id = ? ORDER BY created_at, session_id",
+        personaId,
+      )
+      .toArray()
+      .map((row) => row.session_id);
+    if (sessions.length > 0) return { kind: "InUse", sessions };
+    const deleted =
+      sql.exec("DELETE FROM personas WHERE tenant_id = ? AND persona_id = ?", tenantId, personaId).rowsWritten > 0;
+    return deleted ? { kind: "Deleted" } : { kind: "NotFound" };
   }
 
   private secretSetsWhere(tenantId: string, where: string, ...bindings: string[]): SecretSet[] {

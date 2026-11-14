@@ -206,14 +206,14 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, harness, secret set and whole file set; a file left out is deleted. Name an unchanged file as Stored by its digest and sizeBytes. Returns the Persona of PUT /v1/personas/{personaId}.",
+    "Replace a persona's name, secret set and whole file set; its harness is fixed at create and a file left out is deleted. Name an unchanged file as Stored by its digest and sizeBytes. Returns the Persona of PUT /v1/personas/{personaId}.",
   ),
   rest(
     "tumpel_persona_delete",
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona. Calls DELETE /v1/personas/{personaId}.",
+    "Delete a persona no session ran on; one that sessions ran on is refused. Calls DELETE /v1/personas/{personaId}.",
   ),
   {
     name: "tumpel_secret_set_create",

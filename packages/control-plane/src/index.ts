@@ -47,6 +47,7 @@ import {
   revokeDevice,
   startDeviceCode,
 } from "./device";
+import { checkCredential } from "./dispatch-variables.ts";
 import { HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
 import {
@@ -102,7 +103,7 @@ import {
 import { checkFiles, type PersonaFileWrite, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { type SignerEnv, signerOf } from "./presign";
 import type { SessionTimer } from "./session-timer";
-import { handleSessions } from "./sessions";
+import { credentialRefused, handleSessions } from "./sessions";
 import type { PersonaWrite, Tenant } from "./tenant";
 
 export { HostChannel } from "./host-channel";
@@ -286,7 +287,8 @@ const personaWrite = async (
   operation: string,
 ): Promise<PersonaWritten> => {
   const tenant = env.TENANT.getByName(caller.tenantId);
-  if (!(await tenant.hasSecretSet(body.secretSetId))) {
+  const secretSet = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
+  if (secretSet === null) {
     return { ok: false, response: unknownSecretSet(operation, body.secretSetId) };
   }
   const entry = pinnedEntry(await tenant.listPins(), body.harness);
@@ -300,6 +302,11 @@ const personaWrite = async (
         fix: "Name a harness GET /v1/harnesses lists, or pin one of its listed versions",
       }),
     };
+  }
+  const credential = checkCredential(entry, secretSet.keys, Date.now());
+  if (credential.kind === "Unsupported") {
+    const refused = credentialRefused(credential, `secret set ${secretSet.name}`, body.harness, `repeat ${operation}`);
+    return { ok: false, response: problem(refused.status, refused.problem) };
   }
   const checked = await checkFiles(entry, body.files, operation);
   if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
@@ -335,14 +342,25 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
   const { personaId } = path.data;
   const tenant = env.TENANT.getByName(caller.tenantId);
   if (request.method === "DELETE") {
-    return (await tenant.deletePersona(caller.tenantId, personaId)) ? noContent() : personaNotFound(personaId);
+    const deleted = await tenant.deletePersona(caller.tenantId, personaId);
+    if (deleted.kind === "Deleted") return noContent();
+    if (deleted.kind === "NotFound") return personaNotFound(personaId);
+    return problem(409, {
+      code: "Conflict",
+      title: "Persona in use",
+      detail: `persona ${personaId} is the persona of session ${deleted.sessions.join(", ")}`,
+      fix: "A persona that sessions ran on stays; point new work at another persona instead",
+    });
   }
   if (request.method === "PUT") {
     const body = await parseBody(request, PersonaUpdateSchema, "personas.update");
     if (!body.ok) return body.response;
-    const write = await personaWrite(env, caller, body.value, "personas.update");
+    const current = await tenant.getPersona(caller.tenantId, personaId);
+    if (current === null) return personaNotFound(personaId);
+    const write = await personaWrite(env, caller, { ...body.value, harness: current.harness }, "personas.update");
     if (!write.ok) return write.response;
-    const updated = await tenant.updatePersona(caller.tenantId, personaId, write.value, Date.now());
+    const { harness: _fixed, ...change } = write.value;
+    const updated = await tenant.updatePersona(caller.tenantId, personaId, change, Date.now());
     if (!updated.ok) return conflict("personas.update", body.value.name, updated.constraint);
     return updated.value === null ? personaNotFound(personaId) : json(PersonaSchema.parse(updated.value));
   }

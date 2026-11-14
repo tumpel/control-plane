@@ -35,17 +35,19 @@ export const importKeyEncryptionKey = async (base64: string | undefined): Promis
   return crypto.subtle.importKey("raw", bytes, { name: "AES-GCM" }, false, ["wrapKey", "unwrapKey"]);
 };
 
-export const newDataKey = async (keyEncryptionKey: CryptoKey): Promise<string> => {
-  const dataKey = await crypto.subtle.importKey(
-    "raw",
-    crypto.getRandomValues(new Uint8Array(KEY_BYTES)),
-    { name: "AES-GCM" },
-    true,
-    ["encrypt", "decrypt"],
-  );
+export const generateDataKey = (): Promise<CryptoKey> =>
+  crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(KEY_BYTES)), { name: "AES-GCM" }, true, [
+    "encrypt",
+    "decrypt",
+  ]);
+
+export const wrapDataKey = async (keyEncryptionKey: CryptoKey, dataKey: CryptoKey): Promise<string> => {
   const iv = freshIv();
   return joined(iv, await crypto.subtle.wrapKey("raw", dataKey, keyEncryptionKey, { name: "AES-GCM", iv }));
 };
+
+export const newDataKey = async (keyEncryptionKey: CryptoKey): Promise<string> =>
+  wrapDataKey(keyEncryptionKey, await generateDataKey());
 
 export const unwrapDataKey = (keyEncryptionKey: CryptoKey, wrapped: string): Promise<CryptoKey> => {
   const { iv, body } = split(wrapped);

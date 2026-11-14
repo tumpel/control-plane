@@ -9,7 +9,18 @@ CREATE TABLE personas_next (
 );
 
 INSERT INTO personas_next (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at)
-SELECT persona_id, tenant_id, name, 'ClaudeCode', secret_set_id, created_at, updated_at FROM personas;
+SELECT
+  personas.persona_id,
+  personas.tenant_id,
+  personas.name,
+  COALESCE(
+    (SELECT sessions.harness FROM sessions WHERE sessions.persona_id = personas.persona_id ORDER BY sessions.created_at DESC LIMIT 1),
+    'ClaudeCode'
+  ),
+  personas.secret_set_id,
+  personas.created_at,
+  personas.updated_at
+FROM personas;
 
 DROP TABLE personas;
 

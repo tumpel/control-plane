@@ -8,7 +8,7 @@ import {
   TurnSendSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { credentialFor } from "./dispatch-variables.ts";
+import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -53,6 +53,36 @@ const turnNotFound = (turnId: string): Refused =>
     fix: "List a session's turns with tumpel turn list <sessionId>",
   });
 
+export const credentialRefused = (
+  refusal: CredentialRefusal,
+  owner: string,
+  harness: string,
+  retry: string,
+): Refused => {
+  if (refusal.kind === "NoCredential") {
+    return refuse(422, {
+      code: "NoCredential",
+      title: "No provider credential",
+      detail: `${owner} holds no ${refusal.provider} credential, which ${harness} reads`,
+      fix: `Add a ${refusal.supported.join(" or ")} for ${refusal.provider} to that secret set with tumpel config apply, then ${retry}`,
+    });
+  }
+  if (refusal.kind === "Unsupported") {
+    return refuse(422, {
+      code: "CredentialKindUnsupported",
+      title: "Credential kind not accepted by the harness",
+      detail: `${owner} holds ${refusal.name}, a ${refusal.credentialKind}, and ${harness} accepts only ${refusal.supported.join(", ")}`,
+      fix: `Replace ${refusal.name} with a ${refusal.supported.join(" or ")} with tumpel config apply, then ${retry}`,
+    });
+  }
+  return refuse(422, {
+    code: "CredentialExpired",
+    title: "Subscription token expired",
+    detail: `subscription token ${refusal.name} of ${owner} expired at ${refusal.expiresAt}`,
+    fix: `Write a fresh token and its expiresAt with tumpel config apply --rewrite-secrets, then ${retry}`,
+  });
+};
+
 const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
 
 export const startSession = async (
@@ -85,13 +115,14 @@ export const startSession = async (
   if (secretSet === null) {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
-  if (credentialFor(entry, secretSet.keys) === undefined) {
-    return refuse(422, {
-      code: "NoCredential",
-      title: "No provider credential",
-      detail: `secret set ${secretSet.name} of persona ${persona.name} holds no ${entry.provider} credential, which ${persona.harness} reads`,
-      fix: `Add an ApiKey or SubscriptionToken for ${entry.provider} to secret set ${secretSet.name} with tumpel config apply, then start again`,
-    });
+  const credential = checkCredential(entry, secretSet.keys, now);
+  if (credential.kind !== "Usable") {
+    return credentialRefused(
+      credential,
+      `secret set ${secretSet.name} of persona ${persona.name}`,
+      persona.harness,
+      "start again",
+    );
   }
   const hosts = await listHosts(env.DB, caller.tenantId);
   const host = hosts.find((candidate) => candidate.state === "Online");
@@ -163,12 +194,7 @@ export const sendTurn = async (
       fix: `Wait for turn ${sent.turnId} to finish (tumpel transcript read ${sent.turnId} --follow), then send again`,
     });
   }
-  return refuse(422, {
-    code: "NoCredential",
-    title: "No provider credential",
-    detail: `the secret set of persona ${sent.personaId} holds no ${sent.provider} credential, which this session's harness reads`,
-    fix: `Add an ApiKey or SubscriptionToken for ${sent.provider} to the persona's secret set with tumpel config apply, then send again`,
-  });
+  return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
 };
 
 export const listTurns = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Turn[]>> => {

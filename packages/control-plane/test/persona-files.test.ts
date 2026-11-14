@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { PersonaFileLimit } from "@tumpel/api/schemas";
 import { catalogEntry } from "../src/harness-catalog.ts";
-import { checkFiles, type PersonaFileWrite } from "../src/persona-files.ts";
+import { type BlobStore, checkFiles, type PersonaFileWrite, personaFileKey, storeFiles } from "../src/persona-files.ts";
 
 const claudeCode = catalogEntry("ClaudeCode", "2.0.0");
 if (claudeCode === undefined) throw new Error("the catalog lists no ClaudeCode 2.0.0");
@@ -78,4 +78,41 @@ test("a file at a path the harness does not read is refused with the paths it ac
   const repeated = await checkFiles(claudeCode, [inline(".claude.json", 2), inline(".claude.json", 2)], "test");
   assert.ok(!repeated.ok);
   assert.equal(repeated.problem.title, "Repeated persona file");
+});
+
+class MemoryBlobs implements BlobStore {
+  readonly blobs = new Map<string, Uint8Array<ArrayBuffer>>();
+
+  async put(key: string, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
+    this.blobs.set(key, bytes);
+  }
+
+  async get(key: string): Promise<{ size: number; arrayBuffer(): Promise<ArrayBuffer> } | null> {
+    const bytes = this.blobs.get(key);
+    if (bytes === undefined) return null;
+    return { size: bytes.byteLength, arrayBuffer: async () => bytes.slice().buffer };
+  }
+}
+
+test("a stored file whose bytes do not hash to its digest is refused, and one that does is accepted", async () => {
+  const bytes = new Uint8Array(Buffer.from('{"model":"opus"}'));
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const store = new MemoryBlobs();
+  const named = { path: ".claude/settings.json", digest, sizeBytes: bytes.byteLength, bytes: null };
+
+  store.blobs.set(personaFileKey("tenant-1", digest), new Uint8Array(Buffer.from('{"model":"evil"}')));
+  const refused = await storeFiles(store, "tenant-1", [named], "personas.create");
+  assert.ok(!refused.ok);
+  assert.equal(refused.problem.title, "Persona file digest differs");
+  assert.match(
+    refused.problem.detail,
+    new RegExp(`by digest ${digest}, and the bytes the store holds under it hash to [0-9a-f]{64}`),
+  );
+
+  store.blobs.set(personaFileKey("tenant-1", digest), bytes);
+  const accepted = await storeFiles(store, "tenant-1", [named], "personas.create");
+  assert.deepEqual(accepted, {
+    ok: true,
+    files: [{ path: ".claude/settings.json", digest, sizeBytes: bytes.byteLength }],
+  });
 });
