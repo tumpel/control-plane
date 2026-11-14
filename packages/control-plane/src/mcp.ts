@@ -10,6 +10,7 @@ import {
   HostLabelsSchema,
   HostPathSchema,
   PersonaCreateSchema,
+  PersonaFileUploadRequestSchema,
   PersonaPathSchema,
   PersonaUpdateSchema,
   ProblemSchema,
@@ -177,7 +178,14 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/personas",
     PersonaCreateSchema,
-    "Create a persona: harness settings as a JSON document, instructions, MCP servers and the secretSetId of the secret set its sessions run on. Returns the Persona of POST /v1/personas.",
+    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, and the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to PersonaFileLimit.InlineFileBytes) or Stored (digest and sizeBytes of an uploaded file). Returns the Persona of POST /v1/personas.",
+  ),
+  rest(
+    "tumpel_persona_upload_file",
+    "POST",
+    "/v1/personas/file-uploads",
+    PersonaFileUploadRequestSchema,
+    "Presign the upload of one persona file larger than PersonaFileLimit.InlineFileBytes, named by the sha256 digest and size of its bytes. Returns the PersonaFileUpload of POST /v1/personas/file-uploads: PUT the bytes to uploadUrl before uploadExpiresAt, then name the file as Stored by digest in a persona write.",
   ),
   rest(
     "tumpel_persona_list",
@@ -198,7 +206,7 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, secret set, instructions, settings and MCP servers. Returns the Persona of PUT /v1/personas/{personaId}.",
+    "Replace a persona's name, harness, secret set and whole file set; a file left out is deleted. Name an unchanged file as Stored by its digest and sizeBytes. Returns the Persona of PUT /v1/personas/{personaId}.",
   ),
   rest(
     "tumpel_persona_delete",
@@ -247,7 +255,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema,
-    "Start a session on an online host of the tenant with its first prompt; it runs on its persona's secret set. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
+    "Start a session on an online host of the tenant with its first prompt; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
   ),
   rest(
     "tumpel_session_list",

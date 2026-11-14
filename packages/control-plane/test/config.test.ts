@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -27,6 +27,14 @@ const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const TUMPEL = join(ROOT, "target", "debug", "tumpel");
 const FIXTURE = fileURLToPath(new URL("fixtures/tenant-config.json", import.meta.url));
+const REVIEWER_MEMORY = "Review the diff for correctness.\n";
+const REVIEWER_SETTINGS = '{"permissions":{"defaultMode":"bypassPermissions"}}\n';
+const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+
+const writeLocal = (path: string, text: string): void => {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, text);
+};
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
@@ -147,6 +155,8 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   const file = join(scratch, "tumpel.json");
   const fixture = JSON.parse(readFileSync(FIXTURE, "utf8"));
   writeFileSync(file, JSON.stringify({ ...fixture, hosts: [{ hostId, labels: ["gpu", "region-eu"] }] }));
+  writeLocal(join(scratch, "reviewer", "CLAUDE.md"), REVIEWER_MEMORY);
+  writeLocal(join(scratch, "reviewer", "settings.json"), REVIEWER_SETTINGS);
 
   const validated = await tumpel(["config", "validate", file]);
   assert.equal(validated.code, 0, validated.stderr);
@@ -185,9 +195,25 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
 
   const personas = PersonaSchema.array().parse(await getJson("/v1/personas"));
   assert.deepEqual(
-    personas.map((persona) => [persona.name, persona.settings, persona.mcpServers]),
-    [["Reviewer", '{"permissions":"bypass"}', [{ label: "docs", url: "https://docs.example.test/mcp" }]]],
+    personas.map((persona) => [persona.name, persona.harness, persona.files.map((held) => [held.path, held.digest])]),
+    [
+      [
+        "Reviewer",
+        "ClaudeCode",
+        [
+          [".claude/CLAUDE.md", sha256(REVIEWER_MEMORY)],
+          [".claude/settings.json", sha256(REVIEWER_SETTINGS)],
+        ],
+      ],
+    ],
   );
+
+  writeLocal(join(scratch, "reviewer", "CLAUDE.md"), "Review closely.\n");
+  const edited = await tumpel(["config", "plan", file]);
+  assert.equal(edited.code, 0, edited.stderr);
+  assert.match(edited.stdout, /files: write \.claude\/CLAUDE\.md \(\d+ bytes, sha256 [0-9a-f]{64}\)$/m);
+  assert.doesNotMatch(edited.stdout, /settings\.json/);
+  writeLocal(join(scratch, "reviewer", "CLAUDE.md"), REVIEWER_MEMORY);
   const sets = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.deepEqual(
     sets.map((set) => [set.name, set.keys.map((key) => [key.kind, key.name])]),
@@ -204,6 +230,8 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   const started = join(scratch, "started.json");
   const initialised = await tumpel(["config", "init", started]);
   assert.equal(initialised.code, 0, initialised.stderr);
+  writeLocal(join(scratch, "persona-files", "Reviewer", ".claude", "CLAUDE.md"), REVIEWER_MEMORY);
+  writeLocal(join(scratch, "persona-files", "Reviewer", ".claude", "settings.json"), REVIEWER_SETTINGS);
   const replanned = await tumpel(["config", "plan", started]);
   assert.equal(replanned.stdout.trim(), "no changes; the tenant matches the file", replanned.stderr);
 });
@@ -239,7 +267,7 @@ test("a taken name, a repeated member, two credentials for one provider and dele
   const sets = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.ok(!sets.some((set) => set.name === "repeated" || set.name === "doubled"));
 
-  const persona = { name: "Twin", secretSetId, instructions: "", settings: "{}", mcpServers: [] };
+  const persona = { name: "Twin", harness: "ClaudeCode", secretSetId, files: [] };
   assert.equal((await postJson("/v1/personas", persona, bearer)).status, 200);
   const twin = await postJson("/v1/personas", persona, bearer);
   assert.equal(twin.status, 409);
@@ -250,4 +278,46 @@ test("a taken name, a repeated member, two credentials for one provider and dele
   const inUse = await server.fetch(`${origin}/v1/secret-sets/${secretSetId}`, { method: "DELETE", headers: bearer });
   assert.equal(inUse.status, 409);
   assert.match(ProblemSchema.parse(await inUse.json()).detail, /Twin/);
+});
+
+test("a persona file at a path its harness does not read is refused, and a stored file must be in the store", async () => {
+  const [set] = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
+  assert.ok(set);
+  const content = Buffer.from("{}").toString("base64");
+  const base = { name: "Files", harness: "ClaudeCode", secretSetId: set.secretSetId };
+  const misplaced = await postJson(
+    "/v1/personas",
+    { ...base, files: [{ source: "Inline", path: ".bashrc", content }] },
+    bearer,
+  );
+  assert.equal(misplaced.status, 422);
+  assert.match(ProblemSchema.parse(await misplaced.json()).detail, /\.bashrc.*accepts \.claude\/settings\.json/);
+
+  const created = await postJson(
+    "/v1/personas",
+    { ...base, files: [{ source: "Inline", path: ".claude/settings.json", content }] },
+    bearer,
+  );
+  assert.equal(created.status, 200);
+  const persona = PersonaSchema.parse(await created.json());
+  const [held] = persona.files;
+  assert.ok(held);
+  assert.equal(held.digest, sha256("{}"));
+  const put = (files: unknown[]) =>
+    server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...bearer },
+      body: JSON.stringify({ ...base, files }),
+    });
+  const kept = await put([
+    { source: "Stored", path: ".claude/CLAUDE.md", digest: held.digest, sizeBytes: held.sizeBytes },
+  ]);
+  assert.equal(kept.status, 200);
+  assert.deepEqual(
+    PersonaSchema.parse(await kept.json()).files.map((file) => [file.path, file.digest]),
+    [[".claude/CLAUDE.md", held.digest]],
+  );
+  const missing = await put([{ source: "Stored", path: ".claude/CLAUDE.md", digest: "f".repeat(64), sizeBytes: 2 }]);
+  assert.equal(missing.status, 422);
+  assert.equal(ProblemSchema.parse(await missing.json()).title, "Persona file not uploaded");
 });

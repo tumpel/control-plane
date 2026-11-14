@@ -9,7 +9,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { credentialFor } from "./dispatch-variables.ts";
-import { catalogEntry, defaultEntry, HARNESS_CATALOG, inCatalog } from "./harness-catalog";
+import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
@@ -55,13 +55,6 @@ const turnNotFound = (turnId: string): Refused =>
 
 const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
 
-const harnessVersionFor = async (env: Env, caller: Caller, harness: string): Promise<string | null> => {
-  const pins = await tenantOf(env, caller).listPins();
-  const pinned = pins.find((pin) => pin.harness === harness);
-  if (pinned !== undefined) return inCatalog(harness, pinned.harnessVersion) ? pinned.harnessVersion : null;
-  return defaultEntry(harness)?.harnessVersion ?? null;
-};
-
 export const startSession = async (
   env: Env,
   caller: Caller,
@@ -69,15 +62,6 @@ export const startSession = async (
   endpoint: string,
   now: number,
 ): Promise<Outcome<StartedSession>> => {
-  const harnessVersion = await harnessVersionFor(env, caller, start.harness);
-  if (harnessVersion === null) {
-    return refuse(422, {
-      code: "HarnessNotInCatalog",
-      title: "Harness not in the catalog",
-      detail: `the catalog has no version of ${start.harness} your tenant can run; it holds ${HARNESS_CATALOG.map((entry) => `${entry.harness} ${entry.harnessVersion}`).join(", ")}`,
-      fix: "Start the session with a harness the catalog lists, or pin a listed version with tumpel config apply",
-    });
-  }
   const tenant = tenantOf(env, caller);
   const persona = await tenant.getPersona(caller.tenantId, start.personaId);
   if (persona === null) {
@@ -88,9 +72,15 @@ export const startSession = async (
       fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
     });
   }
-  const entry = catalogEntry(start.harness, harnessVersion);
-  if (entry === undefined)
-    throw new Error(`${start.harness} ${harnessVersion} was resolved from the catalog and then not found`);
+  const entry = pinnedEntry(await tenant.listPins(), persona.harness);
+  if (entry === undefined) {
+    return refuse(422, {
+      code: "HarnessNotInCatalog",
+      title: "Harness not in the catalog",
+      detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
+      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists, with tumpel config apply",
+    });
+  }
   const secretSet = await tenant.getSecretSet(caller.tenantId, persona.secretSetId);
   if (secretSet === null) {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
@@ -99,7 +89,7 @@ export const startSession = async (
     return refuse(422, {
       code: "NoCredential",
       title: "No provider credential",
-      detail: `secret set ${secretSet.name} of persona ${persona.name} holds no ${entry.provider} credential, which ${start.harness} reads`,
+      detail: `secret set ${secretSet.name} of persona ${persona.name} holds no ${entry.provider} credential, which ${persona.harness} reads`,
       fix: `Add an ApiKey or SubscriptionToken for ${entry.provider} to secret set ${secretSet.name} with tumpel config apply, then start again`,
     });
   }
@@ -118,7 +108,14 @@ export const startSession = async (
   }
   const started = await tenant.startSession(
     caller.tenantId,
-    { principalId: caller.principalId, hostId: host.hostId, harnessVersion, endpoint, start },
+    {
+      principalId: caller.principalId,
+      hostId: host.hostId,
+      harness: entry.harness,
+      harnessVersion: entry.harnessVersion,
+      endpoint,
+      start,
+    },
     now,
   );
   return ok(started);

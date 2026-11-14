@@ -74,8 +74,8 @@ const outbound = async (stored: StoredControlMessage, context: ControlContext): 
   if (stored.type !== "TurnOffer") return stored;
   const prepared = await context.prepareOffer(stored);
   if (prepared.kind === "Withdrawn") return { type: "TurnWithdrawn", turnId: stored.turnId };
-  const { credential, lastLineSeq, snapshots } = prepared;
-  return { ...stored, credential, lastLineSeq, snapshots };
+  const { credential, lastLineSeq, snapshots, personaFiles } = prepared;
+  return { ...stored, credential, lastLineSeq, snapshots, personaFiles };
 };
 
 export const send = async (

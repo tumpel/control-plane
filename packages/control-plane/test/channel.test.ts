@@ -85,6 +85,7 @@ const setup = (revoked = false) => {
       },
       lastLineSeq: 0,
       snapshots: [],
+      personaFiles: [],
     };
   };
 
