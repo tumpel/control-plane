@@ -172,7 +172,12 @@ before(async () => {
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
-    workers: [{ configPath: "./wrangler.jsonc", vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE } }],
+    workers: [
+      {
+        configPath: "./wrangler.jsonc",
+        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, SECRETS_KEK: Buffer.alloc(32, 7).toString("base64") },
+      },
+    ],
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
@@ -218,8 +223,15 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   await toolDone("tumpel_harness_unpin", { harness: entry.harness });
   assert.deepEqual(await rest(HarnessPinSchema.array(), "GET", "/v1/harnesses/pins"), []);
 
+  const [defaultSet] = await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets");
+  assert.ok(defaultSet);
+  const secretSet = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {
+    name: "prod",
+    secrets: [{ kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET }],
+  });
   const persona = await toolJson(PersonaSchema, "tumpel_persona_create", {
     name: "Reviewer",
+    secretSetId: secretSet.secretSetId,
     instructions: "Review",
     settings: "{}",
     mcpServers: [],
@@ -232,11 +244,13 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const updated = await toolJson(PersonaSchema, "tumpel_persona_update", {
     personaId: persona.personaId,
     name: "Reviewer",
+    secretSetId: defaultSet.secretSetId,
     instructions: "Review closely",
     settings: "{}",
     mcpServers: [],
   });
   assert.equal(updated.instructions, "Review closely");
+  assert.equal(updated.secretSetId, defaultSet.secretSetId);
   assert.deepEqual(
     await toolJson(PersonaSchema.array(), "tumpel_persona_list"),
     await rest(PersonaSchema.array(), "GET", "/v1/personas"),
@@ -244,10 +258,6 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   await toolDone("tumpel_persona_delete", { personaId: persona.personaId });
   assert.equal((await call(`/v1/personas/${persona.personaId}`, { headers: bearer })).status, 404);
 
-  const secretSet = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {
-    name: "prod",
-    secrets: [{ name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET }],
-  });
   const listedSets = await toolJson(SecretSetSchema.array(), "tumpel_secret_set_list");
   assert.deepEqual(listedSets, await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"));
   const fetchedSet = await toolJson(SecretSetSchema, "tumpel_secret_set_get", { secretSetId: secretSet.secretSetId });
@@ -256,7 +266,10 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
 
   const draft = {
     name: "staging",
-    secrets: [{ name: "OPENAI_API_KEY", provider: "OpenAi", valueFrom: { env: "STAGING_OPENAI_KEY" } }],
+    secrets: [
+      { kind: "ApiKey", name: "OPENAI_API_KEY", provider: "OpenAi", valueFrom: { env: "STAGING_OPENAI_KEY" } },
+      { kind: "Variable", name: "GITHUB_TOKEN", valueFrom: { env: "STAGING_GITHUB_TOKEN" } },
+    ],
   };
   assert.deepEqual(await toolJson(ConfigSecretSetSchema, "tumpel_secret_set_create", draft), draft);
   assert.deepEqual(
@@ -269,9 +282,9 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   });
   assert.ok(withValue.isError);
   assert.ok(!JSON.stringify(withValue).includes(SECRET));
-  assert.deepEqual(await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"), [secretSet]);
+  assert.deepEqual(await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"), [defaultSet, secretSet]);
   await toolDone("tumpel_secret_set_delete", { secretSetId: secretSet.secretSetId });
-  assert.deepEqual(await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"), []);
+  assert.deepEqual(await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"), [defaultSet]);
 
   const devices = await toolJson(DeviceSchema.array(), "tumpel_devices_list");
   assert.deepEqual(devices, await rest(DeviceSchema.array(), "GET", "/v1/devices"));

@@ -8,6 +8,7 @@ import {
   TurnSendSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import { credentialFor } from "./dispatch-variables.ts";
 import { catalogEntry, defaultEntry, HARNESS_CATALOG, inCatalog } from "./harness-catalog";
 import { hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -78,7 +79,8 @@ export const startSession = async (
     });
   }
   const tenant = tenantOf(env, caller);
-  if ((await tenant.getPersona(caller.tenantId, start.personaId)) === null) {
+  const persona = await tenant.getPersona(caller.tenantId, start.personaId);
+  if (persona === null) {
     return refuse(404, {
       code: "NotFound",
       title: "No such persona",
@@ -86,22 +88,19 @@ export const startSession = async (
       fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
     });
   }
-  const secretSet = await tenant.getSecretSet(caller.tenantId, start.secretSetId);
+  const entry = catalogEntry(start.harness, harnessVersion);
+  if (entry === undefined)
+    throw new Error(`${start.harness} ${harnessVersion} was resolved from the catalog and then not found`);
+  const secretSet = await tenant.getSecretSet(caller.tenantId, persona.secretSetId);
   if (secretSet === null) {
-    return refuse(404, {
-      code: "NotFound",
-      title: "No such secret set",
-      detail: `your tenant owns no secret set ${start.secretSetId}`,
-      fix: "List the secret sets with GET /v1/secret-sets and start with one of the ids it returns",
-    });
+    throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
-  const keyName = catalogEntry(start.harness, harnessVersion)?.providerKeyName ?? "";
-  if (!secretSet.keys.some((key) => key.name === keyName)) {
+  if (credentialFor(entry, secretSet.keys) === undefined) {
     return refuse(422, {
       code: "NoCredential",
-      title: "No provider key",
-      detail: `secret set ${secretSet.name} holds no ${keyName}, the key ${start.harness} reads`,
-      fix: `Add ${keyName} to the secret set with tumpel config apply, then start again`,
+      title: "No provider credential",
+      detail: `secret set ${secretSet.name} of persona ${persona.name} holds no ${entry.provider} credential, which ${start.harness} reads`,
+      fix: `Add an ApiKey or SubscriptionToken for ${entry.provider} to secret set ${secretSet.name} with tumpel config apply, then start again`,
     });
   }
   const hosts = await listHosts(env.DB, caller.tenantId);
@@ -169,9 +168,9 @@ export const sendTurn = async (
   }
   return refuse(422, {
     code: "NoCredential",
-    title: "No provider key",
-    detail: `secret set ${sent.secretSetId} holds no ${sent.keyName}, the key this session's harness reads`,
-    fix: `Add ${sent.keyName} to the secret set with tumpel config apply, then send again`,
+    title: "No provider credential",
+    detail: `the secret set of persona ${sent.personaId} holds no ${sent.provider} credential, which this session's harness reads`,
+    fix: `Add an ApiKey or SubscriptionToken for ${sent.provider} to the persona's secret set with tumpel config apply, then send again`,
   });
 };
 

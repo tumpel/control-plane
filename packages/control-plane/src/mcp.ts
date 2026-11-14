@@ -1,6 +1,8 @@
 import {
-  ConfigSecretSchema,
+  ConfigApiKeySchema,
   ConfigSecretSetSchema,
+  ConfigSecretVariableSchema,
+  ConfigSubscriptionTokenSchema,
   DevicePathSchema,
   EnrolmentTokenMintSchema,
   HarnessPathSchema,
@@ -64,10 +66,18 @@ interface ToolDefinition {
 
 const NO_ARGUMENTS = z.object({});
 
-const KEY_NAMES_ONLY = ConfigSecretSetSchema.extend({ secrets: z.array(ConfigSecretSchema.strict()) }).strict();
+const KEY_NAMES_ONLY = ConfigSecretSetSchema.extend({
+  secrets: z.array(
+    z.discriminatedUnion("kind", [
+      ConfigSecretVariableSchema.strict(),
+      ConfigApiKeySchema.strict(),
+      ConfigSubscriptionTokenSchema.strict(),
+    ]),
+  ),
+}).strict();
 
 const KEY_NAMES_RULE =
-  "Secret values never pass through MCP and this tool writes nothing: each key names only the environment variable (valueFrom.env) its value is read from, which the server cannot resolve. Returns the ConfigSecretSet entry to put in secretSets of the tenant config file; export each named variable on your machine and run tumpel config apply <file>, which writes the values.";
+  "Secret values never pass through MCP and this tool writes nothing: each member names its kind (Variable, ApiKey, or SubscriptionToken with its expiresAt), a provider for a credential, and only the environment variable (valueFrom.env) its value is read from, which the server cannot resolve. Returns the ConfigSecretSet entry to put in secretSets of the tenant config file; export each named variable on your machine and run tumpel config apply <file>, which writes the values.";
 
 const rest = (name: string, method: Method, path: string, input: z.ZodObject, description: string): ToolDefinition => ({
   name,
@@ -167,7 +177,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/personas",
     PersonaCreateSchema,
-    "Create a persona: harness settings as a JSON document, instructions and MCP servers. Returns the Persona of POST /v1/personas.",
+    "Create a persona: harness settings as a JSON document, instructions, MCP servers and the secretSetId of the secret set its sessions run on. Returns the Persona of POST /v1/personas.",
   ),
   rest(
     "tumpel_persona_list",
@@ -188,7 +198,7 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, instructions, settings and MCP servers. Returns the Persona of PUT /v1/personas/{personaId}.",
+    "Replace a persona's name, secret set, instructions, settings and MCP servers. Returns the Persona of PUT /v1/personas/{personaId}.",
   ),
   rest(
     "tumpel_persona_delete",
@@ -199,7 +209,7 @@ export const TOOLS: ToolDefinition[] = [
   ),
   {
     name: "tumpel_secret_set_create",
-    description: `Draft a new secret set of provider keys, by key name. ${KEY_NAMES_RULE}`,
+    description: `Draft a new secret set of variables and provider credentials, by member name. ${KEY_NAMES_RULE}`,
     input: KEY_NAMES_ONLY,
     request: null,
     answer: "configSecretSet",
@@ -209,18 +219,18 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/secret-sets",
     NO_ARGUMENTS,
-    "List the tenant's secret sets with their key names; values are write-only and never returned. Returns the SecretSet[] of GET /v1/secret-sets.",
+    "List the tenant's secret sets with their member names and kinds; values are write-only and never returned. Returns the SecretSet[] of GET /v1/secret-sets.",
   ),
   rest(
     "tumpel_secret_set_get",
     "GET",
     "/v1/secret-sets/{secretSetId}",
     SecretSetPathSchema,
-    "Read one secret set with its key names; values are write-only and never returned. Returns the SecretSet of GET /v1/secret-sets/{secretSetId}.",
+    "Read one secret set with its member names and kinds; values are write-only and never returned. Returns the SecretSet of GET /v1/secret-sets/{secretSetId}.",
   ),
   {
     name: "tumpel_secret_set_update",
-    description: `Draft the replacement of an existing secret set's name and keys, by key name; the set must exist. ${KEY_NAMES_RULE}`,
+    description: `Draft the replacement of an existing secret set's name and members, by member name; the set must exist. ${KEY_NAMES_RULE}`,
     input: SecretSetPathSchema.extend(KEY_NAMES_ONLY.shape).strict(),
     request: { method: "GET", path: "/v1/secret-sets/{secretSetId}" },
     answer: "configSecretSet",
@@ -230,14 +240,14 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/secret-sets/{secretSetId}",
     SecretSetPathSchema,
-    "Delete a secret set and its stored values. Calls DELETE /v1/secret-sets/{secretSetId}.",
+    "Delete a secret set and its stored values; refused while a persona names it. Calls DELETE /v1/secret-sets/{secretSetId}.",
   ),
   rest(
     "tumpel_session_start",
     "POST",
     "/v1/sessions",
     SessionStartSchema,
-    "Start a session on an online host of the tenant with its first prompt. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
+    "Start a session on an online host of the tenant with its first prompt; it runs on its persona's secret set. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
   ),
   rest(
     "tumpel_session_list",

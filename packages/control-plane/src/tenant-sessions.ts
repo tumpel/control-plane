@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  CredentialHandoverSchema,
+  SecretSetCreateSchema,
+  SecretSetSchema,
   SessionSchema,
   type SessionStartSchema,
   SnapshotSchema,
@@ -16,6 +19,8 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
+import { credentialFor, dispatchVariables, type SecretKey, type SecretMember } from "./dispatch-variables.ts";
+import { importKeyEncryptionKey, newDataKey, unseal, unwrapDataKey } from "./envelope.ts";
 import { catalogEntry } from "./harness-catalog";
 import type { Env } from "./index";
 import { signerOf } from "./presign";
@@ -49,7 +54,7 @@ export type Sent =
   | { kind: "Sent"; turn: Turn }
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
-  | { kind: "NoCredential"; secretSetId: string; keyName: string };
+  | { kind: "NoCredential"; personaId: string; provider: string };
 
 export type TranscriptCursor =
   | { kind: "Chunk"; sessionState: SessionState; storageKey: string; range: Range }
@@ -60,7 +65,6 @@ type SessionRow = {
   principal_id: string;
   host_id: string;
   box_id: string;
-  secret_set_id: string;
   persona_id: string;
   repository: string;
   harness: string;
@@ -132,7 +136,7 @@ type SnapshotRequestRow = {
 };
 
 const SESSION_SELECT =
-  "SELECT session_id, principal_id, host_id, box_id, secret_set_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at FROM sessions";
+  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at FROM sessions";
 const TURN_SELECT = "SELECT turn_id, session_id, box_id, prompt, state, line_count, created_at, updated_at FROM turns";
 const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, NULL AS reason, NULL AS detail, NULL AS failed_at, created_at, updated_at FROM snapshots
@@ -149,7 +153,6 @@ const toSession = (tenantId: string, row: SessionRow): Session =>
     principalId: row.principal_id,
     hostId: row.host_id,
     boxId: row.box_id,
-    secretSetId: row.secret_set_id,
     personaId: row.persona_id,
     repository: row.repository,
     harness: row.harness,
@@ -202,6 +205,43 @@ const toLine = (tenantId: string, row: PendingRow): TranscriptLine =>
 
 const iso = (at: number): string => new Date(at).toISOString();
 
+export type MemberRow = {
+  name: string;
+  kind: string;
+  sealed: string;
+  updated_at: number;
+  provider: string | null;
+  expires_at: string | null;
+};
+
+export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
+  sql
+    .exec<MemberRow>(
+      `SELECT secret_values.name, secret_values.kind, secret_values.sealed, secret_values.updated_at,
+        secret_credentials.provider, secret_expiries.expires_at
+      FROM secret_values
+      LEFT JOIN secret_credentials USING (secret_set_id, name)
+      LEFT JOIN secret_expiries USING (secret_set_id, name)
+      WHERE secret_values.secret_set_id = ? ORDER BY secret_values.name`,
+      secretSetId,
+    )
+    .toArray();
+
+const memberShape = (row: MemberRow): Record<string, unknown> =>
+  row.kind === "Variable"
+    ? { kind: row.kind, name: row.name }
+    : row.kind === "ApiKey"
+      ? { kind: row.kind, name: row.name, provider: row.provider }
+      : { kind: row.kind, name: row.name, provider: row.provider, expiresAt: row.expires_at };
+
+export const toKey = (row: MemberRow): SecretKey =>
+  SecretSetSchema.shape.keys.element.parse({ ...memberShape(row), updatedAt: row.updated_at });
+
+const toMember = (row: MemberRow, value: string): SecretMember =>
+  SecretSetCreateSchema.shape.secrets.element.parse({ ...memberShape(row), value });
+
+export const sealContext = (secretSetId: string, name: string): string => `${secretSetId}/${name}`;
+
 export class TenantSessions extends DurableObject<Env> {
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
@@ -213,17 +253,59 @@ export class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private hasCredential(secretSetId: string, harness: string, harnessVersion: string): string | null {
-    const entry = catalogEntry(harness, harnessVersion);
-    if (entry === undefined) throw new Error(`${harness} ${harnessVersion} left the harness catalog`);
+  private personaSecretSet(personaId: string): string | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ name: string }>(
-        "SELECT name FROM secret_values WHERE secret_set_id = ? AND name = ?",
-        secretSetId,
-        entry.providerKeyName,
-      )
+      .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM personas WHERE persona_id = ?", personaId)
       .toArray();
-    return row === undefined ? entry.providerKeyName : null;
+    return row?.secret_set_id ?? null;
+  }
+
+  private missingCredential(session: SessionRow): string | null {
+    const entry = catalogEntry(session.harness, session.harness_version);
+    if (entry === undefined) throw new Error(`${session.harness} ${session.harness_version} left the harness catalog`);
+    const secretSetId = this.personaSecretSet(session.persona_id);
+    if (secretSetId === null) return entry.provider;
+    const keys = memberRows(this.ctx.storage.sql, secretSetId).map(toKey);
+    return credentialFor(entry, keys) === undefined ? entry.provider : null;
+  }
+
+  private wrappedDataKey(): string | null {
+    const [row] = this.ctx.storage.sql.exec<{ wrapped: string }>("SELECT wrapped FROM data_keys").toArray();
+    return row?.wrapped ?? null;
+  }
+
+  private async heldOrNewDataKey(keyEncryptionKey: CryptoKey): Promise<string> {
+    const held = this.wrappedDataKey();
+    if (held !== null) return held;
+    const created = await newDataKey(keyEncryptionKey);
+    this.ctx.storage.sql.exec(
+      "INSERT INTO data_keys (data_key_id, wrapped, created_at) VALUES (1, ?, ?)",
+      created,
+      Date.now(),
+    );
+    return created;
+  }
+
+  protected async dataKey(blocking: "Block" | "AlreadyBlocked" = "Block"): Promise<CryptoKey> {
+    const keyEncryptionKey = await importKeyEncryptionKey(this.env.SECRETS_KEK);
+    const wrapped =
+      this.wrappedDataKey() ??
+      (blocking === "AlreadyBlocked"
+        ? await this.heldOrNewDataKey(keyEncryptionKey)
+        : await this.ctx.blockConcurrencyWhile(() => this.heldOrNewDataKey(keyEncryptionKey)));
+    return unwrapDataKey(keyEncryptionKey, wrapped);
+  }
+
+  private async members(secretSetId: string): Promise<SecretMember[]> {
+    const rows = memberRows(this.ctx.storage.sql, secretSetId);
+    if (rows.length === 0) return [];
+    const dataKey = await this.dataKey();
+    const members: SecretMember[] = [];
+    for (const row of rows) {
+      const value = await unseal(dataKey, row.sealed, sealContext(secretSetId, row.name));
+      members.push(toMember(row, value));
+    }
+    return members;
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
@@ -290,7 +372,6 @@ export class TenantSessions extends DurableObject<Env> {
       principal_id: input.principalId,
       host_id: input.hostId,
       box_id: crypto.randomUUID(),
-      secret_set_id: start.secretSetId,
       persona_id: start.personaId,
       repository: start.repository,
       harness: start.harness,
@@ -304,13 +385,12 @@ export class TenantSessions extends DurableObject<Env> {
     };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, secret_set_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         session.session_id,
         session.principal_id,
         session.host_id,
         session.box_id,
-        session.secret_set_id,
         session.persona_id,
         session.repository,
         session.harness,
@@ -339,8 +419,8 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (running !== undefined) return { kind: "InFlight", turnId: running.turn_id };
-    const missing = this.hasCredential(session.secret_set_id, session.harness, session.harness_version);
-    if (missing !== null) return { kind: "NoCredential", secretSetId: session.secret_set_id, keyName: missing };
+    const missing = this.missingCredential(session);
+    if (missing !== null) return { kind: "NoCredential", personaId: session.persona_id, provider: missing };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?",
@@ -470,19 +550,45 @@ export class TenantSessions extends DurableObject<Env> {
         `session ${session.session_id} runs ${session.harness} ${session.harness_version}, which left the catalog`,
       );
     }
-    const [secret] = this.ctx.storage.sql
-      .exec<{ value: string }>(
-        "SELECT value FROM secret_values WHERE secret_set_id = ? AND name = ?",
-        session.secret_set_id,
-        entry.providerKeyName,
-      )
-      .toArray();
-    if (secret === undefined) {
+    const secretSetId = this.personaSecretSet(session.persona_id);
+    if (secretSetId === null) {
       throw new Error(
-        `secret set ${session.secret_set_id} has no ${entry.providerKeyName} for turn ${turnId}; add it with tumpel config apply`,
+        `session ${session.session_id} runs on persona ${session.persona_id}, which is gone; turn ${turnId} has no secret set to run on`,
       );
     }
+    const dispatch = dispatchVariables(entry, await this.members(secretSetId), now);
+    if (dispatch.kind === "NoCredential") {
+      throw new Error(
+        `secret set ${secretSetId} holds no ${dispatch.provider} credential for turn ${turnId}; add one with tumpel config apply`,
+      );
+    }
+    if (dispatch.kind === "Expired") {
+      await this.failTurn(
+        tenantId,
+        turnId,
+        "CredentialExpired",
+        `subscription token ${dispatch.name} of secret set ${secretSetId} expired at ${dispatch.expiresAt}; write a fresh token and its expiresAt with tumpel config apply --rewrite-secrets, then send the turn again`,
+        iso(now),
+      );
+      return { kind: "Withdrawn" };
+    }
     const settings = settingsOf(this.env);
+    const handover = CredentialHandoverSchema.parse({
+      dispatchCredentialId: crypto.randomUUID(),
+      tenantId,
+      turnId,
+      hostId,
+      variableNames: dispatch.variables.map((variable) => variable.name),
+      createdAt: now,
+    });
+    this.ctx.storage.sql.exec(
+      "INSERT INTO credential_handovers (dispatch_credential_id, turn_id, host_id, variable_names, created_at) VALUES (?, ?, ?, ?, ?)",
+      handover.dispatchCredentialId,
+      handover.turnId,
+      handover.hostId,
+      JSON.stringify(handover.variableNames),
+      handover.createdAt,
+    );
     const stored = this.ctx.storage.sql
       .exec<{ snapshot_id: string; snapshot_seq: number; storage_key: string }>(
         "SELECT snapshot_id, snapshot_seq, storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq",
@@ -493,9 +599,9 @@ export class TenantSessions extends DurableObject<Env> {
     return {
       kind: "Ready",
       credential: {
-        dispatchCredentialId: crypto.randomUUID(),
+        dispatchCredentialId: handover.dispatchCredentialId,
         expiresAt: iso(now + settings.dispatchGrantTtlSeconds * 1000),
-        variables: [{ name: entry.providerKeyName, value: secret.value }],
+        variables: dispatch.variables,
       },
       lastLineSeq: session.last_line_seq,
       snapshots,
