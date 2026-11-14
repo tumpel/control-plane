@@ -21,6 +21,7 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
+import { cloneFailureDetail } from "./clone-failure.ts";
 import {
   type CredentialRefusal,
   checkCredential,
@@ -124,7 +125,7 @@ type FailureRow = {
 };
 
 type HandoverRow = {
-  dispatch_credential_id: string;
+  credential_handover_id: string;
   session_id: string;
   turn_id: string;
   host_id: string;
@@ -241,7 +242,7 @@ const toSnapshot = (tenantId: string, row: SnapshotRow): Snapshot =>
 
 const toHandover = (tenantId: string, row: HandoverRow): CredentialHandover =>
   CredentialHandoverSchema.parse({
-    credentialHandoverId: row.dispatch_credential_id,
+    credentialHandoverId: row.credential_handover_id,
     tenantId,
     sessionId: row.session_id,
     turnId: row.turn_id,
@@ -370,11 +371,6 @@ export class TenantSessions extends DurableObject<Env> {
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
     const name = this.secretSetName(session);
     return `${hostDetail}. The credential comes from secret set ${name}; replace its value with tumpel config apply --rewrite-secrets ${name}, then send the turn again`;
-  }
-
-  private cloneSetDetail(session: SessionRow, hostDetail: string): string {
-    const name = this.secretSetName(session);
-    return `${hostDetail}. A private repository needs a Variable member GITHUB_TOKEN with read and write access in secret set ${name}; add it with tumpel config apply, then send the turn again`;
   }
 
   private refusedCredential(session: SessionRow, now: number): CredentialRefusal | null {
@@ -763,10 +759,10 @@ export class TenantSessions extends DurableObject<Env> {
     if (this.sessionRow(sessionId) === null) return null;
     return this.ctx.storage.sql
       .exec<HandoverRow>(
-        `SELECT credential_handovers.dispatch_credential_id, turns.session_id, credential_handovers.turn_id,
+        `SELECT credential_handovers.credential_handover_id, turns.session_id, credential_handovers.turn_id,
           credential_handovers.host_id, turns.box_id, credential_handovers.variable_names, credential_handovers.created_at
         FROM credential_handovers JOIN turns USING (turn_id)
-        WHERE turns.session_id = ? ORDER BY credential_handovers.created_at DESC, credential_handovers.rowid DESC`,
+        WHERE turns.session_id = ? ORDER BY credential_handovers.created_at, credential_handovers.rowid`,
         sessionId,
       )
       .toArray()
@@ -864,15 +860,15 @@ export class TenantSessions extends DurableObject<Env> {
     }
     const settings = settingsOf(this.env);
     const handover = {
-      dispatchCredentialId: crypto.randomUUID(),
+      credentialHandoverId: crypto.randomUUID(),
       turnId,
       hostId,
       variableNames: dispatch.variables.map((variable) => variable.name),
       createdAt: now,
     };
     this.ctx.storage.sql.exec(
-      "INSERT INTO credential_handovers (dispatch_credential_id, turn_id, host_id, variable_names, created_at) VALUES (?, ?, ?, ?, ?)",
-      handover.dispatchCredentialId,
+      "INSERT INTO credential_handovers (credential_handover_id, turn_id, host_id, variable_names, created_at) VALUES (?, ?, ?, ?, ?)",
+      handover.credentialHandoverId,
       handover.turnId,
       handover.hostId,
       JSON.stringify(handover.variableNames),
@@ -889,7 +885,7 @@ export class TenantSessions extends DurableObject<Env> {
     return {
       kind: "Ready",
       credential: {
-        dispatchCredentialId: handover.dispatchCredentialId,
+        credentialHandoverId: handover.credentialHandoverId,
         expiresAt: iso(now + settings.dispatchGrantTtlSeconds * 1000),
         variables: dispatch.variables,
       },
@@ -987,13 +983,16 @@ export class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     if (message.type === "TurnClaim") {
       if (turn.state !== "Offered") return;
-      const settings = settingsOf(this.env);
       this.ctx.storage.transactionSync(() => {
         sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
         sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
       });
+      return this.timers(tenantId, session.session_id, { Claim: null });
+    }
+    if (message.type === "TurnRepositoryReady") {
+      if (turn.state !== "Running" || turn.line_count > 0) return;
+      const settings = settingsOf(this.env);
       return this.timers(tenantId, session.session_id, {
-        Claim: null,
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
       });
     }
@@ -1002,7 +1001,7 @@ export class TenantSessions extends DurableObject<Env> {
         message.reason === "CredentialRefused"
           ? this.refusedSetDetail(session, message.detail)
           : message.reason === "RepositoryCloneFailed"
-            ? this.cloneSetDetail(session, message.detail)
+            ? cloneFailureDetail(message.detail, this.secretSetName(session))
             : message.detail;
       return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
     }
@@ -1074,7 +1073,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NoFirstOutput",
-        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its claim; check the box on host ${session.host_id}, then send the turn again`,
+        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready; check the box on host ${session.host_id}, then send the turn again`,
         failedAt,
       );
     }

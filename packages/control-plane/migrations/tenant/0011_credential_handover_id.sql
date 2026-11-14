@@ -1,0 +1,1 @@
+ALTER TABLE credential_handovers RENAME COLUMN dispatch_credential_id TO credential_handover_id;

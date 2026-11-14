@@ -332,7 +332,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions/{sessionId}/credential-handovers",
     SessionPathSchema,
-    "List the credential handovers of a session, newest first: the variable names each turn offer carried, never their values. Returns the CredentialHandover[] of GET /v1/sessions/{sessionId}/credential-handovers.",
+    "List the credential handovers of a session, oldest first: the variable names each turn offer carried, never their values. Returns the CredentialHandover[] of GET /v1/sessions/{sessionId}/credential-handovers.",
   ),
   rest(
     "tumpel_snapshot_list",
