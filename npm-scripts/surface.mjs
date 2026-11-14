@@ -27,6 +27,7 @@ const VERBS = {
   EnrolmentTokens_mint: "mint-token",
   Turns_getFailure: "failure",
   Sessions_listCredentialHandovers: "handovers",
+  Sessions_listStopFailures: "stop-failures",
 };
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
@@ -110,9 +111,10 @@ const render = (rows, excluded) =>
     `${Object.entries(NOUNS)
       .map(([group, noun]) => `${group} \`${noun || "(none)"}\``)
       .join(", ")}.`,
-    "`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure` and",
-    "`Sessions_listCredentialHandovers` the verb `handovers`. The CLI's",
-    "`transcript read` takes a turnId and reads that turn's lines of its session.",
+    "`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure`,",
+    "`Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb",
+    "`stop-failures`. The CLI's `transcript read` takes a turnId and reads that turn's lines of its",
+    "session; `session get` also prints the session's stop failures.",
     "",
     "`tumpel_secret_set_create` and `_update` take key names and `valueFrom.env` names only and write",
     "nothing: the server cannot read your environment, so they return the config entry for",

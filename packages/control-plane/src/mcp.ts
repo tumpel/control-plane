@@ -286,6 +286,13 @@ export const TOOLS: ToolDefinition[] = [
     "Archive a Stopped session: delete its snapshots, keep its transcript readable and refuse every later send. Final. Returns the Archived Session of POST /v1/sessions/{sessionId}/archive.",
   ),
   rest(
+    "tumpel_session_stop_failures",
+    "GET",
+    "/v1/sessions/{sessionId}/stop-failures",
+    SessionPathSchema,
+    "List the stops of a session that failed, oldest first; each returned the session to Idle with its box kept. Returns the StopFailure[] of GET /v1/sessions/{sessionId}/stop-failures: {reason, detail, failedAt}.",
+  ),
+  rest(
     "tumpel_turn_send",
     "POST",
     "/v1/sessions/{sessionId}/turns",

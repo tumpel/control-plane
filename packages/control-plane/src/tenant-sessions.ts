@@ -7,7 +7,7 @@ import {
   type SessionStartSchema,
   SnapshotSchema,
   type StartedSessionSchema,
-  type StopFailureSchema,
+  StopFailureSchema,
   TranscriptLineSchema,
   TurnFailureSchema,
   TurnSchema,
@@ -47,7 +47,7 @@ export type SessionStart = z.infer<typeof SessionStartSchema>;
 export type StartedSession = z.infer<typeof StartedSessionSchema>;
 type TurnFailureReason = TurnFailure["reason"];
 type SessionState = Session["state"];
-type StopFailure = z.infer<typeof StopFailureSchema>;
+export type StopFailure = z.infer<typeof StopFailureSchema>;
 
 export interface NewSession {
   principalId: string;
@@ -133,6 +133,15 @@ type HandoverRow = {
   created_at: number;
 };
 
+type StopFailureRow = {
+  stop_failure_id: string;
+  session_id: string;
+  reason: string;
+  detail: string;
+  failed_at: string;
+  created_at: number;
+};
+
 type PendingRow = {
   session_id: string;
   line_seq: number;
@@ -183,9 +192,7 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const STORE_DELETE_BATCH = 1000;
 
-const PROVIDER_REFUSAL = "the provider refused the credential";
-
-const toSession = (tenantId: string, row: SessionRow, stopFailures: StopFailure[]): Session =>
+const toSession = (tenantId: string, row: SessionRow): Session =>
   SessionSchema.parse({
     sessionId: row.session_id,
     tenantId,
@@ -198,7 +205,6 @@ const toSession = (tenantId: string, row: SessionRow, stopFailures: StopFailure[
     harnessVersion: row.harness_version,
     model: row.model,
     state: row.state,
-    stopFailures,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -325,17 +331,6 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     return row ?? null;
-  }
-
-  private session(tenantId: string, row: SessionRow): Session {
-    const failures = this.ctx.storage.sql
-      .exec<{ reason: StopFailure["reason"]; detail: string; failed_at: string }>(
-        "SELECT reason, detail, failed_at FROM stop_failures WHERE session_id = ? ORDER BY created_at, stop_failure_id",
-        row.session_id,
-      )
-      .toArray()
-      .map((failure) => ({ reason: failure.reason, detail: failure.detail, failedAt: failure.failed_at }));
-    return toSession(tenantId, row, failures);
   }
 
   private setSessionState(sessionId: string, state: SessionState, now: number): void {
@@ -524,7 +519,7 @@ export class TenantSessions extends DurableObject<Env> {
       return this.insertTurn(session.session_id, session.box_id, start.prompt, now);
     });
     await this.offer(tenantId, session, turn);
-    return { session: this.session(tenantId, session), turn: toTurn(tenantId, turn) };
+    return { session: toSession(tenantId, session), turn: toTurn(tenantId, turn) };
   }
 
   async sendTurn(tenantId: string, sessionId: string, prompt: string, now: number): Promise<Sent> {
@@ -555,7 +550,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
     if (session.state === "Stopping" || session.state === "Stopped") {
-      return { kind: "Stopping", session: this.session(tenantId, session) };
+      return { kind: "Stopping", session: toSession(tenantId, session) };
     }
     const running = this.inFlightTurn(sessionId);
     if (running !== null) return { kind: "InFlight", turnId: running };
@@ -565,7 +560,7 @@ export class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, sessionId, { Snapshot: null });
     const stopping = { ...session, state: "Stopping", updated_at: now };
     await this.snapshotOrTeardown(tenantId, stopping, latest);
-    return { kind: "Stopping", session: this.session(tenantId, stopping) };
+    return { kind: "Stopping", session: toSession(tenantId, stopping) };
   }
 
   async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
@@ -597,12 +592,13 @@ export class TenantSessions extends DurableObject<Env> {
       Total: null,
       Snapshot: null,
       SnapshotAnswer: null,
+      Teardown: null,
       TeardownAnswer: null,
       HostOffline: null,
     });
     const archived = this.sessionRow(sessionId);
     if (archived === null) throw new Error(`session ${sessionId} vanished while it was archived`);
-    return { kind: "Archived", session: this.session(tenantId, archived) };
+    return { kind: "Archived", session: toSession(tenantId, archived) };
   }
 
   private async snapshotOrTeardown(tenantId: string, session: SessionRow, latest: TurnRow): Promise<void> {
@@ -613,8 +609,10 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (pending !== undefined) return;
+    const now = Date.now();
     const completed = this.latestTurn(session.session_id, "Completed");
-    if (completed === null) return this.teardown(tenantId, session, latest.turn_id);
+    if (completed === null)
+      return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
     const [held] = this.ctx.storage.sql
       .exec<{ snapshot_id: string }>(
         "SELECT snapshot_id FROM snapshots WHERE session_id = ? AND turn_id = ? LIMIT 1",
@@ -622,8 +620,10 @@ export class TenantSessions extends DurableObject<Env> {
         completed.turn_id,
       )
       .toArray();
-    if (held !== undefined) return this.teardown(tenantId, session, latest.turn_id);
-    return this.requestSnapshot(tenantId, session, completed);
+    if (held !== undefined) {
+      return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
+    }
+    return this.timers(tenantId, session.session_id, { Snapshot: { turnId: completed.turn_id, at: now } });
   }
 
   private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
@@ -653,7 +653,8 @@ export class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, session.session_id, { TeardownAnswer: null });
     if (message.type === "BoxGone") return this.setSessionState(session.session_id, "Stopped", Date.now());
     this.recordStopFailure(session.session_id, message.reason, message.detail, message.failedAt);
-    return this.returnToIdle(tenantId, session.session_id);
+    this.returnToIdle(session.session_id);
+    return this.rearmSnapshot(tenantId, session.session_id);
   }
 
   private recordStopFailure(sessionId: string, reason: StopFailure["reason"], detail: string, failedAt: string): void {
@@ -668,9 +669,12 @@ export class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  private async returnToIdle(tenantId: string, sessionId: string): Promise<void> {
+  private returnToIdle(sessionId: string): void {
+    this.setSessionState(sessionId, "Idle", Date.now());
+  }
+
+  private async rearmSnapshot(tenantId: string, sessionId: string): Promise<void> {
     const now = Date.now();
-    this.setSessionState(sessionId, "Idle", now);
     const turn = this.latestTurn(sessionId, "Completed") ?? this.latestTurn(sessionId, null);
     if (turn === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
     await this.timers(tenantId, sessionId, {
@@ -680,7 +684,7 @@ export class TenantSessions extends DurableObject<Env> {
 
   getSession(tenantId: string, sessionId: string): Session | null {
     const row = this.sessionRow(sessionId);
-    return row === null ? null : this.session(tenantId, row);
+    return row === null ? null : toSession(tenantId, row);
   }
 
   listSessions(tenantId: string, filter: SessionFilter): Session[] {
@@ -691,7 +695,7 @@ export class TenantSessions extends DurableObject<Env> {
         filter.hostId ?? null,
       )
       .toArray()
-      .map((row) => this.session(tenantId, row));
+      .map((row) => toSession(tenantId, row));
   }
 
   listTurns(tenantId: string, sessionId: string): Turn[] | null {
@@ -724,6 +728,27 @@ export class TenantSessions extends DurableObject<Env> {
       failedAt: row.failed_at,
       createdAt: row.created_at,
     });
+  }
+
+  listStopFailures(tenantId: string, sessionId: string): StopFailure[] | null {
+    if (this.sessionRow(sessionId) === null) return null;
+    return this.ctx.storage.sql
+      .exec<StopFailureRow>(
+        "SELECT stop_failure_id, session_id, reason, detail, failed_at, created_at FROM stop_failures WHERE session_id = ? ORDER BY created_at, stop_failure_id",
+        sessionId,
+      )
+      .toArray()
+      .map((row) =>
+        StopFailureSchema.parse({
+          stopFailureId: row.stop_failure_id,
+          tenantId,
+          sessionId: row.session_id,
+          reason: row.reason,
+          detail: row.detail,
+          failedAt: row.failed_at,
+          createdAt: row.created_at,
+        }),
+      );
   }
 
   listSnapshots(tenantId: string, sessionId: string): Snapshot[] | null {
@@ -974,7 +999,7 @@ export class TenantSessions extends DurableObject<Env> {
     }
     if (message.type === "TurnFailed") {
       const detail =
-        message.reason === "CredentialRefused" && message.detail.startsWith(PROVIDER_REFUSAL)
+        message.reason === "CredentialRefused"
           ? this.refusedSetDetail(session, message.detail)
           : message.reason === "RepositoryCloneFailed"
             ? this.cloneSetDetail(session, message.detail)
@@ -1015,7 +1040,8 @@ export class TenantSessions extends DurableObject<Env> {
     const settings = settingsOf(this.env);
     const failedAt = iso(Date.now());
     if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
-    if (name === "SnapshotAnswer") return this.snapshotUnanswered(tenantId, session, turn, failedAt);
+    if (name === "SnapshotAnswer") return this.snapshotUnanswered(session, turn, failedAt);
+    if (name === "Teardown" && session.state === "Stopping") return this.teardown(tenantId, session, turnId);
     if (name === "TeardownAnswer" && session.state === "Stopping") {
       this.recordStopFailure(
         sessionId,
@@ -1023,7 +1049,7 @@ export class TenantSessions extends DurableObject<Env> {
         `host ${session.host_id} did not answer the teardown of box ${session.box_id} within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs with tumpel host list, then stop the session again`,
         failedAt,
       );
-      return this.returnToIdle(tenantId, sessionId);
+      return this.returnToIdle(sessionId);
     }
     if (name === "HostOffline" && IN_FLIGHT.includes(turn.state) && (await this.hostOffline(session.host_id))) {
       return this.failTurn(
@@ -1222,12 +1248,7 @@ export class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  private async snapshotUnanswered(
-    tenantId: string,
-    session: SessionRow,
-    turn: TurnRow,
-    failedAt: string,
-  ): Promise<void> {
+  private snapshotUnanswered(session: SessionRow, turn: TurnRow, failedAt: string): void {
     const sql = this.ctx.storage.sql;
     const requests = sql
       .exec<SnapshotRequestRow>(
@@ -1245,7 +1266,7 @@ export class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (requests.length > 0 && session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
+    if (requests.length > 0 && session.state === "Stopping") this.returnToIdle(session.session_id);
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -1291,8 +1312,10 @@ export class TenantSessions extends DurableObject<Env> {
     if (message.type === "SnapshotFailed") {
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       if (session.state !== "Stopping") return;
-      if (message.reason === "BoxNotFound") return this.teardown(tenantId, session, request.turn_id);
-      return this.returnToIdle(tenantId, session.session_id);
+      if (message.reason === "BoxNotFound") {
+        return this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
+      }
+      return this.returnToIdle(session.session_id);
     }
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {

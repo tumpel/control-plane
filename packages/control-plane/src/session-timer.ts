@@ -7,6 +7,7 @@ export type DeadlineName =
   | "Total"
   | "Snapshot"
   | "SnapshotAnswer"
+  | "Teardown"
   | "TeardownAnswer"
   | "HostOffline";
 
