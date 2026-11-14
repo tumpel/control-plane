@@ -31,7 +31,10 @@ export type ControlMessage = ControlFrame["message"];
 export type TurnOffer = Extract<ControlMessage, { type: "TurnOffer" }>;
 export type DispatchGrant = TurnOffer["credential"];
 export type SnapshotDownload = TurnOffer["snapshots"][number];
-export type OfferParts = Pick<TurnOffer, "credential" | "lastLineSeq" | "snapshots" | "personaFiles">;
+export type OfferParts = Pick<
+  TurnOffer,
+  "credential" | "lastLineSeq" | "snapshots" | "personaFiles" | "gitAuthorName" | "gitAuthorEmail"
+>;
 export type PersonaFileDownload = TurnOffer["personaFiles"][number];
 export type StoredOffer = Omit<TurnOffer, keyof OfferParts>;
 export type StoredControlMessage = Exclude<ControlMessage, { type: "TurnOffer" | "TurnWithdrawn" }> | StoredOffer;

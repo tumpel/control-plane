@@ -178,7 +178,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/personas",
     PersonaCreateSchema,
-    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, and the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to PersonaFileLimit.InlineFileBytes) or Stored (digest and sizeBytes of an uploaded file). Returns the Persona of POST /v1/personas.",
+    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, the gitAuthorName and gitAuthorEmail its box commits as, and the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to PersonaFileLimit.InlineFileBytes) or Stored (digest and sizeBytes of an uploaded file). Returns the Persona of POST /v1/personas.",
   ),
   rest(
     "tumpel_persona_upload_file",
@@ -206,7 +206,7 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, secret set and whole file set; its harness is fixed at create and a file left out is deleted. Name an unchanged file as Stored by its digest and sizeBytes. Returns the Persona of PUT /v1/personas/{personaId}.",
+    "Replace a persona's name, secret set, git identity and whole file set; its harness is fixed at create and a file left out is deleted. Name an unchanged file as Stored by its digest and sizeBytes. Returns the Persona of PUT /v1/personas/{personaId}.",
   ),
   rest(
     "tumpel_persona_delete",

@@ -276,7 +276,14 @@ const unknownSecretSet = (operation: string, secretSetId: string): Response =>
     fix: "List the secret sets with GET /v1/secret-sets and name one of the ids it returns",
   });
 
-type PersonaBody = { name: string; harness: string; secretSetId: string; files: PersonaFileWrite[] };
+type PersonaBody = {
+  name: string;
+  harness: string;
+  secretSetId: string;
+  gitAuthorName: string;
+  gitAuthorEmail: string;
+  files: PersonaFileWrite[];
+};
 
 type PersonaWritten = { ok: true; value: PersonaWrite } | { ok: false; response: Response };
 
@@ -313,7 +320,17 @@ const personaWrite = async (
   const stored = await storeFiles(env.STORE, caller.tenantId, checked.files, operation);
   if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };
   const harness = PersonaSchema.shape.harness.parse(body.harness);
-  return { ok: true, value: { name: body.name, harness, secretSetId: body.secretSetId, files: stored.files } };
+  return {
+    ok: true,
+    value: {
+      name: body.name,
+      harness,
+      secretSetId: body.secretSetId,
+      gitAuthorName: body.gitAuthorName,
+      gitAuthorEmail: body.gitAuthorEmail,
+      files: stored.files,
+    },
+  };
 };
 
 const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {

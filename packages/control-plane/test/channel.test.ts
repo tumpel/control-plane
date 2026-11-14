@@ -86,6 +86,8 @@ const setup = (revoked = false) => {
       lastLineSeq: 0,
       snapshots: [],
       personaFiles: [],
+      gitAuthorName: "Tumpel Agent",
+      gitAuthorEmail: "agent@tumpel.invalid",
     };
   };
 
