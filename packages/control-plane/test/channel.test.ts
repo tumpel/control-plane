@@ -79,7 +79,7 @@ const setup = (revoked = false) => {
     return {
       kind: "Ready",
       credential: {
-        dispatchCredentialId: `grant-${minted}`,
+        credentialHandoverId: `grant-${minted}`,
         expiresAt: "2026-11-14T12:00:00+01:00",
         variables: [{ name: "API_KEY", value: `secret-${minted}` }],
       },
@@ -209,8 +209,8 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   const [again] = resent;
   assert.ok(offered?.type === "Frame" && offered.message.type === "TurnOffer");
   assert.ok(again?.type === "Frame" && again.message.type === "TurnOffer");
-  assert.equal(offered.message.credential.dispatchCredentialId, "grant-1");
-  assert.equal(again.message.credential.dispatchCredentialId, "grant-2");
+  assert.equal(offered.message.credential.credentialHandoverId, "grant-1");
+  assert.equal(again.message.credential.credentialHandoverId, "grant-2");
   assert.deepEqual({ ...again.message, credential: offered.message.credential }, offered.message);
 
   await second.deliver(frame(1, 0, snapshotDone("snap-1")));
