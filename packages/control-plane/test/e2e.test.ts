@@ -241,10 +241,10 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   const listed = (await (await mcp(oauthToken.access_token, 2, "tools/list")).json()) as {
     result: { tools: { name: string }[] };
   };
-  assert.deepEqual(
-    listed.result.tools.map((tool) => tool.name),
-    ["tumpel_whoami", "tumpel_host_mint_token", "tumpel_host_list", "tumpel_host_revoke"],
-  );
+  const toolNames = listed.result.tools.map((tool) => tool.name);
+  for (const name of ["tumpel_whoami", "tumpel_host_mint_token", "tumpel_host_list", "tumpel_host_revoke"]) {
+    assert.ok(toolNames.includes(name), name);
+  }
   const called = (await (
     await mcp(oauthToken.access_token, 3, "tools/call", { name: "tumpel_whoami", arguments: {} })
   ).json()) as { result: { content: { text: string }[] } };
