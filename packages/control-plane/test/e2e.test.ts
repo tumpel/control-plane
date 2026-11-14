@@ -243,7 +243,7 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   };
   assert.deepEqual(
     listed.result.tools.map((tool) => tool.name),
-    ["tumpel_whoami"],
+    ["tumpel_whoami", "tumpel_host_mint_token", "tumpel_host_list", "tumpel_host_revoke"],
   );
   const called = (await (
     await mcp(oauthToken.access_token, 3, "tools/call", { name: "tumpel_whoami", arguments: {} })

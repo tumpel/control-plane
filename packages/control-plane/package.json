@@ -7,7 +7,7 @@
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
-    "test": "node --test --test-timeout=60000 test/*.test.ts"
+    "test": "cargo build --quiet -p tumpel-supervisor && node --test --test-timeout=80000 test/*.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.0",

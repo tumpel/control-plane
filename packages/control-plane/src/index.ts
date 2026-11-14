@@ -4,7 +4,10 @@ import {
   DeviceDecisionSchema,
   DeviceTokenRequestSchema,
   DeviceTokenSchema,
+  EnrolmentTokenMintSchema,
   HealthSchema,
+  HostEnrolSchema,
+  HostPathSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
@@ -14,6 +17,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { accessVerifier, cachedAccessKeys, type Verification, type Verify } from "./access";
+import { CHANNEL_PATH } from "./channel/protocol.ts";
 import { randomToken, sameSecret } from "./crypto";
 import {
   approveDeviceCode,
@@ -31,6 +35,8 @@ import {
   revokeDevice,
   startDeviceCode,
 } from "./device";
+import type { HostChannel } from "./host-channel";
+import { enrolHost, hostNotFound, hostOf, listHosts, mintEnrolmentToken, type Refused, revokeHost } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
 import { bearerOf, type Caller, callerForDeviceToken, signUp, whoamiForEmail, whoamiOf } from "./identity";
 import { mcpEndpoint, mcpRefusal, type RunTool } from "./mcp";
@@ -73,11 +79,13 @@ import {
 } from "./pages";
 import type { Tenant } from "./tenant";
 
+export { HostChannel } from "./host-channel";
 export { Tenant } from "./tenant";
 
 export interface Env {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
+  HOST: DurableObjectNamespace<HostChannel>;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
 }
@@ -206,6 +214,50 @@ const handleDeviceRevoke = async (request: Request, url: URL, env: Env): Promise
     });
   }
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+};
+
+const refusal = (refused: Refused): Response => problem(refused.status, refused.problem);
+
+const handleMint = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, EnrolmentTokenMintSchema, "mint");
+  if (!body.ok) return body.response;
+  return json(await mintEnrolmentToken(env.DB, caller, body.value.expiresInSeconds, url.origin, Date.now()));
+};
+
+const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const body = await parseBody(request, HostEnrolSchema, "enrol");
+  if (!body.ok) return body.response;
+  const enrolled = await enrolHost(env, body.value, Date.now());
+  return enrolled.ok ? json(enrolled.value) : refusal(enrolled);
+};
+
+const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(await listHosts(env.DB, caller.tenantId));
+};
+
+const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke)?$/;
+
+const handleHost = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const channel = CHANNEL_PATH.exec(url.pathname);
+  if (request.method === "GET" && channel?.[1]) {
+    return env.HOST.get(env.HOST.idFromName(decodeURIComponent(channel[1]))).fetch(request);
+  }
+  const matched = HOST_PATH.exec(url.pathname);
+  const hostId = matched?.[1] === undefined ? "" : decodeURIComponent(matched[1]);
+  const revoking = matched?.[2] !== undefined;
+  if (hostId === "" || request.method !== (revoking ? "POST" : "GET")) return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  if (revoking) {
+    const revoked = await revokeHost(env, caller.tenantId, hostId, Date.now());
+    return revoked.ok ? json(revoked.value) : refusal(revoked);
+  }
+  const host = await hostOf(env.DB, caller.tenantId, hostId);
+  return host === null ? refusal(hostNotFound(hostId)) : json(host);
 };
 
 const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<Response> => {
@@ -366,14 +418,34 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
 };
 
 const runTool =
-  (env: Env, caller: Caller): RunTool =>
-  async () => ({ ok: true, text: JSON.stringify(await whoamiOf(env.DB, caller)) });
+  (env: Env, caller: Caller, origin: string): RunTool =>
+  async (call) => {
+    if (call.name === "tumpel_whoami") return { ok: true, text: JSON.stringify(await whoamiOf(env.DB, caller)) };
+    if (call.name === "tumpel_host_list") {
+      return { ok: true, text: JSON.stringify(await listHosts(env.DB, caller.tenantId)) };
+    }
+    if (call.name === "tumpel_host_mint_token") {
+      const args = EnrolmentTokenMintSchema.safeParse(call.arguments);
+      if (!args.success)
+        return { ok: false, error: `tumpel_host_mint_token refused its arguments: ${issues(args.error)}` };
+      const minted = await mintEnrolmentToken(env.DB, caller, args.data.expiresInSeconds, origin, Date.now());
+      return { ok: true, text: JSON.stringify(minted) };
+    }
+    if (call.name === "tumpel_host_revoke") {
+      const args = HostPathSchema.safeParse(call.arguments);
+      if (!args.success) return { ok: false, error: `tumpel_host_revoke refused its arguments: ${issues(args.error)}` };
+      const revoked = await revokeHost(env, caller.tenantId, args.data.hostId, Date.now());
+      if (!revoked.ok) return { ok: false, error: `${revoked.problem.detail}. ${revoked.problem.fix}` };
+      return { ok: true, text: JSON.stringify(revoked.value) };
+    }
+    return { ok: false, error: `no tool ${call.name}` };
+  };
 
 const handleMcp = async (request: Request, env: Env): Promise<Response> => {
   if (request.method === "OPTIONS") return preflight(request);
   const answered = await mcpEndpoint(request, async () => {
     const caller = await mcpCaller(request, env);
-    return caller instanceof Response ? caller : runTool(env, caller);
+    return caller instanceof Response ? caller : runTool(env, caller, new URL(request.url).origin);
   });
   return withHeaders(answered, corsHeaders(request));
 };
@@ -537,6 +609,9 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
   "GET /v1/personas": (request, _url, env) => handlePersonasList(request, env),
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
+  "POST /v1/enrolment-tokens": handleMint,
+  "POST /v1/hosts/enrol": handleEnrol,
+  "GET /v1/hosts": handleListHosts,
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`OPTIONS ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
@@ -579,6 +654,8 @@ export default {
     ) {
       return handlePersonaGet(request, url, env);
     }
+    const host = await handleHost(request, url, env);
+    if (host) return host;
     return problem(404, {
       code: "NotFound",
       title: "No such route",
