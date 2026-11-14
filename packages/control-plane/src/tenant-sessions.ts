@@ -375,12 +375,17 @@ export class TenantSessions extends DurableObject<Env> {
     hostDetail: string,
   ): string {
     const name = this.secretSetName(session);
-    const handover = this.ctx.storage.sql
+    const [handover] = this.ctx.storage.sql
       .exec<{ variable_names: string }>(
         "SELECT variable_names FROM credential_handovers WHERE turn_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
         turnId,
       )
-      .one();
+      .toArray();
+    if (handover === undefined) {
+      throw new Error(
+        `host ${session.host_id} reported a clone failure for turn ${turnId}, which no credential was handed over for`,
+      );
+    }
     const names = CredentialHandoverSchema.shape.variableNames.parse(JSON.parse(handover.variable_names));
     if (cause !== "Refused" || names.includes("GITHUB_TOKEN")) {
       return `${hostDetail}. The persona runs on secret set ${name}`;

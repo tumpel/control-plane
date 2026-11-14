@@ -363,8 +363,8 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     return problem(409, {
       code: "Conflict",
       title: "Persona in use",
-      detail: `persona ${personaId} is the persona of session ${deleted.sessions.join(", ")}, which ${deleted.sessions.length === 1 ? "is" : "are"} not Archived`,
-      fix: "A persona stays while a session on it is not Archived; archive each session named with tumpel session archive, or keep the persona and point new work at another one",
+      detail: `persona ${personaId} is the persona of session ${deleted.sessions.join(", ")}`,
+      fix: "A persona that sessions ran on stays; point new work at another persona instead",
     });
   }
   if (request.method === "PUT") {

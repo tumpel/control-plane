@@ -284,7 +284,7 @@ export class Tenant extends TenantSessions {
     const sql = this.ctx.storage.sql;
     const sessions = sql
       .exec<{ session_id: string }>(
-        "SELECT session_id FROM sessions WHERE persona_id = ? AND state != 'Archived' ORDER BY created_at, session_id",
+        "SELECT session_id FROM sessions WHERE persona_id = ? ORDER BY created_at, session_id",
         personaId,
       )
       .toArray()
