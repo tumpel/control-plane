@@ -115,6 +115,7 @@ export interface Env extends SignerEnv {
   TUMPEL_SETTINGS: unknown;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
+  SECRETS_KEK?: string;
 }
 
 const DEVICE_PAGE = "/device";
@@ -226,27 +227,49 @@ const secretSetNotFound = (secretSetId: string): Response =>
     fix: "List the secret sets with GET /v1/secret-sets and use one of the ids it returns",
   });
 
-const conflict = (operation: string, name: string, constraint: string): Response =>
-  constraint.startsWith("secret_values.")
-    ? problem(409, {
-        code: "Conflict",
-        title: "Repeated key",
-        detail: `${operation} names a key of secret set ${name} more than once`,
-        fix: "List each key of a secret set once",
-      })
-    : problem(409, {
-        code: "Conflict",
-        title: "Name taken",
-        detail: `${operation} refused the name ${name}: your tenant already has one by that name (${constraint})`,
-        fix: "Pick another name, or update the existing one",
-      });
+const conflict = (operation: string, name: string, constraint: string): Response => {
+  if (constraint.startsWith("secret_values.")) {
+    return problem(409, {
+      code: "Conflict",
+      title: "Repeated member",
+      detail: `${operation} names a member of secret set ${name} more than once`,
+      fix: "List each member of a secret set once",
+    });
+  }
+  if (constraint.startsWith("secret_credentials.")) {
+    return problem(409, {
+      code: "Conflict",
+      title: "Two credentials for one provider",
+      detail: `${operation} gives secret set ${name} more than one ApiKey or SubscriptionToken for the same provider`,
+      fix: "Keep one credential per provider in a secret set; put the other in a secret set of its own",
+    });
+  }
+  return problem(409, {
+    code: "Conflict",
+    title: "Name taken",
+    detail: `${operation} refused the name ${name}: your tenant already has one by that name (${constraint})`,
+    fix: "Pick another name, or update the existing one",
+  });
+};
+
+const unknownSecretSet = (operation: string, secretSetId: string): Response =>
+  problem(422, {
+    code: "NotFound",
+    title: "No such secret set",
+    detail: `${operation} names secret set ${secretSetId}, which your tenant does not own`,
+    fix: "List the secret sets with GET /v1/secret-sets and name one of the ids it returns",
+  });
 
 const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, PersonaCreateSchema, "personas.create");
   if (!body.ok) return body.response;
-  const created = await env.TENANT.getByName(caller.tenantId).createPersona(caller.tenantId, body.value, Date.now());
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  if (!(await tenant.hasSecretSet(body.value.secretSetId))) {
+    return unknownSecretSet("personas.create", body.value.secretSetId);
+  }
+  const created = await tenant.createPersona(caller.tenantId, body.value, Date.now());
   if (!created.ok) return conflict("personas.create", body.value.name, created.constraint);
   return json(PersonaSchema.parse(created.value));
 };
@@ -269,6 +292,9 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "PUT") {
     const body = await parseBody(request, PersonaUpdateSchema, "personas.update");
     if (!body.ok) return body.response;
+    if (!(await tenant.hasSecretSet(body.value.secretSetId))) {
+      return unknownSecretSet("personas.update", body.value.secretSetId);
+    }
     const updated = await tenant.updatePersona(caller.tenantId, personaId, body.value, Date.now());
     if (!updated.ok) return conflict("personas.update", body.value.name, updated.constraint);
     return updated.value === null ? personaNotFound(personaId) : json(PersonaSchema.parse(updated.value));
@@ -307,7 +333,15 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
   const { secretSetId } = path.data;
   const tenant = env.TENANT.getByName(caller.tenantId);
   if (request.method === "DELETE") {
-    return (await tenant.deleteSecretSet(secretSetId)) ? noContent() : secretSetNotFound(secretSetId);
+    const deleted = await tenant.deleteSecretSet(secretSetId);
+    if (deleted.kind === "Deleted") return noContent();
+    if (deleted.kind === "NotFound") return secretSetNotFound(secretSetId);
+    return problem(409, {
+      code: "Conflict",
+      title: "Secret set in use",
+      detail: `secret set ${secretSetId} is the secret set of persona ${deleted.personas.join(", ")}`,
+      fix: "Point each of those personas at another secret set, or delete them, then delete the secret set",
+    });
   }
   if (request.method === "PUT") {
     const body = await parseBody(request, SecretSetUpdateSchema, "secretSets.update");

@@ -23,6 +23,7 @@ const AUDIENCE = "tumpel-config-e2e";
 const KID = "config-e2e-key";
 const EMAIL = "config@example.test";
 const SECRET = "sk-ant-e2e-never-printed";
+const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const TUMPEL = join(ROOT, "target", "debug", "tumpel");
 const FIXTURE = fileURLToPath(new URL("fixtures/tenant-config.json", import.meta.url));
@@ -113,7 +114,7 @@ before(async () => {
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
-    workers: [{ configPath: "./wrangler.jsonc", vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE } }],
+    workers: [{ configPath: "./wrangler.jsonc", vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, SECRETS_KEK } }],
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
@@ -162,9 +163,10 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
       .split("\n")
       .map((line) => line.split(" ").slice(0, 3).join(" ")),
     [
+      "create secret set",
       "create persona Reviewer",
       "delete persona Default",
-      "create secret set",
+      "delete secret set",
       "create pin ClaudeCode",
       `update host ${hostId}`,
     ],
@@ -188,8 +190,8 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   );
   const sets = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.deepEqual(
-    sets.map((set) => [set.name, set.keys.map((key) => [key.name, key.provider])]),
-    [["prod", [["ANTHROPIC_API_KEY", "Anthropic"]]]],
+    sets.map((set) => [set.name, set.keys.map((key) => [key.kind, key.name])]),
+    [["prod", [["ApiKey", "ANTHROPIC_API_KEY"]]]],
   );
   assert.ok(!JSON.stringify(sets).includes(SECRET));
   const pins = HarnessPinSchema.array().parse(await getJson("/v1/harnesses/pins"));
@@ -219,21 +221,33 @@ test("tumpel config validate names every key that breaks the schema, a pasted se
   assert.ok(!validated.stderr.includes(SECRET));
 });
 
-test("a name the tenant already uses and a repeated key are refused with 409 Conflict", async () => {
-  const persona = { name: "Twin", instructions: "", settings: "{}", mcpServers: [] };
-  assert.equal((await postJson("/v1/personas", persona, bearer)).status, 200);
-  const twin = await postJson("/v1/personas", persona, bearer);
-  assert.equal(twin.status, 409);
-  assert.equal(ProblemSchema.parse(await twin.json()).code, "Conflict");
-
-  const key = { name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET };
-  assert.equal((await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer)).status, 200);
+test("a taken name, a repeated member, two credentials for one provider and deleting a set in use are refused with 409 Conflict", async () => {
+  const key = { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET };
+  const created = await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer);
+  assert.equal(created.status, 200);
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
   const taken = await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer);
   assert.equal(taken.status, 409);
   assert.equal(ProblemSchema.parse(await taken.json()).code, "Conflict");
   const repeated = await postJson("/v1/secret-sets", { name: "repeated", secrets: [key, key] }, bearer);
   assert.equal(repeated.status, 409);
-  assert.equal(ProblemSchema.parse(await repeated.json()).title, "Repeated key");
+  assert.equal(ProblemSchema.parse(await repeated.json()).title, "Repeated member");
+  const token = { ...key, kind: "SubscriptionToken", name: "CLAUDE_TOKEN", expiresAt: "2026-12-01T00:00:00+01:00" };
+  const doubled = await postJson("/v1/secret-sets", { name: "doubled", secrets: [key, token] }, bearer);
+  assert.equal(doubled.status, 409);
+  assert.equal(ProblemSchema.parse(await doubled.json()).title, "Two credentials for one provider");
   const sets = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
-  assert.ok(!sets.some((set) => set.name === "repeated"));
+  assert.ok(!sets.some((set) => set.name === "repeated" || set.name === "doubled"));
+
+  const persona = { name: "Twin", secretSetId, instructions: "", settings: "{}", mcpServers: [] };
+  assert.equal((await postJson("/v1/personas", persona, bearer)).status, 200);
+  const twin = await postJson("/v1/personas", persona, bearer);
+  assert.equal(twin.status, 409);
+  assert.equal(ProblemSchema.parse(await twin.json()).code, "Conflict");
+  const unknown = await postJson("/v1/personas", { ...persona, name: "Lost", secretSetId: "no-such-set" }, bearer);
+  assert.equal(unknown.status, 422);
+
+  const inUse = await server.fetch(`${origin}/v1/secret-sets/${secretSetId}`, { method: "DELETE", headers: bearer });
+  assert.equal(inUse.status, 409);
+  assert.match(ProblemSchema.parse(await inUse.json()).detail, /Twin/);
 });

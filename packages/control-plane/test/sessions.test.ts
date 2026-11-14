@@ -296,16 +296,29 @@ const readAll = async (sessionId: string, turnId: string, limit: number) => {
   }
 };
 
-const sessionStart = async () => {
-  const [persona] = await getJson("/v1/personas", PersonaSchema.array());
-  const [secretSet] = await getJson("/v1/secret-sets", SecretSetSchema.array());
+const sessionStart = async (name = "Default") => {
+  const personas = await getJson("/v1/personas", PersonaSchema.array());
   return {
     repository: "https://git.example.test/app.git",
     harness: "ClaudeCode",
     model: "claude-sonnet-test",
-    personaId: persona?.personaId,
-    secretSetId: secretSet?.secretSetId,
+    personaId: personas.find((persona) => persona.name === name)?.personaId,
   };
+};
+
+const createPersona = async (name: string, secrets: unknown[]): Promise<void> => {
+  const created = await postJson("/v1/secret-sets", { name: `${name} secrets`, secrets }, bearer);
+  assert.equal(created.status, 200);
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const persona = { name, secretSetId, instructions: "", settings: "{}", mcpServers: [] };
+  const personas = await getJson("/v1/personas", PersonaSchema.array());
+  const existing = personas.find((candidate) => candidate.name === name);
+  const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
+    method: existing ? "PUT" : "POST",
+    headers: { "content-type": "application/json", ...bearer },
+    body: JSON.stringify(persona),
+  });
+  assert.equal(written.status, 200);
 };
 
 before(async () => {
@@ -322,7 +335,13 @@ before(async () => {
     workers: [
       {
         configPath: "./wrangler.jsonc",
-        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, TUMPEL_SETTINGS: SETTINGS, R2_STUB_ORIGIN },
+        vars: {
+          ACCESS_ISSUER: issuer,
+          ACCESS_AUD: AUDIENCE,
+          TUMPEL_SETTINGS: SETTINGS,
+          R2_STUB_ORIGIN,
+          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+        },
       },
     ],
   });
@@ -332,12 +351,10 @@ before(async () => {
   assert.equal((await postJson("/v1/tenants", { name: "Sessions" }, browser())).status, 200);
   bearer = { authorization: `Bearer ${await deviceToken()}` };
   mcpToken = await connectorToken();
-  const created = await postJson(
-    "/v1/secret-sets",
-    { name: "prod", secrets: [{ name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: PROVIDER_KEY }] },
-    bearer,
-  );
-  assert.equal(created.status, 200);
+  await createPersona("Default", [
+    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
+  ]);
 
   const enrolled = await enrol();
   hostId = enrolled.id;
@@ -369,7 +386,10 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(offer.turnId, started.turn.turnId);
   assert.equal(offer.sessionId, started.session.sessionId);
   assert.equal(offer.prompt, "fix the build");
-  assert.deepEqual(offer.credential.variables, [{ name: "ANTHROPIC_API_KEY", value: PROVIDER_KEY }]);
+  assert.deepEqual(offer.credential.variables, [
+    { name: "ANTHROPIC_API_KEY", value: PROVIDER_KEY },
+    { name: "GITHUB_TOKEN", value: "ghp-e2e" },
+  ]);
   assert.ok(Date.parse(offer.credential.expiresAt) > Date.now());
   assert.equal(offer.lastLineSeq, 0);
   assert.deepEqual(offer.snapshots, []);
@@ -468,6 +488,33 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NotClaimed");
   assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
+});
+
+test("a turn whose subscription token has expired fails CredentialExpired when it is offered, and its key never reaches the host", async () => {
+  await createPersona("Expired", [
+    {
+      kind: "SubscriptionToken",
+      name: "CLAUDE_SUBSCRIPTION",
+      provider: "Anthropic",
+      expiresAt: "2026-01-01T00:00:00+01:00",
+      value: "expired-oauth-token",
+    },
+  ]);
+  const response = await postJson("/v1/sessions", { ...(await sessionStart("Expired")), prompt: "too late" }, bearer);
+  assert.equal(response.status, 200);
+  const started = StartedSessionSchema.parse(await response.json());
+  const withdrawn = await host.next("TurnWithdrawn");
+  assert.equal(withdrawn.turnId, started.turn.turnId);
+  const failure = await eventually(
+    "the turn's failure",
+    async () => {
+      const read = await server.fetch(`${origin}/v1/turns/${started.turn.turnId}/failure`, { headers: bearer });
+      return read.status === 200 ? TurnFailureSchema.parse(await read.json()) : null;
+    },
+    (read) => read !== null,
+  );
+  assert.equal(failure?.reason, "CredentialExpired");
+  assert.match(failure?.detail ?? "", /CLAUDE_SUBSCRIPTION/);
 });
 
 test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {
