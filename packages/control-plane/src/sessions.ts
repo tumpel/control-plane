@@ -164,7 +164,7 @@ export const sendTurn = async (
       code: "TurnInFlight",
       title: "A turn is running",
       detail: `session ${sessionId} is still running turn ${sent.turnId}`,
-      fix: `Wait for turn ${sent.turnId} to finish (tumpel transcript ${sent.turnId} --follow), then send again`,
+      fix: `Wait for turn ${sent.turnId} to finish (tumpel transcript read ${sent.turnId} --follow), then send again`,
     });
   }
   return refuse(422, {

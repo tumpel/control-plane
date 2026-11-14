@@ -30,7 +30,11 @@ export type HostMessage = HostFrame["message"];
 export type ControlMessage = ControlFrame["message"];
 export type TurnOffer = Extract<ControlMessage, { type: "TurnOffer" }>;
 export type DispatchGrant = TurnOffer["credential"];
-export type StoredControlMessage = Exclude<ControlMessage, { type: "TurnOffer" }> | Omit<TurnOffer, "credential">;
+export type SnapshotDownload = TurnOffer["snapshots"][number];
+export type OfferParts = Pick<TurnOffer, "credential" | "lastLineSeq" | "snapshots">;
+export type StoredOffer = Omit<TurnOffer, keyof OfferParts>;
+export type StoredControlMessage = Exclude<ControlMessage, { type: "TurnOffer" | "TurnWithdrawn" }> | StoredOffer;
+export type PreparedOffer = ({ kind: "Ready" } & OfferParts) | { kind: "Withdrawn" };
 
 export interface Port<Out> {
   send(envelope: Out): void;

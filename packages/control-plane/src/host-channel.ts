@@ -247,9 +247,9 @@ export class HostChannel extends DurableObject<Env> {
       port: this.port(socket, attachment),
       host: { hostId: host.host_id, publicKey: host.public_key, revoked: host.revoked === 1 },
       ledger: this.ledger(),
-      mintGrant: async (offer) => {
+      prepareOffer: async (offer) => {
         const tenantId = await this.tenantOf(host.host_id);
-        return this.env.TENANT.getByName(tenantId).mintGrant(tenantId, offer.turnId, host.host_id, Date.now());
+        return this.env.TENANT.getByName(tenantId).prepareOffer(tenantId, offer.turnId, host.host_id, Date.now());
       },
       now: () => new Date(),
     };
@@ -270,10 +270,14 @@ export class HostChannel extends DurableObject<Env> {
   private async presence(state: Presence): Promise<void> {
     const host = this.host();
     if (host === null) throw new Error("presence changed on a host object that was never registered");
-    await this.env.DB.prepare(
+    const now = Date.now();
+    const changed = await this.env.DB.prepare(
       "UPDATE hosts SET state = ?, updated_at = ? WHERE host_id = ? AND state NOT IN ('Revoked', ?)",
     )
-      .bind(state, Date.now(), host.host_id, state)
+      .bind(state, now, host.host_id, state)
       .run();
+    if (changed.meta.changes === 0) return;
+    const tenantId = await this.tenantOf(host.host_id);
+    await this.env.TENANT.getByName(tenantId).hostPresence(tenantId, host.host_id, state, now);
   }
 }
