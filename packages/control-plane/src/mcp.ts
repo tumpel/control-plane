@@ -213,7 +213,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona no session ran on; one that sessions ran on is refused. Calls DELETE /v1/personas/{personaId}.",
+    "Delete a persona whose sessions are all Archived; one with a session not Archived is refused. Calls DELETE /v1/personas/{personaId}.",
   ),
   {
     name: "tumpel_secret_set_create",
