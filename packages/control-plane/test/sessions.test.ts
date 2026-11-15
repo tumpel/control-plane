@@ -715,16 +715,20 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   );
 });
 
-test("a setup box token writes its own setup's member once, only while the setup is Minting", async () => {
-  const created = await postJson(
-    "/v1/secret-sets",
-    { name: "Claude setup secrets", secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" }] },
-    bearer,
-  );
-  assert.equal(created.status, 200, await created.clone().text());
-  const { secretSetId } = SecretSetSchema.parse(await created.json());
-  const startSetup = async () => {
-    const response = await postJson("/v1/claude-setups", { secretSetId }, bearer);
+test("a setup box token writes its own setup's member once, only while the setup is Minting, and a second start on a set supersedes its running setup", async () => {
+  const createSet = async (name: string) => {
+    const created = await postJson(
+      "/v1/secret-sets",
+      { name, secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" }] },
+      bearer,
+    );
+    assert.equal(created.status, 200, await created.clone().text());
+    return SecretSetSchema.parse(await created.json()).secretSetId;
+  };
+  const secretSetId = await createSet("Claude setup secrets");
+  const otherSetId = await createSet("Other Claude setup secrets");
+  const startSetup = async (setId = secretSetId) => {
+    const response = await postJson("/v1/claude-setups", { secretSetId: setId }, bearer);
     assert.equal(response.status, 200, await response.clone().text());
     const setup = ClaudeSetupSchema.parse(await response.json());
     const offer = await host.next("ClaudeSetupBoxOffer");
@@ -732,7 +736,7 @@ test("a setup box token writes its own setup's member once, only while the setup
     return offer;
   };
   const first = await startSetup();
-  const second = await startSetup();
+  const second = await startSetup(otherSetId);
   const token = "setup-e2e-subscription-token";
   const write = (claudeSetupId: string, credential: string, tenantId = first.tenantId) =>
     postJson(
@@ -794,9 +798,20 @@ test("a setup box token writes its own setup's member once, only while the setup
       { kind: "Variable", name: "GITHUB_TOKEN" },
     ],
   );
+
+  const third = await startSetup(otherSetId);
+  const superseded = await status(second.claudeSetupId);
+  assert.ok(superseded.status.state === "Failed" && superseded.status.reason === "Superseded");
+  assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, second.claudeSetupId);
+  assert.deepEqual(
+    (await getJson(`/v1/claude-setups?secretSetId=${otherSetId}`, ClaudeSetupSchema.array())).map(
+      (setup) => setup.claudeSetupId,
+    ),
+    [third.claudeSetupId],
+  );
   host.send({
     type: "ClaudeSetupBoxFailed",
-    claudeSetupId: second.claudeSetupId,
+    claudeSetupId: third.claudeSetupId,
     reason: "SetupUrlMissing",
     detail: "the e2e leaves this setup",
     failedAt: new Date().toISOString(),
@@ -804,11 +819,7 @@ test("a setup box token writes its own setup's member once, only while the setup
 });
 
 test("a Minting setup lists as the one to resume, and read past its mint budget reads and lists Failed SetupTimedOut and discards its box even when its alarm never fired", async () => {
-  const created = await postJson(
-    "/v1/secret-sets",
-    { name: "Overdue setup secrets", secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" }] },
-    bearer,
-  );
+  const created = await postJson("/v1/secret-sets", { name: "Overdue setup secrets", secrets: [] }, bearer);
   assert.equal(created.status, 200, await created.clone().text());
   const { secretSetId } = SecretSetSchema.parse(await created.json());
   const started = await postJson("/v1/claude-setups", { secretSetId }, bearer);

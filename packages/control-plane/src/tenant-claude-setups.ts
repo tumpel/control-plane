@@ -139,6 +139,15 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const settings = settingsOf(this.env);
     const claudeSetupId = crypto.randomUUID();
     const dueAt = now + settings.claudeSetupUrlBudgetSeconds * 1000;
+    const running = this.runningClaudeSetupRow(input.secretSetId);
+    const superseded =
+      running !== null &&
+      this.markClaudeSetupFailed(
+        running,
+        "Superseded",
+        `Claude setup ${claudeSetupId} of secret set ${input.secretSetId} started, and a secret set runs one setup at a time; follow Claude setup ${claudeSetupId}`,
+        now,
+      );
     sql.exec(
       `INSERT INTO claude_setups (claude_setup_id, principal_id, secret_set_id, host_id, box_id, harness_version, endpoint, state, phase_due_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'Starting', ?, ?, ?)`,
@@ -155,6 +164,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     );
     const row = this.claudeSetupRow(claudeSetupId);
     if (row === null) throw new Error(`Claude setup ${claudeSetupId} was created and then not found`);
+    if (running !== null && superseded) await this.endFailedClaudeSetup(tenantId, running, true);
     await this.claudeSetupTimer(tenantId, claudeSetupId, dueAt);
     const offer: StoredClaudeSetupOffer = { type: "ClaudeSetupBoxOffer", claudeSetupId, boxId: row.box_id };
     await this.host(row.host_id).send(offer);
@@ -166,19 +176,22 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return row === null ? null : toClaudeSetup(tenantId, row);
   }
 
-  async listClaudeSetups(tenantId: string, secretSetId: string, now: number): Promise<ClaudeSetup[]> {
-    const ids = this.ctx.storage.sql
-      .exec<{ claude_setup_id: string }>(
-        "SELECT claude_setup_id FROM claude_setups WHERE secret_set_id = ? ORDER BY created_at DESC, claude_setup_id",
+  private runningClaudeSetupRow(secretSetId: string): ClaudeSetupRow | null {
+    const [row] = this.ctx.storage.sql
+      .exec<ClaudeSetupRow>(
+        `${CLAUDE_SETUP_SELECT} WHERE secret_set_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
         secretSetId,
       )
       .toArray();
-    const setups: ClaudeSetup[] = [];
-    for (const { claude_setup_id: claudeSetupId } of ids) {
-      const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
-      if (row !== null) setups.push(toClaudeSetup(tenantId, row));
-    }
-    return setups;
+    return row ?? null;
+  }
+
+  async listClaudeSetups(tenantId: string, secretSetId: string, now: number): Promise<ClaudeSetup[]> {
+    const running = this.runningClaudeSetupRow(secretSetId);
+    if (running === null) return [];
+    if (!overdue(running, now)) return [toClaudeSetup(tenantId, running)];
+    await this.stepClaudeSetup(tenantId, running, { kind: "Deadline" }, now);
+    return [];
   }
 
   async submitClaudeSetupCode(
@@ -304,16 +317,30 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     now: number,
     discard: boolean,
   ): Promise<void> {
-    const moved = this.ctx.storage.sql.exec(
-      `UPDATE claude_setups SET state = 'Failed', reason = ?, detail = ?, sealed_code = NULL, ended_at = ?, updated_at = ?
-      WHERE claude_setup_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
-      reason,
-      detail,
-      now,
-      now,
-      row.claude_setup_id,
-    ).rowsWritten;
-    if (moved === 0) return;
+    if (!this.markClaudeSetupFailed(row, reason, detail, now)) return;
+    await this.endFailedClaudeSetup(tenantId, row, discard);
+  }
+
+  private markClaudeSetupFailed(
+    row: ClaudeSetupRow,
+    reason: ClaudeSetupFailureReason,
+    detail: string,
+    now: number,
+  ): boolean {
+    return (
+      this.ctx.storage.sql.exec(
+        `UPDATE claude_setups SET state = 'Failed', reason = ?, detail = ?, sealed_code = NULL, ended_at = ?, updated_at = ?
+        WHERE claude_setup_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
+        reason,
+        detail,
+        now,
+        now,
+        row.claude_setup_id,
+      ).rowsWritten > 0
+    );
+  }
+
+  private async endFailedClaudeSetup(tenantId: string, row: ClaudeSetupRow, discard: boolean): Promise<void> {
     await this.claudeSetupTimer(tenantId, row.claude_setup_id, null);
     if (!discard) return;
     await this.host(row.host_id).send({
