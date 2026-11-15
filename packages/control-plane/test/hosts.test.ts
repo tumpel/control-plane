@@ -25,6 +25,7 @@ const KID = "hosts-e2e-key";
 const EMAIL = "hosts@example.test";
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
+const TUMPEL = join(ROOT, "target", "debug", "tumpel");
 
 type WorkerConfig = Extract<
   Extract<Parameters<typeof createTestHarness>[0], object>["workers"][number],
@@ -44,6 +45,7 @@ let origin: string;
 let issuer: string;
 let scratch: string;
 let bearer: Record<string, string>;
+let accessToken: string;
 const children: ChildProcess[] = [];
 
 const assertion = (): string => {
@@ -110,7 +112,7 @@ const mint = async (): Promise<string> => {
   const minted = MintedEnrolmentTokenSchema.parse(await response.json());
   assert.equal(
     minted.installCommand,
-    `curl -fL ${origin}/v1/releases/supervisor/Amd64 -o tumpel-supervisor && chmod +x tumpel-supervisor && printf '%s' '${minted.token}' | ./tumpel-supervisor install --endpoint ${origin} --token-file -`,
+    `curl -fL ${origin}/v1/releases/supervisor/Amd64 -o tumpel-supervisor && chmod +x tumpel-supervisor && ./tumpel-supervisor install --endpoint ${origin} --token-file -`,
   );
   return minted.token;
 };
@@ -169,7 +171,8 @@ before(async () => {
     device_code: started.device_code,
   });
   assert.equal(granted.status, 200);
-  bearer = { authorization: `Bearer ${DeviceTokenSchema.parse(await granted.json()).access_token}` };
+  accessToken = DeviceTokenSchema.parse(await granted.json()).access_token;
+  bearer = { authorization: `Bearer ${accessToken}` };
 });
 
 after(async () => {
@@ -302,4 +305,26 @@ test("an unknown enrolment token is refused", async () => {
   });
   assert.equal(response.status, 404);
   assert.equal(ProblemSchema.parse(await response.json()).code, "NotFound");
+});
+
+test("tumpel host mint-token prints the token to stdout only, and its install hint reads the token from stdin", async () => {
+  const envFile = join(scratch, "cli.env");
+  writeFileSync(envFile, `TUMPEL_ENDPOINT=${origin}\nTUMPEL_TOKEN=${accessToken}\n`, { mode: 0o600 });
+  const child = spawn(TUMPEL, ["host", "mint-token", "--expires-in", "600"], {
+    env: { PATH: process.env.PATH ?? "", HOME: scratch, TUMPEL_ENV_FILE: envFile },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  const token = stdout.trim();
+  assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(stderr.includes(token), false, "stderr carries the enrolment token");
+  assert.match(stderr, /\.\/tumpel-supervisor install --endpoint \S+ --token-file -/);
 });

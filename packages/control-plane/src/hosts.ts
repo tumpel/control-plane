@@ -82,7 +82,7 @@ export const mintEnrolmentToken = async (
     installCommand: [
       `curl -fL ${origin}/v1/releases/supervisor/Amd64 -o tumpel-supervisor`,
       "chmod +x tumpel-supervisor",
-      `printf '%s' '${token}' | ./tumpel-supervisor install --endpoint ${origin} --token-file -`,
+      `./tumpel-supervisor install --endpoint ${origin} --token-file -`,
     ].join(" && "),
   });
 };
