@@ -1,13 +1,16 @@
-import { WhoamiSchema } from "@tumpel/api/schemas";
+import { MembershipSchema, type PrincipalRoleSchema, WhoamiSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
 import type { GitIdentity } from "./tenant";
 
 export type Whoami = z.infer<typeof WhoamiSchema>;
+export type Membership = z.infer<typeof MembershipSchema>;
+export type Role = z.infer<typeof PrincipalRoleSchema>;
 
 export interface Caller {
   tenantId: string;
   principalId: string;
+  role: Role;
 }
 
 const LAST_USED_RESOLUTION_MS = 3_600_000;
@@ -22,11 +25,13 @@ interface WhoamiRow {
   role: string;
   principal_created_at: number;
   principal_updated_at: number;
+  joined_at: number;
 }
 
 const WHOAMI_SELECT = `SELECT t.tenant_id, t.name, t.created_at AS tenant_created_at, t.updated_at AS tenant_updated_at,
-    p.principal_id, p.email, p.role, p.created_at AS principal_created_at, p.updated_at AS principal_updated_at
-  FROM principals p JOIN tenants t ON t.tenant_id = p.tenant_id`;
+    p.principal_id, p.email, m.role, p.created_at AS principal_created_at, p.updated_at AS principal_updated_at,
+    m.created_at AS joined_at
+  FROM memberships m JOIN principals p ON p.principal_id = m.principal_id JOIN tenants t ON t.tenant_id = m.tenant_id`;
 
 const toWhoami = (row: WhoamiRow): Whoami =>
   WhoamiSchema.parse({
@@ -46,53 +51,80 @@ const toWhoami = (row: WhoamiRow): Whoami =>
     },
   });
 
+export const callerOf = (whoami: Whoami): Caller => ({
+  tenantId: whoami.tenant.tenantId,
+  principalId: whoami.principal.principalId,
+  role: whoami.principal.role,
+});
+
 export const whoamiOf = async (db: D1Database, caller: Caller): Promise<Whoami> => {
   const row = await db
-    .prepare(`${WHOAMI_SELECT} WHERE p.principal_id = ? AND p.tenant_id = ?`)
+    .prepare(`${WHOAMI_SELECT} WHERE m.principal_id = ? AND m.tenant_id = ?`)
     .bind(caller.principalId, caller.tenantId)
     .first<WhoamiRow>();
-  if (row === null) throw new Error(`principal ${caller.principalId} of tenant ${caller.tenantId} has no row`);
+  if (row === null) throw new Error(`principal ${caller.principalId} is no member of tenant ${caller.tenantId}`);
   return toWhoami(row);
 };
 
-export const whoamiForEmail = async (db: D1Database, email: string): Promise<Whoami | null> => {
-  const row = await db.prepare(`${WHOAMI_SELECT} WHERE p.email = ?`).bind(email).first<WhoamiRow>();
-  return row === null ? null : toWhoami(row);
+export const membershipsOfEmail = async (db: D1Database, email: string): Promise<Whoami[]> => {
+  const rows = await db
+    .prepare(`${WHOAMI_SELECT} WHERE p.email = ? ORDER BY m.created_at, m.tenant_id`)
+    .bind(email)
+    .all<WhoamiRow>();
+  return rows.results.map(toWhoami);
+};
+
+export const listTenants = async (db: D1Database, caller: Caller): Promise<Membership[]> => {
+  const rows = await db
+    .prepare(`${WHOAMI_SELECT} WHERE m.principal_id = ? ORDER BY m.created_at, m.tenant_id`)
+    .bind(caller.principalId)
+    .all<WhoamiRow>();
+  return rows.results.map((row) =>
+    MembershipSchema.parse({ tenant: toWhoami(row).tenant, role: row.role, createdAt: row.joined_at }),
+  );
 };
 
 export const signUp = async (db: D1Database, email: string, name: string, now: number): Promise<Whoami> => {
   const tenantId = crypto.randomUUID();
+  const memberOfNone = `NOT EXISTS (SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
+    WHERE p.email = ?)`;
   await db.batch([
     db
       .prepare(
-        `INSERT INTO tenants (tenant_id, name, created_at, updated_at)
-        SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM principals WHERE email = ?)`,
+        "INSERT INTO principals (principal_id, email, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
       )
+      .bind(crypto.randomUUID(), email, now, now),
+    db
+      .prepare(`INSERT INTO tenants (tenant_id, name, created_at, updated_at) SELECT ?, ?, ?, ? WHERE ${memberOfNone}`)
       .bind(tenantId, name, now, now, email),
     db
       .prepare(
-        `INSERT INTO principals (principal_id, tenant_id, email, role, created_at, updated_at)
-        SELECT ?, ?, ?, 'Owner', ?, ? WHERE EXISTS (SELECT 1 FROM tenants WHERE tenant_id = ?)
-          AND NOT EXISTS (SELECT 1 FROM principals WHERE email = ?)`,
+        `INSERT INTO memberships (tenant_id, principal_id, role, created_at)
+        SELECT t.tenant_id, p.principal_id, 'Owner', ? FROM tenants t JOIN principals p ON p.email = ?
+        WHERE t.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.principal_id = p.principal_id)`,
       )
-      .bind(crypto.randomUUID(), tenantId, email, now, now, tenantId, email),
+      .bind(now, email, tenantId),
   ]);
-  const whoami = await whoamiForEmail(db, email);
-  if (whoami === null) throw new Error(`sign-up for ${email} wrote no principal`);
+  const [whoami] = await membershipsOfEmail(db, email);
+  if (whoami === undefined) throw new Error(`sign-up for ${email} wrote no membership`);
   return whoami;
 };
 
 export const callerForDeviceToken = async (db: D1Database, token: string, now: number): Promise<Caller | null> => {
   if (!TOKEN_PATTERN.test(token)) return null;
   const row = await db
-    .prepare("SELECT device_id, tenant_id, principal_id, last_used_at FROM devices WHERE token_sha256 = ?")
+    .prepare(
+      `SELECT d.device_id, d.tenant_id, d.principal_id, d.last_used_at, m.role FROM devices d
+      JOIN memberships m ON m.tenant_id = d.tenant_id AND m.principal_id = d.principal_id
+      WHERE d.token_sha256 = ?`,
+    )
     .bind(await sha256Hex(token))
-    .first<{ device_id: string; tenant_id: string; principal_id: string; last_used_at: number }>();
+    .first<{ device_id: string; tenant_id: string; principal_id: string; last_used_at: number; role: Role }>();
   if (row === null) return null;
   if (now - row.last_used_at >= LAST_USED_RESOLUTION_MS) {
     await db.prepare("UPDATE devices SET last_used_at = ? WHERE device_id = ?").bind(now, row.device_id).run();
   }
-  return { tenantId: row.tenant_id, principalId: row.principal_id };
+  return { tenantId: row.tenant_id, principalId: row.principal_id, role: row.role };
 };
 
 export const bearerOf = (request: Request): string => {
@@ -125,13 +157,23 @@ export const proofCaller = async (
       .bind(tenantId, PROOF_TENANT_NAME, now, now),
     db
       .prepare(
-        `INSERT INTO principals (principal_id, tenant_id, email, role, created_at, updated_at)
-        VALUES (?, ?, ?, 'Owner', ?, ?) ON CONFLICT DO NOTHING`,
+        "INSERT INTO principals (principal_id, email, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
       )
-      .bind(principalId, tenantId, email, now, now),
+      .bind(principalId, email, now, now),
+    db
+      .prepare(
+        `INSERT INTO memberships (tenant_id, principal_id, role, created_at) VALUES (?, ?, 'Owner', ?)
+        ON CONFLICT DO NOTHING`,
+      )
+      .bind(tenantId, principalId, now),
   ]);
+  const membership = await db
+    .prepare("SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?")
+    .bind(tenantId, principalId)
+    .first<{ role: Role }>();
+  if (membership === null) throw new Error(`the proof principal ${principalId} has no membership of ${tenantId}`);
   return {
-    caller: { tenantId, principalId },
+    caller: { tenantId, principalId, role: membership.role },
     created: tenant?.results.length === 1,
     identity: { gitAuthorName: PROOF_TENANT_NAME, gitAuthorEmail: email },
   };

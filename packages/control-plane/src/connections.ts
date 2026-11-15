@@ -13,6 +13,7 @@ import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { issuerSubject } from "./issuer.ts";
+import { ownerRequired } from "./members";
 import type { BuildProvider, NamespaceRow } from "./tenant-prebuilds";
 
 export type ConnectionSummary =
@@ -26,6 +27,10 @@ const CONNECTIONS_PATH = "/v1/connections";
 const PATHS: Record<BuildProvider, string> = {
   GitHubActions: "/v1/github-actions-connection",
   Namespace: "/v1/namespace-connection",
+};
+const OPERATIONS: Record<BuildProvider, string> = {
+  GitHubActions: "gitHubActionsConnections",
+  Namespace: "namespaceConnections",
 };
 const BUILD_PROVIDERS: readonly BuildProvider[] = ["GitHubActions", "Namespace"];
 
@@ -142,6 +147,9 @@ export const handleConnections = async (
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (route === null) return json(await listConnections(env, caller));
+  const verb = route.action === "START" ? "start" : "delete";
+  const refused = route.action === "GET" ? null : ownerRequired(caller, `${OPERATIONS[route.provider]}.${verb}`);
+  if (refused) return refused;
   if (route.action === "START") return connect(request, env, caller, route.provider);
   if (route.action === "DELETE") {
     await tenantOf(env, caller).deleteBuildConnection(route.provider);

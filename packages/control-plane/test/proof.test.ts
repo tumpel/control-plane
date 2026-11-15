@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -45,6 +45,11 @@ const serviceTokenAssertion = (commonName: string): string => {
     exp: now + 600,
   });
   return `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url")}`;
+};
+
+const proofTenantId = (commonName: string): string => {
+  const hex = createHash("sha256").update(`tenant:${commonName}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 };
 
 const postJson = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -157,13 +162,24 @@ test("the proof's service token approves and denies device codes and is refused 
     DeviceAuthorizationSchema.parse(await (await postJson("/v1/device/code", { device_name: name })).json());
 
   const approvedCode = await start("proof approve");
-  const approved = await postJson("/v1/device/approve", { userCode: approvedCode.user_code }, proof);
+  const approved = await postJson(
+    "/v1/device/approve",
+    { userCode: approvedCode.user_code, tenantId: proofTenantId(PROOF_CLIENT_ID) },
+    proof,
+  );
   assert.equal(approved.status, 200);
   const device = DeviceSchema.parse(await approved.json());
+  assert.equal(device.tenantId, proofTenantId(PROOF_CLIENT_ID));
 
   const again = await start("proof approve again");
   const second = DeviceSchema.parse(
-    await (await postJson("/v1/device/approve", { userCode: again.user_code }, proof)).json(),
+    await (
+      await postJson(
+        "/v1/device/approve",
+        { userCode: again.user_code, tenantId: proofTenantId(PROOF_CLIENT_ID) },
+        proof,
+      )
+    ).json(),
   );
   assert.deepEqual([second.tenantId, second.principalId], [device.tenantId, device.principalId]);
 
@@ -172,7 +188,11 @@ test("the proof's service token approves and denies device codes and is refused 
 
   const stranger = await start("stranger");
   const other = { "cf-access-jwt-assertion": serviceTokenAssertion(OTHER_COMMON_NAME) };
-  const refusedOther = await postJson("/v1/device/approve", { userCode: stranger.user_code }, other);
+  const refusedOther = await postJson(
+    "/v1/device/approve",
+    { userCode: stranger.user_code, tenantId: proofTenantId(OTHER_COMMON_NAME) },
+    other,
+  );
   assert.equal(refusedOther.status, 403);
   assert.equal(ProblemSchema.parse(await refusedOther.json()).title, "Unknown service token");
 

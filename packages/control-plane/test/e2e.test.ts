@@ -143,10 +143,25 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
     device_code: intruder.device_code,
   });
   assert.equal(await oauthErrorOf(refusedIntruder), "invalid_grant");
-  const approveDenied = await postJson("/v1/device/approve", { userCode: intruder.user_code }, browser());
+  const approveDenied = await postJson(
+    "/v1/device/approve",
+    { userCode: intruder.user_code, tenantId: owner.tenant.tenantId },
+    browser(),
+  );
   assert.equal(approveDenied.status, 404);
 
-  const approved = await postJson("/v1/device/approve", { userCode: started.user_code }, browser());
+  const strangeTenant = await postJson(
+    "/v1/device/approve",
+    { userCode: started.user_code, tenantId: "someone-elses-tenant" },
+    browser(),
+  );
+  assert.equal(strangeTenant.status, 403);
+  assert.equal(ProblemSchema.parse(await strangeTenant.json()).title, "Not your tenant");
+  const approved = await postJson(
+    "/v1/device/approve",
+    { userCode: started.user_code, tenantId: owner.tenant.tenantId },
+    browser(),
+  );
   assert.equal(approved.status, 200);
   const device = DeviceSchema.parse(await approved.json());
   assert.equal(device.principalId, owner.principal.principalId);
@@ -218,7 +233,12 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
       "content-type": "application/x-www-form-urlencoded",
       cookie: `__Host-tumpel_connect=${csrf}`,
     },
-    body: new URLSearchParams({ request: requestId, csrf, action: "approve" }).toString(),
+    body: new URLSearchParams({
+      request: requestId,
+      csrf,
+      tenant: owner.tenant.tenantId,
+      action: "approve",
+    }).toString(),
   });
   assert.equal(consented.status, 303);
   const callback = new URL(consented.headers.get("location") ?? "");

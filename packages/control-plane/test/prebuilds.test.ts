@@ -15,6 +15,7 @@ import {
   PersonaSchema,
   PrebuildSchema,
   ProblemSchema,
+  WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
@@ -64,12 +65,15 @@ const refused = async (method: string, path: string, body: unknown, status: numb
   return ProblemSchema.parse(await response.json());
 };
 
-const deviceToken = async (): Promise<string> => {
+const deviceToken = async (tenantId: string): Promise<string> => {
   const started = DeviceAuthorizationSchema.parse(
     await (await send("POST", "/v1/device/code", { device_name: "prebuilds e2e" })).json(),
   );
   const browser = { "cf-access-jwt-assertion": assertion(), origin };
-  assert.equal((await send("POST", "/v1/device/approve", { userCode: started.user_code }, browser)).status, 200);
+  assert.equal(
+    (await send("POST", "/v1/device/approve", { userCode: started.user_code, tenantId }, browser)).status,
+    200,
+  );
   await new Promise((resolve) => setTimeout(resolve, started.interval * 1000 + 100));
   const granted = await send("POST", "/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -108,8 +112,10 @@ before(async () => {
   );
   const identity = { gitAuthorName: "Prebuilds", gitAuthorEmail: EMAIL };
   const browser = { "cf-access-jwt-assertion": assertion(), origin };
-  assert.equal((await send("POST", "/v1/tenants", { name: "Prebuilds", ...identity }, browser)).status, 200);
-  bearer = { authorization: `Bearer ${await deviceToken()}` };
+  const signedUp = await send("POST", "/v1/tenants", { name: "Prebuilds", ...identity }, browser);
+  assert.equal(signedUp.status, 200);
+  const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+  bearer = { authorization: `Bearer ${await deviceToken(tenantId)}` };
 });
 
 after(async () => {

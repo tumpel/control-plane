@@ -13,6 +13,8 @@ const DOC = join(ROOT, "doc/surface.md");
 const NOUNS = {
   Identity: "",
   Devices: "devices",
+  Members: "member",
+  Invitations: "invitation",
   EnrolmentTokens: "host",
   Hosts: "host",
   HarnessCatalog: "harness",
@@ -30,6 +32,7 @@ const NOUNS = {
   NamespaceConnections: "namespace",
 };
 const VERBS = {
+  Identity_listTenants: "tenants",
   EnrolmentTokens_mint: "mint-token",
   Turns_getFailure: "failure",
   Sessions_listCredentialHandovers: "handovers",

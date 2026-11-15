@@ -1,4 +1,5 @@
 import {
+  DeviceApprovalSchema,
   DeviceAuthorizationSchema,
   DeviceCodeRequestSchema,
   DeviceDecisionSchema,
@@ -70,7 +71,17 @@ import {
   setHostLabels,
 } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
-import { bearerOf, type Caller, callerForDeviceToken, proofCaller, signUp, whoamiForEmail, whoamiOf } from "./identity";
+import {
+  bearerOf,
+  type Caller,
+  callerForDeviceToken,
+  callerOf,
+  membershipsOfEmail,
+  proofCaller,
+  signUp,
+  type Whoami,
+  whoamiOf,
+} from "./identity";
 import {
   ISSUER_DOCUMENT_HEADERS,
   issuerOf,
@@ -79,6 +90,7 @@ import {
   openIdConfiguration,
 } from "./issuer.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
+import { handleMembers } from "./members";
 import {
   AUTHORIZATION_SERVER_PATH,
   AUTHORIZE_PATH,
@@ -118,6 +130,7 @@ import {
   messagePage,
   readCookie,
   signUpPage,
+  type TenantChoice,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildUploads } from "./prebuild-uploads.ts";
@@ -709,9 +722,7 @@ const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<
   );
 };
 
-type Decision =
-  | { ok: true; caller: Caller; userCode: string | null; typed: string }
-  | { ok: false; response: Response };
+type Decision<T> = { ok: true; body: T; memberships: Whoami[] } | { ok: false; response: Response };
 
 const notTheProofToken = (): Response =>
   problem(403, {
@@ -721,11 +732,11 @@ const notTheProofToken = (): Response =>
     fix: "Sign in to Access as a person, or sign the proof in with the tumpel-proof service token of this stage",
   });
 
-const decidingCaller = async (
+const signerMemberships = async (
   signed: Extract<Verification, { ok: true }>,
   url: URL,
   env: Env,
-): Promise<Caller | Response> => {
+): Promise<Whoami[] | Response> => {
   if (signed.kind === "ServiceToken") {
     const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
     if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheProofToken();
@@ -734,23 +745,44 @@ const decidingCaller = async (
     if (proof.created) {
       await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, proof.identity, now);
     }
-    return proof.caller;
+    return [await whoamiOf(env.DB, proof.caller)];
   }
-  const owner = await whoamiForEmail(env.DB, signed.email);
-  if (owner === null) return noTenant(url, signed.email);
-  return { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId };
+  const memberships = await membershipsOfEmail(env.DB, signed.email);
+  return memberships.length === 0 ? noTenant(url, signed.email) : memberships;
 };
 
-const readDecision = async (request: Request, url: URL, env: Env, operation: string): Promise<Decision> => {
+const choicesOf = (memberships: Whoami[]): TenantChoice[] =>
+  memberships.map((membership) => ({ tenantId: membership.tenant.tenantId, name: membership.tenant.name }));
+
+const chosenCaller = (memberships: Whoami[], tenantId: string): Caller | null => {
+  const chosen = memberships.find((membership) => membership.tenant.tenantId === tenantId);
+  return chosen === undefined ? null : callerOf(chosen);
+};
+
+const notYourTenant = (tenantId: string): Response =>
+  problem(403, {
+    code: "Forbidden",
+    title: "Not your tenant",
+    detail: `you are no member of tenant ${tenantId}`,
+    fix: "Choose one of the tenants the page lists",
+  });
+
+const readDecision = async <T>(
+  request: Request,
+  url: URL,
+  env: Env,
+  schema: z.ZodType<T>,
+  operation: string,
+): Promise<Decision<T>> => {
   const signed = await assertedSigner(request, env);
   if (!signed.ok) return { ok: false, response: browserSignedOut(url, signed.reason) };
   const refused = sameOriginJson(request, url);
   if (refused) return { ok: false, response: refused };
-  const body = await parseBody(request, DeviceDecisionSchema, operation);
+  const body = await parseBody(request, schema, operation);
   if (!body.ok) return body;
-  const caller = await decidingCaller(signed, url, env);
-  if (caller instanceof Response) return { ok: false, response: caller };
-  return { ok: true, caller, userCode: parseUserCode(body.value.userCode), typed: body.value.userCode };
+  const memberships = await signerMemberships(signed, url, env);
+  if (memberships instanceof Response) return { ok: false, response: memberships };
+  return { ok: true, body: body.value, memberships };
 };
 
 const codeNotFound = (typed: string): Response =>
@@ -762,17 +794,21 @@ const codeNotFound = (typed: string): Response =>
   });
 
 const handleDeviceApprove = async (request: Request, url: URL, env: Env): Promise<Response> => {
-  const decision = await readDecision(request, url, env, "approve");
+  const decision = await readDecision(request, url, env, DeviceApprovalSchema, "approve");
   if (!decision.ok) return decision.response;
-  const { caller, userCode, typed } = decision;
+  const { userCode: typed, tenantId } = decision.body;
+  const caller = chosenCaller(decision.memberships, tenantId);
+  if (caller === null) return notYourTenant(tenantId);
+  const userCode = parseUserCode(typed);
   const device = userCode === null ? null : await approveDeviceCode(env.DB, userCode, caller, Date.now());
   return device === null ? codeNotFound(typed) : json(device);
 };
 
 const handleDeviceDeny = async (request: Request, url: URL, env: Env): Promise<Response> => {
-  const decision = await readDecision(request, url, env, "deny");
+  const decision = await readDecision(request, url, env, DeviceDecisionSchema, "deny");
   if (!decision.ok) return decision.response;
-  const { userCode, typed } = decision;
+  const typed = decision.body.userCode;
+  const userCode = parseUserCode(typed);
   if (userCode === null || !(await denyDeviceCode(env.DB, userCode, Date.now()))) return codeNotFound(typed);
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
@@ -837,16 +873,16 @@ const handleDeviceToken = async (request: Request, env: Env): Promise<Response> 
 const handleDevicePage = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const signed = await assertedEmail(request, env);
   if (!signed.ok) return messagePage(401, "Sign in again", `${signed.reason}.`);
-  const owner = await whoamiForEmail(env.DB, signed.email);
-  if (owner === null) return signUpPage(signed.email);
+  const memberships = await membershipsOfEmail(env.DB, signed.email);
+  if (memberships.length === 0) return signUpPage(signed.email);
   const typed = url.searchParams.get("code") ?? "";
-  if (typed === "") return enterCodePage(signed.email, owner.tenant.name);
+  if (typed === "") return enterCodePage(signed.email);
   const userCode = parseUserCode(typed);
   const pending = userCode === null ? null : await pendingDeviceCode(env.DB, userCode, Date.now());
   if (pending === null) {
     return messagePage(404, "Code not found", "The code is wrong, expired or already decided. Run tumpel login again.");
   }
-  return confirmPage(signed.email, owner.tenant.name, formatUserCode(pending.userCode), pending.deviceName);
+  return confirmPage(signed.email, choicesOf(memberships), formatUserCode(pending.userCode), pending.deviceName);
 };
 
 const allowedOrigins = (env: Env): string[] => {
@@ -988,9 +1024,11 @@ const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
 const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const asserted = await assertedSigner(request, env);
   if (!asserted.ok) return messagePage(401, "Sign in again", `${asserted.reason}.`);
-  const caller = await decidingCaller(asserted, url, env);
-  if (caller instanceof Response) return caller;
-  const email = (await whoamiOf(env.DB, caller)).principal.email;
+  const memberships = await signerMemberships(asserted, url, env);
+  if (memberships instanceof Response) return memberships;
+  const [first, ...others] = memberships;
+  if (first === undefined) return noTenant(url, "this sign-in");
+  const email = first.principal.email;
   const expired = (): Response =>
     messagePage(
       404,
@@ -1000,11 +1038,18 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "GET") {
     const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
     if (asked === null) return expired();
-    if (asked.firstParty) {
-      const code = await grantCode(env.DB, asked, caller.principalId, Date.now());
+    if (asked.firstParty && others.length === 0) {
+      const code = await grantCode(env.DB, asked, callerOf(first), Date.now());
       return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
     }
-    return grantPage(email, asked.clientName, new URL(asked.redirectUri).origin, asked.requestId, randomToken());
+    return grantPage(
+      email,
+      choicesOf(memberships),
+      asked.clientName,
+      new URL(asked.redirectUri).origin,
+      asked.requestId,
+      randomToken(),
+    );
   }
   const form = new URLSearchParams(await request.text());
   const cookie = readCookie(request.headers.get("cookie"), CONSENT_CSRF_COOKIE);
@@ -1025,7 +1070,9 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
     );
   }
   if (action !== "approve") return messagePage(400, "Bad request", "Choose Connect or Cancel.");
-  const code = await grantCode(env.DB, asked, caller.principalId, Date.now());
+  const caller = chosenCaller(memberships, form.get("tenant") ?? "");
+  if (caller === null) return messagePage(403, "Not your tenant", "Choose one of the tenants the page lists.");
+  const code = await grantCode(env.DB, asked, caller, Date.now());
   return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
 };
 
@@ -1156,6 +1203,13 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (prebuilds) return prebuilds;
   const connections = await handleConnections(request, url, env, deviceCaller);
   if (connections) return connections;
+  const members = await handleMembers(request, url, env, {
+    authenticate: deviceCaller,
+    signedIn: assertedEmail,
+    sameOrigin: sameOriginJson,
+    signedOut: browserSignedOut,
+  });
+  if (members) return members;
   const github =
     (await handleGitHubConnection(request, url, env, deviceCaller)) ??
     (await handleGitHubPage(request, url, env, assertedEmail)) ??

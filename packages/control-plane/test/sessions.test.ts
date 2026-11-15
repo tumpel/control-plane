@@ -28,6 +28,7 @@ import {
   TranscriptPageSchema,
   TurnFailureSchema,
   TurnSchema,
+  WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
@@ -258,11 +259,14 @@ class HostSide {
   }
 }
 
-const deviceToken = async (): Promise<string> => {
+const deviceToken = async (tenantId: string): Promise<string> => {
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "sessions e2e" })).json(),
   );
-  assert.equal((await postJson("/v1/device/approve", { userCode: started.user_code }, browser())).status, 200);
+  assert.equal(
+    (await postJson("/v1/device/approve", { userCode: started.user_code, tenantId }, browser())).status,
+    200,
+  );
   await sleep(started.interval * 1000 + 100);
   const granted = await postJson("/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -272,7 +276,7 @@ const deviceToken = async (): Promise<string> => {
   return DeviceTokenSchema.parse(await granted.json()).access_token;
 };
 
-const connectorToken = async (): Promise<string> => {
+const connectorToken = async (tenantId: string): Promise<string> => {
   const registered = await postJson("/oauth/register", { redirect_uris: [CALLBACK], client_name: "sessions e2e" });
   const client = OAuthClientSchema.parse(await registered.json());
   const verifier = randomBytes(32).toString("base64url");
@@ -296,6 +300,7 @@ const connectorToken = async (): Promise<string> => {
     body: new URLSearchParams({
       request: consent.searchParams.get("request") ?? "",
       csrf,
+      tenant: tenantId,
       action: "approve",
     }).toString(),
   });
@@ -416,9 +421,11 @@ before(async () => {
   await server.getWorker().applyD1Migrations("DB");
   await (await server.getWorker<{ RELEASES: Store }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
 
-  assert.equal((await postJson("/v1/tenants", { name: "Sessions", ...GIT_IDENTITY }, browser())).status, 200);
-  bearer = { authorization: `Bearer ${await deviceToken()}` };
-  mcpToken = await connectorToken();
+  const signedUp = await postJson("/v1/tenants", { name: "Sessions", ...GIT_IDENTITY }, browser());
+  assert.equal(signedUp.status, 200);
+  const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+  bearer = { authorization: `Bearer ${await deviceToken(tenantId)}` };
+  mcpToken = await connectorToken(tenantId);
   await createPersona(
     "Default",
     [

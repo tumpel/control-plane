@@ -6,7 +6,7 @@ fails when an operation lacks a tool or a command, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`.
 `EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in
@@ -39,7 +39,13 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Hosts_listUsage`                    | `tumpel_host_list_usage`          | `tumpel host list-usage`          |
 | `Hosts_revoke`                       | `tumpel_host_revoke`              | `tumpel host revoke`              |
 | `Hosts_setLabels`                    | `tumpel_host_set_labels`          | `tumpel host set-labels`          |
+| `Identity_listTenants`               | `tumpel_tenants`                  | `tumpel tenants`                  |
 | `Identity_whoami`                    | `tumpel_whoami`                   | `tumpel whoami`                   |
+| `Invitations_create`                 | `tumpel_invitation_create`        | `tumpel invitation create`        |
+| `Invitations_list`                   | `tumpel_invitation_list`          | `tumpel invitation list`          |
+| `Invitations_revoke`                 | `tumpel_invitation_revoke`        | `tumpel invitation revoke`        |
+| `Members_list`                       | `tumpel_member_list`              | `tumpel member list`              |
+| `Members_remove`                     | `tumpel_member_remove`            | `tumpel member remove`            |
 | `NamespaceConnections_delete`        | `tumpel_namespace_delete`         | `tumpel namespace delete`         |
 | `NamespaceConnections_get`           | `tumpel_namespace_get`            | `tumpel namespace get`            |
 | `NamespaceConnections_start`         | `tumpel_namespace_start`          | `tumpel namespace start`          |
@@ -77,6 +83,6 @@ nothing: the server cannot read your environment, so they return the config entr
 
 Excluded by rule:
 
-- browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `IssuerKeys_rotate`, `Tenants_signUp`.
+- browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `Invitations_accept`, `IssuerKeys_rotate`, `Tenants_signUp`.
 - OAuth, device-flow, enrolment and host download wire: no principal: `WellKnown_jwks`, `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `WellKnown_openIdConfiguration`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_revoke`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`, `Releases_supervisor`.
 - build job wire: the provider's OIDC job token, no principal: `PrebuildUploads_start`, `PrebuildUploads_complete`.
