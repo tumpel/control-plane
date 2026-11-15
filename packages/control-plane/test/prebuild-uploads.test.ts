@@ -272,6 +272,8 @@ test("a job of the dispatched run exchanges its GitHub token for one checked lay
     [{ event_name: "push" }, "event_name"],
     [{ job_workflow_ref: "Acme/App/.github/workflows/prebuild.yml@refs/tags/v1" }, "job_workflow_ref"],
     [{ job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/heads/main" }, "job_workflow_ref"],
+    [{ job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/tags/v2.0.0" }, "job_workflow_ref"],
+    [{ job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/tags/v1.2" }, "job_workflow_ref"],
     [{ run_id: "43" }, "run_id"],
     [{ sha: "d".repeat(40) }, "sha"],
   ];
@@ -280,6 +282,8 @@ test("a job of the dispatched run exchanges its GitHub token for one checked lay
     assert.equal(problem.code, "JobTokenMismatch");
     assert.equal(problem.title, `Job token refused: ${check}`);
   }
+  const shaPin = jobToken({ job_workflow_ref: `tumpel/workflows/.github/workflows/prebuild.yml@${"e".repeat(40)}` });
+  assert.match((await refusal(uploadsPath, exchange, shaPin, 403)).fix, /commit SHA pin is refused/);
 
   const answered = await send("POST", uploadsPath, exchange, asJob(jobToken()));
   assert.equal(answered.status, 200, await answered.clone().text());
@@ -298,7 +302,8 @@ test("a job of the dispatched run exchanges its GitHub token for one checked lay
   assert.equal(url.searchParams.get("X-Tumpel-Length"), String(layer.length));
   const lifetime = Date.parse(grant.uploadExpiresAt) - Date.now();
   assert.ok(lifetime > 890_000 && lifetime <= 900_000, `the URL lives the upload budget, not ${lifetime} ms`);
-  const repeated = await send("POST", uploadsPath, exchange, asJob(jobToken()));
+  const releasePin = jobToken({ job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/tags/v1.4.2" });
+  const repeated = await send("POST", uploadsPath, exchange, asJob(releasePin));
   assert.equal(repeated.status, 200, await repeated.clone().text());
   const other = { ...exchange, layerSizeBytes: layer.length + 1 };
   assert.equal((await refusal(uploadsPath, other, jobToken(), 409)).code, "Conflict");
