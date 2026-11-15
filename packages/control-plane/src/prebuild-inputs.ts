@@ -22,6 +22,10 @@ export const LOCKFILES = [
   "pubspec.lock",
   "flake.lock",
 ];
+export const MANIFESTS = ["Cargo.toml", "go.mod", "requirements.txt", "pyproject.toml"];
+const DEVCONTAINER_CONFIGS = [`${DEVCONTAINER_DIRECTORY}/devcontainer.json`, DEVCONTAINER_FILE];
+
+export type ConfigSource = "RepositoryFile" | "Default";
 
 const API_MEDIA_TYPE = "application/vnd.github+json";
 
@@ -31,11 +35,11 @@ export interface InputFile {
 }
 
 export type Inputs =
-  | { kind: "Read"; files: InputFile[]; defaultBranch: string; headSha: string }
-  | { kind: "Empty"; detail: string }
+  | { kind: "Read"; files: InputFile[]; configSource: ConfigSource; defaultBranch: string; headSha: string }
   | { kind: "Unreadable"; detail: string };
 
-const countsAtRoot = (path: string): boolean => path === DEVCONTAINER_FILE || LOCKFILES.includes(path);
+const countsAtRoot = (path: string): boolean =>
+  path === DEVCONTAINER_FILE || LOCKFILES.includes(path) || MANIFESTS.includes(path);
 
 const encoder = new TextEncoder();
 
@@ -114,11 +118,6 @@ export const readInputs = async (
       if (entry.type === "blob") files.push({ path: `${DEVCONTAINER_DIRECTORY}/${entry.path}`, blobSha: entry.sha });
     }
   }
-  if (files.length === 0) {
-    return {
-      kind: "Empty",
-      detail: `${repository} holds no file under .devcontainer/, no .devcontainer.json and none of ${LOCKFILES.join(", ")} at its root on ${branch}, so a prebuild has nothing to install`,
-    };
-  }
-  return { kind: "Read", files, defaultBranch: branch, headSha };
+  const configSource = files.some((file) => DEVCONTAINER_CONFIGS.includes(file.path)) ? "RepositoryFile" : "Default";
+  return { kind: "Read", files, configSource, defaultBranch: branch, headSha };
 };

@@ -76,6 +76,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
       { path: ".devcontainer/Dockerfile", blobSha: "b1" },
       { path: ".devcontainer/scripts/setup.sh", blobSha: "b5" },
     ],
+    configSource: "RepositoryFile",
     defaultBranch: "trunk",
     headSha: HEAD,
   });
@@ -94,16 +95,34 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
   );
 });
 
-test("a repository without inputs reads Empty, and a tree GitHub refuses reads Unreadable", async () => {
-  const empty = await readInputs(
+test("a repository without a devcontainer.json builds with the default config, read from the manifests it detects", async () => {
+  const bare = await readInputs(
     github({ [ROOT]: [{ path: "README.md", type: "blob", sha: "b3" }] }).fetcher,
     "https://api.github.com",
     TARGET,
     "t",
   );
-  assert.equal(empty.kind, "Empty");
-  assert.match(empty.kind === "Empty" ? empty.detail : "", /no file under \.devcontainer\//);
+  assert.deepEqual(bare, { kind: "Read", files: [], configSource: "Default", defaultBranch: "trunk", headSha: HEAD });
+  const python = await readInputs(
+    github({
+      [ROOT]: [
+        { path: ".devcontainer", type: "tree", sha: "t1" },
+        { path: "requirements.txt", type: "blob", sha: "b4" },
+      ],
+      t1: [{ path: "Dockerfile", type: "blob", sha: "b1" }],
+    }).fetcher,
+    "https://api.github.com",
+    TARGET,
+    "t",
+  );
+  assert.equal(python.kind === "Read" ? python.configSource : python.kind, "Default");
+  assert.deepEqual(python.kind === "Read" ? python.files.map((file) => file.path) : [], [
+    "requirements.txt",
+    ".devcontainer/Dockerfile",
+  ]);
+});
 
+test("a tree GitHub refuses reads Unreadable", async () => {
   const missing = await readInputs(
     github({ [ROOT]: [{ path: ".devcontainer", type: "tree", sha: "gone" }] }).fetcher,
     "https://api.github.com",

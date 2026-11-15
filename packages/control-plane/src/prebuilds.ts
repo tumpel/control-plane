@@ -276,15 +276,12 @@ export const startPrebuild = async (
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const inputs = await readInputs((url, init) => fetch(url, init), env.GITHUB_API_ORIGIN, target, token.token);
   if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);
-  if (inputs.kind === "Empty") {
-    return refuse(422, {
-      code: "NoPrebuildInputs",
-      title: "Nothing to prebuild",
-      detail: inputs.detail,
-      fix: "Add a .devcontainer/devcontainer.json or commit a lockfile at the repository root, then start the prebuild again",
-    });
-  }
-  const key = { repository, inputDigest: await inputDigest(inputs.files), guestImageDigest: image.value.imageDigest };
+  const key = {
+    repository,
+    inputDigest: await inputDigest(inputs.files),
+    guestImageDigest: image.value.imageDigest,
+    configSource: inputs.configSource,
+  };
   if (!start.rebuild) {
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
