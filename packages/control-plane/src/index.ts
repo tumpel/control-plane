@@ -621,8 +621,9 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
     const githubUser = await repositoryTokenUser(env, [body.value], "secretSets.setMember");
     if (!githubUser.ok) return githubUser.response;
     const written = await tenant.setSecretMember(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
-    if (!written.ok) return conflict("secretSets.setMember", secretSetId, written.constraint);
-    return written.value === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(written.value));
+    if (written.kind === "Conflict") return conflict("secretSets.setMember", secretSetId, written.constraint);
+    if (written.kind === "SetNotFound") return secretSetNotFound(secretSetId);
+    return json(SecretSetSchema.parse(written.secretSet));
   }
   const name = decodeURIComponent(rawName ?? "");
   const memberPath = SecretMemberPathSchema.safeParse({ secretSetId, name });

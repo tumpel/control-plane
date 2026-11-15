@@ -112,10 +112,11 @@ const MEMBER_WITHOUT_VALUE = SecretSetPathSchema.extend({
 
 const memberCommand = (args: z.infer<typeof MEMBER_WITHOUT_VALUE>): string => {
   const { member } = args;
-  const flags = [`--kind ${member.kind}`, `--name ${member.name}`];
+  const kind = member.kind.replace(/\B([A-Z])/g, "-$1").toLowerCase();
+  const flags = [`--name ${member.name}`];
   if (member.kind !== "Variable") flags.push(`--provider ${member.provider}`);
   if (member.kind === "SubscriptionToken") flags.push(`--expires-at ${member.expiresAt}`);
-  return `Secret values never pass through MCP and this tool writes nothing. Pipe the value of ${member.name} into this command on your machine: tumpel secret-set set-member ${args.secretSetId} ${flags.join(" ")} --stdin`;
+  return `Secret values never pass through MCP and this tool writes nothing. Pipe the value of ${member.name} into this command on your machine: tumpel secret-set set-member ${kind} ${args.secretSetId} ${flags.join(" ")} --stdin`;
 };
 
 const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
