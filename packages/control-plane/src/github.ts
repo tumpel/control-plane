@@ -276,7 +276,7 @@ export type Minted =
   | { kind: "Outside"; detail: string }
   | { kind: "Refused"; detail: string };
 
-const installationSettings = (installationId: number): string =>
+export const installationSettings = (installationId: number): string =>
   `${GITHUB_WEB}/settings/installations/${installationId}`;
 
 const OUTSIDE_STATUSES = [404, 422];

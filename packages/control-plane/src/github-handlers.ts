@@ -7,6 +7,25 @@ import {
   GitHubRepositorySchema,
   type WhoamiSchema,
 } from "@tumpel/api/schemas";
+import {
+  appBadOrganizationPage,
+  appCreatedPage,
+  appExistsPage,
+  appGitHubRefusedPage,
+  appNothingToCreatePage,
+  appRequestRefusedPage,
+  appSetupPage,
+  gitHubConnectedPage,
+  installationChoicePage,
+  installationInUsePage,
+  installationRequestedPage,
+  installerUnconfirmedPage,
+  installNothingToConnectPage,
+  installRefusedPage,
+  noGitHubAppPage,
+  notTheInstallerPage,
+  signInAgainPage,
+} from "@tumpel/pages";
 import type { z } from "zod";
 import {
   APP_CREATED_PATH,
@@ -18,9 +37,9 @@ import {
   convertManifest,
   dashboardReturn,
   type Fetch,
-  GITHUB_WEB,
   type GitHubAnswer,
   type GitHubInstallationRecord,
+  installationSettings,
   installUrl,
   listInstallationRepositories,
   listOpenIssues,
@@ -69,7 +88,7 @@ import { type Caller, membershipsOfEmail, whoamiOf } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
-import { appSetupPage, connectAgainPage, installationTenantPage, linkPage, messagePage } from "./pages";
+import { htmlPage } from "./pages";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
 export type SignedInPerson = (request: Request, env: Env) => Promise<PersonCheck>;
@@ -274,118 +293,92 @@ export const handleGitHubConnection = async (
   return starting ? handleStart(caller, url, env) : handleConnection(caller, url, env);
 };
 
-const appExists = (slug: string, htmlUrl: string): Response =>
-  linkPage(
-    409,
-    "GitHub App already set up",
-    `This stage already has the GitHub App ${slug}; it is created once per stage. Install it for a tenant with tumpel github start.`,
-    htmlUrl,
-    `Open ${slug} on GitHub`,
-  );
+const appExists = (env: Env, url: URL, email: string, slug: string, htmlUrl: string): Response =>
+  htmlPage(env, url, 409, (links) => appExistsPage(links, email, slug, htmlUrl));
 
 const handleSetupPage = async (url: URL, env: Env, email: string): Promise<Response> => {
   const app = await storedApp(env.DB);
-  if (app !== null) return appExists(app.slug, app.htmlUrl);
+  if (app !== null) return appExists(env, url, email, app.slug, app.htmlUrl);
   const organization = url.searchParams.get("organization") ?? "";
   if (organization !== "" && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(organization)) {
-    return messagePage(400, "Not an organization", `${organization} is not a GitHub organization login.`);
+    return htmlPage(env, url, 400, (links) => appBadOrganizationPage(links, email, organization));
   }
   const state = await signState(await stateKey(env), {
     purpose: "AppManifest",
     email,
     expiresAt: expiry(Date.now()),
   });
-  return appSetupPage(
-    email,
-    appManifest(url.origin),
-    manifestAction(organization, state),
-    organization === "" ? "your GitHub account" : `the organization ${organization}`,
-  );
+  const form = { manifest: appManifest(url.origin), action: manifestAction(organization, state), organization };
+  return htmlPage(env, url, 200, (links) => appSetupPage(links, email, form));
 };
 
 const handleCreated = async (url: URL, env: Env, email: string): Promise<Response> => {
   const query = GitHubManifestCallbackSchema.safeParse(Object.fromEntries(url.searchParams));
-  if (!query.success) {
-    return messagePage(400, "Nothing to create", `GitHub sent no code and state. Start again at ${APP_SETUP_PATH}.`);
-  }
+  if (!query.success) return htmlPage(env, url, 400, (links) => appNothingToCreatePage(links, email));
   const state = await readState(await stateKey(env), query.data.state, GitHubManifestStateSchema, Date.now());
-  if (!state.ok) return messagePage(403, "Request refused", `${state.reason}. Start again at ${APP_SETUP_PATH}.`);
+  if (!state.ok) return htmlPage(env, url, 403, (links) => appRequestRefusedPage(links, email, `${state.reason}.`));
   if (state.claims.email !== email) {
-    return messagePage(
-      403,
-      "Request refused",
-      `The App setup was started by ${state.claims.email}, and you are signed in as ${email}. Start again at ${APP_SETUP_PATH}.`,
-    );
+    const detail = `The App setup was started by ${state.claims.email}, and you are signed in as ${email}.`;
+    return htmlPage(env, url, 403, (links) => appRequestRefusedPage(links, email, detail));
   }
   const existing = await storedApp(env.DB);
-  if (existing !== null) return appExists(existing.slug, existing.htmlUrl);
+  if (existing !== null) return appExists(env, url, email, existing.slug, existing.htmlUrl);
   const converted = await convertManifest(fetcher, env.GITHUB_API_ORIGIN, query.data.code);
-  if (!converted.ok) {
-    return messagePage(
-      502,
-      "GitHub refused the App",
-      `${converted.detail}. A conversion code works once and for an hour; start again at ${APP_SETUP_PATH}.`,
-    );
-  }
+  if (!converted.ok) return htmlPage(env, url, 502, (links) => appGitHubRefusedPage(links, email, converted.detail));
   const bot = await botUserId(fetcher, env.GITHUB_API_ORIGIN, converted.value.slug, null);
   const stored = await storeApp(env.DB, keyStoreOf(env), converted.value, bot.ok ? bot.value : null, Date.now());
-  if (stored.kind === "Exists") return appExists(stored.app.slug, stored.app.htmlUrl);
-  return linkPage(
-    200,
-    "GitHub App created",
-    `Created the GitHub App ${stored.app.slug} for this stage. Each tenant installs it once: run tumpel github start and open the URL it prints.`,
-    stored.app.htmlUrl,
-    `Open ${stored.app.slug} on GitHub`,
-  );
+  if (stored.kind === "Exists") return appExists(env, url, email, stored.app.slug, stored.app.htmlUrl);
+  return htmlPage(env, url, 200, (links) => appCreatedPage(links, email, stored.app.slug, stored.app.htmlUrl));
 };
 
-const connectUrl = (env: Env, tenantId: string | null): string =>
-  tenantId === null
-    ? `${env.DASHBOARD_ORIGIN}/`
-    : `${env.DASHBOARD_ORIGIN}/t/${encodeURIComponent(tenantId)}/setup/github`;
-
-const refuseInstall = (env: Env, tenantId: string | null, status: number, title: string, text: string): Response =>
-  connectAgainPage(
-    status,
-    title,
-    `${text} Choose Connect from Tumpel to start again from the dashboard's GitHub step, or run tumpel github start on the CLI.`,
-    connectUrl(env, tenantId),
-  );
+const refuseInstall = (
+  env: Env,
+  url: URL,
+  email: string,
+  tenantId: string | null,
+  status: number,
+  title: string,
+  text: string,
+): Response => htmlPage(env, url, status, (links) => installRefusedPage(links, email, tenantId, title, text));
 
 const ownedTenants = async (env: Env, email: string): Promise<z.infer<typeof WhoamiSchema>[]> =>
   (await membershipsOfEmail(env.DB, email)).filter((membership) => membership.principal.role === "Owner");
 
 const linked = async (
   env: Env,
+  url: URL,
+  email: string,
   tenantId: string,
   record: GitHubInstallationRecord,
   returnUrl: string | undefined,
 ): Promise<Response> => {
   const outcome = await linkInstallation(env.DB, tenantId, record, Date.now());
   if (outcome.kind === "OtherTenant") {
-    return refuseInstall(
-      env,
-      tenantId,
-      409,
-      "Installation in use",
-      `The installation on ${record.account.login} is linked to another tenant. Each installation serves one tenant; remove it there first.`,
+    return htmlPage(env, url, 409, (links) =>
+      installationInUsePage(links, email, tenantId, record.account.login, installationSettings(record.id)),
     );
   }
   if (returnUrl !== undefined) return seeOther(returnUrl);
-  return linkPage(
-    200,
-    "GitHub connected",
-    `Tenant ${outcome.installation.tenantId} now holds the GitHub App installation on ${outcome.installation.accountLogin}, next to any it held before. Each turn on a repository of ${outcome.installation.accountLogin} gets a token of its own. Connect another account or organization from the dashboard's GitHub connection, or with tumpel github start.`,
-    `${GITHUB_WEB}/settings/installations/${record.id}`,
-    "Choose the repositories it covers on GitHub",
-  );
+  const installation = {
+    tenantId: outcome.installation.tenantId,
+    accountLogin: outcome.installation.accountLogin,
+    settingsUrl: installationSettings(record.id),
+  };
+  return htmlPage(env, url, 200, (links) => gitHubConnectedPage(links, email, installation));
 };
 
-const confirmInstallation = async (env: Env, email: string, record: GitHubInstallationRecord): Promise<Response> => {
+const confirmInstallation = async (
+  env: Env,
+  url: URL,
+  email: string,
+  record: GitHubInstallationRecord,
+): Promise<Response> => {
   const tenants = await ownedTenants(env, email);
   if (tenants.length === 0) {
     return refuseInstall(
       env,
+      url,
+      email,
       null,
       403,
       "No tenant to connect",
@@ -398,13 +391,14 @@ const confirmInstallation = async (env: Env, email: string, record: GitHubInstal
     installation: record,
     expiresAt: expiry(Date.now()),
   });
-  return installationTenantPage(
+  const request = {
     email,
-    record.account.login,
-    APP_INSTALLED_PATH,
+    accountLogin: record.account.login,
+    action: APP_INSTALLED_PATH,
     choice,
-    tenants.map(({ tenant }) => ({ tenantId: tenant.tenantId, name: tenant.name })),
-  );
+    tenants: tenants.map(({ tenant }) => ({ tenantId: tenant.tenantId, name: tenant.name })),
+  };
+  return htmlPage(env, url, 200, (links) => installationChoicePage(links, request));
 };
 
 const choiceOf = async (request: Request): Promise<Record<string, string>> => {
@@ -414,11 +408,13 @@ const choiceOf = async (request: Request): Promise<Record<string, string>> => {
   return fields;
 };
 
-const handleChoice = async (request: Request, url: URL, env: Env, email: string): Promise<Response> => {
+const handleChoice = async (request: Request, env: Env, url: URL, email: string): Promise<Response> => {
   const origin = request.headers.get("origin");
   if (origin !== url.origin) {
     return refuseInstall(
       env,
+      url,
+      email,
       null,
       403,
       "Request refused",
@@ -427,7 +423,15 @@ const handleChoice = async (request: Request, url: URL, env: Env, email: string)
   }
   const picked = GitHubInstallationChoiceQuerySchema.safeParse(await choiceOf(request));
   if (!picked.success) {
-    return refuseInstall(env, null, 400, "Nothing to connect", "The confirmation names no installation and tenant.");
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      400,
+      "Nothing to connect",
+      "The confirmation names no installation and tenant.",
+    );
   }
   const state = await readState(
     await stateKey(env),
@@ -436,10 +440,20 @@ const handleChoice = async (request: Request, url: URL, env: Env, email: string)
     Date.now(),
   );
   if (!state.ok)
-    return refuseInstall(env, null, 403, "Request refused", `The confirmation is no longer valid: ${state.reason}.`);
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      403,
+      "Request refused",
+      `The confirmation is no longer valid: ${state.reason}.`,
+    );
   if (state.claims.email !== email) {
     return refuseInstall(
       env,
+      url,
+      email,
       null,
       403,
       "Request refused",
@@ -448,20 +462,30 @@ const handleChoice = async (request: Request, url: URL, env: Env, email: string)
   }
   const owned = await ownedTenants(env, email);
   if (!owned.some(({ tenant }) => tenant.tenantId === picked.data.tenant)) {
-    return refuseInstall(env, null, 403, "Request refused", `${email} is no Owner of tenant ${picked.data.tenant}.`);
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      403,
+      "Request refused",
+      `${email} is no Owner of tenant ${picked.data.tenant}.`,
+    );
   }
-  return linked(env, picked.data.tenant, state.claims.installation, undefined);
+  return linked(env, url, email, picked.data.tenant, state.claims.installation, undefined);
 };
 
 type StartedBy = { ok: true; tenantId: string; returnUrl: string | undefined } | { ok: false; response: Response };
 
-const startedBy = async (env: Env, email: string, stateText: string): Promise<StartedBy> => {
+const startedBy = async (env: Env, url: URL, email: string, stateText: string): Promise<StartedBy> => {
   const state = await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
   if (!state.ok) {
     return {
       ok: false,
       response: refuseInstall(
         env,
+        url,
+        email,
         null,
         403,
         "Request refused",
@@ -475,6 +499,8 @@ const startedBy = async (env: Env, email: string, stateText: string): Promise<St
       ok: false,
       response: refuseInstall(
         env,
+        url,
+        email,
         null,
         403,
         "Request refused",
@@ -488,6 +514,8 @@ const startedBy = async (env: Env, email: string, stateText: string): Promise<St
       ok: false,
       response: refuseInstall(
         env,
+        url,
+        email,
         null,
         403,
         "Request refused",
@@ -498,11 +526,11 @@ const startedBy = async (env: Env, email: string, stateText: string): Promise<St
   return { ok: true, tenantId, returnUrl };
 };
 
-const handleInstalled = async (url: URL, env: Env, email: string): Promise<Response> => {
+const handleInstalled = async (env: Env, url: URL, email: string): Promise<Response> => {
   const query = Object.fromEntries(url.searchParams);
   const action = GitHubSetupActionSchema.safeParse(query);
   if (!action.success) {
-    return refuseInstall(env, null, 400, "Nothing to connect", "GitHub sent no setup action with this link.");
+    return htmlPage(env, url, 400, (links) => installNothingToConnectPage(links, email));
   }
   if (action.data.setup_action === "request") {
     const requested =
@@ -510,17 +538,15 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
         ? null
         : await readState(await stateKey(env), action.data.state, GitHubInstallStateSchema, Date.now());
     if (requested?.ok === true && requested.claims.returnUrl !== undefined) return seeOther(requested.claims.returnUrl);
-    return connectAgainPage(
-      202,
-      "Installation requested",
-      "An owner of the GitHub organization must approve the installation. Once approved, connect again from Tumpel and finish it, or run tumpel github start on the CLI.",
-      connectUrl(env, requested?.ok === true ? requested.claims.tenantId : null),
-    );
+    const tenantId = requested?.ok === true ? requested.claims.tenantId : null;
+    return htmlPage(env, url, 202, (links) => installationRequestedPage(links, email, tenantId));
   }
   const callback = GitHubSetupCallbackSchema.safeParse(query);
   if (!callback.success) {
     return refuseInstall(
       env,
+      url,
+      email,
       null,
       400,
       "Nothing to connect",
@@ -528,18 +554,12 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
     );
   }
   const { code, installation_id: installationText, state: stateText } = callback.data;
-  const started = stateText === undefined ? null : await startedBy(env, email, stateText);
+  const started = stateText === undefined ? null : await startedBy(env, url, email, stateText);
   if (started !== null && !started.ok) return started.response;
   const tenantId = started?.tenantId ?? null;
   const client = await oauthClient(env.DB, keyStoreOf(env));
   if (client === null) {
-    return refuseInstall(
-      env,
-      tenantId,
-      409,
-      "No GitHub App",
-      `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`,
-    );
+    return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId));
   }
   const installer = await verifyInstaller(
     fetcher,
@@ -549,11 +569,13 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
     Number(installationText),
   );
   if (installer.kind === "Failed") {
-    return refuseInstall(env, tenantId, 502, "GitHub did not confirm the installer", `${installer.detail}.`);
+    return htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, installer.detail));
   }
   if (installer.kind === "MembershipUnreadable") {
     return refuseInstall(
       env,
+      url,
+      email,
       tenantId,
       403,
       "The App cannot read your organization membership yet",
@@ -561,16 +583,10 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
     );
   }
   if (installer.kind === "NotInstaller") {
-    return refuseInstall(
-      env,
-      tenantId,
-      403,
-      "Request refused",
-      `${installer.detail}. Sign in to GitHub as an owner of the account, or ask one to connect it.`,
-    );
+    return htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, installer.detail));
   }
-  if (started !== null) return linked(env, started.tenantId, installer.installation, started.returnUrl);
-  return confirmInstallation(env, email, installer.installation);
+  if (started !== null) return linked(env, url, email, started.tenantId, installer.installation, started.returnUrl);
+  return confirmInstallation(env, url, email, installer.installation);
 };
 
 export const handleGitHubPage = async (
@@ -584,18 +600,14 @@ export const handleGitHubPage = async (
   if (!confirming && (request.method !== "GET" || !pages.includes(url.pathname))) return null;
   const person = await signedIn(request, env);
   if (!person.ok) {
-    return linkPage(
-      401,
-      "Sign in again",
-      `${person.reason}. Sign in, then this page continues.`,
-      confirming ? connectUrl(env, null) : url.toString(),
-      "Sign in and continue",
+    return htmlPage(env, url, 401, (links) =>
+      signInAgainPage(links, person.reason, confirming ? `${links.dashboard}/connections` : url.href),
     );
   }
-  if (confirming) return handleChoice(request, url, env, person.email);
+  if (confirming) return handleChoice(request, env, url, person.email);
   if (url.pathname === APP_SETUP_PATH) return handleSetupPage(url, env, person.email);
   if (url.pathname === APP_CREATED_PATH) return handleCreated(url, env, person.email);
-  return handleInstalled(url, env, person.email);
+  return handleInstalled(env, url, person.email);
 };
 
 const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Response): Promise<Response> => {
