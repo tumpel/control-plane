@@ -39,7 +39,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the nextCursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -325,7 +325,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions/{sessionId}/transcript",
     SessionPathSchema.extend(TranscriptQuerySchema.shape),
-    "Read a page of a session's harness-native JSONL transcript; turnId keeps one turn's lines. Pass the cursor of the previous page as after to read on; an empty page means nothing new. Returns the TranscriptPage of GET /v1/sessions/{sessionId}/transcript: {sessionState, lines, cursor}.",
+    "Read a page of a session's harness-native JSONL transcript; turnId keeps one turn's lines, limit and maxBytes cap the page (64 lines and 32768 bytes by default). Pass compact true to poll a live turn: it keeps the text the assistant wrote, shows each tool call as one line naming the tool and its first argument, and drops tool results. Pass the nextCursor of the previous page as after to read on; finished is true when no turn is in flight and no line follows. Returns the TranscriptPage of GET /v1/sessions/{sessionId}/transcript: {sessionState, lines, cursor, nextCursor, finished}.",
   ),
   rest(
     "tumpel_session_handovers",

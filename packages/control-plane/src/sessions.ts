@@ -14,6 +14,7 @@ import { hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { settingsOf } from "./settings";
 import type {
   CredentialHandover,
   Session,
@@ -25,7 +26,7 @@ import type {
   Turn,
   TurnFailure,
 } from "./tenant-sessions";
-import { DEFAULT_PAGE_LINES, decodeLines } from "./transcript";
+import { DEFAULT_PAGE_BYTES, decodeLines, pageOf } from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
@@ -300,7 +301,7 @@ export const readTranscript = async (
     sessionId,
     after,
     query.turnId ?? null,
-    query.limit ?? DEFAULT_PAGE_LINES,
+    query.limit ?? settingsOf(env).transcriptChunkLines,
   );
   if (cursor === null) return sessionNotFound(sessionId);
   const lines =
@@ -313,11 +314,15 @@ export const readTranscript = async (
           }
           return decodeLines(await object.text());
         })();
+  const page = pageOf(lines, after, query.compact ?? false, query.maxBytes ?? DEFAULT_PAGE_BYTES);
+  const tail = await tenantOf(env, caller).transcriptTail(sessionId, page.nextCursor, query.turnId ?? null);
   return ok(
     TranscriptPageSchema.parse({
       sessionState: cursor.sessionState,
-      lines,
-      cursor: lines.at(-1)?.lineSeq ?? after,
+      lines: page.lines,
+      cursor: page.nextCursor,
+      nextCursor: page.nextCursor,
+      finished: !tail.more && !tail.running,
     }),
   );
 };
@@ -356,11 +361,15 @@ export const getSnapshot = async (env: Env, caller: Caller, snapshotId: string):
   });
 };
 
-const queryOf = (url: URL, numeric: string[]): Record<string, unknown> =>
+const queryOf = (url: URL, numeric: string[], flags: string[] = []): Record<string, unknown> =>
   Object.fromEntries(
     [...url.searchParams].map(([name, value]) => [
       name,
-      numeric.includes(name) && /^\d+$/.test(value) ? Number(value) : value,
+      numeric.includes(name) && /^\d+$/.test(value)
+        ? Number(value)
+        : flags.includes(name) && (value === "true" || value === "false")
+          ? value === "true"
+          : value,
     ]),
   );
 
@@ -407,7 +416,7 @@ const sessionRoute = async (
   if (action === "/credential-handovers") return answer(await listCredentialHandovers(env, caller, sessionId));
   if (action === "/stop-failures") return answer(await listStopFailures(env, caller, sessionId));
   if (action === "/transcript") {
-    const query = TranscriptQuerySchema.safeParse(queryOf(url, ["after", "limit"]));
+    const query = TranscriptQuerySchema.safeParse(queryOf(url, ["after", "limit", "maxBytes"], ["compact"]));
     if (!query.success) return invalidQuery("sessions.readTranscript", query.error);
     return answer(await readTranscript(env, caller, sessionId, query.data));
   }

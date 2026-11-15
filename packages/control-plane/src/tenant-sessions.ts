@@ -842,6 +842,37 @@ export class TenantSessions extends DurableObject<Env> {
     return { kind: "Lines", sessionState, lines };
   }
 
+  transcriptTail(sessionId: string, after: number, turnId: string | null): { more: boolean; running: boolean } {
+    const sql = this.ctx.storage.sql;
+    const [pending] = sql
+      .exec<{ found: number }>(
+        `SELECT 1 AS found FROM transcript_pending
+        WHERE session_id = ?1 AND line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3) LIMIT 1`,
+        sessionId,
+        after,
+        turnId,
+      )
+      .toArray();
+    const [chunk] = sql
+      .exec<{ found: number }>(
+        `SELECT 1 AS found FROM transcript_chunks
+        WHERE session_id = ?1 AND last_line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3) LIMIT 1`,
+        sessionId,
+        after,
+        turnId,
+      )
+      .toArray();
+    const [running] = sql
+      .exec<{ found: number }>(
+        `SELECT 1 AS found FROM turns
+        WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2) AND state IN (${IN_FLIGHT.map((state) => `'${state}'`).join(", ")}) LIMIT 1`,
+        sessionId,
+        turnId,
+      )
+      .toArray();
+    return { more: pending !== undefined || chunk !== undefined, running: running !== undefined };
+  }
+
   async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
