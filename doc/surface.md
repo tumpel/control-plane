@@ -17,18 +17,9 @@ session; `session get` also prints the session's stop failures.
 
 `tumpel_secret_set_create` and `_update` take key names and `valueFrom.env` names only and write
 nothing: the server cannot read your environment, so they return the config entry for
-`tumpel config apply`, which writes the values. `tumpel_secret_set_set_member` writes nothing either:
-it returns the `tumpel secret-set set-member` command that writes one member.
+`tumpel config apply`, which writes the values.
 
-Every value the CLI writes is a flag, a `--file <path>`, or, for a secret value, stdin: one value per
-`--stdin` invocation, never a flag value and never echoed. `secret-set create --name` makes an empty
-set, `secret-set set-member` writes one member and keeps the rest, `secret-set remove-member` drops one,
-and `persona create` and `persona update` take `--name`, `--harness`, `--secret-set-id` and a
-`--persona-file <path>=<local file>` per file instead of a JSON file:
-
-```sh
-gh auth token | tumpel secret-set set-member <secretSetId> --kind Variable --name GITHUB_TOKEN --stdin
-```
+`tumpel_secret_set_set_member` returns the `tumpel secret-set set-member` command that writes one member; see [Set one value at a time](config.md#set-one-value-at-a-time).
 
 | Operation                            | MCP tool                          | CLI command                       |
 | ------------------------------------ | --------------------------------- | --------------------------------- |

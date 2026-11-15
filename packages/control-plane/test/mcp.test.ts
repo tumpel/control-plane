@@ -319,7 +319,7 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   });
   assert.equal(
     drafted.content[0]?.text.split(": ")[1],
-    `tumpel secret-set set-member ${secretSet.secretSetId} --kind Variable --name GITHUB_TOKEN --stdin`,
+    `tumpel secret-set set-member variable ${secretSet.secretSetId} --name GITHUB_TOKEN --stdin`,
   );
   const removed = await toolJson(SecretSetSchema, "tumpel_secret_set_remove_member", {
     secretSetId: secretSet.secretSetId,

@@ -30,6 +30,11 @@ export type Written<T> = { ok: true; value: T } | { ok: false; constraint: strin
 
 export type SecretSetDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; personas: string[] };
 
+export type SecretMemberSet =
+  | { kind: "Set"; secretSet: SecretSet }
+  | { kind: "SetNotFound" }
+  | { kind: "Conflict"; constraint: string };
+
 export type SecretMemberRemoved =
   | { kind: "Removed"; secretSet: SecretSet }
   | { kind: "SetNotFound" }
@@ -436,8 +441,8 @@ export class Tenant extends TenantClaudeSetups {
     member: SecretMember,
     githubUser: GitHubUser | null,
     now: number,
-  ): Promise<Written<SecretSet | null>> {
-    if (!this.hasSecretSet(secretSetId)) return { ok: true, value: null };
+  ): Promise<SecretMemberSet> {
+    if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
     const sealed = await this.sealMembers(secretSetId, [member]);
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
@@ -448,12 +453,12 @@ export class Tenant extends TenantClaudeSetups {
         sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
       }),
     );
-    if (!written.ok) return written;
-    return { ok: true, value: this.getSecretSet(tenantId, secretSetId) };
+    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
+    const secretSet = this.getSecretSet(tenantId, secretSetId);
+    return secretSet === null ? { kind: "SetNotFound" } : { kind: "Set", secretSet };
   }
 
   removeSecretMember(tenantId: string, secretSetId: string, name: string, now: number): SecretMemberRemoved {
-    if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
     const sql = this.ctx.storage.sql;
     const removed = this.ctx.storage.transactionSync(() => {
       const deleted = sql.exec("DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?", secretSetId, name);
@@ -463,7 +468,7 @@ export class Tenant extends TenantClaudeSetups {
       return true;
     });
     const secretSet = this.getSecretSet(tenantId, secretSetId);
-    if (secretSet === null) throw new Error(`secret set ${secretSetId} vanished while a member was removed`);
+    if (secretSet === null) return { kind: "SetNotFound" };
     return removed ? { kind: "Removed", secretSet } : { kind: "MemberNotFound" };
   }
 

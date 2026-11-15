@@ -355,16 +355,16 @@ test("secret-set set-member writes one member from stdin and keeps the rest, and
   const created = await tumpel(["secret-set", "create", "--name", "piped"]);
   assert.equal(created.code, 0, created.stderr);
   const { secretSetId } = SecretSetSchema.parse(JSON.parse(created.stdout));
-  const key = ["--kind", "ApiKey", "--name", "ANTHROPIC_API_KEY", "--provider", "Anthropic"];
+  const key = ["api-key", secretSetId, "--name", "ANTHROPIC_API_KEY", "--provider", "Anthropic"];
 
-  const asArgument = await tumpel(["secret-set", "set-member", secretSetId, ...key]);
+  const asArgument = await tumpel(["secret-set", "set-member", ...key]);
   assert.equal(asArgument.code, 1);
   assert.match(asArgument.stderr, /--stdin/);
 
-  const keyed = await tumpel(["secret-set", "set-member", secretSetId, ...key, "--stdin"], {}, `${SECRET}\n`);
+  const keyed = await tumpel(["secret-set", "set-member", ...key, "--stdin"], {}, `${SECRET}\n`);
   assert.equal(keyed.code, 0, keyed.stderr);
-  const token = ["--kind", "Variable", "--name", "DEPLOY_TOKEN"];
-  const both = await tumpel(["secret-set", "set-member", secretSetId, ...token, "--stdin"], {}, SECRET);
+  const token = ["variable", secretSetId, "--name", "DEPLOY_TOKEN"];
+  const both = await tumpel(["secret-set", "set-member", ...token, "--stdin"], {}, SECRET);
   assert.equal(both.code, 0, both.stderr);
   assert.ok(!`${keyed.stdout}${keyed.stderr}${both.stdout}${both.stderr}`.includes(SECRET));
   assert.deepEqual(
