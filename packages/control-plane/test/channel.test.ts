@@ -95,6 +95,7 @@ const setup = (revoked = false) => {
         kernelUrl: "https://r2.example.test/kernel",
         manifestUrl: "https://r2.example.test/manifest",
         downloadExpiresAt: "2026-11-14T12:00:00+01:00",
+        fetchSeconds: 900,
       },
       gitAuthorName: "Tumpel Agent",
       gitAuthorEmail: "agent@tumpel.invalid",
