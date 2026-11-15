@@ -44,6 +44,7 @@ import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
 import { handleCircleCIProjects } from "./circleci-projects.ts";
+import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, type Call, planConfig } from "./configs.ts";
 import { handleConnections } from "./connections.ts";
 import { randomToken, sameSecret } from "./crypto";
@@ -1400,6 +1401,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (uploads) return uploads;
   const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
   if (prebuilds) return prebuilds;
+  const claudeSetups = await handleClaudeSetups(request, url, env, deviceCaller);
+  if (claudeSetups) return claudeSetups;
   const connections =
     (await handleConnections(request, url, env, deviceCaller)) ??
     (await handleCircleCIProjects(request, url, env, deviceCaller));

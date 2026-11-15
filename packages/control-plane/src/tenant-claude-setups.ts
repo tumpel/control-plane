@@ -60,6 +60,11 @@ export type ClaudeSetupStored =
   | { kind: "NotWaiting"; detail: string }
   | { kind: "NotStored"; detail: string };
 
+type TokenWritten =
+  | { kind: "Written" }
+  | { kind: "NotStored"; detail: string }
+  | { kind: "NotWaiting"; detail: string };
+
 type ClaudeSetupHostMessage = Extract<HostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 
 const isClaudeSetupMessage = (message: HostMessage): message is ClaudeSetupHostMessage =>
@@ -197,12 +202,34 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const { secret_set_id: secretSetId } = row;
     const sealed = await seal(await this.dataKey(), token.value, sealContext(secretSetId, CLAUDE_SETUP_MEMBER));
     const sql = this.ctx.storage.sql;
-    const written = this.ctx.storage.transactionSync((): string | null => {
+    const written = this.ctx.storage.transactionSync((): TokenWritten => {
       const [set] = sql.exec("SELECT 1 FROM secret_sets WHERE secret_set_id = ?", secretSetId).toArray();
-      if (set === undefined) return `secret set ${secretSetId} was deleted while Claude setup ${claudeSetupId} ran`;
+      if (set === undefined) {
+        return {
+          kind: "NotStored",
+          detail: `secret set ${secretSetId} was deleted while Claude setup ${claudeSetupId} ran`,
+        };
+      }
       const other = this.otherAnthropicCredential(secretSetId);
       if (other !== null) {
-        return `secret set ${secretSetId} took the ${PROVIDER} credential ${other} while Claude setup ${claudeSetupId} ran`;
+        return {
+          kind: "NotStored",
+          detail: `secret set ${secretSetId} took the ${PROVIDER} credential ${other} while Claude setup ${claudeSetupId} ran`,
+        };
+      }
+      const completed = sql.exec(
+        `UPDATE claude_setups SET state = 'Completed', expires_at = ?, sealed_code = NULL, ended_at = ?, updated_at = ?
+        WHERE claude_setup_id = ? AND state = 'Minting'`,
+        token.expiresAt,
+        now,
+        now,
+        claudeSetupId,
+      ).rowsWritten;
+      if (completed === 0) {
+        return {
+          kind: "NotWaiting",
+          detail: `Claude setup ${claudeSetupId} ended while its token was sealed and takes no token`,
+        };
       }
       for (const table of ["secret_expiries", "secret_credentials", "secret_values"]) {
         sql.exec(`DELETE FROM ${table} WHERE secret_set_id = ? AND name = ?`, secretSetId, CLAUDE_SETUP_MEMBER);
@@ -227,18 +254,11 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         token.expiresAt,
       );
       sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
-      sql.exec(
-        `UPDATE claude_setups SET state = 'Completed', expires_at = ?, sealed_code = NULL, ended_at = ?, updated_at = ?
-        WHERE claude_setup_id = ?`,
-        token.expiresAt,
-        now,
-        now,
-        claudeSetupId,
-      );
-      return null;
+      return { kind: "Written" };
     });
-    if (written !== null) {
-      const detail = `${written}; the minted token was discarded with the box. Fix the secret set, then start the Claude setup again`;
+    if (written.kind === "NotWaiting") return written;
+    if (written.kind === "NotStored") {
+      const detail = `${written.detail}; the minted token was discarded with the box. Fix the secret set, then start the Claude setup again`;
       await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
