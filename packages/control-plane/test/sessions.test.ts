@@ -108,6 +108,16 @@ const RELEASE = {
       rootfsDigest: "9".repeat(64),
     },
   ],
+  harnessLayers: [
+    {
+      harness: "ClaudeCode",
+      harnessVersion: CLAUDE_CODE_VERSION,
+      architecture: "Amd64",
+      layerDigest: "1".repeat(64),
+      manifestDigest: "2".repeat(64),
+      sizeBytes: 65536,
+    },
+  ],
 };
 
 let certs: Server;

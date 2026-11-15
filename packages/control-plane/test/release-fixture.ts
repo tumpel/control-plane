@@ -20,4 +20,14 @@ export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
       rootfsDigest: "9".repeat(64),
     },
   ],
+  harnessLayers: [
+    {
+      harness: "ClaudeCode",
+      harnessVersion: CLAUDE_CODE_VERSION,
+      architecture: "Amd64",
+      layerDigest: "1".repeat(64),
+      manifestDigest: "2".repeat(64),
+      sizeBytes: 65536,
+    },
+  ],
 };
