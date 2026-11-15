@@ -99,7 +99,7 @@ test("the manifest conversion posts the code to GitHub without a credential and 
   assert.match(refused.detail, /404: Not Found/);
 });
 
-test("the manifest returns installs and deliveries to the control plane and asks for no admin-level permission", () => {
+test("the manifest returns installs and deliveries to the control plane and asks for no organization-wide admin permission", () => {
   const manifest = appManifest("https://api.dev.tumpel.dev");
   assert.equal(manifest.setup_url, "https://api.dev.tumpel.dev/github/app/installed");
   assert.deepEqual(manifest.callback_urls, [manifest.setup_url]);
@@ -110,7 +110,9 @@ test("the manifest returns installs and deliveries to the control plane and asks
   assert.equal(manifest.hook_attributes.url, "https://api.dev.tumpel.dev/github/webhook");
   assert.ok(manifest.name.length <= 34);
   assert.notEqual(manifest.name, appManifest("https://api.tumpel.dev").name);
-  for (const permission of ["administration", "organization_administration", "secrets", "members"]) {
+  assert.equal(manifest.default_permissions.members, "read");
+  assert.equal(manifest.default_permissions.administration, "write");
+  for (const permission of ["organization_administration", "organization_secrets", "repository_creation"]) {
     assert.ok(!(permission in manifest.default_permissions), permission);
   }
 });
