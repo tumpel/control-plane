@@ -842,6 +842,24 @@ test("a snapshot learns where the tenant holds its chunks and uploads only new p
     (turn) => turn.state === "Failed",
   );
 
+  await tool(
+    "tumpel_turn_send",
+    { sessionId: second.session.sessionId, prompt: "restore the shared pack" },
+    TurnSchema,
+  );
+  const reusing = await host.next("TurnOffer");
+  host.send({ type: "RestoreChunks", turnId: reusing.turnId, part: 1, chunks: [...placed({ [packTwo]: [two] })] });
+  const reused = await host.next("RestoreDownloads");
+  assert.deepEqual(
+    reused.packs.map((pack) => pack.packDigest),
+    [packTwo],
+  );
+  await eventually(
+    "the unclaimed shared restore turn reading Failed",
+    () => getJson(`/v1/turns/${reusing.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
+
   await tool("tumpel_session_stop", { sessionId: first.session.sessionId }, SessionSchema);
   const teardown = await host.next("BoxTeardown");
   host.send({ type: "BoxGone", sessionId: first.session.sessionId, boxId: teardown.boxId });
