@@ -20,6 +20,7 @@ import {
   GitHubUserSchema,
   GitHubUserTokenSchema,
 } from "./github-schemas.ts";
+import type { Problem } from "./http.ts";
 
 export type GitHubAppManifest = z.infer<typeof GitHubAppManifestSchema>;
 export type GitHubAppConversion = z.infer<typeof GitHubAppConversionSchema>;
@@ -292,7 +293,7 @@ export interface GitHubRepository {
 }
 
 export const githubRepository = (repository: string): GitHubRepository | null => {
-  const matched = /^(?:https:\/\/github\.com\/)?([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(
+  const matched = /^(?:(?:https:\/\/)?github\.com\/)?([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(
     repository.trim(),
   );
   return matched?.[1] === undefined || matched[2] === undefined ? null : { owner: matched[1], name: matched[2] };
@@ -300,6 +301,13 @@ export const githubRepository = (repository: string): GitHubRepository | null =>
 
 export const repositoryUrl = (target: GitHubRepository): string =>
   `${GITHUB_WEB}/${target.owner}/${target.name}`.toLowerCase();
+
+export const notARepository = (repository: string): Problem => ({
+  code: "InvalidRequest",
+  title: "Not a GitHub repository",
+  detail: `${repository} is not a GitHub repository; a repository is owner/name, github.com/owner/name or https://github.com/owner/name, with or without .git`,
+  fix: "Pass https://github.com/owner/name",
+});
 
 export type Minted =
   | { kind: "Minted"; token: string; expiresAt: string; permissions: Record<string, string> }

@@ -848,7 +848,14 @@ test("an organization install connects only for the GitHub account its installat
 
 test("a repository is read from owner/name as from its GitHub URL, and anything else is no GitHub repository", () => {
   const app = { owner: "acme", name: "app" };
-  for (const form of ["acme/app", "https://github.com/acme/app", "https://github.com/acme/app.git", " acme/app/ "]) {
+  for (const form of [
+    "acme/app",
+    "github.com/acme/app",
+    "github.com/acme/app.git",
+    "https://github.com/acme/app",
+    "https://github.com/acme/app.git",
+    " acme/app/ ",
+  ]) {
     assert.deepEqual(githubRepository(form), app, form);
   }
   for (const form of ["acme", "acme/app/tree/main", "https://gitlab.com/acme/app", "github.com:acme/app"]) {

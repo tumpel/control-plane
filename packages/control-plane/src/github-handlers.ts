@@ -6,7 +6,6 @@ import {
   GitHubInstallStartSchema,
   GitHubIssueSchema,
   GitHubRefreshStartSchema,
-  GitHubRepositoryPathSchema,
   GitHubRepositorySchema,
   type WhoamiSchema,
 } from "@tumpel/api/schemas";
@@ -44,6 +43,7 @@ import {
   type GitHubAnswer,
   type GitHubInstallationRecord,
   type GitHubUser,
+  githubRepository,
   installationSettings,
   installedBy,
   installUrl,
@@ -52,6 +52,7 @@ import {
   manifestAction,
   mintInstallationToken,
   mintInstallationWideToken,
+  notARepository,
   type OAuthClient,
   parseJson,
   type RecordedInstaller,
@@ -319,28 +320,28 @@ const handleRepositories = async (caller: Caller, url: URL, env: Env): Promise<R
 };
 
 const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, name: string): Promise<Response> => {
-  const path = GitHubRepositoryPathSchema.safeParse({ owner, name });
-  if (!path.success) {
+  const target = githubRepository(`${owner}/${name}`);
+  if (target === null) {
     return problem(404, {
+      ...notARepository(`${owner}/${name}`),
       code: "NotFound",
       title: "No such repository",
-      detail: `${owner}/${name} is not a GitHub repository name: ${issues(path.error)}`,
       fix: "List your GitHub repositories and pass an owner and name from it",
     });
   }
   const app = await appKey(env.DB, keyStoreOf(env));
   if (app === null) return appMissing(url.origin);
-  const installation = await installationOn(env.DB, caller.tenantId, path.data.owner);
+  const installation = await installationOn(env.DB, caller.tenantId, target.owner);
   const minted =
     installation === null
       ? uncovered(
           (await installationsOf(env.DB, caller.tenantId)).map(({ accountLogin }) => accountLogin),
-          path.data,
+          target,
         )
-      : await mintInstallationToken(fetcher, env.GITHUB_API_ORIGIN, app, installation, path.data, Date.now());
+      : await mintInstallationToken(fetcher, env.GITHUB_API_ORIGIN, app, installation, target, Date.now());
   if (minted.kind === "NoToken") return notConnected();
   if (minted.kind !== "Minted") return unreadable(minted.detail);
-  return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, path.data), GitHubIssueSchema);
+  return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, target), GitHubIssueSchema);
 };
 
 export const handleGitHubConnection = async (
