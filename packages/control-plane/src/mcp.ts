@@ -6,6 +6,7 @@ import {
   ConfigSubscriptionTokenSchema,
   DevicePathSchema,
   EnrolmentTokenMintSchema,
+  EnrolmentTokenPathSchema,
   GitHubActionsConnectionStartSchema,
   GitHubRepositoryPathSchema,
   HarnessPathSchema,
@@ -16,6 +17,7 @@ import {
   InvitationPathSchema,
   MemberPathSchema,
   NamespaceConnectionStartSchema,
+  OAuthGrantPathSchema,
   PersonaCreateSchema,
   PersonaFileUploadRequestSchema,
   PersonaPathSchema,
@@ -52,7 +54,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections or tumpel config apply on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections or tumpel config apply on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -180,6 +182,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/enrolment-tokens",
     EnrolmentTokenMintSchema,
     "Mint a one-time enrolment token for a new host; expiresInSeconds is how long the token enrols a host. Returns the MintedEnrolmentToken of POST /v1/enrolment-tokens: {enrolmentToken, token, installCommand}. The token is shown once. installCommand holds no token and reads it from stdin: run installCommand on the new x86_64 host with the token on stdin; it downloads the supervisor, installs it and enrols the host.",
+  ),
+  rest(
+    "tumpel_host_list_tokens",
+    "GET",
+    "/v1/enrolment-tokens",
+    NO_ARGUMENTS,
+    "List the tenant's unused, unexpired enrolment tokens, without their token values. Returns the EnrolmentToken[] of GET /v1/enrolment-tokens: enrolmentTokenId, principalId, expiresAt and createdAt.",
+  ),
+  rest(
+    "tumpel_host_revoke_token",
+    "DELETE",
+    "/v1/enrolment-tokens/{enrolmentTokenId}",
+    EnrolmentTokenPathSchema,
+    "Revoke an unused enrolment token; no host can enrol with it. Calls DELETE /v1/enrolment-tokens/{enrolmentTokenId}.",
   ),
   rest(
     "tumpel_host_list",
@@ -340,7 +356,14 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/oauth-grants",
     NO_ARGUMENTS,
-    "List the OAuth clients, such as this connector or the dashboard, that hold a live token for you in this tenant. Returns the OAuthGrant[] of GET /v1/oauth-grants: clientId, clientName, redirectOrigin and lastIssuedAt.",
+    "List the OAuth clients, such as this connector or the dashboard, that hold a live token for you in this tenant. Returns the OAuthGrant[] of GET /v1/oauth-grants: grantId, clientId, clientName, redirectOrigin and lastIssuedAt.",
+  ),
+  rest(
+    "tumpel_oauth_grant_revoke",
+    "DELETE",
+    "/v1/oauth-grants/{grantId}",
+    OAuthGrantPathSchema,
+    "Revoke one of your OAuth grants: every access and refresh token of the grant stops working at once, so revoking this connector's own grant signs it out. Calls DELETE /v1/oauth-grants/{grantId}.",
   ),
   rest(
     "tumpel_config_plan",

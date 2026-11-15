@@ -1,4 +1,9 @@
-import { type HostEnrolSchema, HostSchema, MintedEnrolmentTokenSchema } from "@tumpel/api/schemas";
+import {
+  EnrolmentTokenSchema,
+  type HostEnrolSchema,
+  HostSchema,
+  MintedEnrolmentTokenSchema,
+} from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
@@ -8,6 +13,7 @@ import type { Env } from "./index";
 
 export type Host = z.infer<typeof HostSchema>;
 export type MintedEnrolmentToken = z.infer<typeof MintedEnrolmentTokenSchema>;
+export type EnrolmentToken = z.infer<typeof EnrolmentTokenSchema>;
 export type HostEnrol = z.infer<typeof HostEnrolSchema>;
 
 export type Refused = { ok: false; status: ProblemStatus; problem: Problem };
@@ -84,6 +90,57 @@ export const mintEnrolmentToken = async (
       "chmod +x tumpel-supervisor",
       `./tumpel-supervisor install --endpoint ${origin} --token-file -`,
     ].join(" && "),
+  });
+};
+
+export const listEnrolmentTokens = async (db: D1Database, tenantId: string, now: number): Promise<EnrolmentToken[]> => {
+  const { results } = await db
+    .prepare(
+      `SELECT enrolment_token_id, tenant_id, principal_id, state, expires_at, created_at, updated_at
+      FROM enrolment_tokens WHERE tenant_id = ? AND state = 'Unused' AND expires_at > ? ORDER BY created_at`,
+    )
+    .bind(tenantId, now)
+    .all<{
+      enrolment_token_id: string;
+      tenant_id: string;
+      principal_id: string;
+      state: string;
+      expires_at: number;
+      created_at: number;
+      updated_at: number;
+    }>();
+  return results.map((row) =>
+    EnrolmentTokenSchema.parse({
+      enrolmentTokenId: row.enrolment_token_id,
+      tenantId: row.tenant_id,
+      principalId: row.principal_id,
+      state: row.state,
+      expiresAt: new Date(row.expires_at).toISOString(),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }),
+  );
+};
+
+export const revokeEnrolmentToken = async (
+  db: D1Database,
+  tenantId: string,
+  enrolmentTokenId: string,
+  now: number,
+): Promise<Outcome<null>> => {
+  const revoked = await db
+    .prepare(
+      `DELETE FROM enrolment_tokens WHERE tenant_id = ? AND enrolment_token_id = ? AND state = 'Unused' AND expires_at > ?
+      RETURNING enrolment_token_id`,
+    )
+    .bind(tenantId, enrolmentTokenId, now)
+    .all();
+  if (revoked.results.length === 1) return { ok: true, value: null };
+  return refuse(404, {
+    code: "NotFound",
+    title: "No such enrolment token",
+    detail: `your tenant has no unused, unexpired enrolment token ${enrolmentTokenId}`,
+    fix: "List them with tumpel host list-tokens and revoke one of the ids it prints",
   });
 };
 

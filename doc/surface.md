@@ -8,7 +8,8 @@ names no operation or one that has a tool, or when this file is stale.
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
 Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`.
-`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
+`EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
+`Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in
 principal reads it too. The CLI's `transcript read` takes a turnId and reads that turn's lines of its
@@ -23,7 +24,9 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Connections_list`                   | `tumpel_connection_list`          | `tumpel connection list`          |
 | `Devices_list`                       | `tumpel_devices_list`             | `tumpel devices list`             |
 | `Devices_revoke`                     | `tumpel_devices_revoke`           | `tumpel devices revoke`           |
+| `EnrolmentTokens_list`               | `tumpel_host_list_tokens`         | `tumpel host list-tokens`         |
 | `EnrolmentTokens_mint`               | `tumpel_host_mint_token`          | `tumpel host mint-token`          |
+| `EnrolmentTokens_revoke`             | `tumpel_host_revoke_token`        | `tumpel host revoke-token`        |
 | `GitHubActionsConnections_delete`    | `tumpel_github_actions_delete`    | `tumpel github-actions delete`    |
 | `GitHubActionsConnections_get`       | `tumpel_github_actions_get`       | `tumpel github-actions get`       |
 | `GitHubActionsConnections_start`     | `tumpel_github_actions_start`     | `tumpel github-actions start`     |
@@ -52,6 +55,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `NamespaceConnections_get`           | `tumpel_namespace_get`            | `tumpel namespace get`            |
 | `NamespaceConnections_start`         | `tumpel_namespace_start`          | `tumpel namespace start`          |
 | `OAuthGrants_list`                   | `tumpel_oauth_grant_list`         | `tumpel oauth-grant list`         |
+| `OAuthGrants_revoke`                 | `tumpel_oauth_grant_revoke`       | `tumpel oauth-grant revoke`       |
 | `Personas_create`                    | `tumpel_persona_create`           | `tumpel persona create`           |
 | `Personas_delete`                    | `tumpel_persona_delete`           | `tumpel persona delete`           |
 | `Personas_get`                       | `tumpel_persona_get`              | `tumpel persona get`              |

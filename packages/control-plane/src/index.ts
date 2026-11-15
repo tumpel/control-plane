@@ -69,9 +69,11 @@ import {
   enrolHost,
   hostNotFound,
   hostOf,
+  listEnrolmentTokens,
   listHosts,
   mintEnrolmentToken,
   type Refused,
+  revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
 } from "./hosts";
@@ -123,6 +125,7 @@ import {
   refreshGrant,
   registerClient,
   resourceMetadataUrl,
+  revokeCallerGrant,
   revokeToken,
   SCOPE,
   startAuthorization,
@@ -310,6 +313,23 @@ const handleGrantsList = async (request: Request, env: Env): Promise<Response> =
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   return json(await listGrants(env.DB, caller, Date.now()));
+};
+
+const OAUTH_GRANTS_PATH = "/v1/oauth-grants/";
+
+const handleGrantRevoke = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const grantId = decodeURIComponent(url.pathname.slice(OAUTH_GRANTS_PATH.length));
+  if (!(await revokeCallerGrant(env.DB, caller, grantId))) {
+    return problem(404, {
+      code: "NotFound",
+      title: "No such OAuth grant",
+      detail: `you hold no OAuth grant ${grantId} in this tenant`,
+      fix: "Run tumpel oauth-grant list and revoke one of the grantIds it prints",
+    });
+  }
+  return noContent();
 };
 
 const handleDevicesList = async (request: Request, env: Env): Promise<Response> => {
@@ -674,6 +694,22 @@ const handleMint = async (request: Request, url: URL, env: Env): Promise<Respons
   const body = await parseBody(request, EnrolmentTokenMintSchema, "mint");
   if (!body.ok) return body.response;
   return json(await mintEnrolmentToken(env.DB, caller, body.value.expiresInSeconds, url.origin, Date.now()));
+};
+
+const handleListEnrolmentTokens = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(await listEnrolmentTokens(env.DB, caller.tenantId, Date.now()));
+};
+
+const ENROLMENT_TOKENS_PATH = "/v1/enrolment-tokens/";
+
+const handleRevokeEnrolmentToken = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const enrolmentTokenId = decodeURIComponent(url.pathname.slice(ENROLMENT_TOKENS_PATH.length));
+  const revoked = await revokeEnrolmentToken(env.DB, caller.tenantId, enrolmentTokenId, Date.now());
+  return revoked.ok ? noContent() : refusal(revoked);
 };
 
 const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -1260,6 +1296,7 @@ const ROUTES: Record<string, Route> = {
   "PUT /v1/harnesses/pins": handlePin,
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
+  "GET /v1/enrolment-tokens": handleListEnrolmentTokens,
   "POST /v1/issuer-keys/rotate": handleIssuerRotate,
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
@@ -1293,6 +1330,17 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     url.pathname.length > DEVICES_PATH.length
   ) {
     return handleDeviceRevoke(request, url, env);
+  }
+  const deleting = request.method === "DELETE";
+  if (deleting && url.pathname.startsWith(OAUTH_GRANTS_PATH) && url.pathname.length > OAUTH_GRANTS_PATH.length) {
+    return handleGrantRevoke(request, url, env);
+  }
+  if (
+    deleting &&
+    url.pathname.startsWith(ENROLMENT_TOKENS_PATH) &&
+    url.pathname.length > ENROLMENT_TOKENS_PATH.length
+  ) {
+    return handleRevokeEnrolmentToken(request, url, env);
   }
   const resource =
     (await handlePersona(request, url, env)) ??

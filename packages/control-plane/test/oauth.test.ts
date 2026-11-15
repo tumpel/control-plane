@@ -418,6 +418,34 @@ test("signing out of the dashboard on one device revokes that sign-in and keeps 
   assert.equal(phoneRefreshed.status, 200);
 });
 
+test("revoking one of the caller's OAuth grants over REST stops every token of that grant and keeps the others", async () => {
+  const laptop = await dashboardSignIn();
+  const bearer = { authorization: `Bearer ${laptop.access_token}` };
+  const grantIds = async (): Promise<string[]> =>
+    OAuthGrantSchema.array()
+      .parse(await (await call("/v1/oauth-grants", { headers: bearer })).json())
+      .map((grant) => grant.grantId);
+  const earlier = await grantIds();
+  const phone = await dashboardSignIn();
+  const added = (await grantIds()).filter((grantId) => !earlier.includes(grantId));
+  assert.equal(added.length, 1);
+
+  const revoke = () => call(`/v1/oauth-grants/${added[0]}`, { method: "DELETE", headers: bearer });
+  assert.equal((await revoke()).status, 204);
+  const whoami = async (accessToken: string): Promise<number> =>
+    (await call("/v1/whoami", { headers: { authorization: `Bearer ${accessToken}` } })).status;
+  assert.deepEqual([await whoami(phone.access_token), await whoami(laptop.access_token)], [401, 200]);
+  const refreshed = await token({
+    grant_type: "refresh_token",
+    client_id: DASHBOARD_CLIENT,
+    refresh_token: phone.refresh_token,
+  });
+  assert.equal(refreshed.status, 400);
+  const again = await revoke();
+  assert.equal(again.status, 404);
+  assert.equal(ProblemSchema.parse(await again.json()).code, "NotFound");
+});
+
 test("an Origin outside the allow-list gets no access-control-allow-origin, the dashboard origin does", async () => {
   for (const method of ["OPTIONS", "GET"]) {
     const answered = await call("/v1/whoami", { method, headers: { origin: "https://app.elsewhere.test" } });

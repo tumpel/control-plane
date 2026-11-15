@@ -12,6 +12,7 @@ import {
   CloseCode,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
+  EnrolmentTokenSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
   ProblemSchema,
@@ -304,6 +305,46 @@ test("an unknown enrolment token is refused", async () => {
   });
   assert.equal(response.status, 404);
   assert.equal(ProblemSchema.parse(await response.json()).code, "NotFound");
+});
+
+test("the tenant lists its open enrolment tokens without their values, and a revoked token enrols no host", async () => {
+  const minted = MintedEnrolmentTokenSchema.parse(
+    await (await postJson("/v1/enrolment-tokens", { expiresInSeconds: 600 }, bearer)).json(),
+  );
+  const tokenId = minted.enrolmentToken.enrolmentTokenId;
+  const listed = await server.fetch(`${origin}/v1/enrolment-tokens`, { headers: bearer });
+  assert.equal(listed.status, 200);
+  const body = await listed.text();
+  assert.equal(body.includes(minted.token), false, "the listing carries a token value");
+  const open = EnrolmentTokenSchema.array().parse(JSON.parse(body));
+  assert.deepEqual(
+    open.filter((token) => token.enrolmentTokenId === tokenId).map((token) => token.state),
+    ["Unused"],
+  );
+
+  const revoke = () => server.fetch(`${origin}/v1/enrolment-tokens/${tokenId}`, { method: "DELETE", headers: bearer });
+  assert.equal((await revoke()).status, 204);
+  const again = await revoke();
+  assert.equal(again.status, 404);
+  assert.equal(ProblemSchema.parse(await again.json()).code, "NotFound");
+  const remaining = EnrolmentTokenSchema.array().parse(
+    await (await server.fetch(`${origin}/v1/enrolment-tokens`, { headers: bearer })).json(),
+  );
+  assert.equal(
+    remaining.some((token) => token.enrolmentTokenId === tokenId),
+    false,
+  );
+
+  const enrol = await postJson("/v1/hosts/enrol", {
+    name: "revoked",
+    architecture: "Amd64",
+    cpuCount: 1,
+    memoryBytes: 1024,
+    publicKey: Buffer.alloc(32).toString("base64"),
+    supervisorVersion: "0.1.0",
+    enrolmentToken: minted.token,
+  });
+  assert.equal(enrol.status, 404);
 });
 
 test("tumpel host mint-token prints the token to stdout only, and its install hint reads the token from stdin", async () => {

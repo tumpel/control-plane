@@ -481,20 +481,29 @@ const RegisteredRedirects = z.tuple([z.url()], z.url());
 export const listGrants = async (db: D1Database, caller: Caller, now: number): Promise<OAuthGrant[]> => {
   const rows = await db
     .prepare(
-      `SELECT c.client_id, c.client_name, c.redirect_uris, MAX(t.created_at) AS last_issued_at
+      `SELECT t.grant_id, c.client_id, c.client_name, c.redirect_uris, MAX(t.created_at) AS last_issued_at
       FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id
       WHERE t.tenant_id = ? AND t.principal_id = ? AND t.spent = 0 AND t.expires_at > ?
-      GROUP BY c.client_id ORDER BY last_issued_at DESC`,
+      GROUP BY t.grant_id, c.client_id ORDER BY last_issued_at DESC`,
     )
     .bind(caller.tenantId, caller.principalId, now)
-    .all<{ client_id: string; client_name: string; redirect_uris: string; last_issued_at: number }>();
+    .all<{ grant_id: string; client_id: string; client_name: string; redirect_uris: string; last_issued_at: number }>();
   return rows.results.map((row) => {
     const [first] = RegisteredRedirects.parse(JSON.parse(row.redirect_uris));
     return OAuthGrantSchema.parse({
+      grantId: row.grant_id,
       clientId: row.client_id,
       clientName: row.client_name,
       redirectOrigin: new URL(first).origin,
       lastIssuedAt: row.last_issued_at,
     });
   });
+};
+
+export const revokeCallerGrant = async (db: D1Database, caller: Caller, grantId: string): Promise<boolean> => {
+  const revoked = await db
+    .prepare("DELETE FROM oauth_tokens WHERE grant_id = ? AND tenant_id = ? AND principal_id = ? RETURNING grant_id")
+    .bind(grantId, caller.tenantId, caller.principalId)
+    .all();
+  return revoked.results.length > 0;
 };
