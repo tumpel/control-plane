@@ -240,7 +240,7 @@ const noInstallation = (installationId: string): Response =>
     code: "NotFound",
     title: "No such installation",
     detail: `your tenant holds no GitHub App installation ${installationId}`,
-    fix: "List the installations with tumpel github list and pass an installationId it prints",
+    fix: "List your GitHub installations and pass one of their installationIds",
   });
 
 const handleDelete = async (caller: Caller, env: Env, installationText: string): Promise<Response> => {
@@ -251,7 +251,7 @@ const handleDelete = async (caller: Caller, env: Env, installationText: string):
       code: "InvalidRequest",
       title: "Not an installation id",
       detail: `${installationText} is not a GitHub installation id, which is a positive whole number`,
-      fix: "List the installations with tumpel github list and pass an installationId it prints",
+      fix: "List your GitHub installations and pass one of their installationIds",
     });
   }
   if (!(await unlinkTenantInstallation(env.DB, caller.tenantId, Number(installationText)))) {
@@ -264,8 +264,8 @@ const notConnected = (): Response =>
   problem(409, {
     code: "GitHubNotConnected",
     title: "GitHub not connected",
-    detail: "your tenant holds no installation of the stage's GitHub App, so no repository is covered",
-    fix: "Install it with tumpel github start and open the URL it prints",
+    detail: "GitHub is not connected, so no repository is covered",
+    fix: "Connect GitHub first",
   });
 
 const unreadable = (detail: string): Response =>
@@ -325,7 +325,7 @@ const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, n
       code: "NotFound",
       title: "No such repository",
       detail: `${owner}/${name} is not a GitHub repository name: ${issues(path.error)}`,
-      fix: "List the repositories with tumpel github list-repositories and pass an owner and name it prints",
+      fix: "List your GitHub repositories and pass an owner and name from it",
     });
   }
   const app = await appKey(env.DB, keyStoreOf(env));

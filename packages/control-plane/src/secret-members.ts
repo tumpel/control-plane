@@ -29,7 +29,7 @@ export const unreadableSecretSet = (operation: string, unreadable: UnreadableSec
   code: "Conflict",
   title: "Stored secret member unreadable",
   detail: `${operation} read member ${unreadable.member} of secret set ${unreadable.name} (${unreadable.secretSetId}), which no longer matches its kind: ${unreadable.detail}`,
-  fix: `Write member ${unreadable.member} again with tumpel secret-set set-member, or rewrite secret set ${unreadable.name} with tumpel secret-set update`,
+  fix: `Write member ${unreadable.member} again, or rewrite secret set ${unreadable.name}`,
 });
 
 const memberShape = (row: MemberRow): Record<string, unknown> =>

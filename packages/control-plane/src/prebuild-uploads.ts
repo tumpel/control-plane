@@ -106,7 +106,7 @@ const notUploading = (prebuild: Prebuild): Response =>
     code: "PrebuildNotUploading",
     title: "Prebuild not uploading",
     detail: `prebuild ${prebuild.prebuildId} is ${prebuild.status.state}, and only a Dispatched or Building prebuild takes its layer`,
-    fix: `Upload from the run the prebuild dispatched once it runs, or start a new prebuild with tumpel prebuild start --rebuild; read this one with tumpel prebuild get ${prebuild.prebuildId}`,
+    fix: `Upload from the run the prebuild dispatched once it runs, or start a new prebuild with rebuild set; read prebuild ${prebuild.prebuildId} to follow this one`,
   });
 
 const claimOf = (claims: Record<string, unknown>, name: string): string | null => {
@@ -234,7 +234,7 @@ const bindCircleCIClaims = (target: CircleCIUploadTarget, claims: Record<string,
       tokenMismatch(
         "ssh-rerun",
         "the token comes from a job rerun with SSH, or names no ssh-rerun, and a rerun with SSH hands a person a shell in the job",
-        "Upload from the pipeline's own run; start a new prebuild with tumpel prebuild start --rebuild instead of rerunning a job with SSH",
+        "Upload from the pipeline's own run; start a new prebuild with rebuild set instead of rerunning a job with SSH",
       ),
     );
   }
@@ -343,7 +343,7 @@ const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: 
       code: "Conflict",
       title: "Another layer already started",
       detail: `prebuild ${prebuildId} recorded layer ${recorded.recorded.layerDigest} of ${recorded.recorded.layerSizeBytes} bytes, and this start names ${upload.layerDigest} of ${upload.layerSizeBytes} bytes`,
-      fix: "Upload the layer the first start named, or start a new prebuild with tumpel prebuild start --rebuild",
+      fix: "Upload the layer the first start named, or start a new prebuild with rebuild set",
     });
   }
   const signer = signerOf(env, env.R2_BUCKET_NAME, env.R2_ACCESS_KEY_ID, env.R2_SECRET_ACCESS_KEY);

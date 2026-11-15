@@ -194,13 +194,13 @@ test("a prebuild start refuses before it stores anything: an unconnected provide
   const problem = await refused("POST", "/v1/prebuilds", start, 409);
   assert.equal(problem.code, "NoBuildProvider");
   assert.match(problem.detail, /GitHubActions/);
-  assert.match(problem.fix, /tumpel github-actions start/);
+  assert.match(problem.fix, /Connect your own GitHubActions account/);
   const circleCI = await refused("POST", "/v1/prebuilds", { ...start, provider: "CircleCI" }, 409);
   assert.equal(circleCI.code, "NoBuildProvider");
-  assert.match(circleCI.fix, /tumpel circleci authorize/);
+  assert.match(circleCI.fix, /Connect your own CircleCI account/);
   const namespace = await refused("POST", "/v1/prebuilds", { ...start, provider: "Namespace", rebuild: true }, 409);
   assert.equal(namespace.code, "NoBuildProvider");
-  assert.match(namespace.fix, /tumpel namespace start/);
+  assert.match(namespace.fix, /Connect your own Namespace account/);
   assert.equal((await refused("POST", "/v1/prebuilds", unnamed, 400)).code, "InvalidRequest");
   assert.equal(
     (await refused("POST", "/v1/prebuilds", { ...start, repository: "https://example.test/app.git" }, 422)).code,

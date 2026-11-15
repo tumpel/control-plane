@@ -33,7 +33,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import type { z } from "zod";
+import { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../src/channel/protocol.ts";
 import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 
@@ -87,6 +87,13 @@ type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
 type StoredTimerStub = { store(timers: unknown, at: number): Promise<void> };
 type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
+
+const CompactPageSchema = z.object({
+  sessionId: z.string(),
+  cursor: z.number(),
+  finished: z.boolean(),
+  turns: z.array(z.object({ turnId: z.string(), lines: z.array(z.object({ lineSeq: z.number(), text: z.string() })) })),
+});
 
 const IMAGE_DIGEST = "b".repeat(64);
 const KERNEL_DIGEST = "c".repeat(64);
@@ -643,22 +650,17 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     (turn) => turn.lineCount === 3,
   );
   assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
-  const chunked = await tool("tumpel_transcript_read", { sessionId, compact: true, limit: 10 }, TranscriptPageSchema);
-  assert.deepEqual(
-    chunked.lines.map(({ lineSeq, text }) => ({ lineSeq, text })),
-    [{ lineSeq: 2, text: "on it" }],
-  );
+  const chunked = await tool("tumpel_transcript_read", { sessionId, compact: true, limit: 10 }, CompactPageSchema);
+  assert.equal(chunked.sessionId, sessionId);
+  assert.deepEqual(chunked.turns, [{ turnId, lines: [{ lineSeq: 2, text: "on it" }] }]);
   assert.equal(chunked.cursor, 2);
   assert.equal(chunked.finished, false);
   const pending = await tool(
     "tumpel_transcript_read",
     { sessionId, compact: true, limit: 10, after: chunked.cursor },
-    TranscriptPageSchema,
+    CompactPageSchema,
   );
-  assert.deepEqual(
-    pending.lines.map(({ lineSeq, text }) => ({ lineSeq, text })),
-    [{ lineSeq: 3, text: "[Bash] npm test" }],
-  );
+  assert.deepEqual(pending.turns, [{ turnId, lines: [{ lineSeq: 3, text: "[Bash] npm test" }] }]);
   assert.equal(pending.cursor, 3);
   assert.equal(pending.finished, false);
 

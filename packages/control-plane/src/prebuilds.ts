@@ -22,12 +22,6 @@ const LATEST_PATH = "/v1/prebuilds/latest";
 const PREBUILD_PATH = /^\/v1\/prebuilds\/([^/]+)(\/failure)?$/;
 const PREBUILD_ARCHITECTURE = "Amd64";
 
-const CONNECT_COMMANDS: Record<BuildProvider, string> = {
-  GitHubActions: "tumpel github-actions start",
-  CircleCI: "tumpel circleci authorize",
-  Namespace: "tumpel namespace start",
-};
-
 const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
 
 const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused => ({
@@ -43,7 +37,7 @@ const prebuildNotFound = (prebuildId: string): Refused =>
     code: "NotFound",
     title: "No such prebuild",
     detail: `your tenant has no prebuild ${prebuildId}`,
-    fix: "List a repository's prebuilds with tumpel prebuild list --repository <url>",
+    fix: "List the repository's prebuilds and use one of their ids",
   });
 
 const notGitHub = (repository: string): Refused =>
@@ -59,7 +53,7 @@ export const noBuildProvider = (provider: BuildProvider, repository: string): Re
     code: "NoBuildProvider",
     title: "Build provider not connected",
     detail: `your tenant has not connected ${provider}, so no prebuild of ${repository} can run on it`,
-    fix: `Connect your own ${provider} account with ${CONNECT_COMMANDS[provider]}, or name a connected provider, then start the prebuild again`,
+    fix: `Connect your own ${provider} account, or name a connected provider, then start the prebuild again`,
   });
 
 const buildProviderUnavailable = (provider: BuildProvider, repository: string): Refused =>
@@ -75,7 +69,7 @@ const circleCIProjectMissing = (repository: string): Refused =>
     code: "CircleCIProjectMissing",
     title: "Repository not bound to CircleCI",
     detail: `your tenant has bound no CircleCI project to ${repository}, so CircleCI has no pipeline to run its prebuild`,
-    fix: "Bind it once with tumpel circleci project add --repository <url> --project-slug <slug> --pipeline-definition-id <uuid>, then start the prebuild again",
+    fix: "Bind the repository to its CircleCI project once, then start the prebuild again",
   });
 
 const dispatchRefused = (detail: string): Refused =>
@@ -161,7 +155,7 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
       code: "GitHubNotConnected",
       title: "GitHub not connected",
       detail: `your tenant has not installed the stage's GitHub App, and a GitHub Actions prebuild of ${key.repository} dispatches its caller workflow with the App`,
-      fix: "Install it with tumpel github start on the repository's owner, then start the prebuild again",
+      fix: "Connect GitHub for the repository's owner, then start the prebuild again",
     });
   }
   if (dispatched.kind === "PermissionMissing") return appPermissionMissing(target, dispatched.permissions);
@@ -234,7 +228,7 @@ const guestImage = async (
       code: "ImageNotReleased",
       title: "Harness version not in the current release",
       detail: `release ${release.manifest.releaseVersion} carries no ${harness} ${harnessVersion} guest image for ${PREBUILD_ARCHITECTURE}, the architecture prebuilds build on`,
-      fix: `Pin a version tumpel release current lists for ${PREBUILD_ARCHITECTURE} with tumpel harness pin, then start the prebuild again`,
+      fix: `Pin a harness version the current release carries for ${PREBUILD_ARCHITECTURE}, then start the prebuild again`,
     });
   }
   return ok(image);
@@ -257,7 +251,7 @@ export const startPrebuild = async (
       code: "NotFound",
       title: "No such persona",
       detail: `your tenant has no persona ${start.personaId}`,
-      fix: "List your personas with tumpel persona list",
+      fix: "List your personas and use one of their ids",
     });
   }
   if (!(await tenant.buildProviderConnected(start.provider))) return noBuildProvider(start.provider, repository);
@@ -267,7 +261,7 @@ export const startPrebuild = async (
       code: "HarnessNotInCatalog",
       title: "Harness not in the catalog",
       detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
-      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists, with tumpel config apply",
+      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
     });
   }
   const image = await guestImage(env, entry.harness, entry.harnessVersion, now);
@@ -340,7 +334,7 @@ export const getPrebuildFailure = async (
     code: "NotFound",
     title: "Prebuild did not fail",
     detail: `prebuild ${prebuildId} is ${prebuild.status.state}, and only a Failed prebuild has a failure`,
-    fix: `Read the prebuild with tumpel prebuild get ${prebuildId}`,
+    fix: `Read prebuild ${prebuildId}`,
   });
 };
 

@@ -355,7 +355,7 @@ const handleGrantRevoke = async (request: Request, url: URL, env: Env): Promise<
       code: "NotFound",
       title: "No such OAuth grant",
       detail: `you hold no OAuth grant ${grantId} in this tenant`,
-      fix: "Run tumpel oauth-grant list and revoke one of the grantIds it prints",
+      fix: "List your OAuth grants and revoke one of their ids",
     });
   }
   return noContent();
@@ -381,7 +381,7 @@ const personaNotFound = (personaId: string): Response =>
     code: "NotFound",
     title: "No such persona",
     detail: `your tenant owns no persona ${personaId}`,
-    fix: "List the personas with GET /v1/personas and use one of the ids it returns",
+    fix: "List your personas and use one of their ids",
   });
 
 const secretSetNotFound = (secretSetId: string): Response =>
@@ -389,7 +389,7 @@ const secretSetNotFound = (secretSetId: string): Response =>
     code: "NotFound",
     title: "No such secret set",
     detail: `your tenant owns no secret set ${secretSetId}`,
-    fix: "List the secret sets with GET /v1/secret-sets and use one of the ids it returns",
+    fix: "List your secret sets and use one of their ids",
   });
 
 const conflict = (operation: string, name: string, constraint: string): Response => {
@@ -412,7 +412,7 @@ const conflict = (operation: string, name: string, constraint: string): Response
   return problem(409, {
     code: "Conflict",
     title: "Name taken",
-    detail: `${operation} refused the name ${name}: your tenant already has one by that name (${constraint})`,
+    detail: `the name ${name} is taken: your tenant already has one by that name`,
     fix: "Pick another name, or update the existing one",
   });
 };
@@ -420,12 +420,12 @@ const conflict = (operation: string, name: string, constraint: string): Response
 const unreadable = (operation: string, read: UnreadableSecretSet): Response =>
   problem(409, unreadableSecretSet(operation, read));
 
-const unknownSecretSet = (operation: string, secretSetId: string): Response =>
+const unknownSecretSet = (secretSetId: string): Response =>
   problem(422, {
     code: "NotFound",
     title: "No such secret set",
-    detail: `${operation} names secret set ${secretSetId}, which your tenant does not own`,
-    fix: "List the secret sets with GET /v1/secret-sets and name one of the ids it returns",
+    detail: `your tenant owns no secret set with the id ${secretSetId}`,
+    fix: "List your secret sets and pass the secretSetId of one; a secret set's name is not its id",
   });
 
 type PersonaBody = z.infer<typeof PersonaCreateSchema>;
@@ -440,7 +440,7 @@ const personaWrite = async (
 ): Promise<PersonaWritten> => {
   const tenant = env.TENANT.getByName(caller.tenantId);
   const read = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
-  if (read.kind === "NotFound") return { ok: false, response: unknownSecretSet(operation, body.secretSetId) };
+  if (read.kind === "NotFound") return { ok: false, response: unknownSecretSet(body.secretSetId) };
   if (read.kind === "Unreadable") return { ok: false, response: unreadable(operation, read) };
   const { secretSet } = read;
   const entry = pinnedEntry(await tenant.listPins(), body.harness);
@@ -451,7 +451,7 @@ const personaWrite = async (
         code: "HarnessNotInCatalog",
         title: "Harness not in the catalog",
         detail: `${operation} names ${body.harness}, of which the catalog holds no version your tenant can run`,
-        fix: "Name a harness GET /v1/harnesses lists, or pin one of its listed versions",
+        fix: "Name a harness the harness catalog lists, or pin one of its listed versions",
       }),
     };
   }
@@ -686,7 +686,7 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
     code: "NotFound",
     title: "No such member",
     detail: `secret set ${secretSetId} has no member ${name}`,
-    fix: "List the members with GET /v1/secret-sets/{secretSetId} and name one of them",
+    fix: "Read the secret set and name one of its members",
   });
 };
 
@@ -719,7 +719,7 @@ const unreleasedPin = async (
     code: "ImageNotReleased",
     title: "Harness version not in the current release",
     detail: `release ${release.manifest.releaseVersion} carries no ${harness} ${harnessVersion} guest image for ${architectures.join(" or ")}, the architectures of your tenant's hosts`,
-    fix: "Pin a version tumpel release current lists for one of those architectures, or ask the operator, who publishes releases, for one that carries it",
+    fix: "Pin a version the current release carries for one of those architectures, or ask the operator, who publishes releases, for one that carries it",
   });
 };
 
@@ -733,7 +733,7 @@ const handlePin = async (request: Request, _url: URL, env: Env): Promise<Respons
       code: "HarnessNotInCatalog",
       title: "Harness version not in the catalog",
       detail: `the catalog has no ${body.value.harness} ${body.value.harnessVersion}`,
-      fix: "Pin a version GET /v1/harnesses lists",
+      fix: "Pin a version the harness catalog lists",
     });
   }
   const unreleased = await unreleasedPin(env, caller.tenantId, body.value.harness, body.value.harnessVersion);
@@ -757,7 +757,7 @@ const handleUnpin = async (request: Request, url: URL, env: Env): Promise<Respon
     code: "NotFound",
     title: "No such pin",
     detail: `your tenant has no pin for harness ${raw}`,
-    fix: "List the pins with GET /v1/harnesses/pins",
+    fix: "List your harness pins and name one of them",
   });
 };
 
@@ -772,7 +772,7 @@ const handleDeviceRevoke = async (request: Request, url: URL, env: Env): Promise
       code: "NotFound",
       title: "No such device",
       detail: `no device ${deviceId} is signed in as you`,
-      fix: "Run tumpel devices list and revoke one of the ids it prints",
+      fix: "List your devices and revoke one of their ids",
     });
   }
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });

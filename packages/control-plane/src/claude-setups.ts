@@ -22,7 +22,7 @@ const setupNotFound = (claudeSetupId: string): Response =>
     code: "NotFound",
     title: "No such Claude setup",
     detail: `your tenant has no Claude setup ${claudeSetupId}`,
-    fix: "Start one with tumpel claude-setup start <secretSetId> and use the claudeSetupId it answers",
+    fix: "Start a Claude setup for a secret set and use the claudeSetupId it answers",
   });
 
 const notWaiting = (detail: string): Response =>
@@ -30,7 +30,7 @@ const notWaiting = (detail: string): Response =>
     code: "ClaudeSetupNotWaiting",
     title: "Claude setup not waiting",
     detail,
-    fix: `Read the setup with tumpel claude-setup get; once it ended, ${START_AGAIN}`,
+    fix: `Read the setup again; once it ended, ${START_AGAIN}`,
   });
 
 const boxTokenRefused = (detail: string): Response =>
@@ -55,7 +55,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       code: "HarnessNotInCatalog",
       title: "Claude Code not in the catalog",
       detail: "the catalog holds no Claude Code version your tenant can run",
-      fix: `Pin a version tumpel harness list shows for ClaudeCode with tumpel harness pin, then ${START_AGAIN}`,
+      fix: `Pin a ClaudeCode version the harness catalog lists, then ${START_AGAIN}`,
     });
   }
   const now = Date.now();
@@ -77,7 +77,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       code: "NotFound",
       title: "No such secret set",
       detail: `your tenant owns no secret set ${body.value.secretSetId}`,
-      fix: "List the secret sets with tumpel secret-set list and start the setup for one of their ids",
+      fix: "List your secret sets and start the setup for one of their ids",
     });
   }
   if (started.kind === "OtherCredential") {
@@ -85,7 +85,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       code: "Conflict",
       title: "Secret set holds another Anthropic credential",
       detail: `secret set ${body.value.secretSetId} holds the Anthropic credential ${started.name}, and a set holds one credential per provider`,
-      fix: `Remove ${started.name} from the set with tumpel config apply, or set up Claude Code for another set, then ${START_AGAIN}`,
+      fix: `Remove ${started.name} from the set, or set up Claude Code for another set, then ${START_AGAIN}`,
     });
   }
   return problem(409, {
@@ -106,7 +106,7 @@ const list = async (url: URL, env: Env, caller: Caller): Promise<Response> => {
       code: "InvalidRequest",
       title: "Invalid query",
       detail: `claudeSetups.list refused the query: ${issues(query.error)}`,
-      fix: "Name the secret set, such as ?secretSetId=<secretSetId> from tumpel secret-set list",
+      fix: "Name the secretSetId of one of your secret sets",
     });
   }
   const tenant = env.TENANT.getByName(caller.tenantId);

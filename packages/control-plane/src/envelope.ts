@@ -89,7 +89,7 @@ export const seal = async (dataKey: CryptoKey, plaintext: string, context: strin
   return joined(iv, body);
 };
 
-const RESEAL_SECRET_SET = "write the secret set again with tumpel config apply";
+const RESEAL_SECRET_SET = "write the secret set again";
 
 export const unseal = async (
   dataKey: CryptoKey,
