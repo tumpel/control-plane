@@ -1,5 +1,7 @@
-import { SecretSetCreateSchema, SecretSetSchema } from "@tumpel/api/schemas";
+import { type SecretMemberUpdateSchema, SecretSetCreateSchema, SecretSetSchema } from "@tumpel/api/schemas";
+import type { z } from "zod";
 import type { SecretKey, SecretMember } from "./dispatch-variables.ts";
+import { REPOSITORY_TOKEN } from "./github.ts";
 import { issues, type Problem } from "./http.ts";
 
 export type MemberRow = {
@@ -49,3 +51,40 @@ export const storedKeys = (rows: readonly MemberRow[]): StoredKeys => {
 
 export const toMember = (row: MemberRow, value: string): SecretMember =>
   SecretSetCreateSchema.shape.secrets.element.parse({ ...memberShape(row), value });
+
+export type MemberUpdate = z.infer<typeof SecretMemberUpdateSchema>;
+
+export type PlannedMember =
+  | { kind: "Written"; member: SecretMember }
+  | { kind: "Kept"; update: MemberUpdate; from: MemberRow };
+
+export type UpdatePlan =
+  | { kind: "Planned"; members: PlannedMember[]; keepsGitHubUser: boolean }
+  | { kind: "NoStoredValue"; name: string; source: string }
+  | { kind: "UncheckedToken"; source: string };
+
+export const memberWith = (update: MemberUpdate, value: string): SecretMember =>
+  SecretSetCreateSchema.shape.secrets.element.parse({ ...update, value });
+
+const isRepositoryToken = (member: { kind: string; name: string }): boolean =>
+  member.kind === "Variable" && member.name === REPOSITORY_TOKEN;
+
+export const planUpdate = (stored: readonly MemberRow[], updates: readonly MemberUpdate[]): UpdatePlan => {
+  const members: PlannedMember[] = [];
+  let keepsGitHubUser = false;
+  for (const update of updates) {
+    if (update.value !== undefined) {
+      members.push({ kind: "Written", member: memberWith(update, update.value) });
+      continue;
+    }
+    const source = update.previousName ?? update.name;
+    const from = stored.find((row) => row.name === source);
+    if (from === undefined) return { kind: "NoStoredValue", name: update.name, source };
+    if (isRepositoryToken(update)) {
+      if (!isRepositoryToken(from)) return { kind: "UncheckedToken", source };
+      keepsGitHubUser = true;
+    }
+    members.push({ kind: "Kept", update, from });
+  }
+  return { kind: "Planned", members, keepsGitHubUser };
+};
