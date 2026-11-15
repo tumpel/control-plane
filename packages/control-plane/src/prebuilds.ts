@@ -228,6 +228,7 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
       target: dispatch.target,
       defaultBranch: dispatch.defaultBranch,
       headSha: dispatch.headSha,
+      rootfsKey: rootfsKey(image),
     },
     project,
     parameters,
