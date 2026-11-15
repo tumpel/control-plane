@@ -499,7 +499,7 @@ export const handlePrebuildInputs = async (request: Request, url: URL, env: Env)
   if (mismatch !== null) return mismatch;
   if (prebuild.status.state !== "Dispatched" && prebuild.status.state !== "Building") return notRunning(prebuild);
   const now = Date.now();
-  const bound = await tenant.bindJobRun(tenantId, prebuild.prebuildId, { runId, headSha: sha }, now);
+  const bound = await tenant.bindJobRun(tenantId, prebuild.prebuildId, runId, now);
   if (bound.kind === "OtherRun") {
     return tokenMismatch(
       "run_id",

@@ -186,6 +186,7 @@ export interface PrebuildStartRecord {
   target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
+  rootfsKey: string;
 }
 
 export type StartedGitHubActions =
@@ -252,6 +253,8 @@ type PrebuildRow = {
   guest_image_digest: string;
   provider: string;
   config_source: string;
+  head_sha: string;
+  rootfs_key: string;
   state: string;
   started_at: string;
   log_url: string;
@@ -275,7 +278,7 @@ type FailureRow = {
 };
 
 const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, provider, config_source,
-  state, started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
+  head_sha, rootfs_key, state, started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
   prebuild_layers.layer_size_bytes, prebuild_layers.finished_at AS layer_finished_at,
   prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at,
   prebuild_uploads.layer_digest AS upload_layer_digest, prebuild_uploads.layer_size_bytes AS upload_layer_size_bytes
@@ -373,31 +376,24 @@ export class TenantPrebuilds extends TenantSessions {
 
   private writePrebuildCommit(commit: PrebuildCommit, now: number): void {
     const { prebuildId } = commit;
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(
-        `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-        provider, config_source, state, started_at, log_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'GitHubActions', ?, 'Dispatched', ?, ?, ?, ?)`,
-        prebuildId,
-        commit.personaId,
-        commit.key.repository,
-        commit.defaultBranch,
-        commit.key.inputDigest,
-        commit.key.guestImageDigest,
-        commit.configSource,
-        new Date(now).toISOString(),
-        commit.logUrl,
-        now,
-        now,
-      );
-      this.ctx.storage.sql.exec(
-        "INSERT INTO prebuild_commits (prebuild_id, head_sha, rootfs_key, created_at) VALUES (?, ?, ?, ?)",
-        prebuildId,
-        commit.headSha,
-        commit.rootfsKey,
-        now,
-      );
-    });
+    this.ctx.storage.sql.exec(
+      `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
+        provider, config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'GitHubActions', ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+      prebuildId,
+      commit.personaId,
+      commit.key.repository,
+      commit.defaultBranch,
+      commit.key.inputDigest,
+      commit.key.guestImageDigest,
+      commit.configSource,
+      commit.headSha,
+      commit.rootfsKey,
+      new Date(now).toISOString(),
+      commit.logUrl,
+      now,
+      now,
+    );
   }
 
   private async armDispatch(tenantId: string, prebuildId: string, now: number): Promise<Prebuild> {
@@ -412,7 +408,7 @@ export class TenantPrebuilds extends TenantSessions {
   private recordedRun(prebuildId: string): RecordedRun {
     const [row] = this.ctx.storage.sql
       .exec<{ run_id: number; head_sha: string }>(
-        "SELECT run_id, head_sha FROM prebuild_runs WHERE prebuild_id = ?",
+        "SELECT run_id, head_sha FROM prebuild_runs JOIN prebuilds USING (prebuild_id) WHERE prebuild_id = ?",
         prebuildId,
       )
       .toArray();
@@ -506,8 +502,8 @@ export class TenantPrebuilds extends TenantSessions {
   private waitingPrebuild(repository: string, headSha: string): string | null {
     const [row] = this.ctx.storage.sql
       .exec<{ prebuild_id: string }>(
-        `SELECT prebuilds.prebuild_id FROM prebuilds JOIN prebuild_commits USING (prebuild_id)
-        WHERE prebuilds.repository = ? AND prebuild_commits.head_sha = ? AND prebuilds.state = 'Dispatched'
+        `SELECT prebuilds.prebuild_id FROM prebuilds
+        WHERE prebuilds.repository = ? AND prebuilds.head_sha = ? AND prebuilds.state = 'Dispatched'
         AND NOT EXISTS (SELECT 1 FROM prebuild_runs WHERE prebuild_runs.prebuild_id = prebuilds.prebuild_id)
         ORDER BY prebuilds.created_at DESC, prebuilds.rowid DESC LIMIT 1`,
         repository,
@@ -517,18 +513,17 @@ export class TenantPrebuilds extends TenantSessions {
     return row?.prebuild_id ?? null;
   }
 
-  private bindRun(prebuildId: string, run: PrebuildRun, logUrl: string, now: number): JobRunBound | null {
+  private bindRun(prebuildId: string, runId: number, logUrl: string, now: number): JobRunBound | null {
     return this.ctx.storage.transactionSync((): JobRunBound | null => {
       const [held] = this.ctx.storage.sql
         .exec<{ run_id: number }>("SELECT run_id FROM prebuild_runs WHERE prebuild_id = ?", prebuildId)
         .toArray();
-      if (held !== undefined && held.run_id !== run.runId) return { kind: "OtherRun", runId: held.run_id };
+      if (held !== undefined && held.run_id !== runId) return { kind: "OtherRun", runId: held.run_id };
       if (held === undefined) {
         this.ctx.storage.sql.exec(
-          "INSERT INTO prebuild_runs (prebuild_id, run_id, head_sha, created_at) VALUES (?, ?, ?, ?)",
+          "INSERT INTO prebuild_runs (prebuild_id, run_id, created_at) VALUES (?, ?, ?)",
           prebuildId,
-          run.runId,
-          run.headSha,
+          runId,
           now,
         );
         this.ctx.storage.sql.exec(
@@ -547,7 +542,7 @@ export class TenantPrebuilds extends TenantSessions {
     if (caller.kind === "NotConnected" || caller.callerWorkflow !== event.path) return null;
     const prebuildId = this.waitingPrebuild(`https://github.com/${event.repository.toLowerCase()}`, event.headSha);
     if (prebuildId === null) return null;
-    this.bindRun(prebuildId, { runId: event.runId, headSha: event.headSha }, event.htmlUrl, now);
+    this.bindRun(prebuildId, event.runId, event.htmlUrl, now);
     return prebuildId;
   }
 
@@ -561,25 +556,19 @@ export class TenantPrebuilds extends TenantSessions {
         repository,
       )
       .toArray();
-    const [commit] = this.ctx.storage.sql
-      .exec<{ head_sha: string; rootfs_key: string }>(
-        "SELECT head_sha, rootfs_key FROM prebuild_commits WHERE prebuild_id = ?",
-        prebuildId,
-      )
-      .toArray();
-    if (row === undefined || commit === undefined) return null;
+    if (row === undefined) return null;
     return {
       prebuild: toPrebuild(tenantId, row),
       defaultBranch: row.default_branch,
       callerWorkflow: this.callerWorkflowOf(),
-      headSha: commit.head_sha,
-      rootfsKey: commit.rootfs_key,
+      headSha: row.head_sha,
+      rootfsKey: row.rootfs_key,
     };
   }
 
-  async bindJobRun(tenantId: string, prebuildId: string, run: PrebuildRun, now: number): Promise<JobRunBound> {
+  async bindJobRun(tenantId: string, prebuildId: string, runId: number, now: number): Promise<JobRunBound> {
     const prebuild = this.prebuildOf(tenantId, prebuildId);
-    const other = this.bindRun(prebuildId, run, runPage(prebuild.repository, run.runId), now);
+    const other = this.bindRun(prebuildId, runId, runPage(prebuild.repository, runId), now);
     if (other !== null) return other;
     await this.recordPrebuildBuilding(tenantId, prebuildId, now);
     return { kind: "Bound", prebuild: this.prebuildOf(tenantId, prebuildId) };
@@ -1087,8 +1076,8 @@ export class TenantPrebuilds extends TenantSessions {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
           `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-          provider, config_source, state, started_at, log_url, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', ?, 'Building', ?, ?, ?, ?)`,
+          provider, config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', ?, ?, ?, 'Building', ?, ?, ?, ?)`,
           prebuildId,
           start.personaId,
           start.key.repository,
@@ -1096,6 +1085,8 @@ export class TenantPrebuilds extends TenantSessions {
           start.key.inputDigest,
           start.key.guestImageDigest,
           start.configSource,
+          start.headSha,
+          start.rootfsKey,
           new Date(now).toISOString(),
           pipelineLogUrl(project.projectSlug, answer.number),
           now,
