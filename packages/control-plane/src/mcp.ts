@@ -354,7 +354,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/tenant-config/apply",
     NO_SECRET_VALUES,
-    "Apply a TenantConfig: the plan of tumpel_config_plan, made in order, writing every secret set again. Secret values never pass through MCP, so secretValues must be empty and a config with secret sets is refused for the missing values; the dashboard or tumpel config apply writes those. Send each persona file Inline (base64 content) or Stored by digest. Returns the ConfigPlan of POST /v1/tenant-config/apply.",
+    "Apply a TenantConfig: the plan of tumpel_config_plan, made in order. Secret values never pass through MCP, so secretValues must be empty: a secret set the config keeps keeps its values, and a config that creates or updates a secret set is refused for the missing values; the dashboard or tumpel config apply writes those. Send each persona file Inline (base64 content) or Stored by digest. Returns the ConfigPlan of POST /v1/tenant-config/apply.",
   ),
   rest(
     "tumpel_connection_list",
