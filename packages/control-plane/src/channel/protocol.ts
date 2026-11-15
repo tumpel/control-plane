@@ -36,9 +36,10 @@ export type DispatchGrant = TurnOffer["credential"];
 export type SnapshotDownload = TurnOffer["snapshots"][number];
 export type OfferParts = Pick<
   TurnOffer,
-  "credential" | "lastLineSeq" | "snapshots" | "personaFiles" | "gitAuthorName" | "gitAuthorEmail"
+  "credential" | "lastLineSeq" | "snapshots" | "personaFiles" | "image" | "gitAuthorName" | "gitAuthorEmail"
 >;
 export type PersonaFileDownload = TurnOffer["personaFiles"][number];
+export type GuestImageDownload = TurnOffer["image"];
 export type StoredOffer = Omit<TurnOffer, keyof OfferParts>;
 export type StoredControlMessage = Exclude<ControlMessage, { type: "TurnOffer" | "TurnWithdrawn" }> | StoredOffer;
 export type PreparedOffer = ({ kind: "Ready" } & OfferParts) | { kind: "Withdrawn" };

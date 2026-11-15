@@ -15,6 +15,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import {
+  type GuestImageDownload,
   HEARTBEAT_DEADLINE_MS,
   type HostMessage,
   type HostUsage,
@@ -33,13 +34,14 @@ import {
 import { generateDataKey, unseal } from "./envelope.ts";
 import { type Minted, mintInstallationToken, repositoryCredential } from "./github.ts";
 import { appKey, installationOf } from "./github-store.ts";
-import { catalogEntry, IMAGE_ARCHITECTURES } from "./harness-catalog";
-import type { Host } from "./hosts";
+import { catalogEntry } from "./harness-catalog";
+import { type Host, hostOf } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
-import { placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
-import { signerOf } from "./presign";
+import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
+import { releaseSignerOf, signerOf } from "./presign";
+import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
@@ -651,9 +653,53 @@ export class TenantSessions extends DurableObject<Env> {
     }
   }
 
+  private async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageAvailability> {
+    const release = await currentRelease(this.env.RELEASES, now);
+    return {
+      harness,
+      harnessVersion,
+      architectures: imagesFor(release, harness, harnessVersion).map((image) => image.architecture),
+    };
+  }
+
+  private async guestImage(
+    tenantId: string,
+    session: SessionRow,
+    hostId: string,
+    seconds: number,
+    now: number,
+  ): Promise<GuestImageDownload> {
+    const host = await hostOf(this.env.DB, tenantId, hostId);
+    if (host === null)
+      throw new Error(
+        `turn of session ${session.session_id} is offered to host ${hostId}, which tenant ${tenantId} does not list`,
+      );
+    const release = await currentRelease(this.env.RELEASES, now);
+    const image = imagesFor(release, session.harness, session.harness_version).find(
+      (each) => each.architecture === host.architecture,
+    );
+    if (image === undefined) {
+      throw new Error(
+        `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); publish a release that carries it with the release workflow, then send the turn again`,
+      );
+    }
+    const signer = releaseSignerOf(this.env);
+    const at = new Date(now);
+    return {
+      imageDigest: image.imageDigest,
+      kernelDigest: image.kernelDigest,
+      manifestDigest: image.manifestDigest,
+      imageUrl: await signer.presign("GET", imageKey(image), seconds, at),
+      kernelUrl: await signer.presign("GET", kernelKey(image), seconds, at),
+      manifestUrl: await signer.presign("GET", manifestKey(image), seconds, at),
+      downloadExpiresAt: iso(now + seconds * 1000),
+    };
+  }
+
   async startSession(tenantId: string, input: NewSession, now: number): Promise<Started> {
     const { start } = input;
-    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), IMAGE_ARCHITECTURES);
+    const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
+    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
@@ -713,7 +759,8 @@ export class TenantSessions extends DurableObject<Env> {
     }
     const missingTurnIds = this.unsnapshottedTurns(sessionId);
     if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), IMAGE_ARCHITECTURES);
+    const image = await this.imageAvailability(session.harness, session.harness_version, now);
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
@@ -1151,6 +1198,7 @@ export class TenantSessions extends DurableObject<Env> {
       .toArray();
     const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
     const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
+    const image = await this.guestImage(tenantId, session, hostId, settings.turnClaimBudgetSeconds, now);
     return {
       kind: "Ready",
       credential: {
@@ -1161,6 +1209,7 @@ export class TenantSessions extends DurableObject<Env> {
       lastLineSeq: session.last_line_seq,
       snapshots,
       personaFiles,
+      image,
       gitAuthorName,
       gitAuthorEmail,
     };

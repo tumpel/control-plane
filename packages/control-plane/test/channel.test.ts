@@ -87,6 +87,15 @@ const setup = (revoked = false) => {
       lastLineSeq: 0,
       snapshots: [],
       personaFiles: [],
+      image: {
+        imageDigest: "b".repeat(64),
+        kernelDigest: "c".repeat(64),
+        manifestDigest: "d".repeat(64),
+        imageUrl: "https://r2.example.test/image",
+        kernelUrl: "https://r2.example.test/kernel",
+        manifestUrl: "https://r2.example.test/manifest",
+        downloadExpiresAt: "2026-11-14T12:00:00+01:00",
+      },
       gitAuthorName: "Tumpel Agent",
       gitAuthorEmail: "agent@tumpel.invalid",
     };

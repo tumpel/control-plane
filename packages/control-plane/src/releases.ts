@@ -86,3 +86,8 @@ export const currentRelease = async (bucket: ReleaseBucket, now: number): Promis
   cached = { readAt: now, manifest };
   return { kind: "Published", manifest };
 };
+
+export const imagesFor = (release: ReleaseRead, harness: string, harnessVersion: string): ReleaseImage[] =>
+  release.kind === "Published"
+    ? release.manifest.images.filter((image) => image.harness === harness && image.harnessVersion === harnessVersion)
+    : [];
