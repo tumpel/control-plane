@@ -17,6 +17,9 @@
     { "binding": "STORE", "bucket_name": "tumpel-sessions" },
     { "binding": "RELEASES", "bucket_name": "tumpel-releases" }
   ],
+  "queues": {
+    "consumers": [{ "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 }]
+  },
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
     "RELEASES_BUCKET_NAME": "tumpel-releases",
@@ -72,6 +75,9 @@
         { "binding": "STORE", "bucket_name": "tumpel-sessions-dev" },
         { "binding": "RELEASES", "bucket_name": "tumpel-releases-dev" }
       ],
+      "queues": {
+        "consumers": [{ "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 }]
+      },
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
         "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
