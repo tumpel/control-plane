@@ -7,6 +7,7 @@ import {
   CIRCLECI_PARAMETER_LIMIT,
   circleCIParameters,
   overLongParameter,
+  readCollaborations,
   triggerPipeline,
   verifyCircleCISignature,
 } from "../src/circleci.ts";
@@ -78,4 +79,33 @@ test("the circleci-signature check takes any v1 HMAC-SHA256 of the body under th
   assert.equal(await verify(v1("binding-secret").replace("v1=", "v2=")), false);
   assert.equal(await verify(null), false);
   assert.equal(await verify(""), false);
+});
+
+test("a collaborations answer without vcs-type, as CircleCI sends it for GitHub App and OAuth organizations, parses to id, name and slug", async () => {
+  const organization = "6f1c2b3a-0d4e-4f5a-9b8c-7d6e5f4a3b2c";
+  answer = {
+    status: 200,
+    body: [
+      {
+        id: organization,
+        vcs_type: "circleci",
+        name: "acme",
+        avatar_url: "https://avatars.githubusercontent.com/u/1000001?v=4",
+        slug: `circleci/${organization}`,
+      },
+      {
+        id: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        vcs_type: "github",
+        name: "acme-legacy",
+        avatar_url: "https://avatars.githubusercontent.com/u/1000002?v=4",
+        slug: "gh/acme-legacy",
+      },
+    ],
+  };
+  const read = await readCollaborations((url, init) => fetch(url, init), origin, "personal-token");
+  assert.ok(read.ok, JSON.stringify(read));
+  assert.deepEqual(read.value, [
+    { id: organization, name: "acme", slug: `circleci/${organization}` },
+    { id: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", name: "acme-legacy", slug: "gh/acme-legacy" },
+  ]);
 });

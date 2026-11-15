@@ -142,9 +142,7 @@ const slugPath = (slug: string): string => slug.split("/").map(encodeURIComponen
 export const readMe = (fetcher: Fetch, api: string, token: string) =>
   callCircleCI(fetcher, { method: "GET", url: v2(api, "/me"), token, body: null }, MeSchema, "CircleCIUser");
 
-const CollaborationsSchema = z.array(
-  z.object({ id: z.string().nullable(), name: z.string(), slug: z.string(), "vcs-type": z.string() }),
-);
+const CollaborationsSchema = z.array(z.object({ id: z.string().nullable(), name: z.string(), slug: z.string() }));
 
 export type CircleCICollaboration = z.infer<typeof CollaborationsSchema>[number];
 
