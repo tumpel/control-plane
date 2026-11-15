@@ -402,7 +402,7 @@ const conflict = (operation: string, name: string, constraint: string): Response
     return problem(409, {
       code: "Conflict",
       title: "Two credentials for one provider",
-      detail: `${operation} gives secret set ${name} more than one ApiKey or SubscriptionToken for the same provider`,
+      detail: `${operation} gives secret set ${name} more than one API key or subscription token for the same provider`,
       fix: "Keep one credential per provider in a secret set; put the other in a secret set of its own",
     });
   }
@@ -873,7 +873,7 @@ const handleReleaseDownload = async (request: Request, url: URL, env: Env): Prom
       code: "InvalidRequest",
       title: "Unknown architecture",
       detail: `releases.${kind} refused the path: ${issues(parsed.error)}`,
-      fix: "Ask for Amd64, the one architecture releases build until an arm64 host passes the proof",
+      fix: "Ask for Amd64; releases build for Amd64 only",
     });
   }
   const { architecture } = parsed.data;
