@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { Fetch } from "../src/github.ts";
-import { dispatchCallerWorkflow } from "../src/github-actions.ts";
+import { CALLER_WORKFLOW_EXAMPLE, dispatchCallerWorkflow } from "../src/github-actions.ts";
 
 type Call = { url: string; init: RequestInit };
 
@@ -60,4 +61,9 @@ test("a dispatch GitHub refuses answers its status and message", async () => {
   );
   assert.equal(refused.ok, false);
   assert.match(refused.ok ? "" : refused.detail, /422: Workflow does not have 'workflow_dispatch' trigger/);
+});
+
+test("the published caller workflow example is the one the connection read answers", () => {
+  const doc = readFileSync(new URL("../../../doc/github-actions-prebuild.md", import.meta.url), "utf8");
+  assert.ok(doc.includes(CALLER_WORKFLOW_EXAMPLE), "doc/github-actions-prebuild.md holds the caller workflow example");
 });

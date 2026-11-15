@@ -1,6 +1,43 @@
 import { callGitHub, type Fetch, type GitHubAnswer, type GitHubRepository } from "./github.ts";
 import { GitHubWorkflowDispatchSchema } from "./github-schemas.ts";
 
+export const REUSABLE_WORKFLOW_PATH = "tumpel/workflows/.github/workflows/prebuild.yml";
+export const REUSABLE_WORKFLOW_TAG = "v1";
+export const REUSABLE_WORKFLOW = `${REUSABLE_WORKFLOW_PATH}@${REUSABLE_WORKFLOW_TAG}`;
+
+const INPUTS: [string, string][] = [
+  ["prebuildId", "The prebuild Tumpel started"],
+  ["tenantId", "The tenant that started the prebuild"],
+  ["apiOrigin", "The Tumpel API the upload job calls"],
+  ["rootfsUrl", "A presigned GET of the guest image's root filesystem tar"],
+  ["imageDigest", "The digest of the guest image the layer is built on"],
+];
+
+export const CALLER_WORKFLOW_EXAMPLE = [
+  "name: tumpel prebuild",
+  "",
+  "on:",
+  "  workflow_dispatch:",
+  "    inputs:",
+  ...INPUTS.flatMap(([name, description]) => [
+    `      ${name}:`,
+    `        description: ${description}`,
+    "        required: true",
+    "        type: string",
+  ]),
+  "",
+  "permissions:",
+  "  contents: read",
+  "  id-token: write",
+  "",
+  "jobs:",
+  "  prebuild:",
+  `    uses: ${REUSABLE_WORKFLOW}`,
+  "    with:",
+  ...INPUTS.map(([name]) => `      ${name}: \${{ inputs.${name} }}`),
+  "",
+].join("\n");
+
 export interface PrebuildInputs {
   prebuildId: string;
   tenantId: string;

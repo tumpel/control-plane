@@ -267,6 +267,8 @@ test("a job of the dispatched run exchanges its GitHub token for one checked lay
     [{ workflow_ref: "Acme/App/.github/workflows/ci.yml@refs/heads/main" }, "workflow_ref"],
     [{ ref: "refs/heads/feature", workflow_ref: `Acme/App/${CALLER_WORKFLOW}@refs/heads/feature` }, "ref"],
     [{ event_name: "push" }, "event_name"],
+    [{ job_workflow_ref: "Acme/App/.github/workflows/prebuild.yml@refs/tags/v1" }, "job_workflow_ref"],
+    [{ job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/heads/main" }, "job_workflow_ref"],
     [{ run_id: "43" }, "run_id"],
     [{ sha: "d".repeat(40) }, "sha"],
   ];
