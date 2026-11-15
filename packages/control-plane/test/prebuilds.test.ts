@@ -24,7 +24,7 @@ import type { z } from "zod";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
-type TenantStub = { recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown> };
+type TenantStub = { recordPrebuildCommit(tenantId: string, commit: unknown, now: number): Promise<unknown> };
 type OpenRouterTenant = {
   openRouterAuthorizationDeadlineReached(deadline: { openRouterAuthorizationId: string; at: number }): Promise<void>;
 };
@@ -212,9 +212,10 @@ test("a prebuild start refuses before it stores anything: an unconnected provide
     accountLabel: "acme on GitHub Actions",
     callerWorkflow: ".github/workflows/tumpel-prebuild.yml",
   });
-  const anonymous = await refused("POST", "/v1/prebuilds", start, 409);
-  assert.equal(anonymous.code, "RepositoryUnreadable");
-  assert.match(anonymous.detail, /no token reads acme\/app/);
+  const uninstalled = await refused("POST", "/v1/prebuilds", start, 409);
+  assert.equal(uninstalled.code, "GitHubNotConnected");
+  assert.match(uninstalled.detail, /GitHub App on acme/);
+  assert.match(uninstalled.fix, /Connect GitHub for the repository.s owner/);
   assert.equal((await send("DELETE", "/v1/github-actions-connection", undefined, bearer)).status, 204);
 
   for (const repository of [REPOSITORY, "https://github.com/Acme/App"]) {
@@ -286,16 +287,17 @@ test("the latest listing answers the newest prebuild of each repository, by repo
   ).TENANT.getByName(tenant.tenantId);
   const record = async (repository: string, seed: string, at: number) =>
     PrebuildSchema.parse(
-      await stub.recordDispatchedPrebuild(
+      await stub.recordPrebuildCommit(
         tenant.tenantId,
         {
           prebuildId: crypto.randomUUID(),
           personaId: persona.personaId,
-          run: { runId: at + seed.charCodeAt(0), headSha: "f".repeat(40) },
-          key: { repository, inputDigest: seed.repeat(64), guestImageDigest: "c".repeat(64), configSource: "Default" },
+          key: { repository, inputDigest: seed.repeat(64), guestImageDigest: "c".repeat(64) },
+          configSource: "Default",
           defaultBranch: "main",
-          provider: "GitHubActions",
-          logUrl: `${repository}/actions/runs/1`,
+          headSha: "f".repeat(40),
+          rootfsKey: "images/claude-code/1/amd64/rootfs/x",
+          logUrl: `${repository}/actions/workflows/tumpel-prebuild.yml`,
         },
         at,
       ),

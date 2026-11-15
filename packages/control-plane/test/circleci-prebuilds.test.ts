@@ -96,8 +96,8 @@ const fakeGitHub = (request: IncomingMessage, response: ServerResponse, path: st
     });
   }
   if (path === "/repos/acme/app") return reply(response, 200, { default_branch: "main" });
-  if (path === "/repos/acme/app/branches/main") {
-    return reply(response, 200, { commit: { sha: HEAD_SHA, commit: { tree: { sha: TREE_SHA } } } });
+  if (path === "/repos/acme/app/commits/main") {
+    return reply(response, 200, { sha: HEAD_SHA, commit: { tree: { sha: TREE_SHA } } });
   }
   if (path === `/repos/acme/app/git/trees/${TREE_SHA}`) {
     return reply(response, 200, { tree: [{ path: "package-lock.json", type: "blob", sha: "2".repeat(40) }] });

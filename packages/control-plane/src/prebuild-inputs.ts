@@ -1,6 +1,7 @@
+import type { PrebuildConfigSourceSchema } from "@tumpel/api/schemas";
 import { z } from "zod";
 import { callGitHub, type Fetch, type GitHubRepository } from "./github.ts";
-import { GitHubBranchSchema } from "./github-schemas.ts";
+import { GitHubCommitSchema } from "./github-schemas.ts";
 
 export const DEVCONTAINER_DIRECTORY = ".devcontainer";
 export const DEVCONTAINER_FILE = ".devcontainer.json";
@@ -25,7 +26,7 @@ export const LOCKFILES = [
 export const MANIFESTS = ["Cargo.toml", "go.mod", "requirements.txt", "pyproject.toml"];
 const DEVCONTAINER_CONFIGS = [`${DEVCONTAINER_DIRECTORY}/devcontainer.json`, DEVCONTAINER_FILE];
 
-export type ConfigSource = "RepositoryFile" | "Default";
+export type ConfigSource = z.infer<typeof PrebuildConfigSourceSchema>;
 
 const API_MEDIA_TYPE = "application/vnd.github+json";
 
@@ -37,6 +38,13 @@ export interface InputFile {
 export type Inputs =
   | { kind: "Read"; files: InputFile[]; configSource: ConfigSource; defaultBranch: string; headSha: string }
   | { kind: "Unreadable"; detail: string };
+
+export type DefaultBranch = { kind: "Branch"; branch: string } | { kind: "Unreadable"; detail: string };
+
+export interface InputsAt {
+  branch: string;
+  ref: string;
+}
 
 const countsAtRoot = (path: string): boolean =>
   path === DEVCONTAINER_FILE || LOCKFILES.includes(path) || MANIFESTS.includes(path);
@@ -69,38 +77,44 @@ const TreeSchema = z.object({
 const read = <T>(fetcher: Fetch, url: string, token: string, schema: z.ZodType<T>, name: string) =>
   callGitHub(fetcher, { method: "GET", url, accept: API_MEDIA_TYPE, bearer: token, body: null }, schema, name);
 
+const unreadable = (target: GitHubRepository, detail: string): { kind: "Unreadable"; detail: string } => ({
+  kind: "Unreadable",
+  detail: `${detail}; check that the token reads ${target.owner}/${target.name}`,
+});
+
+const repositoryBase = (api: string, target: GitHubRepository): string =>
+  `${api}/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}`;
+
+export const readDefaultBranch = async (
+  fetcher: Fetch,
+  api: string,
+  target: GitHubRepository,
+  token: string,
+): Promise<DefaultBranch> => {
+  const described = await read(fetcher, repositoryBase(api, target), token, RepositorySchema, "repository");
+  if (!described.ok) return unreadable(target, described.detail);
+  return { kind: "Branch", branch: described.value.default_branch };
+};
+
 export const readInputs = async (
   fetcher: Fetch,
   api: string,
   target: GitHubRepository,
   token: string,
+  at: InputsAt,
 ): Promise<Inputs> => {
-  const repository = `${target.owner}/${target.name}`;
-  const base = `${api}/repos/${repository}`;
-  const unreadable = (detail: string): Inputs => ({
-    kind: "Unreadable",
-    detail: `${detail}; check that the token reads ${repository}`,
-  });
-  const described = await read(fetcher, base, token, RepositorySchema, "repository");
-  if (!described.ok) return unreadable(described.detail);
-  const branch = described.value.default_branch;
+  const base = repositoryBase(api, target);
   const head = await read(
     fetcher,
-    `${base}/branches/${encodeURIComponent(branch)}`,
+    `${base}/commits/${encodeURIComponent(at.ref)}`,
     token,
-    GitHubBranchSchema,
-    "branch",
+    GitHubCommitSchema,
+    "commit",
   );
-  if (!head.ok) return unreadable(head.detail);
-  const headSha = head.value.commit.sha;
-  const root = await read(
-    fetcher,
-    `${base}/git/trees/${head.value.commit.commit.tree.sha}`,
-    token,
-    TreeSchema,
-    "git tree",
-  );
-  if (!root.ok) return unreadable(root.detail);
+  if (!head.ok) return unreadable(target, head.detail);
+  const headSha = head.value.sha;
+  const root = await read(fetcher, `${base}/git/trees/${head.value.commit.tree.sha}`, token, TreeSchema, "git tree");
+  if (!root.ok) return unreadable(target, root.detail);
   const files: InputFile[] = root.value.tree
     .filter((entry) => entry.type === "blob" && countsAtRoot(entry.path))
     .map((entry) => ({ path: entry.path, blobSha: entry.sha }));
@@ -113,11 +127,11 @@ export const readInputs = async (
       TreeSchema,
       "git tree",
     );
-    if (!subtree.ok) return unreadable(subtree.detail);
+    if (!subtree.ok) return unreadable(target, subtree.detail);
     for (const entry of subtree.value.tree) {
       if (entry.type === "blob") files.push({ path: `${DEVCONTAINER_DIRECTORY}/${entry.path}`, blobSha: entry.sha });
     }
   }
   const configSource = files.some((file) => DEVCONTAINER_CONFIGS.includes(file.path)) ? "RepositoryFile" : "Default";
-  return { kind: "Read", files, configSource, defaultBranch: branch, headSha };
+  return { kind: "Read", files, configSource, defaultBranch: at.branch, headSha };
 };

@@ -143,5 +143,6 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `Releases_install`: install script a person pipes to sh before the CLI exists.
 - `PrebuildUploads_start`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `PrebuildUploads_complete`: build job wire, signed by the provider's OIDC job token, never by a principal.
+- `PrebuildInputs_read`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.

@@ -168,7 +168,7 @@ import {
   wantsHtml,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
-import { handlePrebuildUploads } from "./prebuild-uploads.ts";
+import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import {
@@ -1472,7 +1472,10 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (resource) return resource;
   const sessions = await handleSessions(request, url, env, deviceCaller);
   if (sessions) return sessions;
-  const uploads = (await handlePrebuildUploads(request, url, env)) ?? (await handleCircleCIEvents(request, url, env));
+  const uploads =
+    (await handlePrebuildUploads(request, url, env)) ??
+    (await handlePrebuildInputs(request, url, env)) ??
+    (await handleCircleCIEvents(request, url, env));
   if (uploads) return uploads;
   const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
   if (prebuilds) return prebuilds;

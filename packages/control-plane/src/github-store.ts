@@ -276,6 +276,14 @@ export const tenantOfInstallation = async (db: D1Database, installationId: numbe
   return row?.tenant_id ?? null;
 };
 
+export const tenantOfAccount = async (db: D1Database, accountLogin: string): Promise<string | null> => {
+  const row = await db
+    .prepare("SELECT tenant_id FROM github_installations WHERE account_login = ? COLLATE NOCASE")
+    .bind(accountLogin)
+    .first<{ tenant_id: string }>();
+  return row?.tenant_id ?? null;
+};
+
 export const holdersOf = async (db: D1Database, installationIds: number[]): Promise<Map<number, string>> => {
   const { results } = await db
     .prepare(

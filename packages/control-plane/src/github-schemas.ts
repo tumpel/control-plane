@@ -182,7 +182,7 @@ export const GitHubFileSchema = z.object({
 });
 
 export const GitHubFileCommitSchema = z.object({
-  commit: z.object({ sha: z.string().min(1), parents: z.array(z.object({ sha: z.string().min(1) })) }),
+  commit: z.object({ sha: z.string().min(1) }),
 });
 
 export const GitHubUserTokenSchema = z.union([
@@ -226,23 +226,18 @@ export const GitHubIssueRecordSchema = z.object({
 
 export const GitHubIssueRecordsSchema = z.array(GitHubIssueRecordSchema);
 
-export const GitHubWorkflowDispatchSchema = z.object({
-  workflow_run_id: GitHubIdSchema,
-  html_url: z.string().url(),
-});
-
-export const GitHubBranchSchema = z.object({
-  commit: z.object({
-    sha: z.string().regex(/^[0-9a-f]{40}$/),
-    commit: z.object({ tree: z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) }) }),
-  }),
+export const GitHubCommitSchema = z.object({
+  sha: z.string().regex(/^[0-9a-f]{40}$/),
+  commit: z.object({ tree: z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) }) }),
 });
 
 export const GitHubWorkflowRunEventSchema = z.object({
   action: z.string(),
   installation: z.object({ id: GitHubIdSchema }),
+  repository: z.object({ full_name: z.string() }),
   workflow_run: z.object({
     id: GitHubIdSchema,
+    path: z.string(),
     head_sha: z.string(),
     html_url: z.string().url(),
     conclusion: z.string().nullable(),

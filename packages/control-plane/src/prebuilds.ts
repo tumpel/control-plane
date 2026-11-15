@@ -7,7 +7,8 @@ import type { Outcome, Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
-import { inputDigest, readInputs } from "./prebuild-inputs.ts";
+import type { ConfigSource } from "./prebuild-inputs.ts";
+import { inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import { signerOf } from "./presign";
 import { currentRelease, imagesFor, type ReleaseImage, rootfsKey } from "./releases";
 import { settingsOf } from "./settings";
@@ -66,12 +67,28 @@ const circleCIProjectMissing = (repository: string): Refused =>
     fix: "Bind the repository to its CircleCI project once, then start the prebuild again",
   });
 
-const dispatchRefused = (detail: string): Refused =>
+const actionsDisabled = (target: GitHubRepository, detail: string): Refused =>
+  refuse(409, {
+    code: "DispatchRefused",
+    title: "GitHub Actions disabled",
+    detail,
+    fix: `On GitHub, open the settings of ${target.owner}/${target.name}, go to Actions, General, and allow actions and reusable workflows, at least tumpel/workflows; if the Actions tab lists the tumpel prebuild workflow as disabled, enable it there; then start the prebuild`,
+  });
+
+const tokenRefused = (target: GitHubRepository, detail: string): Refused =>
+  refuse(409, {
+    code: "DispatchRefused",
+    title: "GitHub refused the installation token",
+    detail,
+    fix: `On GitHub, open the settings of ${target.owner}, go to GitHub Apps, choose Configure next to the Tumpel app, and check that it is not suspended and has access to ${target.name}; if the App is gone, connect GitHub for ${target.owner} again`,
+  });
+
+const gitHubRefused = (detail: string): Refused =>
   refuse(409, {
     code: "DispatchRefused",
     title: "GitHub refused the dispatch",
     detail,
-    fix: "Start the prebuild again; if GitHub keeps refusing, check https://www.githubstatus.com",
+    fix: "Fix what GitHub's answer in the detail names; a 5xx answer is an outage on GitHub's side, which https://www.githubstatus.com reports",
   });
 
 const listed = (names: string[]): string =>
@@ -90,7 +107,7 @@ const callerWorkflowRefused = (detail: string): Refused =>
     code: "CallerWorkflowRefused",
     title: "Prebuild workflow not added",
     detail: `Tumpel could not add its prebuild workflow to the repository: ${detail}`,
-    fix: "Start the prebuild again; if the default branch is protected, allow the Tumpel app to push to it first",
+    fix: "When the default branch is protected, let the Tumpel app push to it in the branch protection rule or ruleset, or commit the caller workflow the GitHub Actions connection shows at its path yourself; then start the prebuild",
   });
 
 const pipelineRefused = (detail: string): Refused =>
@@ -101,11 +118,11 @@ const pipelineRefused = (detail: string): Refused =>
     fix: "Commit the config that imports the orb tumpel/prebuild and declares the five tumpel_* parameters at the path the pipeline definition names, on the default branch, then start the prebuild again",
   });
 
-const rootfsUrlOf = (env: Env, image: ReleaseImage, now: number): Promise<string> => {
+export const presignRootfs = (env: Env, key: string, now: number): Promise<string> => {
   const settings = settingsOf(env);
   return signerOf(env, env.RELEASES_BUCKET_NAME, env.RELEASES_ACCESS_KEY_ID, env.RELEASES_SECRET_ACCESS_KEY).presign(
     "GET",
-    rootfsKey(image),
+    key,
     settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
     new Date(now),
   );
@@ -116,6 +133,7 @@ export interface Dispatch {
   tenantId: string;
   personaId: string;
   key: PrebuildKey;
+  configSource: ConfigSource;
   target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
@@ -123,39 +141,59 @@ export interface Dispatch {
   apiOrigin: string;
 }
 
-const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number): Promise<Outcome<Prebuild>> => {
-  const { prebuildId, tenantId, target, key, image } = dispatch;
+interface GitHubActionsRequest {
+  tenantId: string;
+  personaId: string;
+  target: GitHubRepository;
+  repository: string;
+  image: ReleaseImage;
+  apiOrigin: string;
+  rebuild: boolean;
+}
+
+const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: number): Promise<Outcome<Prebuild>> => {
+  const { tenantId, target, repository, image } = request;
   const tenant = env.TENANT.getByName(tenantId);
   const connection = await tenant.gitHubActionsConnection(tenantId);
-  if (connection === null) return noBuildProvider("GitHubActions", key.repository);
-  const rootfsUrl = await rootfsUrlOf(env, image, now);
-  const dispatched = await tenant.dispatchPrebuild(
+  if (connection === null) return noBuildProvider("GitHubActions", repository);
+  const started = await tenant.startGitHubActionsPrebuild(
     tenantId,
-    connection.callerWorkflow,
     {
-      prebuildId,
-      personaId: dispatch.personaId,
-      key,
+      prebuildId: crypto.randomUUID(),
+      personaId: request.personaId,
       target,
-      defaultBranch: dispatch.defaultBranch,
-      headSha: dispatch.headSha,
-      rootfsUrl,
-      apiOrigin: dispatch.apiOrigin,
+      repository,
+      guestImageDigest: image.imageDigest,
+      rootfsKey: rootfsKey(image),
+      callerWorkflow: connection.callerWorkflow,
+      apiOrigin: request.apiOrigin,
+      rebuild: request.rebuild,
     },
     now,
   );
-  if (dispatched.kind === "NoInstallation") {
-    return refuse(409, {
-      code: "GitHubNotConnected",
-      title: "GitHub not connected",
-      detail: `your tenant has not installed the stage's GitHub App, and a GitHub Actions prebuild of ${key.repository} dispatches its caller workflow with the App`,
-      fix: "Connect GitHub for the repository's owner, then start the prebuild again",
-    });
+  switch (started.kind) {
+    case "Started":
+      return ok(started.prebuild);
+    case "NoInstallation":
+      return refuse(409, {
+        code: "GitHubNotConnected",
+        title: "GitHub not connected",
+        detail: `your tenant has not installed the stage's GitHub App on ${target.owner}, and a GitHub Actions prebuild of ${repository} adds and starts its caller workflow with the App`,
+        fix: "Connect GitHub for the repository's owner, then start the prebuild",
+      });
+    case "TokenRefused":
+      return tokenRefused(target, started.detail);
+    case "Unreadable":
+      return repositoryUnreadable(started.detail);
+    case "PermissionMissing":
+      return appPermissionMissing(target, started.permissions);
+    case "CallerRefused":
+      return callerWorkflowRefused(started.detail);
+    case "ActionsDisabled":
+      return actionsDisabled(target, started.detail);
+    case "Refused":
+      return gitHubRefused(started.detail);
   }
-  if (dispatched.kind === "PermissionMissing") return appPermissionMissing(target, dispatched.permissions);
-  if (dispatched.kind === "CallerRefused") return callerWorkflowRefused(dispatched.detail);
-  if (dispatched.kind === "Refused") return dispatchRefused(dispatched.detail);
-  return ok(dispatched.prebuild);
 };
 
 const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Promise<Outcome<Prebuild>> => {
@@ -163,7 +201,7 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
   const tenant = env.TENANT.getByName(tenantId);
   const project = await tenant.circleCIProjectOf(tenantId, key.repository);
   if (project === null) return circleCIProjectMissing(key.repository);
-  const rootfsUrl = await rootfsUrlOf(env, image, now);
+  const rootfsUrl = await presignRootfs(env, rootfsKey(image), now);
   const parameters = circleCIParameters({
     prebuildId,
     tenantId,
@@ -186,11 +224,10 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
       prebuildId,
       personaId: dispatch.personaId,
       key,
+      configSource: dispatch.configSource,
       target: dispatch.target,
       defaultBranch: dispatch.defaultBranch,
       headSha: dispatch.headSha,
-      rootfsUrl,
-      apiOrigin: dispatch.apiOrigin,
     },
     project,
     parameters,
@@ -260,28 +297,49 @@ export const startPrebuild = async (
   }
   const image = await guestImage(env, entry.harness, entry.harnessVersion, now);
   if (!image.ok) return image;
+  if (start.provider === "GitHubActions") {
+    return startGitHubActions(
+      env,
+      {
+        tenantId: caller.tenantId,
+        personaId: start.personaId,
+        target,
+        repository,
+        image: image.value,
+        apiOrigin,
+        rebuild: start.rebuild === true,
+      },
+      now,
+    );
+  }
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
-  const inputs = await readInputs((url, init) => fetch(url, init), env.GITHUB_API_ORIGIN, target, token.token);
+  const fetcher = (url: string, init: RequestInit) => fetch(url, init);
+  const described = await readDefaultBranch(fetcher, env.GITHUB_API_ORIGIN, target, token.token);
+  if (described.kind === "Unreadable") return repositoryUnreadable(described.detail);
+  const inputs = await readInputs(fetcher, env.GITHUB_API_ORIGIN, target, token.token, {
+    branch: described.branch,
+    ref: described.branch,
+  });
   if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);
   const key = {
     repository,
     inputDigest: await inputDigest(inputs.files),
     guestImageDigest: image.value.imageDigest,
-    configSource: inputs.configSource,
   };
   if (!start.rebuild) {
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
   }
   if (start.provider === "Namespace") return buildProviderUnavailable(start.provider, repository);
-  return (start.provider === "CircleCI" ? dispatchCircleCI : dispatchGitHubActions)(
+  return dispatchCircleCI(
     env,
     {
       prebuildId: crypto.randomUUID(),
       tenantId: caller.tenantId,
       personaId: start.personaId,
       key,
+      configSource: inputs.configSource,
       target,
       defaultBranch: inputs.defaultBranch,
       headSha: inputs.headSha,
