@@ -9,6 +9,7 @@ import {
   importAppKey,
   type OAuthClient,
   pkcs8FromPem,
+  type RecordedInstaller,
 } from "./github.ts";
 import type { KeyStore } from "./key-store.ts";
 
@@ -220,7 +221,34 @@ export const unlinkTenantInstallation = async (
 };
 
 export const unlinkInstallation = async (db: D1Database, installationId: number): Promise<void> => {
-  await db.prepare("DELETE FROM github_installations WHERE installation_id = ?").bind(installationId).run();
+  await db.batch([
+    db.prepare("DELETE FROM github_installations WHERE installation_id = ?").bind(installationId),
+    db.prepare("DELETE FROM github_installers WHERE installation_id = ?").bind(installationId),
+  ]);
+};
+
+export const recordInstaller = async (
+  db: D1Database,
+  installationId: number,
+  githubUserId: number,
+  now: number,
+): Promise<void> => {
+  await db
+    .prepare(
+      `INSERT INTO github_installers (installation_id, installer_github_user_id, recorded_at) VALUES (?, ?, ?)
+      ON CONFLICT (installation_id) DO UPDATE SET installer_github_user_id = excluded.installer_github_user_id,
+        recorded_at = excluded.recorded_at`,
+    )
+    .bind(installationId, githubUserId, now)
+    .run();
+};
+
+export const recordedInstaller = async (db: D1Database, installationId: number): Promise<RecordedInstaller> => {
+  const row = await db
+    .prepare("SELECT installer_github_user_id FROM github_installers WHERE installation_id = ?")
+    .bind(installationId)
+    .first<{ installer_github_user_id: number }>();
+  return row === null ? { kind: "Unrecorded" } : { kind: "Recorded", githubUserId: row.installer_github_user_id };
 };
 
 export const refreshInstallation = async (

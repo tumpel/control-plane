@@ -15,7 +15,6 @@ import {
   GitHubIssueRecordSchema,
   GitHubIssueRecordsSchema,
   type GitHubManifestStateSchema,
-  GitHubOrgMembershipSchema,
   GitHubUserInstallationsSchema,
   GitHubUserSchema,
   GitHubUserTokenSchema,
@@ -94,7 +93,6 @@ export const appManifest = (origin: string): GitHubAppManifest => ({
     workflows: "write",
     discussions: "write",
     actions: "write",
-    members: "read",
   },
   default_events: APP_EVENTS,
 });
@@ -457,10 +455,12 @@ export interface OAuthClient {
   clientSecret: string;
 }
 
+export type RecordedInstaller = { kind: "Recorded"; githubUserId: number } | { kind: "Unrecorded" };
+
 export type Installer =
   | { kind: "Installer"; installation: GitHubInstallationRecord }
   | { kind: "NotInstaller"; detail: string }
-  | { kind: "MembershipUnreadable"; detail: string }
+  | { kind: "InstallerUnknown"; detail: string }
   | { kind: "Failed"; detail: string };
 
 const personDetail = (answer: { status: number; detail: string }, asked: string): string =>
@@ -468,53 +468,29 @@ const personDetail = (answer: { status: number; detail: string }, asked: string)
     ? `GitHub answered ${asked} in a form tumpel does not read`
     : answer.detail;
 
-const installerOf = async (
-  fetcher: Fetch,
-  api: string,
-  token: string,
+export const installedBy = (
+  user: GitHubUser,
   installation: GitHubInstallationRecord,
-): Promise<Installer> => {
+  recorded: RecordedInstaller,
+): Installer => {
   const { login, type } = installation.account;
   if (type === "User") {
-    const user = await tokenUser(fetcher, api, token);
-    if (!user.ok) return { kind: "Failed", detail: personDetail(user, "who you are") };
-    if (user.value.login.toLowerCase() === login.toLowerCase()) return { kind: "Installer", installation };
+    if (user.login.toLowerCase() === login.toLowerCase()) return { kind: "Installer", installation };
     return {
       kind: "NotInstaller",
-      detail: `installation ${installation.id} is on the personal account ${login}, and you authorized GitHub as ${user.value.login}; only ${login} connects their own account`,
+      detail: `installation ${installation.id} is on the personal account ${login}, and you authorized GitHub as ${user.login}; only ${login} connects their own account`,
     };
   }
-  const membership = await callGitHub(
-    fetcher,
-    {
-      method: "GET",
-      url: `${api}/user/memberships/orgs/${encodeURIComponent(login)}`,
-      accept: API_MEDIA_TYPE,
-      bearer: token,
-      body: null,
-    },
-    GitHubOrgMembershipSchema,
-    "GitHubOrgMembership",
-  );
-  if (!membership.ok && membership.status === 403) {
+  if (recorded.kind === "Unrecorded") {
     return {
-      kind: "MembershipUnreadable",
-      detail: `GitHub refused a read of your membership of the organization ${login}: ${membership.detail}`,
+      kind: "InstallerUnknown",
+      detail: `GitHub has not yet sent this control plane the installation notice that names who installed the App on the organization ${login}`,
     };
   }
-  if (!membership.ok && membership.status === 404) {
-    return {
-      kind: "NotInstaller",
-      detail: `the GitHub account you authorized is no member of the organization ${login}; only an owner of ${login} connects it`,
-    };
-  }
-  if (!membership.ok) return { kind: "Failed", detail: personDetail(membership, `your membership of ${login}`) };
-  if (membership.value.state === "active" && membership.value.role === "admin") {
-    return { kind: "Installer", installation };
-  }
+  if (recorded.githubUserId === user.githubUserId) return { kind: "Installer", installation };
   return {
     kind: "NotInstaller",
-    detail: `the GitHub account you authorized is a ${membership.value.state} ${membership.value.role} of the organization ${login}, and only an owner of ${login} connects it`,
+    detail: `you authorized GitHub as ${user.login}, who did not install the App on the organization ${login}; only the person who installed it connects ${login}`,
   };
 };
 
@@ -524,6 +500,7 @@ export const verifyInstaller = async (
   client: OAuthClient,
   code: string,
   installationId: number,
+  recorded: RecordedInstaller,
 ): Promise<Installer> => {
   const { api, web } = origins;
   const exchanged = await callGitHub(
@@ -573,7 +550,9 @@ export const verifyInstaller = async (
       detail: `installation ${installationId} is on an account tumpel cannot link, such as an enterprise; install the App on a user or organization account`,
     };
   }
-  return installerOf(fetcher, api, token, installation.data);
+  const user = await tokenUser(fetcher, api, token);
+  if (!user.ok) return { kind: "Failed", detail: personDetail(user, "who you are") };
+  return installedBy(user.value, installation.data, recorded);
 };
 
 export const convertManifest = async (

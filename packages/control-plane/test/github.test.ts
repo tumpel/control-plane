@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
@@ -110,8 +110,7 @@ test("the manifest returns installs and deliveries to the control plane and asks
   assert.equal(manifest.hook_attributes.url, "https://api.dev.tumpel.dev/github/webhook");
   assert.ok(manifest.name.length <= 34);
   assert.notEqual(manifest.name, appManifest("https://api.tumpel.dev").name);
-  assert.equal(manifest.default_permissions.members, "read");
-  for (const permission of ["administration", "organization_administration", "secrets"]) {
+  for (const permission of ["administration", "organization_administration", "secrets", "members"]) {
     assert.ok(!(permission in manifest.default_permissions), permission);
   }
 });
@@ -282,15 +281,17 @@ test("a repository outside the installation uses the secret set's GITHUB_TOKEN, 
 
 const oauthClient = { clientId: "Iv23client", clientSecret: "client-secret" };
 
+const unrecorded = { kind: "Unrecorded" as const };
+
 const origins = { api: "https://api.github.com", web: "https://github.com" };
 
-test("an installation links only when the person who authorized the App owns its account", async () => {
+test("an installation links only when the person who authorized the App installed it", async () => {
   const record = { id: 7, account: { login: "octo", type: "User" } };
   const listed = { total_count: 1, installations: [record] };
   const exchanged: [number, unknown] = [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }];
 
   const owned = answering([exchanged, [200, listed], [200, { id: 1, login: "Octo" }]]);
-  const installer = await verifyInstaller(owned.fetcher, origins, oauthClient, "code-1", 7);
+  const installer = await verifyInstaller(owned.fetcher, origins, oauthClient, "code-1", 7, unrecorded);
   assert.deepEqual(installer, { kind: "Installer", installation: record });
   assert.equal(owned.calls[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(header(owned.calls[0]?.init ?? {}, "accept"), "application/json");
@@ -303,37 +304,41 @@ test("an installation links only when the person who authorized the App owns its
   assert.equal(header(owned.calls[1]?.init ?? {}, "authorization"), "Bearer ghu_user");
 
   const someoneElses = answering([exchanged, [200, listed]]);
-  assert.equal((await verifyInstaller(someoneElses.fetcher, origins, oauthClient, "code-1", 8)).kind, "NotInstaller");
+  assert.equal(
+    (await verifyInstaller(someoneElses.fetcher, origins, oauthClient, "code-1", 8, unrecorded)).kind,
+    "NotInstaller",
+  );
 
   const collaborator = answering([exchanged, [200, listed], [200, { id: 2, login: "reader" }]]);
-  assert.equal((await verifyInstaller(collaborator.fetcher, origins, oauthClient, "code-1", 7)).kind, "NotInstaller");
+  assert.equal(
+    (await verifyInstaller(collaborator.fetcher, origins, oauthClient, "code-1", 7, unrecorded)).kind,
+    "NotInstaller",
+  );
 
   const organization = { id: 9, account: { login: "acme", type: "Organization" } };
   const orgListed: [number, unknown] = [200, { total_count: 1, installations: [organization] }];
-  const admin = answering([exchanged, orgListed, [200, { state: "active", role: "admin" }]]);
-  assert.deepEqual(await verifyInstaller(admin.fetcher, origins, oauthClient, "code-1", 9), {
-    kind: "Installer",
-    installation: organization,
+  const installerAnswers: [number, unknown][] = [exchanged, orgListed, [200, { id: 5, login: "owner" }]];
+  const byInstaller = answering(installerAnswers);
+  assert.deepEqual(
+    await verifyInstaller(byInstaller.fetcher, origins, oauthClient, "code-1", 9, {
+      kind: "Recorded",
+      githubUserId: 5,
+    }),
+    { kind: "Installer", installation: organization },
+  );
+  const otherOwner = answering(installerAnswers);
+  const mismatch = await verifyInstaller(otherOwner.fetcher, origins, oauthClient, "code-1", 9, {
+    kind: "Recorded",
+    githubUserId: 6,
   });
-  assert.equal(admin.calls[2]?.url, "https://api.github.com/user/memberships/orgs/acme");
-  const member = answering([exchanged, orgListed, [200, { state: "active", role: "member" }]]);
-  assert.equal((await verifyInstaller(member.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
-  const outsider = answering([exchanged, orgListed, [404, { message: "Not Found" }]]);
-  assert.equal((await verifyInstaller(outsider.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
-  const unpermitted = answering([exchanged, orgListed, [403, { message: "Resource not accessible by integration" }]]);
-  const unreadable = await verifyInstaller(unpermitted.fetcher, origins, oauthClient, "code-1", 9);
-  assert.equal(unreadable.kind, "MembershipUnreadable");
-  assert.match(unreadable.kind === "MembershipUnreadable" ? unreadable.detail : "", /403: Resource not accessible/);
-  const saml = answering([
-    exchanged,
-    orgListed,
-    [403, { message: "Resource protected by organization SAML enforcement." }],
-  ]);
-  const samlRefused = await verifyInstaller(saml.fetcher, origins, oauthClient, "code-1", 9);
-  assert.match(samlRefused.kind === "MembershipUnreadable" ? samlRefused.detail : "", /SAML enforcement/);
+  assert.equal(mismatch.kind, "NotInstaller");
+  assert.match(
+    mismatch.kind === "NotInstaller" ? mismatch.detail : "",
+    /owner, who did not install the App on the organization acme/,
+  );
 
   const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
-  const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7);
+  const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7, unrecorded);
   assert.equal(failed.kind, "Failed");
   assert.equal(spent.calls.length, 1);
 });
@@ -486,10 +491,10 @@ const MALLORY = "mallory@example.test";
 const ORG_INSTALLATION = { id: 88, account: { login: "victimorg", type: "Organization" } };
 const MALLORY_INSTALLATION = { id: 77, account: { login: "mallory", type: "User" } };
 const VICTIM_INSTALLATION = { id: 66, account: { login: "victim", type: "User" } };
-const GITHUB_PEOPLE: Record<string, { login: string; installations: unknown[]; role: string }> = {
-  ghu_victim: { login: "victim", installations: [ORG_INSTALLATION, VICTIM_INSTALLATION], role: "admin" },
-  ghu_reader: { login: "reader", installations: [ORG_INSTALLATION], role: "member" },
-  ghu_mallory: { login: "mallory", installations: [MALLORY_INSTALLATION], role: "none" },
+const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[] }> = {
+  ghu_victim: { id: 1, login: "victim", installations: [ORG_INSTALLATION, VICTIM_INSTALLATION] },
+  ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION] },
+  ghu_mallory: { id: 3, login: "mallory", installations: [MALLORY_INSTALLATION] },
 };
 
 interface Database {
@@ -543,12 +548,9 @@ const gitHubStandIn = async (request: IncomingMessage, response: ServerResponse)
   }
   const person = GITHUB_PEOPLE[(request.headers.authorization ?? "").replace(/^Bearer /, "")];
   if (person === undefined) return answer(response, 401, { message: "Bad credentials" });
-  if (path === "/user") return answer(response, 200, { id: 1, login: person.login });
+  if (path === "/user") return answer(response, 200, { id: person.id, login: person.login });
   if (path.startsWith("/user/installations")) {
     return answer(response, 200, { total_count: person.installations.length, installations: person.installations });
-  }
-  if (path === "/user/memberships/orgs/victimorg" && person.role !== "none") {
-    return answer(response, 200, { state: "active", role: person.role });
   }
   return answer(response, 404, { message: "Not Found" });
 };
@@ -741,13 +743,27 @@ test("an install made directly on GitHub links after the installer signs in to G
   assert.equal(await linkedTenant(66), victimTenant);
 });
 
-test("an install started by one person and finished in another's session, or by a read-only org member, is refused", async () => {
+const delivered = async (installation: unknown, senderId: number): Promise<number> => {
+  const body = JSON.stringify({ action: "created", installation, sender: { id: senderId, login: "someone" } });
+  const signature = createHmac("sha256", "webhook-secret").update(body).digest("hex");
+  const answered = await call("/github/webhook", {
+    method: "POST",
+    headers: { "x-github-event": "installation", "x-hub-signature-256": `sha256=${signature}` },
+    body,
+  });
+  return answered.status;
+};
+
+test("an organization install connects only for the GitHub account its installation notice names, whichever arrives first", async () => {
   const mallorys = await startedState(MALLORY, malloryTenant);
   await refusedPage(await installed(VICTIM, "victim-code", 88, mallorys), 403, /started by mallory@example.test/);
-  assert.equal(await linkedTenant(88), null);
 
   const victims = await startedState(VICTIM, victimTenant);
-  await refusedPage(await installed(VICTIM, "reader-code", 88, victims), 403, /only an owner of victimorg/);
+  await refusedPage(await installed(VICTIM, "victim-code", 88, victims), 409, /GitHub has not named the installer yet/);
+  assert.equal(await linkedTenant(88), null);
+
+  assert.equal(await delivered(ORG_INSTALLATION, 1), 204);
+  await refusedPage(await installed(VICTIM, "coowner-code", 88, victims), 403, /coowner, who did not install the App/);
   assert.equal(await linkedTenant(88), null);
 
   assert.equal((await installed(VICTIM, "victim-code", 88, victims)).status, 200);
