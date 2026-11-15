@@ -29,6 +29,7 @@ import tenant0028 from "../migrations/tenant/0028_claude_setups.sql";
 import tenant0029 from "../migrations/tenant/0029_circleci.sql";
 import tenant0030 from "../migrations/tenant/0030_prebuild_pipelines.sql";
 import tenant0031 from "../migrations/tenant/0031_prebuild_upload_jobs.sql";
+import tenant0032 from "../migrations/tenant/0032_prebuild_pipeline_projects.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -63,4 +64,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0029_circleci", sql: tenant0029 },
   { name: "0030_prebuild_pipelines", sql: tenant0030 },
   { name: "0031_prebuild_upload_jobs", sql: tenant0031 },
+  { name: "0032_prebuild_pipeline_projects", sql: tenant0032 },
 ];

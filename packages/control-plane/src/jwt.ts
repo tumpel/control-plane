@@ -1,4 +1,4 @@
-export type JwtCheck = "token" | "kid" | "signature" | "iss" | "aud" | "exp" | "nbf";
+export type JwtCheck = "token" | "keys" | "kid" | "signature" | "iss" | "aud" | "exp" | "nbf";
 
 export type VerifiedJwt =
   | { ok: true; claims: Record<string, unknown> }
@@ -20,7 +20,7 @@ interface Jwk {
 }
 
 interface KeySource {
-  keys(): Promise<Map<string, CryptoKey>>;
+  keys(): Promise<Map<string, CryptoKey> | null>;
   refresh(): Promise<Map<string, CryptoKey> | null>;
 }
 
@@ -59,8 +59,9 @@ const importKeys = async (jwks: Jwk[]): Promise<Map<string, CryptoKey>> =>
 const cachedKeys = (keysUrl: string): KeySource => {
   let current: { keys: Map<string, CryptoKey>; loadedAt: number } | null = null;
 
-  const fromOrigin = async (): Promise<Jwk[]> => {
+  const fromOrigin = async (): Promise<Jwk[] | null> => {
     const response = await fetch(keysUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (response.status === 404) return null;
     if (!response.ok) {
       throw new Error(
         `the signing keys at ${keysUrl} answered ${response.status}; no token can be checked until it answers`,
@@ -69,7 +70,8 @@ const cachedKeys = (keysUrl: string): KeySource => {
     return parseKeySet(keysUrl, await response.text());
   };
 
-  const load = async (jwks: Jwk[]): Promise<Map<string, CryptoKey>> => {
+  const load = async (jwks: Jwk[] | null): Promise<Map<string, CryptoKey> | null> => {
+    if (jwks === null) return null;
     const keys = await importKeys(jwks);
     current = { keys, loadedAt: Date.now() };
     return keys;
@@ -120,7 +122,9 @@ export const jwtVerifier = (keysUrl: string, issuer: string, audience: string): 
     if (header.alg !== "RS256" || typeof header.kid !== "string") {
       return refuse("token", "the JWT names no kid or is not signed with RS256");
     }
-    const key = (await source.keys()).get(header.kid) ?? (await source.refresh())?.get(header.kid) ?? null;
+    const keys = await source.keys();
+    if (keys === null) return refuse("keys", `the signing keys at ${keysUrl} answered 404`);
+    const key = keys.get(header.kid) ?? (await source.refresh())?.get(header.kid) ?? null;
     if (!key) return refuse("kid", `the signing keys at ${keysUrl} hold no key ${header.kid}`);
     const signed = new TextEncoder().encode(`${headerSegment}.${payloadSegment}`);
     if (!(await crypto.subtle.verify(RS256, key, signature, signed))) {

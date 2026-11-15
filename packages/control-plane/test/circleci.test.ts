@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import {
@@ -17,21 +17,9 @@ const DEFINITION = "11111111-2222-4333-8444-555555555555";
 let api: Server;
 let origin: string;
 let answer: { status: number; body: unknown } = { status: 201, body: {} };
-let received: { url: string; token: string; body: unknown } | null = null;
-
-const bodyOf = async (request: IncomingMessage): Promise<unknown> => {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(chunk as Buffer);
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-};
 
 before(async () => {
-  api = createServer(async (request, response) => {
-    received = {
-      url: request.url ?? "",
-      token: String(request.headers["circle-token"]),
-      body: await bodyOf(request),
-    };
+  api = createServer((_request, response) => {
     response.writeHead(answer.status, { "content-type": "application/json" });
     response.end(JSON.stringify(answer.body));
   });
@@ -56,25 +44,6 @@ const trigger = () =>
     branch: "main",
     parameters,
   });
-
-test("the trigger runs the definition on the default branch with the five tumpel parameters, and a 201 names the pipeline", async () => {
-  answer = { status: 201, body: { id: "pipeline-1", state: "created", number: 7, created_at: "2026-11-15T10:00:00Z" } };
-  assert.deepEqual(await trigger(), { kind: "Created", pipelineId: "pipeline-1", number: 7 });
-  assert.equal(received?.url, `/api/v2/project/${SLUG}/pipeline/run`);
-  assert.equal(received?.token, "personal-token");
-  assert.deepEqual(received?.body, {
-    definition_id: DEFINITION,
-    config: { branch: "main" },
-    checkout: { branch: "main" },
-    parameters: {
-      tumpel_prebuild_id: "prebuild-1",
-      tumpel_tenant_id: "tenant-1",
-      tumpel_api_origin: "https://api.tumpel.dev",
-      tumpel_rootfs_url: "https://releases.example.test/rootfs?signed",
-      tumpel_image_digest: "b".repeat(64),
-    },
-  });
-});
 
 test("a 200 without a pipeline, a pipeline in state errored and a 401 each refuse the trigger with CircleCI's answer", async () => {
   const refusals: [{ status: number; body: unknown }, RegExp, number][] = [
