@@ -26,7 +26,6 @@ export type GitHubIssueRecord = z.infer<typeof GitHubIssueRecordSchema>;
 export type GitHubState = z.infer<typeof GitHubManifestStateSchema> | z.infer<typeof GitHubInstallStateSchema>;
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
-export const GITHUB_API = "https://api.github.com";
 export const GITHUB_WEB = "https://github.com";
 export const APP_SETUP_PATH = "/github/app/setup";
 export const APP_CREATED_PATH = "/github/app/created";
@@ -262,6 +261,7 @@ const OUTSIDE_STATUSES = [404, 422];
 
 export const mintInstallationToken = async (
   fetcher: Fetch,
+  api: string,
   app: AppKey,
   installation: Installation,
   target: GitHubRepository,
@@ -278,7 +278,7 @@ export const mintInstallationToken = async (
     fetcher,
     {
       method: "POST",
-      url: `${GITHUB_API}/app/installations/${installationId}/access_tokens`,
+      url: `${api}/app/installations/${installationId}/access_tokens`,
       accept: API_MEDIA_TYPE,
       bearer: await appJwt(app.clientId, app.privateKey, now),
       body: { repositories: [target.name] },
@@ -301,6 +301,7 @@ export const mintInstallationToken = async (
 
 export const mintInstallationWideToken = async (
   fetcher: Fetch,
+  api: string,
   app: AppKey,
   installationId: number,
   now: number,
@@ -309,7 +310,7 @@ export const mintInstallationWideToken = async (
     fetcher,
     {
       method: "POST",
-      url: `${GITHUB_API}/app/installations/${installationId}/access_tokens`,
+      url: `${api}/app/installations/${installationId}/access_tokens`,
       accept: API_MEDIA_TYPE,
       bearer: await appJwt(app.clientId, app.privateKey, now),
       body: null,
@@ -324,6 +325,7 @@ const PAGE_SIZE = 100;
 
 export const listInstallationRepositories = async (
   fetcher: Fetch,
+  api: string,
   token: string,
 ): Promise<GitHubAnswer<GitHubRepositorySummary[]>> => {
   const repositories: GitHubRepositorySummary[] = [];
@@ -332,7 +334,7 @@ export const listInstallationRepositories = async (
       fetcher,
       {
         method: "GET",
-        url: `${GITHUB_API}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
+        url: `${api}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
         accept: API_MEDIA_TYPE,
         bearer: token,
         body: null,
@@ -427,6 +429,7 @@ export type Installer =
 
 export const verifyInstaller = async (
   fetcher: Fetch,
+  api: string,
   client: OAuthClient,
   code: string,
   installationId: number,
@@ -454,7 +457,7 @@ export const verifyInstaller = async (
     fetcher,
     {
       method: "GET",
-      url: `${GITHUB_API}/user/installations?per_page=100`,
+      url: `${api}/user/installations?per_page=100`,
       accept: API_MEDIA_TYPE,
       bearer: exchanged.value.access_token,
       body: null,
@@ -473,12 +476,16 @@ export const verifyInstaller = async (
   return { kind: "Installer", installation };
 };
 
-export const convertManifest = async (fetcher: Fetch, code: string): Promise<GitHubAnswer<GitHubAppConversion>> => {
+export const convertManifest = async (
+  fetcher: Fetch,
+  api: string,
+  code: string,
+): Promise<GitHubAnswer<GitHubAppConversion>> => {
   return callGitHub(
     fetcher,
     {
       method: "POST",
-      url: `${GITHUB_API}/app-manifests/${encodeURIComponent(code)}/conversions`,
+      url: `${api}/app-manifests/${encodeURIComponent(code)}/conversions`,
       accept: API_MEDIA_TYPE,
       bearer: null,
       body: null,

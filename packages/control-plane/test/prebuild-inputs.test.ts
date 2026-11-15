@@ -62,7 +62,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer, read
       { path: "scripts/setup.sh", type: "blob", sha: "b5" },
     ],
   });
-  const inputs = await readInputs(fetcher, TARGET, "installation-token");
+  const inputs = await readInputs(fetcher, "https://api.github.com", TARGET, "installation-token");
   assert.deepEqual(inputs, {
     kind: "Read",
     files: [
@@ -90,6 +90,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer, read
 test("a repository without inputs reads Empty, and a tree GitHub refuses reads Unreadable", async () => {
   const empty = await readInputs(
     github({ trunk: [{ path: "README.md", type: "blob", sha: "b3" }] }).fetcher,
+    "https://api.github.com",
     TARGET,
     "t",
   );
@@ -98,6 +99,7 @@ test("a repository without inputs reads Empty, and a tree GitHub refuses reads U
 
   const missing = await readInputs(
     github({ trunk: [{ path: ".devcontainer", type: "tree", sha: "gone" }] }).fetcher,
+    "https://api.github.com",
     TARGET,
     "t",
   );

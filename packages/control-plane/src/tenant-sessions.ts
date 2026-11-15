@@ -526,7 +526,14 @@ export class TenantSessions extends DurableObject<Env> {
         `tenant ${tenantId} is linked to GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
       );
     }
-    return mintInstallationToken((url, init) => fetch(url, init), app, installation, repository, now);
+    return mintInstallationToken(
+      (url, init) => fetch(url, init),
+      this.env.GITHUB_API_ORIGIN,
+      app,
+      installation,
+      repository,
+      now,
+    );
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
