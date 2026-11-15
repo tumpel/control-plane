@@ -243,8 +243,8 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   const body = await parseBody(request, SignUpSchema, "signUp");
   if (!body.ok) return body.response;
   const now = Date.now();
-  const whoami = await signUp(env.DB, signed.email, body.value.name, now);
-  await env.TENANT.getByName(whoami.tenant.tenantId).open(whoami.tenant.tenantId, now);
+  const { whoami, created } = await signUp(env.DB, signed.email, body.value.name, now);
+  if (created) await env.TENANT.getByName(whoami.tenant.tenantId).open(whoami.tenant.tenantId, now);
   return json(WhoamiSchema.parse(whoami));
 };
 
