@@ -6,6 +6,7 @@ import {
   type GitHubAppConversion,
   type GitHubInstallationRecord,
   importAppKey,
+  type OAuthClient,
   pkcs8FromPem,
 } from "./github.ts";
 import type { KeyStore } from "./key-store.ts";
@@ -19,10 +20,6 @@ export interface StoredApp {
   htmlUrl: string;
 }
 
-export interface AppCredentials extends AppKey {
-  webhookSecret: string;
-}
-
 type AppRow = {
   app_id: number;
   slug: string;
@@ -30,6 +27,7 @@ type AppRow = {
   owner_login: string;
   html_url: string;
   wrapped_data_key: string;
+  client_secret_sealed: string;
   webhook_secret_sealed: string;
   private_key_sealed: string;
 };
@@ -48,7 +46,7 @@ const fromBase64 = (text: string): Uint8Array<ArrayBuffer> => Uint8Array.from(at
 const appRow = (db: D1Database): Promise<AppRow | null> =>
   db
     .prepare(
-      "SELECT app_id, slug, client_id, owner_login, html_url, wrapped_data_key, webhook_secret_sealed, private_key_sealed FROM github_apps WHERE github_app_slot = 1",
+      "SELECT app_id, slug, client_id, owner_login, html_url, wrapped_data_key, client_secret_sealed, webhook_secret_sealed, private_key_sealed FROM github_apps WHERE github_app_slot = 1",
     )
     .first<AppRow>();
 
@@ -59,18 +57,32 @@ export const storedApp = async (db: D1Database): Promise<StoredApp | null> => {
     : { appId: row.app_id, slug: row.slug, ownerLogin: row.owner_login, htmlUrl: row.html_url };
 };
 
-export const appCredentials = async (db: D1Database, keyStore: KeyStore): Promise<AppCredentials | null> => {
+const unsealed = async (
+  keyStore: KeyStore,
+  row: AppRow,
+  sealed: "client_secret_sealed" | "webhook_secret_sealed" | "private_key_sealed",
+  context: string,
+): Promise<string> => unseal(await keyStore.unwrap(row.wrapped_data_key), row[sealed], context, RESEAL_APP);
+
+export const appKey = async (db: D1Database, keyStore: KeyStore): Promise<AppKey | null> => {
   const row = await appRow(db);
   if (row === null) return null;
-  const dataKey = await keyStore.unwrap(row.wrapped_data_key);
-  const privateKey = await importAppKey(
-    fromBase64(await unseal(dataKey, row.private_key_sealed, "github-app/private_key", RESEAL_APP)),
-  );
+  const pkcs8 = await unsealed(keyStore, row, "private_key_sealed", "github-app/private_key");
+  return { clientId: row.client_id, privateKey: await importAppKey(fromBase64(pkcs8)) };
+};
+
+export const oauthClient = async (db: D1Database, keyStore: KeyStore): Promise<OAuthClient | null> => {
+  const row = await appRow(db);
+  if (row === null) return null;
   return {
     clientId: row.client_id,
-    privateKey,
-    webhookSecret: await unseal(dataKey, row.webhook_secret_sealed, "github-app/webhook_secret", RESEAL_APP),
+    clientSecret: await unsealed(keyStore, row, "client_secret_sealed", "github-app/client_secret"),
   };
+};
+
+export const webhookSecret = async (db: D1Database, keyStore: KeyStore): Promise<string | null> => {
+  const row = await appRow(db);
+  return row === null ? null : unsealed(keyStore, row, "webhook_secret_sealed", "github-app/webhook_secret");
 };
 
 export type AppStored = { kind: "Stored"; app: StoredApp } | { kind: "Exists"; app: StoredApp };

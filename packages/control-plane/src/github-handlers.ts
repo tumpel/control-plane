@@ -1,12 +1,5 @@
-import {
-  GitHubConnectionSchema,
-  GitHubInstallStartSchema,
-  GitHubInstallStateSchema,
-  GitHubManifestCallbackSchema,
-  GitHubManifestStateSchema,
-  GitHubSetupCallbackSchema,
-  GitHubWebhookDeliverySchema,
-} from "@tumpel/api/schemas";
+import { GitHubConnectionSchema, GitHubInstallStartSchema } from "@tumpel/api/schemas";
+import type { z } from "zod";
 import {
   APP_CREATED_PATH,
   APP_INSTALLED_PATH,
@@ -17,21 +10,31 @@ import {
   GITHUB_WEB,
   installUrl,
   manifestAction,
-  readInstallation,
+  parseJson,
   readState,
   STATE_KEY_PURPOSE,
   STATE_TTL_MS,
   signState,
+  verifyInstaller,
   verifyWebhookSignature,
   WEBHOOK_PATH,
 } from "./github.ts";
 import {
-  appCredentials,
+  GitHubInstallationEventSchema,
+  GitHubInstallStateSchema,
+  GitHubManifestCallbackSchema,
+  GitHubManifestStateSchema,
+  GitHubSetupActionSchema,
+  GitHubSetupCallbackSchema,
+} from "./github-schemas.ts";
+import {
   installationOf,
   linkInstallation,
+  oauthClient,
   storeApp,
   storedApp,
   unlinkInstallation,
+  webhookSecret,
 } from "./github-store.ts";
 import { json, problem } from "./http";
 import type { Caller } from "./identity";
@@ -48,6 +51,8 @@ const CONNECTION_PATH = "/v1/github-connection";
 const fetcher: Fetch = (url, init) => fetch(url, init);
 const stateKey = (env: Env): Promise<CryptoKey> => keyStoreOf(env).signingKey(STATE_KEY_PURPOSE);
 const expiry = (now: number): string => new Date(now + STATE_TTL_MS).toISOString();
+const issues = (error: z.ZodError): string =>
+  error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; ");
 
 const appMissing = (origin: string): Response =>
   problem(409, {
@@ -83,7 +88,6 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
   const state = await signState(await stateKey(env), {
     purpose: "Installation",
     tenantId: caller.tenantId,
-    principalId: caller.principalId,
     expiresAt,
   });
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state), expiresAt }));
@@ -168,45 +172,55 @@ const handleCreated = async (url: URL, env: Env, email: string): Promise<Respons
 };
 
 const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
-  const query = GitHubSetupCallbackSchema.safeParse(Object.fromEntries(url.searchParams));
-  if (!query.success) {
+  const query = Object.fromEntries(url.searchParams);
+  const action = GitHubSetupActionSchema.safeParse(query);
+  if (!action.success) {
     return messagePage(400, "Nothing to connect", "GitHub sent no setup action. Run tumpel github start again.");
   }
-  const { installation_id: installationText, setup_action: action, state: stateText } = query.data;
-  if (action === "request") {
+  if (action.data.setup_action === "request") {
     return messagePage(
       202,
       "Installation requested",
       "An owner of the GitHub organization must approve the installation. Once approved, run tumpel github start again and finish it from the URL it prints.",
     );
   }
-  if (installationText === undefined || stateText === undefined) {
+  const callback = GitHubSetupCallbackSchema.safeParse(query);
+  if (!callback.success) {
     return messagePage(
       400,
       "Nothing to connect",
-      "GitHub sent no installation or no state; this happens when the App is installed from GitHub instead of from tumpel. Run tumpel github start and open the URL it prints.",
+      `GitHub sent the installer back without ${issues(callback.error)}; this happens when the App is installed from GitHub instead of from tumpel. Run tumpel github start and open the URL it prints.`,
     );
   }
+  const { code, installation_id: installationText, state: stateText } = callback.data;
   const state = await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
   if (!state.ok) return messagePage(403, "Request refused", `${state.reason}. Run tumpel github start again.`);
-  const app = await appCredentials(env.DB, keyStoreOf(env));
-  if (app === null)
+  const client = await oauthClient(env.DB, keyStoreOf(env));
+  if (client === null)
     return messagePage(409, "No GitHub App", `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`);
   const installationId = Number(installationText);
-  const record = await readInstallation(fetcher, app, installationId, Date.now());
-  if (!record.ok) {
+  const installer = await verifyInstaller(fetcher, client, code, installationId);
+  if (installer.kind === "Failed") {
     return messagePage(
       502,
-      "Installation not found",
-      `${record.detail}. Install the App again from the URL tumpel github start prints.`,
+      "GitHub did not confirm the installer",
+      `${installer.detail}. Run tumpel github start again.`,
     );
   }
-  const linked = await linkInstallation(env.DB, state.claims.tenantId, record.value, Date.now());
+  if (installer.kind === "NotInstaller") {
+    return messagePage(
+      403,
+      "Request refused",
+      `${installer.detail}. Sign in to GitHub as a person who installed the App, then run tumpel github start again.`,
+    );
+  }
+  const record = installer.installation;
+  const linked = await linkInstallation(env.DB, state.claims.tenantId, record, Date.now());
   if (linked.kind === "OtherTenant") {
     return messagePage(
       409,
       "Installation in use",
-      `The installation on ${record.value.account.login} is linked to another tenant. Each installation serves one tenant; uninstall it there first.`,
+      `The installation on ${record.account.login} is linked to another tenant. Each installation serves one tenant; uninstall it there first.`,
     );
   }
   return linkPage(
@@ -233,12 +247,10 @@ export const handleGitHubPage = async (
   return handleInstalled(url, env);
 };
 
-const DROPPING_ACTIONS = ["deleted", "suspend"];
-
 export const handleGitHubWebhook = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   if (request.method !== "POST" || url.pathname !== WEBHOOK_PATH) return null;
-  const app = await appCredentials(env.DB, keyStoreOf(env));
-  if (app === null) {
+  const secret = await webhookSecret(env.DB, keyStoreOf(env));
+  if (secret === null) {
     return problem(404, {
       code: "NotFound",
       title: "No GitHub App",
@@ -246,8 +258,8 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
       fix: `Create the App at ${url.origin}${APP_SETUP_PATH}, or remove this webhook on GitHub`,
     });
   }
-  const body = await request.text();
-  if (!(await verifyWebhookSignature(app.webhookSecret, body, request.headers.get("x-hub-signature-256")))) {
+  const body = await request.arrayBuffer();
+  if (!(await verifyWebhookSignature(secret, body, request.headers.get("x-hub-signature-256")))) {
     return problem(403, {
       code: "Forbidden",
       title: "Signature mismatch",
@@ -257,10 +269,15 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   }
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   if (request.headers.get("x-github-event") !== "installation") return noContent;
-  const delivery = GitHubWebhookDeliverySchema.safeParse(JSON.parse(body));
-  if (!delivery.success || delivery.data.installation === undefined) return noContent;
-  if (DROPPING_ACTIONS.includes(delivery.data.action ?? "")) {
-    await unlinkInstallation(env.DB, delivery.data.installation.id);
+  const delivery = GitHubInstallationEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
+  if (!delivery.success) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Not an installation event",
+      detail: `the installation delivery does not parse: ${issues(delivery.error)}`,
+      fix: "Send installation events in the shape GitHub documents, with an action and an installation",
+    });
   }
+  if (delivery.data.action === "deleted") await unlinkInstallation(env.DB, delivery.data.installation.id);
   return noContent;
 };

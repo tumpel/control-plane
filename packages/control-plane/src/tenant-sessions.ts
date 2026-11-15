@@ -30,8 +30,8 @@ import {
   type SecretMember,
 } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
-import { type Minted, mintInstallationToken, withRepositoryToken } from "./github.ts";
-import { appCredentials, installationOf } from "./github-store.ts";
+import { type Minted, mintInstallationToken, repositoryCredential } from "./github.ts";
+import { appKey, installationOf } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
@@ -462,7 +462,7 @@ export class TenantSessions extends DurableObject<Env> {
   private async repositoryToken(tenantId: string, repository: string, now: number): Promise<Minted> {
     const installation = await installationOf(this.env.DB, tenantId);
     if (installation === null) return { kind: "NoToken" };
-    const app = await appCredentials(this.env.DB, keyStoreOf(this.env));
+    const app = await appKey(this.env.DB, keyStoreOf(this.env));
     if (app === null) {
       throw new Error(
         `tenant ${tenantId} is linked to GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
@@ -955,14 +955,12 @@ export class TenantSessions extends DurableObject<Env> {
       return { kind: "Withdrawn" };
     }
     const minted = await this.repositoryToken(tenantId, session.repository, now);
-    if (minted.kind === "Refused") {
-      await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", minted.detail, iso(now));
+    const credential = repositoryCredential(dispatch.variables, minted);
+    if (credential.kind === "Refused") {
+      await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", credential.detail, iso(now));
       return { kind: "Withdrawn" };
     }
-    const { variables, source } = withRepositoryToken(
-      dispatch.variables,
-      minted.kind === "Minted" ? minted.token : null,
-    );
+    const { variables, source } = credential;
     const settings = settingsOf(this.env);
     const handover = {
       credentialHandoverId: crypto.randomUUID(),

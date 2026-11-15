@@ -61,4 +61,4 @@ nothing: the server cannot read your environment, so they return the config entr
 Excluded by rule:
 
 - browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `Tenants_signUp`.
-- OAuth, device-flow and enrolment wire: no principal: `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `GitHubWebhooks_receive`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`.
+- OAuth, device-flow and enrolment wire: no principal: `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`.
