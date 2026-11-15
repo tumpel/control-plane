@@ -671,11 +671,9 @@ export class TenantPrebuilds extends TenantSessions {
       inputDigest: await inputDigest(inputs.files),
       guestImageDigest: start.guestImageDigest,
     };
-    if (read.kind === "Current" && !start.rebuild) {
-      const held = this.heldPrebuild(tenantId, key);
-      if (held !== null) return { kind: "Started", prebuild: held };
-    }
     const recorded = await this.ctx.blockConcurrencyWhile(async (): Promise<Recorded> => {
+      const held = read.kind === "Current" && !start.rebuild ? this.heldPrebuild(tenantId, key) : null;
+      if (held !== null) return { kind: "Started", prebuild: held };
       const committed =
         read.kind === "Stale"
           ? await commitCallerWorkflow(fetcher, api, minted.token, target, { ...caller, file: read.file })
