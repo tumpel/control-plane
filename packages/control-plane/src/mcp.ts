@@ -27,6 +27,8 @@ import {
   MemberPathSchema,
   NamespaceConnectionStartSchema,
   OAuthGrantPathSchema,
+  OpenRouterAuthorizationPathSchema,
+  OpenRouterAuthorizationStartSchema,
   PersonaCreateSchema,
   PersonaFileUploadRequestSchema,
   PersonaPathSchema,
@@ -66,7 +68,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects one more GitHub account or organization through the GitHub App, tumpel_github_list lists the connected ones, tumpel_github_list_accounts lists the person's GitHub account and organizations with what the tenant can do on each, tumpel_github_refresh reads them again, tumpel_github_delete removes one, and tumpel_github_get reads the App, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_*, tumpel_circleci_* and tumpel_namespace_* connect the tenant's own build provider accounts, with CircleCI API tokens kept off MCP, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_claude_setup_start mints a Claude subscription token into a secret set from a short-lived box and tumpel_claude_setup_get reads its sign-in URL and outcome, tumpel_claude_setup_list finds a set's running setup to resume it; the person pastes the sign-in code into the dashboard or tumpel claude-setup submit-code, never through MCP. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects one more GitHub account or organization through the GitHub App, tumpel_github_list lists the connected ones, tumpel_github_list_accounts lists the person's GitHub account and organizations with what the tenant can do on each, tumpel_github_refresh reads them again, tumpel_github_delete removes one, and tumpel_github_get reads the App, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_*, tumpel_circleci_* and tumpel_namespace_* connect the tenant's own build provider accounts, with CircleCI API tokens kept off MCP, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_claude_setup_start mints a Claude subscription token into a secret set from a short-lived box and tumpel_claude_setup_get reads its sign-in URL and outcome, tumpel_claude_setup_list finds a set's running setup to resume it; tumpel_openrouter_authorize mints an OpenRouter key into a secret set through a browser approval and tumpel_openrouter_get_authorization reads its outcome; the person pastes the sign-in code into the dashboard or tumpel claude-setup submit-code, never through MCP. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -441,7 +443,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/connections",
     NO_ARGUMENTS,
-    "List one row per connection kind: GitHub, GitHubActions, CircleCI and Namespace, each NotConfigured, NotConnected or Connected with the account it bills. Returns the ConnectionSummary[] of GET /v1/connections.",
+    "List one row per connection kind: GitHub, GitHubActions, CircleCI, Namespace and OpenRouter, each NotConfigured, NotConnected or Connected with the account it bills. Returns the ConnectionSummary[] of GET /v1/connections.",
   ),
   rest(
     "tumpel_github_actions_get",
@@ -583,6 +585,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/claude-setups/{claudeSetupId}",
     ClaudeSetupPathSchema,
     "Read one Claude setup; a setup read past the end of its phase reads Failed. Returns the ClaudeSetup of GET /v1/claude-setups/{claudeSetupId}; status.state is Starting with urlDueAt, AwaitingCode with signInUrl and codeDueAt, Minting with tokenDueAt, Completed with the member CLAUDE_CODE_OAUTH_TOKEN and its expiresAt, or Failed with reason SetupUrlMissing, CodeRejected, SetupTimedOut, TokenNotStored or NoHostOnline and a detail naming the fix. It never carries the token.",
+  ),
+  rest(
+    "tumpel_openrouter_authorize",
+    "POST",
+    "/v1/openrouter-connection/authorize",
+    OpenRouterAuthorizationStartSchema,
+    "Start minting an OpenRouter API key into a secret set through OpenRouter's PKCE flow, so the person copies no key. Takes {secretSetId, returnUrl?}: returnUrl is a dashboard page to land on afterwards, by default the secret set's page. Returns the OpenRouterAuthorization of POST /v1/openrouter-connection/authorize, AwaitingCallback with authorizeUrl and callbackDueAt, 10 minutes out. Give the person authorizeUrl; OpenRouter sends their browser back to the control plane, which spends the code and stores the key as OPENROUTER_API_KEY for OpenRouter. The code and the key never pass through MCP. Read the outcome with tumpel_openrouter_get_authorization.",
+  ),
+  rest(
+    "tumpel_openrouter_get_authorization",
+    "GET",
+    "/v1/openrouter-connection/authorizations/{openRouterAuthorizationId}",
+    OpenRouterAuthorizationPathSchema,
+    "Read one OpenRouter authorization you started; one read past its callbackDueAt reads Failed. Returns the OpenRouterAuthorization of GET /v1/openrouter-connection/authorizations/{openRouterAuthorizationId}; status.state is AwaitingCallback with authorizeUrl, Completed with the member OPENROUTER_API_KEY and the keyLabel it carries on OpenRouter, or Failed with reason AuthorizationTimedOut, NotConnected, CodeRefused, ExchangeFailed or KeyNotStored and a detail naming the fix. It never carries the key.",
   ),
   rest(
     "tumpel_prebuild_get",

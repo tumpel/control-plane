@@ -153,6 +153,7 @@ import {
   TOKEN_PATH,
   usableRedirect,
 } from "./oauth";
+import { handleOpenRouterAuthorizations, handleOpenRouterCallback } from "./openrouter-authorizations.ts";
 import {
   CONSENT_CSRF_COOKIE,
   DEVICE_APPROVE_PATH,
@@ -1425,6 +1426,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const connections =
     (await handleConnections(request, url, env, deviceCaller)) ??
     (await handleCircleCIAuthorizations(request, url, env, deviceCaller)) ??
+    (await handleOpenRouterAuthorizations(request, url, env, deviceCaller)) ??
+    (await handleOpenRouterCallback(request, url, env)) ??
     (await handleCircleCIProjects(request, url, env, deviceCaller));
   if (connections) return connections;
   const members = await handleMembers(request, url, env, {

@@ -34,6 +34,7 @@ import tenant0033 from "../migrations/tenant/0033_circleci_authorizations.sql";
 import tenant0034 from "../migrations/tenant/0034_one_running_claude_setup.sql";
 import tenant0035 from "../migrations/tenant/0035_circleci_authorization_phases.sql";
 import tenant0036 from "../migrations/tenant/0036_github_accounts.sql";
+import tenant0037 from "../migrations/tenant/0037_openrouter_authorizations.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -73,4 +74,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0034_one_running_claude_setup", sql: tenant0034 },
   { name: "0035_circleci_authorization_phases", sql: tenant0035 },
   { name: "0036_github_accounts", sql: tenant0036 },
+  { name: "0037_openrouter_authorizations", sql: tenant0037 },
 ];
