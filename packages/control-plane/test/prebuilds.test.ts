@@ -210,6 +210,7 @@ test("the connection list holds one row per provider, and a connected build prov
     { kind: "GitHubActions", state: "NotConnected" },
     { kind: "CircleCI", state: "NotConnected" },
     { kind: "Namespace", state: "NotConfigured" },
+    { kind: "OpenRouter", state: "NotConnected" },
   ]);
 
   const actions = await rest(GitHubActionsConnectionLinkSchema, "POST", "/v1/github-actions-connection/start", {
@@ -243,12 +244,13 @@ test("the connection list holds one row per provider, and a connected build prov
     { kind: "GitHubActions", state: "Connected", account: "acme on GitHub Actions" },
     { kind: "CircleCI", state: "NotConnected" },
     { kind: "Namespace", state: "NotConfigured" },
+    { kind: "OpenRouter", state: "NotConnected" },
   ]);
 
   assert.equal((await send("DELETE", "/v1/github-actions-connection", undefined, bearer)).status, 204);
   assert.deepEqual(
     (await rest(ConnectionRows, "GET", "/v1/connections")).map((row) => row.state),
-    ["NotConfigured", "NotConnected", "NotConnected", "NotConfigured"],
+    ["NotConfigured", "NotConnected", "NotConnected", "NotConfigured", "NotConnected"],
   );
 });
 

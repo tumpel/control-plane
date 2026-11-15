@@ -81,11 +81,13 @@ export const listConnections = async (env: Env, caller: Caller): Promise<Connect
   const logins = installations.map((installation) => installation.accountLogin).join(", ");
   const tenant = tenantOf(env, caller);
   const accounts = await tenant.connectedAccounts();
+  const openRouter = (await tenant.openRouterSecretSets()).join(", ");
   return [
     summary("GitHub", logins === "" ? null : logins, app !== null),
     summary("GitHubActions", accounts.GitHubActions, true),
     circleCISummary(await tenant.circleCIConnection(), Date.now()),
     summary("Namespace", accounts.Namespace, stageIssuer(env.ISSUER_HOSTNAME) !== null),
+    summary("OpenRouter", openRouter === "" ? null : openRouter, true),
   ];
 };
 

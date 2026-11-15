@@ -29,8 +29,8 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "OpenCode",
     harnessVersion: "1.0.0",
-    provider: "Anthropic",
-    credentialVariables: [{ kind: "ApiKey", variable: "OPENCODE_API_KEY" }],
+    provider: "OpenRouter",
+    credentialVariables: [{ kind: "ApiKey", variable: "OPENROUTER_API_KEY" }],
     personaFilePaths: [".config/opencode/opencode.json", ".config/opencode/AGENTS.md"],
     installRecipe: "npm:opencode-ai@1.0.0",
   },

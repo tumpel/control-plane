@@ -34,6 +34,7 @@ const NOUNS = {
   TenantConfigs: "config",
   OAuthGrants: "oauth-grant",
   ClaudeSetups: "claude-setup",
+  OpenRouterConnections: "openrouter",
 };
 const VERBS = {
   Identity_listTenants: "tenants",
