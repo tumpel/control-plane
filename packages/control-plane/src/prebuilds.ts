@@ -68,14 +68,6 @@ const buildProviderUnavailable = (provider: BuildProvider, repository: string): 
     fix: "Start the prebuild again once the operator deploys a control plane that dispatches to this provider",
   });
 
-const imageNotReleased = (detail: string): Refused =>
-  refuse(422, {
-    code: "ImageNotReleased",
-    title: "Guest image not in the current release",
-    detail,
-    fix: "Ask the operator to publish the release again with the release workflow, then start the prebuild again",
-  });
-
 const dispatchRefused = (detail: string): Refused =>
   refuse(409, {
     code: "DispatchRefused",
@@ -101,8 +93,6 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
   const tenant = env.TENANT.getByName(tenantId);
   const connection = await tenant.gitHubActionsConnection(tenantId);
   if (connection === null) return noBuildProvider("GitHubActions", key.repository);
-  const rootfs = await rootfsKey(env.RELEASES, image);
-  if (rootfs.kind === "Missing") return imageNotReleased(rootfs.detail);
   const settings = settingsOf(env);
   const rootfsUrl = await signerOf(
     env,
@@ -111,7 +101,7 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
     env.RELEASES_SECRET_ACCESS_KEY,
   ).presign(
     "GET",
-    rootfs.key,
+    rootfsKey(image),
     settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
     new Date(now),
   );
