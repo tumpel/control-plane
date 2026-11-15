@@ -39,6 +39,7 @@ const EMAIL = "sessions@example.test";
 const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-sessions-e2e-provider-key";
 const CLAIM_BUDGET_SECONDS = 3;
+const IMAGE_FETCH_BUDGET_SECONDS = 2;
 const CLONE_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
@@ -51,6 +52,7 @@ const SETTINGS = {
   snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
   turnClaimBudgetSeconds: CLAIM_BUDGET_SECONDS,
+  turnImageFetchBudgetSeconds: IMAGE_FETCH_BUDGET_SECONDS,
   turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
@@ -493,7 +495,11 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   ]) {
     assert.match(url ?? "", new RegExp(`^${R2_STUB_ORIGIN}/tumpel-releases/${key}\\?X-Tumpel-Method=GET`));
   }
-  assert.equal(offer.image.downloadExpiresAt, offer.personaFiles[0]?.downloadExpiresAt);
+  assert.equal(offer.image.fetchSeconds, IMAGE_FETCH_BUDGET_SECONDS);
+  assert.equal(
+    Date.parse(offer.image.downloadExpiresAt) - Date.parse(offer.personaFiles[0]?.downloadExpiresAt ?? ""),
+    IMAGE_FETCH_BUDGET_SECONDS * 1000,
+  );
   const { turnId } = offer;
   const { sessionId } = started.session;
 
@@ -936,6 +942,25 @@ test("a snapshot learns where the tenant holds its chunks and uploads only new p
     [two],
   );
   assert.deepEqual(again.uploaded, [packOne]);
+});
+
+test("a turn whose host fetches its image fails ImageFetchTimedOut after the fetch and claim budgets", async () => {
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "fetching" }, bearer);
+  assert.equal(response.status, 200);
+  const started = StartedSessionSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  const fetching = Date.now();
+  host.send({ type: "TurnImageFetching", turnId: offer.turnId, imageDigest: offer.image.imageDigest });
+
+  const failed = await eventually(
+    "the turn reading Failed",
+    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
+  assert.equal(failed.turnId, started.turn.turnId);
+  assert.ok(failed.updatedAt - fetching >= (IMAGE_FETCH_BUDGET_SECONDS + CLAIM_BUDGET_SECONDS) * 1000);
+  const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+  assert.equal(failure.reason, "ImageFetchTimedOut");
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {

@@ -3,6 +3,7 @@ import type { Env } from "./index";
 
 export type DeadlineName =
   | "Claim"
+  | "ImageFetch"
   | "FirstLine"
   | "Total"
   | "Snapshot"

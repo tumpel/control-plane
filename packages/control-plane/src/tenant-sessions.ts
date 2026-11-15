@@ -510,6 +510,7 @@ export class TenantSessions extends DurableObject<Env> {
     const now = Date.now();
     await this.timers(tenantId, session.session_id, {
       Claim: { turnId: turn.turn_id, at: now + settings.turnClaimBudgetSeconds * 1000 },
+      ImageFetch: null,
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: now + settings.turnTotalBudgetSeconds * 1000 },
       Snapshot: null,
@@ -666,7 +667,8 @@ export class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     session: SessionRow,
     hostId: string,
-    seconds: number,
+    claimSeconds: number,
+    fetchSeconds: number,
     now: number,
   ): Promise<GuestImageDownload> {
     const host = await hostOf(this.env.DB, tenantId, hostId);
@@ -685,6 +687,7 @@ export class TenantSessions extends DurableObject<Env> {
     }
     const signer = releaseSignerOf(this.env);
     const at = new Date(now);
+    const seconds = claimSeconds + fetchSeconds;
     return {
       imageDigest: image.imageDigest,
       kernelDigest: image.kernelDigest,
@@ -693,6 +696,7 @@ export class TenantSessions extends DurableObject<Env> {
       kernelUrl: await signer.presign("GET", kernelKey(image), seconds, at),
       manifestUrl: await signer.presign("GET", manifestKey(image), seconds, at),
       downloadExpiresAt: iso(now + seconds * 1000),
+      fetchSeconds,
     };
   }
 
@@ -837,6 +841,7 @@ export class TenantSessions extends DurableObject<Env> {
     await this.releaseChunks(tenantId, sessionId);
     await this.timers(tenantId, sessionId, {
       Claim: null,
+      ImageFetch: null,
       FirstLine: null,
       Total: null,
       Snapshot: null,
@@ -1198,7 +1203,14 @@ export class TenantSessions extends DurableObject<Env> {
       .toArray();
     const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
     const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
-    const image = await this.guestImage(tenantId, session, hostId, settings.turnClaimBudgetSeconds, now);
+    const image = await this.guestImage(
+      tenantId,
+      session,
+      hostId,
+      settings.turnClaimBudgetSeconds,
+      settings.turnImageFetchBudgetSeconds,
+      now,
+    );
     return {
       kind: "Ready",
       credential: {
@@ -1501,6 +1513,17 @@ export class TenantSessions extends DurableObject<Env> {
     }
     const now = Date.now();
     const sql = this.ctx.storage.sql;
+    if (message.type === "TurnImageFetching") {
+      if (turn.state !== "Offered") return;
+      const settings = settingsOf(this.env);
+      return this.timers(tenantId, session.session_id, {
+        Claim: null,
+        ImageFetch: {
+          turnId: turn.turn_id,
+          at: now + (settings.turnImageFetchBudgetSeconds + settings.turnClaimBudgetSeconds) * 1000,
+        },
+      });
+    }
     if (message.type === "TurnClaim") {
       if (turn.state !== "Offered") return;
       this.ctx.storage.transactionSync(() => {
@@ -1510,6 +1533,7 @@ export class TenantSessions extends DurableObject<Env> {
       const settings = settingsOf(this.env);
       return this.timers(tenantId, session.session_id, {
         Claim: null,
+        ImageFetch: null,
         FirstLine: {
           turnId: turn.turn_id,
           at: now + (message.cloneSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
@@ -1552,6 +1576,7 @@ export class TenantSessions extends DurableObject<Env> {
     });
     await this.timers(tenantId, session.session_id, {
       Claim: null,
+      ImageFetch: null,
       FirstLine: null,
       Total: null,
       HostOffline: null,
@@ -1592,6 +1617,15 @@ export class TenantSessions extends DurableObject<Env> {
         turnId,
         "NotClaimed",
         `host ${session.host_id} did not claim turn ${turnId} within ${settings.turnClaimBudgetSeconds} seconds; check that its supervisor runs with tumpel host list, then send the turn again`,
+        failedAt,
+      );
+    }
+    if (name === "ImageFetch" && turn.state === "Offered") {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "ImageFetchTimedOut",
+        `host ${session.host_id} started fetching the guest image of turn ${turnId} and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
         failedAt,
       );
     }
@@ -1730,7 +1764,13 @@ export class TenantSessions extends DurableObject<Env> {
         now,
       );
     });
-    await this.timers(tenantId, turn.session_id, { Claim: null, FirstLine: null, Total: null, HostOffline: null });
+    await this.timers(tenantId, turn.session_id, {
+      Claim: null,
+      ImageFetch: null,
+      FirstLine: null,
+      Total: null,
+      HostOffline: null,
+    });
   }
 
   private async requestSnapshot(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
