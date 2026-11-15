@@ -64,7 +64,7 @@ test("the manifest conversion posts the code to GitHub without a credential and 
     node_id: "ignored",
   };
   const { fetcher, calls } = spiedFetch(201, conversion);
-  const answer = await convertManifest(fetcher, "code/1");
+  const answer = await convertManifest(fetcher, "https://api.github.com", "code/1");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.url, "https://api.github.com/app-manifests/code%2F1/conversions");
   assert.equal(calls[0]?.init.method, "POST");
@@ -73,7 +73,11 @@ test("the manifest conversion posts the code to GitHub without a credential and 
   assert.equal(answer.value.id, 42);
   assert.equal(answer.value.owner.login, "octo");
 
-  const refused = await convertManifest(spiedFetch(404, { message: "Not Found" }).fetcher, "spent");
+  const refused = await convertManifest(
+    spiedFetch(404, { message: "Not Found" }).fetcher,
+    "https://api.github.com",
+    "spent",
+  );
   assert.ok(!refused.ok);
   assert.match(refused.detail, /404: Not Found/);
 });
@@ -146,7 +150,14 @@ test("an installation token is minted for the session's repository with a JWT th
   const installation = { installationId: 7, accountLogin: "Octo" };
   const { fetcher, calls } = spiedFetch(201, { token: "ghs_minted", expires_at: "2026-11-15T11:00:00Z" });
 
-  const minted = await mintInstallationToken(fetcher, app, installation, { owner: "octo", name: "widgets" }, now);
+  const minted = await mintInstallationToken(
+    fetcher,
+    "https://api.github.com",
+    app,
+    installation,
+    { owner: "octo", name: "widgets" },
+    now,
+  );
   assert.deepEqual(minted, { kind: "Minted", token: "ghs_minted", expiresAt: "2026-11-15T11:00:00Z" });
   assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
   assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { repositories: ["widgets"] });
@@ -176,6 +187,7 @@ test("a repository outside the installation names the fix, and only a 404 or 422
 
   const notCovered = await mintInstallationToken(
     spiedFetch(422, { message: "There is at least one repository that does not exist or is not accessible" }).fetcher,
+    "https://api.github.com",
     app,
     installation,
     { owner: "octo", name: "private" },
@@ -187,6 +199,7 @@ test("a repository outside the installation names the fix, and only a 404 or 422
 
   const down = await mintInstallationToken(
     spiedFetch(503, { message: "Service Unavailable" }).fetcher,
+    "https://api.github.com",
     app,
     installation,
     { owner: "octo", name: "private" },
@@ -196,7 +209,14 @@ test("a repository outside the installation names the fix, and only a 404 or 422
   assert.doesNotMatch(down.kind === "Refused" ? down.detail : "", /add octo\/private/);
 
   const elsewhere = spiedFetch(201, {});
-  const foreign = await mintInstallationToken(elsewhere.fetcher, app, installation, { owner: "acme", name: "x" }, now);
+  const foreign = await mintInstallationToken(
+    elsewhere.fetcher,
+    "https://api.github.com",
+    app,
+    installation,
+    { owner: "acme", name: "x" },
+    now,
+  );
   assert.equal(foreign.kind, "Outside");
   assert.equal(elsewhere.calls.length, 0);
 });
@@ -227,7 +247,7 @@ test("an installation links only when the person who authorized the App can acce
     [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }],
     [200, listed],
   ]);
-  const installer = await verifyInstaller(owned.fetcher, oauthClient, "code-1", 7);
+  const installer = await verifyInstaller(owned.fetcher, "https://api.github.com", oauthClient, "code-1", 7);
   assert.deepEqual(installer, { kind: "Installer", installation: { id: 7, account: { login: "octo" } } });
   assert.equal(owned.calls[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(header(owned.calls[0]?.init ?? {}, "accept"), "application/json");
@@ -243,11 +263,11 @@ test("an installation links only when the person who authorized the App can acce
     [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }],
     [200, listed],
   ]);
-  const refused = await verifyInstaller(someoneElses.fetcher, oauthClient, "code-1", 8);
+  const refused = await verifyInstaller(someoneElses.fetcher, "https://api.github.com", oauthClient, "code-1", 8);
   assert.equal(refused.kind, "NotInstaller");
 
   const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
-  const failed = await verifyInstaller(spent.fetcher, oauthClient, "spent", 7);
+  const failed = await verifyInstaller(spent.fetcher, "https://api.github.com", oauthClient, "spent", 7);
   assert.equal(failed.kind, "Failed");
   assert.equal(spent.calls.length, 1);
 });
@@ -291,10 +311,13 @@ const gitHubIssue = (number: number, pullRequest: boolean) => ({
 test("an installation-wide token is minted without naming repositories", async () => {
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
   const { fetcher, calls } = spiedFetch(201, { token: "ghs_wide", expires_at: "2026-11-15T11:00:00Z" });
-  assert.deepEqual(await mintInstallationWideToken(fetcher, app, 7, Date.parse("2026-11-15T10:00:00Z")), {
-    ok: true,
-    value: "ghs_wide",
-  });
+  assert.deepEqual(
+    await mintInstallationWideToken(fetcher, "https://api.github.com", app, 7, Date.parse("2026-11-15T10:00:00Z")),
+    {
+      ok: true,
+      value: "ghs_wide",
+    },
+  );
   assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
   assert.equal(calls[0]?.init.method, "POST");
   assert.equal(calls[0]?.init.body, null);
@@ -306,7 +329,7 @@ test("the installation's repositories are read page by page until total_count, a
     [200, { total_count: 101, repositories: first }],
     [200, { total_count: 101, repositories: [gitHubRepository(101)] }],
   ]);
-  const listed = await listInstallationRepositories(fetcher, "ghs_wide");
+  const listed = await listInstallationRepositories(fetcher, "https://api.github.com", "ghs_wide");
   assert.ok(listed.ok);
   assert.deepEqual(
     calls.map((call) => call.url),
@@ -325,7 +348,11 @@ test("the installation's repositories are read page by page until total_count, a
     htmlUrl: "https://github.com/octo/repo-101",
   });
 
-  const refused = await listInstallationRepositories(spiedFetch(401, { message: "Bad credentials" }).fetcher, "x");
+  const refused = await listInstallationRepositories(
+    spiedFetch(401, { message: "Bad credentials" }).fetcher,
+    "https://api.github.com",
+    "x",
+  );
   assert.ok(!refused.ok);
   assert.match(refused.detail, /GET https:\/\/api.github.com\/installation\/repositories with 401: Bad credentials/);
 });

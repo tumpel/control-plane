@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { callGitHub, type Fetch, GITHUB_API, type GitHubRepository } from "./github.ts";
+import { callGitHub, type Fetch, type GitHubRepository } from "./github.ts";
 
 export const DEVCONTAINER_DIRECTORY = ".devcontainer";
 export const DEVCONTAINER_FILE = ".devcontainer.json";
@@ -64,9 +64,14 @@ const TreeSchema = z.object({
 const read = <T>(fetcher: Fetch, url: string, token: string, schema: z.ZodType<T>, name: string) =>
   callGitHub(fetcher, { method: "GET", url, accept: API_MEDIA_TYPE, bearer: token, body: null }, schema, name);
 
-export const readInputs = async (fetcher: Fetch, target: GitHubRepository, token: string): Promise<Inputs> => {
+export const readInputs = async (
+  fetcher: Fetch,
+  api: string,
+  target: GitHubRepository,
+  token: string,
+): Promise<Inputs> => {
   const repository = `${target.owner}/${target.name}`;
-  const base = `${GITHUB_API}/repos/${repository}`;
+  const base = `${api}/repos/${repository}`;
   const unreadable = (detail: string): Inputs => ({
     kind: "Unreadable",
     detail: `${detail}; check that the token reads ${repository}`,

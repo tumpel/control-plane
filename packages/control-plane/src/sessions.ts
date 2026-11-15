@@ -10,7 +10,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
-import { readIssue, repositoryUrl } from "./github.ts";
+import { githubRepository, readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -191,6 +191,11 @@ const personaNotFound = (personaId: string): Refused =>
     fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
   });
 
+const normalisedRepository = (repository: string): string => {
+  const target = githubRepository(repository);
+  return target === null ? repository : repositoryUrl(target);
+};
+
 const prepareStart = async (
   env: Env,
   caller: Caller,
@@ -229,7 +234,7 @@ const prepareStart = async (
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
-    start,
+    start: { ...start, repository: normalisedRepository(start.repository) },
   });
 };
 

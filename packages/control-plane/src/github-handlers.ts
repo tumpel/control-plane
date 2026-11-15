@@ -152,9 +152,18 @@ const installationAccess = async (caller: Caller, url: URL, env: Env): Promise<A
 const handleRepositories = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
   const access = await installationAccess(caller, url, env);
   if (!access.ok) return access.response;
-  const token = await mintInstallationWideToken(fetcher, access.app, access.installation.installationId, Date.now());
+  const token = await mintInstallationWideToken(
+    fetcher,
+    env.GITHUB_API_ORIGIN,
+    access.app,
+    access.installation.installationId,
+    Date.now(),
+  );
   if (!token.ok) return unreadable(token.detail);
-  return listed(await listInstallationRepositories(fetcher, token.value), GitHubRepositorySchema);
+  return listed(
+    await listInstallationRepositories(fetcher, env.GITHUB_API_ORIGIN, token.value),
+    GitHubRepositorySchema,
+  );
 };
 
 const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, name: string): Promise<Response> => {
@@ -169,7 +178,14 @@ const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, n
   }
   const access = await installationAccess(caller, url, env);
   if (!access.ok) return access.response;
-  const minted = await mintInstallationToken(fetcher, access.app, access.installation, path.data, Date.now());
+  const minted = await mintInstallationToken(
+    fetcher,
+    env.GITHUB_API_ORIGIN,
+    access.app,
+    access.installation,
+    path.data,
+    Date.now(),
+  );
   if (minted.kind !== "Minted") return unreadable(minted.detail);
   return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, path.data), GitHubIssueSchema);
 };
@@ -242,7 +258,7 @@ const handleCreated = async (url: URL, env: Env, email: string): Promise<Respons
   }
   const existing = await storedApp(env.DB);
   if (existing !== null) return appExists(existing.slug, existing.htmlUrl);
-  const converted = await convertManifest(fetcher, query.data.code);
+  const converted = await convertManifest(fetcher, env.GITHUB_API_ORIGIN, query.data.code);
   if (!converted.ok) {
     return messagePage(
       502,
@@ -289,7 +305,7 @@ const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
   if (client === null)
     return messagePage(409, "No GitHub App", `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`);
   const installationId = Number(installationText);
-  const installer = await verifyInstaller(fetcher, client, code, installationId);
+  const installer = await verifyInstaller(fetcher, env.GITHUB_API_ORIGIN, client, code, installationId);
   if (installer.kind === "Failed") {
     return messagePage(
       502,

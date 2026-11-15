@@ -126,7 +126,7 @@ export const startPrebuild = async (
   if (!image.ok) return image;
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
-  const inputs = await readInputs((url, init) => fetch(url, init), target, token.token);
+  const inputs = await readInputs((url, init) => fetch(url, init), env.GITHUB_API_ORIGIN, target, token.token);
   if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);
   if (inputs.kind === "Empty") {
     return refuse(422, {
