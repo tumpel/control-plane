@@ -33,6 +33,7 @@ import {
   APP_SETUP_PATH,
   type AppKey,
   appManifest,
+  authorizeUrl,
   botUserId,
   convertManifest,
   dashboardReturn,
@@ -60,6 +61,8 @@ import {
   GitHubInstallationChoiceQuerySchema,
   GitHubInstallationChoiceStateSchema,
   GitHubInstallationEventSchema,
+  GitHubInstallerIdentityCallbackSchema,
+  GitHubInstallerIdentityStateSchema,
   GitHubInstallStateSchema,
   GitHubManifestCallbackSchema,
   GitHubManifestStateSchema,
@@ -344,6 +347,9 @@ const refuseInstall = (
 const ownedTenants = async (env: Env, email: string): Promise<z.infer<typeof WhoamiSchema>[]> =>
   (await membershipsOfEmail(env.DB, email)).filter((membership) => membership.principal.role === "Owner");
 
+const ownsTenant = async (env: Env, email: string, tenantId: string): Promise<boolean> =>
+  (await ownedTenants(env, email)).some(({ tenant }) => tenant.tenantId === tenantId);
+
 const linked = async (
   env: Env,
   url: URL,
@@ -460,8 +466,7 @@ const handleChoice = async (request: Request, env: Env, url: URL, email: string)
       `The installation was confirmed for ${state.claims.email}, and you are signed in as ${email}.`,
     );
   }
-  const owned = await ownedTenants(env, email);
-  if (!owned.some(({ tenant }) => tenant.tenantId === picked.data.tenant)) {
+  if (!(await ownsTenant(env, email, picked.data.tenant))) {
     return refuseInstall(
       env,
       url,
@@ -508,8 +513,7 @@ const startedBy = async (env: Env, url: URL, email: string, stateText: string): 
       ),
     };
   }
-  const owned = await ownedTenants(env, email);
-  if (!owned.some(({ tenant }) => tenant.tenantId === tenantId)) {
+  if (!(await ownsTenant(env, email, tenantId))) {
     return {
       ok: false,
       response: refuseInstall(
@@ -526,7 +530,106 @@ const startedBy = async (env: Env, url: URL, email: string, stateText: string): 
   return { ok: true, tenantId, returnUrl };
 };
 
+type Verified = { ok: true; installation: GitHubInstallationRecord } | { ok: false; response: Response };
+
+const verifiedInstaller = async (
+  env: Env,
+  url: URL,
+  email: string,
+  tenantId: string | null,
+  code: string,
+  installationId: number,
+): Promise<Verified> => {
+  const client = await oauthClient(env.DB, keyStoreOf(env));
+  if (client === null) {
+    return { ok: false, response: htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId)) };
+  }
+  const installer = await verifyInstaller(
+    fetcher,
+    { api: env.GITHUB_API_ORIGIN, web: env.GITHUB_WEB_ORIGIN },
+    client,
+    code,
+    installationId,
+  );
+  if (installer.kind === "Failed") {
+    return {
+      ok: false,
+      response: htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, installer.detail)),
+    };
+  }
+  if (installer.kind === "MembershipUnreadable") {
+    return {
+      ok: false,
+      response: refuseInstall(
+        env,
+        url,
+        email,
+        tenantId,
+        403,
+        "GitHub refused a read of your organization membership",
+        `${installer.detail.replace(/\.$/, "")}. Clear what GitHub names, such as the App's Members: read permission, the organization's SAML single sign-on or its IP allow list, then connect again.`,
+      ),
+    };
+  }
+  if (installer.kind === "NotInstaller") {
+    return {
+      ok: false,
+      response: htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, installer.detail)),
+    };
+  }
+  return { ok: true, installation: installer.installation };
+};
+
+const askInstallerIdentity = async (env: Env, url: URL, email: string, installationId: number): Promise<Response> => {
+  const client = await oauthClient(env.DB, keyStoreOf(env));
+  if (client === null) return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, null));
+  const state = await signState(await stateKey(env), {
+    purpose: "InstallerIdentity",
+    email,
+    installationId,
+    expiresAt: expiry(Date.now()),
+  });
+  return seeOther(authorizeUrl(env.GITHUB_WEB_ORIGIN, client.clientId, `${url.origin}${APP_INSTALLED_PATH}`, state));
+};
+
+const handleInstallerIdentity = async (env: Env, url: URL, email: string): Promise<Response> => {
+  const callback = GitHubInstallerIdentityCallbackSchema.safeParse(Object.fromEntries(url.searchParams));
+  if (!callback.success) return htmlPage(env, url, 400, (links) => installNothingToConnectPage(links, email));
+  const state = await readState(
+    await stateKey(env),
+    callback.data.state,
+    GitHubInstallerIdentityStateSchema,
+    Date.now(),
+  );
+  if (!state.ok) {
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      403,
+      "Request refused",
+      `The GitHub sign-in for this installation is no longer valid: ${state.reason}.`,
+    );
+  }
+  if (state.claims.email !== email) {
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      403,
+      "Request refused",
+      `The GitHub sign-in for this installation was started by ${state.claims.email}, and you are signed in as ${email}. Each person connects GitHub from their own Tumpel session.`,
+    );
+  }
+  const verified = await verifiedInstaller(env, url, email, null, callback.data.code, state.claims.installationId);
+  if (!verified.ok) return verified.response;
+  return confirmInstallation(env, url, email, verified.installation);
+};
+
 const handleInstalled = async (env: Env, url: URL, email: string): Promise<Response> => {
+  if (!url.searchParams.has("setup_action")) return handleInstallerIdentity(env, url, email);
   const query = Object.fromEntries(url.searchParams);
   const action = GitHubSetupActionSchema.safeParse(query);
   if (!action.success) {
@@ -554,39 +657,13 @@ const handleInstalled = async (env: Env, url: URL, email: string): Promise<Respo
     );
   }
   const { code, installation_id: installationText, state: stateText } = callback.data;
-  const started = stateText === undefined ? null : await startedBy(env, url, email, stateText);
-  if (started !== null && !started.ok) return started.response;
-  const tenantId = started?.tenantId ?? null;
-  const client = await oauthClient(env.DB, keyStoreOf(env));
-  if (client === null) {
-    return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId));
-  }
-  const installer = await verifyInstaller(
-    fetcher,
-    { api: env.GITHUB_API_ORIGIN, web: env.GITHUB_WEB_ORIGIN },
-    client,
-    code,
-    Number(installationText),
-  );
-  if (installer.kind === "Failed") {
-    return htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, installer.detail));
-  }
-  if (installer.kind === "MembershipUnreadable") {
-    return refuseInstall(
-      env,
-      url,
-      email,
-      tenantId,
-      403,
-      "The App cannot read your organization membership yet",
-      `${installer.detail}. The App owner must grant the organization permission Members: read in the App's settings on GitHub, and an owner of the organization must accept the new permission on its installation.`,
-    );
-  }
-  if (installer.kind === "NotInstaller") {
-    return htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, installer.detail));
-  }
-  if (started !== null) return linked(env, url, email, started.tenantId, installer.installation, started.returnUrl);
-  return confirmInstallation(env, url, email, installer.installation);
+  const installationId = Number(installationText);
+  if (stateText === undefined) return askInstallerIdentity(env, url, email, installationId);
+  const started = await startedBy(env, url, email, stateText);
+  if (!started.ok) return started.response;
+  const verified = await verifiedInstaller(env, url, email, started.tenantId, code, installationId);
+  if (!verified.ok) return verified.response;
+  return linked(env, url, email, started.tenantId, verified.installation, started.returnUrl);
 };
 
 export const handleGitHubPage = async (
