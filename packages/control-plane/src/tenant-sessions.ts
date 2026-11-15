@@ -584,6 +584,10 @@ export class TenantSessions extends DurableObject<Env> {
     }
   }
 
+  forgetHostUsage(hostId: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
+  }
+
   listHostUsage(tenantId: string): ReportedHostUsage[] {
     const sql = this.ctx.storage.sql;
     const running = new Map(
@@ -716,10 +720,10 @@ export class TenantSessions extends DurableObject<Env> {
     this.settleSnapshotRequests(session, hostId, iso(now));
     const turn = this.runTurn(session, hostId, boxId, prompt, now);
     await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
-    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
+    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
@@ -1382,7 +1386,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (turn === null || session === null || turn.host_id !== hostId) {
       throw new Error(`host ${hostId} asked for the chunks of turn ${message.turnId}, which is not offered to it`);
     }
-    if (session.host_id !== hostId || !IN_FLIGHT.includes(turn.state)) return null;
+    if (!IN_FLIGHT.includes(turn.state)) return null;
     const sql = this.ctx.storage.sql;
     const [offered] = sql
       .exec<{ offered_at: number | null }>(
@@ -1446,7 +1450,6 @@ export class TenantSessions extends DurableObject<Env> {
     if (turn === null || session === null || turn.host_id !== hostId) {
       throw new Error(`host ${hostId} sent ${message.type} for turn ${message.turnId}, which is not offered to it`);
     }
-    if (session.host_id !== hostId) return;
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     if (message.type === "TurnClaim") {
