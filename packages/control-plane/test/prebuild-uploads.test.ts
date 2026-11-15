@@ -18,6 +18,7 @@ import {
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
+import { CALLER_WORKFLOW_EXAMPLE } from "../src/github-actions.ts";
 import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
@@ -125,6 +126,7 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
     return reply(response, 201, {
       token: "installation-token",
       expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      permissions: { actions: "write", contents: "write", workflows: "write" },
     });
   }
   if (path === "/repos/acme/app") return reply(response, 200, { default_branch: "main" });
@@ -133,6 +135,13 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
   }
   if (path === `/repos/acme/app/git/trees/${TREE_SHA}`) {
     return reply(response, 200, { tree: [{ path: "package-lock.json", type: "blob", sha: "2".repeat(40) }] });
+  }
+  if (path === "/repos/acme/app/contents/.github/workflows/tumpel-prebuild.yml?ref=main") {
+    return reply(response, 200, {
+      sha: "3".repeat(40),
+      encoding: "base64",
+      content: Buffer.from(CALLER_WORKFLOW_EXAMPLE).toString("base64"),
+    });
   }
   if (request.method === "POST" && path === "/repos/acme/app/actions/workflows/tumpel-prebuild.yml/dispatches") {
     inProgressDelivery = fetch(`${origin}/github/webhook`, runEvent(DISPATCHED_RUN, "in_progress", null, HEAD_SHA));

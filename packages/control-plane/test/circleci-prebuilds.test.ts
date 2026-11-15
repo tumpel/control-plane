@@ -92,6 +92,7 @@ const fakeGitHub = (request: IncomingMessage, response: ServerResponse, path: st
     return reply(response, 201, {
       token: "installation-token",
       expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      permissions: { actions: "write", contents: "write", workflows: "write" },
     });
   }
   if (path === "/repos/acme/app") return reply(response, 200, { default_branch: "main" });

@@ -231,7 +231,7 @@ const failed = (error: unknown): Error => (error instanceof Error ? error : new 
 
 export const callGitHub = async <T>(
   fetcher: Fetch,
-  request: { method: "GET" | "POST"; url: string; accept: string; bearer: string | null; body: unknown },
+  request: { method: "GET" | "POST" | "PUT"; url: string; accept: string; bearer: string | null; body: unknown },
   schema: z.ZodType<T>,
   answerName: string,
 ): Promise<GitHubAnswer<T>> => {
@@ -300,7 +300,7 @@ export const repositoryUrl = (target: GitHubRepository): string =>
   `${GITHUB_WEB}/${target.owner}/${target.name}`.toLowerCase();
 
 export type Minted =
-  | { kind: "Minted"; token: string; expiresAt: string }
+  | { kind: "Minted"; token: string; expiresAt: string; permissions: Record<string, string> }
   | { kind: "NoToken" }
   | { kind: "Outside"; detail: string }
   | { kind: "Refused"; detail: string };
@@ -345,7 +345,14 @@ export const mintInstallationToken = async (
     GitHubInstallationTokenSchema,
     "GitHubInstallationToken",
   );
-  if (answer.ok) return { kind: "Minted", token: answer.value.token, expiresAt: answer.value.expires_at };
+  if (answer.ok) {
+    return {
+      kind: "Minted",
+      token: answer.value.token,
+      expiresAt: answer.value.expires_at,
+      permissions: answer.value.permissions,
+    };
+  }
   if (OUTSIDE_STATUSES.includes(answer.status)) {
     return {
       kind: "Outside",
