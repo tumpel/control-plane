@@ -132,7 +132,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/members",
     NO_ARGUMENTS,
-    "List the people of the tenant. Returns the Member[] of GET /v1/members: principalId, email, role (Owner or Member) and createdAt, when they joined.",
+    "List the people of the tenant. Returns the Principal[] of GET /v1/members: principalId, tenantId, email and role (Owner or Member).",
   ),
   rest(
     "tumpel_member_remove",

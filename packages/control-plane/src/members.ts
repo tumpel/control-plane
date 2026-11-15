@@ -5,19 +5,18 @@ import {
   InvitationPathSchema,
   InvitationSchema,
   MemberPathSchema,
-  MemberSchema,
+  PrincipalSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { base64Url, sameSecret } from "./crypto";
+import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
 import type { PersonCheck } from "./github-handlers.ts";
 import { json, parseBody, problem } from "./http";
-import { type Caller, listTenants, type Role, type Whoami, whoamiOf } from "./identity";
+import { type Caller, type Role, type Whoami, whoamiOf } from "./identity";
 import type { Env } from "./index";
-import { keyStoreOf } from "./key-store.ts";
 import { acceptPage, messagePage } from "./pages";
 
-type Member = z.infer<typeof MemberSchema>;
+type Principal = z.infer<typeof PrincipalSchema>;
 type Invitation = z.infer<typeof InvitationSchema>;
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -26,7 +25,6 @@ type SameOrigin = (request: Request, url: URL) => Response | null;
 
 export const INVITATION_TTL_MS = 604_800_000;
 export const ACCEPT_PAGE_PATH = "/invitations/accept";
-const INVITATION_KEY_PURPOSE = "invitation";
 const MEMBERS_PATH = "/v1/members";
 const INVITATIONS_PATH = "/v1/invitations";
 const ACCEPT_PATH = "/v1/invitations/accept";
@@ -45,21 +43,29 @@ export const ownerRequired = (caller: Caller, operation: string): Response | nul
         fix: "Ask an Owner of the tenant to do it",
       });
 
-export const listMembers = async (db: D1Database, tenantId: string): Promise<Member[]> => {
+export const listMembers = async (db: D1Database, tenantId: string): Promise<Principal[]> => {
   const rows = await db
     .prepare(
-      `SELECT m.tenant_id, m.principal_id, p.email, m.role, m.created_at FROM memberships m
+      `SELECT m.tenant_id, m.principal_id, p.email, m.role, p.created_at, p.updated_at FROM memberships m
       JOIN principals p ON p.principal_id = m.principal_id WHERE m.tenant_id = ? ORDER BY m.created_at, m.principal_id`,
     )
     .bind(tenantId)
-    .all<{ tenant_id: string; principal_id: string; email: string; role: Role; created_at: number }>();
+    .all<{
+      tenant_id: string;
+      principal_id: string;
+      email: string;
+      role: Role;
+      created_at: number;
+      updated_at: number;
+    }>();
   return rows.results.map((row) =>
-    MemberSchema.parse({
+    PrincipalSchema.parse({
       principalId: row.principal_id,
       tenantId: row.tenant_id,
       email: row.email,
       role: row.role,
       createdAt: row.created_at,
+      updatedAt: row.updated_at,
     }),
   );
 };
@@ -67,44 +73,20 @@ export const listMembers = async (db: D1Database, tenantId: string): Promise<Mem
 export type Removal = "Removed" | "NotFound" | "LastOwner";
 
 export const removeMember = async (db: D1Database, tenantId: string, principalId: string): Promise<Removal> => {
-  const gone = "NOT EXISTS (SELECT 1 FROM memberships WHERE tenant_id = ? AND principal_id = ?)";
-  const signOut = (table: string) =>
-    db
-      .prepare(`DELETE FROM ${table} WHERE tenant_id = ? AND principal_id = ? AND ${gone}`)
-      .bind(tenantId, principalId, tenantId, principalId);
-  const [removed] = await db.batch([
-    db
-      .prepare(
-        `DELETE FROM memberships WHERE tenant_id = ? AND principal_id = ?
-          AND (role <> 'Owner' OR (SELECT count(*) FROM memberships WHERE tenant_id = ? AND role = 'Owner') > 1)
-        RETURNING principal_id`,
-      )
-      .bind(tenantId, principalId, tenantId),
-    signOut("devices"),
-    signOut("device_approvals"),
-    signOut("oauth_tokens"),
-    signOut("oauth_codes"),
-  ]);
-  if (removed?.results.length === 1) return "Removed";
+  const removed = await db
+    .prepare(
+      `DELETE FROM memberships WHERE tenant_id = ? AND principal_id = ?
+        AND (role <> 'Owner' OR (SELECT count(*) FROM memberships WHERE tenant_id = ? AND role = 'Owner') > 1)
+      RETURNING principal_id`,
+    )
+    .bind(tenantId, principalId, tenantId)
+    .all();
+  if (removed.results.length === 1) return "Removed";
   const kept = await db
     .prepare("SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?")
     .bind(tenantId, principalId)
     .first<{ role: Role }>();
   return kept === null ? "NotFound" : "LastOwner";
-};
-
-const invitationKey = (env: Env): Promise<CryptoKey> => keyStoreOf(env).signingKey(INVITATION_KEY_PURPOSE);
-
-const signatureOf = async (key: CryptoKey, invitationId: string): Promise<string> =>
-  base64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(invitationId))));
-
-export const invitationToken = async (key: CryptoKey, invitationId: string): Promise<string> =>
-  `${invitationId}.${await signatureOf(key, invitationId)}`;
-
-const signedInvitationId = async (key: CryptoKey, token: string): Promise<string | null> => {
-  const [invitationId, signature, ...extra] = token.split(".");
-  if (invitationId === undefined || signature === undefined || extra.length > 0) return null;
-  return sameSecret(signature, await signatureOf(key, invitationId)) ? invitationId : null;
 };
 
 interface InvitationRow {
@@ -140,7 +122,7 @@ export const listInvitations = async (db: D1Database, tenantId: string, now: num
   return rows.results.map(toInvitation);
 };
 
-export type Invited = { ok: true; invitation: Invitation; invitationId: string } | { ok: false; member: string };
+export type Invited = { ok: true; invitation: Invitation; token: string } | { ok: false; member: string };
 
 export const createInvitation = async (
   db: D1Database,
@@ -150,31 +132,29 @@ export const createInvitation = async (
   now: number,
 ): Promise<Invited> => {
   const invited = email.toLowerCase();
-  const invitationId = crypto.randomUUID();
-  const [, inserted] = await db.batch<InvitationRow>([
-    db.prepare("DELETE FROM invitations WHERE expires_at <= ?").bind(now),
-    db
-      .prepare(
-        `INSERT INTO invitations (${INVITATION_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?
-        WHERE NOT EXISTS (SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
-          WHERE m.tenant_id = ? AND p.email = ?)
-        RETURNING ${INVITATION_COLUMNS}`,
-      )
-      .bind(
-        invitationId,
-        caller.tenantId,
-        caller.principalId,
-        invited,
-        role,
-        now,
-        now + INVITATION_TTL_MS,
-        caller.tenantId,
-        invited,
-      ),
-  ]);
-  const row = inserted?.results[0];
-  if (row === undefined) return { ok: false, member: invited };
-  return { ok: true, invitation: toInvitation(row), invitationId };
+  const token = randomToken();
+  const row = await db
+    .prepare(
+      `INSERT INTO invitations (token_sha256, ${INVITATION_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
+        WHERE m.tenant_id = ? AND p.email = ?)
+      RETURNING ${INVITATION_COLUMNS}`,
+    )
+    .bind(
+      await sha256Hex(token),
+      crypto.randomUUID(),
+      caller.tenantId,
+      caller.principalId,
+      invited,
+      role,
+      now,
+      now + INVITATION_TTL_MS,
+      caller.tenantId,
+      invited,
+    )
+    .first<InvitationRow>();
+  if (row === null) return { ok: false, member: invited };
+  return { ok: true, invitation: toInvitation(row), token };
 };
 
 export const revokeInvitation = async (db: D1Database, tenantId: string, invitationId: string): Promise<boolean> => {
@@ -200,21 +180,23 @@ const judge = (row: { email: string; expires_at: number } | null, email: string,
   return null;
 };
 
+const tokenHashOf = async (token: string): Promise<string | null> =>
+  TOKEN_PATTERN.test(token) ? sha256Hex(token) : null;
+
 export const previewInvitation = async (
   db: D1Database,
-  key: CryptoKey,
   token: string,
   email: string,
   now: number,
 ): Promise<Preview> => {
-  const invitationId = await signedInvitationId(key, token);
-  if (invitationId === null) return { kind: "Unknown" };
+  const tokenHash = await tokenHashOf(token);
+  if (tokenHash === null) return { kind: "Unknown" };
   const row = await db
     .prepare(
       `SELECT i.email, i.expires_at, i.role, t.name FROM invitations i JOIN tenants t ON t.tenant_id = i.tenant_id
-      WHERE i.invitation_id = ?`,
+      WHERE i.token_sha256 = ?`,
     )
-    .bind(invitationId)
+    .bind(tokenHash)
     .first<{ email: string; expires_at: number; role: Role; name: string }>();
   if (row === null) return { kind: "Unknown" };
   return judge(row, email, now) ?? { kind: "Open", tenantName: row.name, role: row.role };
@@ -222,52 +204,55 @@ export const previewInvitation = async (
 
 export const acceptInvitation = async (
   db: D1Database,
-  key: CryptoKey,
   token: string,
   email: string,
   now: number,
 ): Promise<Acceptance> => {
-  const invitationId = await signedInvitationId(key, token);
-  if (invitationId === null) return { kind: "Unknown" };
-  const open = "i.invitation_id = ? AND i.email = ? AND i.expires_at > ?";
-  const [, , spent] = await db.batch<{ tenant_id: string }>([
+  const tokenHash = await tokenHashOf(token);
+  if (tokenHash === null) return { kind: "Unknown" };
+  const open = "i.token_sha256 = ? AND i.email = ? AND i.expires_at > ?";
+  const [, , spent] = await db.batch<{ invitation_id: string; tenant_id: string }>([
     db
       .prepare(
         `INSERT INTO principals (principal_id, email, created_at, updated_at)
         SELECT ?, i.email, ?, ? FROM invitations i WHERE ${open} ON CONFLICT (email) DO NOTHING`,
       )
-      .bind(crypto.randomUUID(), now, now, invitationId, email, now),
+      .bind(crypto.randomUUID(), now, now, tokenHash, email, now),
     db
       .prepare(
         `INSERT INTO memberships (tenant_id, principal_id, role, created_at)
         SELECT i.tenant_id, p.principal_id, i.role, ? FROM invitations i JOIN principals p ON p.email = i.email
         WHERE ${open} ON CONFLICT DO NOTHING`,
       )
-      .bind(now, invitationId, email, now),
+      .bind(now, tokenHash, email, now),
     db
-      .prepare("DELETE FROM invitations WHERE invitation_id = ? AND email = ? AND expires_at > ? RETURNING tenant_id")
-      .bind(invitationId, email, now),
+      .prepare(
+        "DELETE FROM invitations WHERE token_sha256 = ? AND email = ? AND expires_at > ? RETURNING invitation_id, tenant_id",
+      )
+      .bind(tokenHash, email, now),
   ]);
-  const tenantId = spent?.results[0]?.tenant_id;
-  if (tenantId !== undefined) {
+  const invitation = spent?.results[0];
+  if (invitation !== undefined) {
+    const tenantId = invitation.tenant_id;
     const principal = await db
       .prepare(
         "SELECT p.principal_id, m.role FROM principals p JOIN memberships m ON m.principal_id = p.principal_id WHERE p.email = ? AND m.tenant_id = ?",
       )
       .bind(email, tenantId)
       .first<{ principal_id: string; role: Role }>();
-    if (principal === null) throw new Error(`accepting invitation ${invitationId} left ${email} no membership`);
+    if (principal === null)
+      throw new Error(`accepting invitation ${invitation.invitation_id} left ${email} no membership`);
     return {
       kind: "Accepted",
       whoami: await whoamiOf(db, { tenantId, principalId: principal.principal_id, role: principal.role }),
     };
   }
   const row = await db
-    .prepare("SELECT email, expires_at FROM invitations WHERE invitation_id = ?")
-    .bind(invitationId)
-    .first<{ email: string; expires_at: number }>();
+    .prepare("SELECT invitation_id, email, expires_at FROM invitations WHERE token_sha256 = ?")
+    .bind(tokenHash)
+    .first<{ invitation_id: string; email: string; expires_at: number }>();
   const refused = judge(row, email, now);
-  if (refused === null) throw new Error(`invitation ${invitationId} is open and was not spent`);
+  if (refused === null) throw new Error(`invitation ${row?.invitation_id} is open and was not spent`);
   return refused;
 };
 
@@ -334,11 +319,10 @@ const handleCreate = async (request: Request, url: URL, env: Env, caller: Caller
       fix: "List the members with tumpel member list; invite an email that is not one of them",
     });
   }
-  const token = await invitationToken(await invitationKey(env), created.invitationId);
   return json(
     InvitationCreatedSchema.parse({
       invitation: created.invitation,
-      acceptUrl: `${url.origin}${ACCEPT_PAGE_PATH}?token=${encodeURIComponent(token)}`,
+      acceptUrl: `${url.origin}${ACCEPT_PAGE_PATH}?token=${encodeURIComponent(created.token)}`,
     }),
   );
 };
@@ -370,14 +354,14 @@ const handleAccept = async (
   if (crossOrigin) return crossOrigin;
   const body = await parseBody(request, InvitationAcceptSchema, "invitations.accept");
   if (!body.ok) return body.response;
-  const accepted = await acceptInvitation(env.DB, await invitationKey(env), body.value.token, person.email, Date.now());
+  const accepted = await acceptInvitation(env.DB, body.value.token, person.email, Date.now());
   return accepted.kind === "Accepted" ? json(WhoamiSchema.parse(accepted.whoami)) : acceptRefusal(accepted);
 };
 
 const handleAcceptPage = async (url: URL, env: Env, person: PersonCheck): Promise<Response> => {
   if (!person.ok) return messagePage(401, "Sign in again", `${person.reason}.`);
   const token = url.searchParams.get("token") ?? "";
-  const preview = await previewInvitation(env.DB, await invitationKey(env), token, person.email, Date.now());
+  const preview = await previewInvitation(env.DB, token, person.email, Date.now());
   if (preview.kind === "Open") {
     const next = env.DASHBOARD_ORIGIN ? env.DASHBOARD_ORIGIN : `${url.origin}/device`;
     return acceptPage(person.email, preview.tenantName, preview.role, token, next);
@@ -425,7 +409,6 @@ export const handleMembers = async (
   const memberId = MEMBER_PATH.exec(pathname)?.[1];
   const invitationId = INVITATION_PATH.exec(pathname)?.[1];
   const known =
-    (pathname === "/v1/whoami/tenants" && method === "GET") ||
     (pathname === MEMBERS_PATH && method === "GET") ||
     (pathname === INVITATIONS_PATH && (method === "GET" || method === "POST")) ||
     (memberId !== undefined && method === "DELETE") ||
@@ -433,7 +416,6 @@ export const handleMembers = async (
   if (!known) return null;
   const caller = await routing.authenticate(request, env);
   if (caller instanceof Response) return caller;
-  if (pathname === "/v1/whoami/tenants") return json(await listTenants(env.DB, caller));
   if (pathname === MEMBERS_PATH) return json(await listMembers(env.DB, caller.tenantId));
   if (memberId !== undefined) return handleRemove(env, caller, decodeURIComponent(memberId));
   if (invitationId !== undefined) return handleRevoke(env, caller, decodeURIComponent(invitationId));

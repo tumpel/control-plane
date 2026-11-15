@@ -77,6 +77,7 @@ import {
   type Caller,
   callerForDeviceToken,
   callerOf,
+  listTenants,
   membershipsOfEmail,
   proofCaller,
   signUp,
@@ -269,6 +270,12 @@ const handleWhoami = async (request: Request, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   return json(WhoamiSchema.parse(await whoamiOf(env.DB, caller)));
+};
+
+const handleListTenants = async (request: Request, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(await listTenants(env.DB, caller));
 };
 
 const handleDevicesList = async (request: Request, env: Env): Promise<Response> => {
@@ -746,7 +753,9 @@ const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<
   );
 };
 
-type Decision<T> = { ok: true; body: T; memberships: Whoami[] } | { ok: false; response: Response };
+type Memberships = [Whoami, ...Whoami[]];
+
+type Decision<T> = { ok: true; body: T; memberships: Memberships } | { ok: false; response: Response };
 
 const notTheProofToken = (): Response =>
   problem(403, {
@@ -760,7 +769,7 @@ const signerMemberships = async (
   signed: Extract<Verification, { ok: true }>,
   url: URL,
   env: Env,
-): Promise<Whoami[] | Response> => {
+): Promise<Memberships | Response> => {
   if (signed.kind === "ServiceToken") {
     const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
     if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheProofToken();
@@ -771,8 +780,8 @@ const signerMemberships = async (
     }
     return [await whoamiOf(env.DB, proof.caller)];
   }
-  const memberships = await membershipsOfEmail(env.DB, signed.email);
-  return memberships.length === 0 ? noTenant(url, signed.email) : memberships;
+  const [first, ...others] = await membershipsOfEmail(env.DB, signed.email);
+  return first === undefined ? noTenant(url, signed.email) : [first, ...others];
 };
 
 const choicesOf = (memberships: Whoami[]): TenantChoice[] =>
@@ -1051,7 +1060,6 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   const memberships = await signerMemberships(asserted, url, env);
   if (memberships instanceof Response) return memberships;
   const [first, ...others] = memberships;
-  if (first === undefined) return noTenant(url, "this sign-in");
   const email = first.principal.email;
   const expired = (): Response =>
     messagePage(
@@ -1166,6 +1174,7 @@ type Route = (request: Request, url: URL, env: Env) => Promise<Response>;
 const ROUTES: Record<string, Route> = {
   "POST /v1/tenants": handleSignUp,
   "GET /v1/whoami": (request, _url, env) => handleWhoami(request, env),
+  "GET /v1/whoami/tenants": (request, _url, env) => handleListTenants(request, env),
   "POST /v1/device/code": handleDeviceStart,
   "POST /v1/device/approve": handleDeviceApprove,
   "POST /v1/device/deny": handleDeviceDeny,
