@@ -262,7 +262,13 @@ const readBundles = (
   return bundles;
 };
 
-const planSecretSets = (desired: ResolvedSet[], live: SecretSet[], rewriteAll: boolean, steps: Step[]): void => {
+const planSecretSets = (
+  desired: ResolvedSet[],
+  live: SecretSet[],
+  sent: Set<string>,
+  steps: Step[],
+  problems: string[],
+): void => {
   const byName = new Map(live.map((set) => [set.name, set]));
   for (const secretSet of desired) {
     const current = byName.get(secretSet.name);
@@ -277,9 +283,16 @@ const planSecretSets = (desired: ResolvedSet[], live: SecretSet[], rewriteAll: b
       steps.push({ kind: "UpdateSecretSet", secretSetId: current.secretSetId, secretSet });
       continue;
     }
-    if (rewriteAll) {
-      steps.push({ kind: "RewriteSecretSet", secretSetId: current.secretSetId, secretSet });
+    const envs = secretSet.secrets.map(({ secret }) => secret.valueFrom.env);
+    const missing = envs.filter((env) => !sent.has(env));
+    if (missing.length === envs.length) continue;
+    if (missing.length > 0) {
+      problems.push(
+        `secret set ${secretSet.name} is rewritten only with every value it names, and secretValues holds no ${missing.join(", ")}; send all of ${envs.join(", ")} to rewrite it, or none to keep its values`,
+      );
+      continue;
     }
+    steps.push({ kind: "RewriteSecretSet", secretSetId: current.secretSetId, secretSet });
   }
 };
 
@@ -383,7 +396,7 @@ interface Desired {
   config: TenantConfig;
   files: Map<string, SentFile>;
   expiryValues: PlanRequest["expiryValues"];
-  rewriteAll: boolean;
+  secretEnvs: Set<string>;
 }
 
 const planOf = (desired: Desired, live: Live): Outcome<Step[]> => {
@@ -446,7 +459,7 @@ const planOf = (desired: Desired, live: Live): Outcome<Step[]> => {
   const sets = resolveSets(config, expiries, problems);
   const bundles = readBundles(config, desired.files, problems);
   const steps: Step[] = [];
-  planSecretSets(sets, live.secretSets, desired.rewriteAll, steps);
+  planSecretSets(sets, live.secretSets, desired.secretEnvs, steps, problems);
   planPersonas(config.personas, bundles, live, steps, problems);
   planPersonaDeletes(config.personas, live, steps, problems);
   planSecretSetDeletes(sets, live.secretSets, steps);
@@ -458,9 +471,7 @@ const planOf = (desired: Desired, live: Live): Outcome<Step[]> => {
 
 const missingValues = (steps: Step[], values: Map<string, string>): string[] =>
   steps.flatMap((step) => {
-    if (step.kind !== "CreateSecretSet" && step.kind !== "UpdateSecretSet" && step.kind !== "RewriteSecretSet") {
-      return [];
-    }
+    if (step.kind !== "CreateSecretSet" && step.kind !== "UpdateSecretSet") return [];
     return step.secretSet.secrets
       .filter(({ secret }) => !values.has(secret.valueFrom.env))
       .map(
@@ -601,8 +612,15 @@ const writtenFiles = async (files: ApplyRequest["files"], problems: string[]): P
 export const planConfig = async (body: PlanRequest, call: Call): Promise<Response> => {
   const live = await readLive(call);
   if (!live.ok) return live.response;
-  const desired = { config: body.config, files: digestFiles(body.files), expiryValues: body.expiryValues };
-  const planned = planOf({ ...desired, rewriteAll: false }, live.value);
+  const planned = planOf(
+    {
+      config: body.config,
+      files: digestFiles(body.files),
+      expiryValues: body.expiryValues,
+      secretEnvs: new Set((body.secretValues ?? []).map((each) => each.env)),
+    },
+    live.value,
+  );
   if (!planned.ok) return planned.response;
   return json(ConfigPlanSchema.parse({ changes: planned.value.map(changeOf) }));
 };
@@ -613,11 +631,14 @@ export const applyConfig = async (body: ApplyRequest, call: Call): Promise<Respo
   if (problems.length > 0) return stopped(problems);
   const live = await readLive(call);
   if (!live.ok) return live.response;
-  const planned = planOf({ config: body.config, files, expiryValues: body.expiryValues, rewriteAll: true }, live.value);
+  const values = new Map(body.secretValues.map((each) => [each.env, each.value]));
+  const planned = planOf(
+    { config: body.config, files, expiryValues: body.expiryValues, secretEnvs: new Set(values.keys()) },
+    live.value,
+  );
   if (!planned.ok) return planned.response;
   const steps = planned.value;
   const changes = steps.map(changeOf);
-  const values = new Map(body.secretValues.map((each) => [each.env, each.value]));
   const missing = missingValues(steps, values);
   if (missing.length > 0) return stopped(missing);
   const setIds = new Map(live.value.secretSets.map((set) => [set.name, set.secretSetId]));
