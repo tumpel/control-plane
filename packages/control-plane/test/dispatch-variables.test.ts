@@ -8,10 +8,20 @@ const claudeCode = {
     { kind: "ApiKey" as const, variable: "ANTHROPIC_API_KEY" },
     { kind: "SubscriptionToken" as const, variable: "CLAUDE_CODE_OAUTH_TOKEN" },
   ],
+  providerRoutes: [
+    {
+      provider: "OpenRouter" as const,
+      variables: [
+        { source: "Credential" as const, name: "ANTHROPIC_AUTH_TOKEN" },
+        { source: "Fixed" as const, name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" },
+      ],
+    },
+  ],
 };
 const codex = {
   provider: "OpenAi" as const,
   credentialVariables: [{ kind: "ApiKey" as const, variable: "OPENAI_API_KEY" }],
+  providerRoutes: [],
 };
 const NOW = Date.parse("2026-11-14T12:00:00+00:00");
 
@@ -64,5 +74,26 @@ test("a set without a credential for the harness's provider has nothing to dispa
     kind: "NoCredential",
     provider: "OpenAi",
     supported: ["ApiKey"],
+    routed: [],
+  });
+});
+
+test("an ApiKey of a provider serving the harness's API lands in the route's variables, whatever the member is named", () => {
+  const openRouter: SecretMember = { kind: "ApiKey", name: "API_KEY", provider: "OpenRouter", value: "sk-or" };
+  const stray: SecretMember = { kind: "Variable", name: "ANTHROPIC_API_KEY", value: "stale" };
+  assert.deepEqual(dispatchVariables(claudeCode, [openRouter, stray, github], NOW), {
+    kind: "Ready",
+    variables: [
+      { name: "ANTHROPIC_AUTH_TOKEN", value: "sk-or" },
+      { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" },
+      { name: "GITHUB_TOKEN", value: "ghp" },
+    ],
+  });
+  assert.deepEqual(dispatchVariables(claudeCode, [openRouter, apiKey], NOW), {
+    kind: "Ready",
+    variables: [
+      { name: "ANTHROPIC_API_KEY", value: "sk-ant" },
+      { name: "API_KEY", value: "sk-or" },
+    ],
   });
 });
