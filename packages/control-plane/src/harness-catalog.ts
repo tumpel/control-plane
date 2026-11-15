@@ -36,14 +36,14 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   },
   {
     harness: "PiDev",
-    harnessVersion: "0.10.0",
+    harnessVersion: "1.5.2",
     provider: "Anthropic",
     credentialVariables: [
       { kind: "ApiKey", variable: "ANTHROPIC_API_KEY" },
       { kind: "SubscriptionToken", variable: "ANTHROPIC_OAUTH_TOKEN" },
     ],
     personaFilePaths: [".pi/agent/settings.json", ".pi/agent/models.json", ".pi/agent/AGENTS.md"],
-    installRecipe: "npm:@mariozechner/pi-coding-agent@0.10.0",
+    installRecipe: "npm:@earendil-works/pi-coding-agent@1.5.2",
   },
 ]);
 
