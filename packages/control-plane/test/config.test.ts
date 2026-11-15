@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
-  HarnessPinSchema,
+  EffectiveHarnessVersionSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
   PersonaSchema,
@@ -233,9 +233,9 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
     [["prod", [["ApiKey", "ANTHROPIC_API_KEY"]]]],
   );
   assert.ok(!JSON.stringify(sets).includes(SECRET));
-  const pins = HarnessPinSchema.array().parse(await getJson("/v1/harnesses/pins"));
+  const versions = EffectiveHarnessVersionSchema.array().parse(await getJson("/v1/harnesses/pins"));
   assert.deepEqual(
-    pins.map((pin) => [pin.harness, pin.harnessVersion]),
+    versions.filter((row) => row.pinned).map((pin) => [pin.harness, pin.harnessVersion]),
     [["ClaudeCode", "2.0.0"]],
   );
   assert.deepEqual(HostSchema.parse(await getJson(`/v1/hosts/${hostId}`)).labels, ["gpu", "region-eu"]);

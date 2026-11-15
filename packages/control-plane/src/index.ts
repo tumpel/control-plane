@@ -4,6 +4,7 @@ import {
   DeviceDecisionSchema,
   DeviceTokenRequestSchema,
   DeviceTokenSchema,
+  EffectiveHarnessVersionSchema,
   EnrolmentTokenMintSchema,
   HarnessCatalogEntrySchema,
   HarnessPathSchema,
@@ -56,7 +57,7 @@ import {
 } from "./device";
 import { checkCredential } from "./dispatch-variables.ts";
 import { handleGitHubConnection, handleGitHubPage, handleGitHubWebhook } from "./github-handlers.ts";
-import { HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";
+import { effectiveVersions, HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
 import {
   enrolHost,
@@ -503,7 +504,7 @@ const handlePinsList = async (request: Request, _url: URL, env: Env): Promise<Re
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const pins = await env.TENANT.getByName(caller.tenantId).listPins();
-  return json(HarnessPinSchema.array().parse(pins));
+  return json(EffectiveHarnessVersionSchema.array().parse(effectiveVersions(pins)));
 };
 
 const unreleasedPin = async (
