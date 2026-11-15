@@ -21,7 +21,6 @@ export interface NamespaceRow {
   namespaceConnectionId: string;
   accountLabel: string;
   workspaceId: string;
-  audience: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -146,6 +145,17 @@ export class TenantPrebuilds extends TenantSessions {
       .exec<PrebuildRow>(
         `${PREBUILD_SELECT} WHERE repository = ? ORDER BY prebuilds.created_at DESC, prebuilds.rowid DESC`,
         repository,
+      )
+      .toArray()
+      .map((row) => toPrebuild(tenantId, row));
+  }
+
+  listLatestPrebuilds(tenantId: string): Prebuild[] {
+    return this.ctx.storage.sql
+      .exec<PrebuildRow>(
+        `${PREBUILD_SELECT} WHERE prebuilds.rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER
+        (PARTITION BY repository ORDER BY created_at DESC, rowid DESC) AS newness FROM prebuilds) WHERE newness = 1)
+        ORDER BY repository`,
       )
       .toArray()
       .map((row) => toPrebuild(tenantId, row));
@@ -343,7 +353,6 @@ export class TenantPrebuilds extends TenantSessions {
       namespace_connection_id: string;
       account_label: string;
       workspace_id: string;
-      audience: string;
       created_at: number;
       updated_at: number;
     }>("Namespace");
@@ -352,7 +361,6 @@ export class TenantPrebuilds extends TenantSessions {
       namespaceConnectionId: row.namespace_connection_id,
       accountLabel: row.account_label,
       workspaceId: row.workspace_id,
-      audience: row.audience,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -360,13 +368,12 @@ export class TenantPrebuilds extends TenantSessions {
 
   connectNamespace(start: NamespaceConnectionStart, now: number): NamespaceRow {
     this.ctx.storage.sql.exec(
-      `INSERT INTO namespace_connections (connection_slot, namespace_connection_id, account_label, workspace_id, audience, created_at, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,
-      workspace_id = excluded.workspace_id, audience = excluded.audience, updated_at = excluded.updated_at`,
+      `INSERT INTO namespace_connections (connection_slot, namespace_connection_id, account_label, workspace_id, created_at, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,
+      workspace_id = excluded.workspace_id, updated_at = excluded.updated_at`,
       crypto.randomUUID(),
       start.accountLabel,
       start.workspaceId,
-      start.audience,
       now,
       now,
     );

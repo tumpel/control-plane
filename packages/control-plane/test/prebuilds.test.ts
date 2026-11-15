@@ -5,23 +5,22 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  ConnectedConnectionSchema,
+  ConnectionSummarySchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
   GitHubActionsConnectionLinkSchema,
   NamespaceConnectionLinkSchema,
-  NotConfiguredConnectionSchema,
-  NotConnectedConnectionSchema,
   PersonaSchema,
   PrebuildSchema,
   ProblemSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import { z } from "zod";
+import type { z } from "zod";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
+type TenantStub = { recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown> };
 
 const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
@@ -159,9 +158,7 @@ test("a prebuild start refuses before it stores anything: an unconnected provide
   assert.equal((await refused("GET", "/v1/prebuilds/missing/failure", undefined, 404)).code, "NotFound");
 });
 
-const ConnectionRows = z
-  .discriminatedUnion("state", [ConnectedConnectionSchema, NotConnectedConnectionSchema, NotConfiguredConnectionSchema])
-  .array();
+const ConnectionRows = ConnectionSummarySchema.array();
 
 test("the connection list holds one row per provider, and a connected build provider shows its billing account", async () => {
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
@@ -193,7 +190,6 @@ test("the connection list holds one row per provider, and a connected build prov
   const start = {
     accountLabel: "acme workspace",
     workspaceId: "tenant_123456789ab",
-    audience: "federation.namespaceapis.com",
   };
   assert.equal((await refused("POST", "/v1/namespace-connection/start", start, 409)).code, "IssuerMissing");
 
@@ -207,5 +203,39 @@ test("the connection list holds one row per provider, and a connected build prov
   assert.deepEqual(
     (await rest(ConnectionRows, "GET", "/v1/connections")).map((row) => row.state),
     ["NotConfigured", "NotConnected", "NotConfigured"],
+  );
+});
+
+test("the latest listing answers the newest prebuild of each repository, by repository", async () => {
+  const { tenant } = await rest(WhoamiSchema, "GET", "/v1/whoami");
+  const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
+  assert.ok(persona);
+  const stub = (
+    await server.getWorker<{ TENANT: { getByName(name: string): TenantStub } }>().getEnv()
+  ).TENANT.getByName(tenant.tenantId);
+  const record = async (repository: string, seed: string, at: number) =>
+    PrebuildSchema.parse(
+      await stub.recordDispatchedPrebuild(
+        tenant.tenantId,
+        {
+          personaId: persona.personaId,
+          key: { repository, inputDigest: seed.repeat(64), guestImageDigest: "c".repeat(64) },
+          defaultBranch: "main",
+          provider: "GitHubActions",
+          logUrl: `${repository}/actions/runs/1`,
+        },
+        at,
+      ),
+    );
+  const now = Date.now();
+  await record("https://github.com/acme/web", "a", now - 3000);
+  const web = await record("https://github.com/acme/web", "b", now - 1000);
+  const app = await record("https://github.com/acme/app", "d", now - 2000);
+  await record("https://github.com/acme/web", "e", now - 2000);
+
+  const latest = await rest(PrebuildSchema.array(), "GET", "/v1/prebuilds/latest");
+  assert.deepEqual(
+    latest.map((prebuild) => prebuild.prebuildId),
+    [app.prebuildId, web.prebuildId],
   );
 });

@@ -349,14 +349,14 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/namespace-connection",
     NO_ARGUMENTS,
-    "Read the tenant's Namespace build provider connection. Returns the NamespaceConnectionLink of GET /v1/namespace-connection: the issuer and subject pattern to register at Namespace.",
+    "Read the tenant's Namespace build provider connection. Returns the NamespaceConnectionLink of GET /v1/namespace-connection: the issuer, subject pattern and audience to register at Namespace.",
   ),
   rest(
     "tumpel_namespace_start",
     "POST",
     "/v1/namespace-connection/start",
     NamespaceConnectionStartSchema,
-    "Connect the tenant's own Namespace workspace, replacing an earlier one. Takes {accountLabel, workspaceId, audience}: workspaceId is the Namespace workspace id, such as tenant_123456789ab, that the builds run in; audience is the aud Namespace requires, federation.namespaceapis.com; register the issuer and subject pattern tumpel_namespace_get answers at Namespace first. Returns the NamespaceConnectionLink of POST /v1/namespace-connection/start.",
+    "Connect the tenant's own Namespace workspace, replacing an earlier one. Takes {accountLabel, workspaceId}: workspaceId is the Namespace workspace id, such as tenant_123456789ab, that the builds run in; register the issuer, subject pattern and audience tumpel_namespace_get answers at Namespace first. Returns the NamespaceConnectionLink of POST /v1/namespace-connection/start.",
   ),
   rest(
     "tumpel_namespace_delete",
@@ -378,6 +378,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/prebuilds",
     PrebuildListQuerySchema,
     "List the prebuilds of one repository, newest first. Returns the Prebuild[] of GET /v1/prebuilds?repository=.",
+  ),
+  rest(
+    "tumpel_prebuild_list_latest",
+    "GET",
+    "/v1/prebuilds/latest",
+    NO_ARGUMENTS,
+    "List the newest prebuild of each repository the tenant has prebuilt, ordered by repository. Returns the Prebuild[] of GET /v1/prebuilds/latest.",
   ),
   rest(
     "tumpel_prebuild_get",
