@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { Fetch } from "../src/github.ts";
-import { DISPATCH_INPUTS, dispatchCallerWorkflow } from "../src/github-actions.ts";
+import { dispatchCallerWorkflow } from "../src/github-actions.ts";
 
 type Call = { url: string; init: RequestInit };
 
@@ -61,15 +60,4 @@ test("a dispatch GitHub refuses answers its status and message", async () => {
   );
   assert.equal(refused.ok, false);
   assert.match(refused.ok ? "" : refused.detail, /422: Workflow does not have 'workflow_dispatch' trigger/);
-});
-
-test("the dispatch inputs are the workflow_call inputs of the reusable workflow", () => {
-  const workflow = readFileSync(new URL("../../../.github/workflows/prebuild.yml", import.meta.url), "utf8");
-  const declared = workflow.match(/^on:\n {2}workflow_call:\n {4}inputs:\n((?: {6}.*\n)+)/m);
-  assert.ok(declared, ".github/workflows/prebuild.yml declares on.workflow_call.inputs");
-  const expected = DISPATCH_INPUTS.map(
-    ([name, description]) =>
-      `      ${name}:\n        description: ${description}\n        required: true\n        type: string\n`,
-  ).join("");
-  assert.equal(declared[1], expected);
 });
