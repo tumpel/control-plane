@@ -76,6 +76,10 @@ const RULES = [
       !PUBLIC_READS.has(op.operationId) && op.security.some((scheme) => Object.keys(scheme).length === 0),
   },
   {
+    rule: "build job wire: the provider's OIDC job token, no principal",
+    matches: (op) => op.security.some((scheme) => "ProviderJobToken" in scheme),
+  },
+  {
     rule: "not served yet: no control-plane route",
     matches: (op) => !served.includes(op.path.split("/").slice(0, 3).join("/")),
   },

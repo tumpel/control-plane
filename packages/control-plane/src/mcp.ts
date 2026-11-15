@@ -295,7 +295,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/namespace-connection/start",
     NamespaceConnectionStartSchema,
-    "Connect the tenant's own Namespace workspace, replacing an earlier one. Takes {accountLabel, audience}: audience is the aud Namespace requires, federation.namespaceapis.com; register the issuer and subject pattern tumpel_namespace_get answers at Namespace first. Returns the NamespaceConnectionLink of POST /v1/namespace-connection/start.",
+    "Connect the tenant's own Namespace workspace, replacing an earlier one. Takes {accountLabel, workspaceId, audience}: workspaceId is the Namespace workspace id, such as tenant_123456789ab, whose workload tokens may upload prebuild layers; audience is the aud Namespace requires, federation.namespaceapis.com; register the issuer and subject pattern tumpel_namespace_get answers at Namespace first. Returns the NamespaceConnectionLink of POST /v1/namespace-connection/start.",
   ),
   rest(
     "tumpel_namespace_delete",

@@ -28,7 +28,12 @@
       "turnImageFetchBudgetSeconds": 900,
       "turnFirstLineBudgetSeconds": 120,
       "turnTotalBudgetSeconds": 3600,
-      "transcriptChunkLines": 64
+      "transcriptChunkLines": 64,
+      "prebuildUploadBudgetSeconds": 3600,
+      "buildProviderIssuers": {
+        "gitHubActions": "https://token.actions.githubusercontent.com",
+        "namespaceBuilds": "https://federation.namespaceapis.com"
+      }
     }
   },
   "durable_objects": {
@@ -69,7 +74,12 @@
           "turnImageFetchBudgetSeconds": 900,
           "turnFirstLineBudgetSeconds": 120,
           "turnTotalBudgetSeconds": 3600,
-          "transcriptChunkLines": 64
+          "transcriptChunkLines": 64,
+          "prebuildUploadBudgetSeconds": 3600,
+          "buildProviderIssuers": {
+            "gitHubActions": "https://token.actions.githubusercontent.com",
+            "namespaceBuilds": "https://federation.namespaceapis.com"
+          }
         }
       },
       "durable_objects": {
