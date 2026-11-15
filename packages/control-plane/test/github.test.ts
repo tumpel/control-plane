@@ -110,7 +110,8 @@ test("the manifest returns installs and deliveries to the control plane and asks
   assert.equal(manifest.hook_attributes.url, "https://api.dev.tumpel.dev/github/webhook");
   assert.ok(manifest.name.length <= 34);
   assert.notEqual(manifest.name, appManifest("https://api.tumpel.dev").name);
-  for (const permission of ["administration", "members", "organization_administration", "secrets"]) {
+  assert.equal(manifest.default_permissions.members, "read");
+  for (const permission of ["administration", "organization_administration", "secrets"]) {
     assert.ok(!(permission in manifest.default_permissions), permission);
   }
 });
@@ -319,6 +320,11 @@ test("an installation links only when the person who authorized the App owns its
   assert.equal((await verifyInstaller(member.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
   const outsider = answering([exchanged, orgListed, [404, { message: "Not Found" }]]);
   assert.equal((await verifyInstaller(outsider.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
+  const unpermitted = answering([exchanged, orgListed, [403, { message: "Resource not accessible by integration" }]]);
+  assert.equal(
+    (await verifyInstaller(unpermitted.fetcher, origins, oauthClient, "code-1", 9)).kind,
+    "MembershipUnreadable",
+  );
 
   const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
   const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7);

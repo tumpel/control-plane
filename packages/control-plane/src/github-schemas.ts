@@ -53,6 +53,7 @@ const GitHubAppPermissionsSchema = z.object({
   workflows: z.literal("write"),
   discussions: z.literal("write"),
   actions: z.literal("write"),
+  members: z.literal("read"),
 });
 
 export const GitHubAppManifestSchema = z.object({
