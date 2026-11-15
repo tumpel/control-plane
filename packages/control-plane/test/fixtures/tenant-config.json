@@ -35,7 +35,7 @@
   "harnessPins": [
     {
       "harness": "ClaudeCode",
-      "harnessVersion": "2.0.0"
+      "harnessVersion": "2.1.325"
     }
   ],
   "hosts": []

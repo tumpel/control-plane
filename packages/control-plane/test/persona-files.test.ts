@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { PersonaFileLimit } from "@tumpel/api/schemas";
-import { catalogEntry } from "../src/harness-catalog.ts";
+import { CLAUDE_CODE_VERSION, catalogEntry } from "../src/harness-catalog.ts";
 import { type BlobStore, checkFiles, type PersonaFileWrite, personaFileKey, storeFiles } from "../src/persona-files.ts";
 
-const claudeCode = catalogEntry("ClaudeCode", "2.0.0");
-if (claudeCode === undefined) throw new Error("the catalog lists no ClaudeCode 2.0.0");
+const claudeCode = catalogEntry("ClaudeCode", CLAUDE_CODE_VERSION);
+if (claudeCode === undefined) throw new Error(`the catalog lists no ClaudeCode ${CLAUDE_CODE_VERSION}`);
 
 const inline = (path: string, bytes: number): PersonaFileWrite => ({
   source: "Inline",
@@ -73,7 +73,7 @@ test("a file at a path the harness does not read is refused with the paths it ac
   assert.equal(refused.problem.title, "Path not read by the harness");
   assert.equal(
     refused.problem.detail,
-    `personas.create gives ClaudeCode a file at .bashrc, which ClaudeCode 2.0.0 does not read; it accepts ${claudeCode.personaFilePaths.join(", ")}`,
+    `personas.create gives ClaudeCode a file at .bashrc, which ClaudeCode ${CLAUDE_CODE_VERSION} does not read; it accepts ${claudeCode.personaFilePaths.join(", ")}`,
   );
   const repeated = await checkFiles(claudeCode, [inline(".claude.json", 2), inline(".claude.json", 2)], "test");
   assert.ok(!repeated.ok);

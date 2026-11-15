@@ -34,6 +34,7 @@ import {
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../src/channel/protocol.ts";
+import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 
 const AUDIENCE = "tumpel-sessions-e2e";
 const KID = "sessions-e2e-key";
@@ -84,7 +85,7 @@ const RELEASE = {
   images: [
     {
       harness: "ClaudeCode",
-      harnessVersion: "2.0.0",
+      harnessVersion: CLAUDE_CODE_VERSION,
       architecture: "Amd64",
       imageDigest: IMAGE_DIGEST,
       kernelDigest: KERNEL_DIGEST,
@@ -547,9 +548,9 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     [IMAGE_DIGEST, KERNEL_DIGEST, MANIFEST_DIGEST],
   );
   for (const [url, key] of [
-    [offer.image.imageUrl, `images/ClaudeCode/2.0.0/amd64/${IMAGE_DIGEST}`],
+    [offer.image.imageUrl, `images/ClaudeCode/${CLAUDE_CODE_VERSION}/amd64/${IMAGE_DIGEST}`],
     [offer.image.kernelUrl, `kernels/amd64/${KERNEL_DIGEST}`],
-    [offer.image.manifestUrl, `images/ClaudeCode/2.0.0/amd64/${MANIFEST_DIGEST}`],
+    [offer.image.manifestUrl, `images/ClaudeCode/${CLAUDE_CODE_VERSION}/amd64/${MANIFEST_DIGEST}`],
   ]) {
     assert.match(url ?? "", new RegExp(`^${R2_STUB_ORIGIN}/tumpel-releases/${key}\\?X-Tumpel-Method=GET`));
   }
