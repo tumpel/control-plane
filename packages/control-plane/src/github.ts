@@ -60,7 +60,7 @@ export const APP_EVENTS = [
 ];
 
 export const appManifest = (origin: string): GitHubAppManifest => ({
-  name: `tumpel ${new URL(origin).hostname.split(".")[0] ?? ""}`.slice(0, APP_NAME_LIMIT).trim(),
+  name: `tumpel ${new URL(origin).hostname.replaceAll(".", "-")}`.slice(0, APP_NAME_LIMIT).trim(),
   url: origin,
   description: "Tumpel boxes clone, push and open pull requests with a short-lived token of this App.",
   hook_attributes: { url: `${origin}${WEBHOOK_PATH}`, active: true },

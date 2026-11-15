@@ -75,15 +75,16 @@ test("the manifest conversion posts the code to GitHub without a credential and 
 });
 
 test("the manifest returns installs and deliveries to the control plane and asks for no admin-level permission", () => {
-  const manifest = appManifest("https://tumpel-control-plane-dev.example.workers.dev");
-  assert.equal(manifest.setup_url, "https://tumpel-control-plane-dev.example.workers.dev/github/app/installed");
+  const manifest = appManifest("https://api.dev.tumpel.dev");
+  assert.equal(manifest.setup_url, "https://api.dev.tumpel.dev/github/app/installed");
   assert.deepEqual(manifest.callback_urls, [manifest.setup_url]);
   assert.equal(manifest.request_oauth_on_install, true);
   assert.equal(manifest.setup_on_update, true);
-  assert.equal(manifest.redirect_url, "https://tumpel-control-plane-dev.example.workers.dev/github/app/created");
+  assert.equal(manifest.redirect_url, "https://api.dev.tumpel.dev/github/app/created");
   assert.equal(manifest.public, true);
-  assert.equal(manifest.hook_attributes.url, "https://tumpel-control-plane-dev.example.workers.dev/github/webhook");
+  assert.equal(manifest.hook_attributes.url, "https://api.dev.tumpel.dev/github/webhook");
   assert.ok(manifest.name.length <= 34);
+  assert.notEqual(manifest.name, appManifest("https://api.tumpel.dev").name);
   for (const permission of ["administration", "members", "organization_administration", "secrets"]) {
     assert.ok(!(permission in manifest.default_permissions), permission);
   }
