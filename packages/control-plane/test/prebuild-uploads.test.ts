@@ -55,7 +55,6 @@ let personaId: string;
 type Store = { put(key: string, value: Uint8Array): Promise<unknown> };
 type TenantStub = {
   recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown>;
-  recordPrebuildBuilding(tenantId: string, prebuildId: string, run: unknown, now: number): Promise<{ kind: string }>;
 };
 type Bindings = { STORE: Store; TENANT: { getByName(name: string): TenantStub } };
 
@@ -203,7 +202,7 @@ const refusal = async (path: string, body: unknown, token: string | null, status
   return ProblemSchema.parse(await response.json());
 };
 
-test("a build job of the dispatched run exchanges its GitHub token for one checked layer upload, and completing it moves the prebuild to Converting", async () => {
+test("a job of the dispatched run exchanges its GitHub token for one checked layer upload, which moves a Dispatched prebuild to Building, and completing it moves the prebuild to Converting", async () => {
   const prebuild = await dispatched(tenantId);
   assert.equal(prebuild.status.state, "Dispatched");
   const layer = new TextEncoder().encode("layer bytes");
@@ -211,15 +210,7 @@ test("a build job of the dispatched run exchanges its GitHub token for one check
   const exchange = { tenantId, layerDigest: sha256(layer), layerSizeBytes: layer.length };
   const completion = { tenantId };
 
-  assert.equal((await refusal(uploadsPath, exchange, jobToken(), 409)).code, "PrebuildNotUploading");
   const env = await server.getWorker<Bindings>().getEnv();
-  const building = await env.TENANT.getByName(tenantId).recordPrebuildBuilding(
-    tenantId,
-    prebuild.prebuildId,
-    RUN,
-    Date.now(),
-  );
-  assert.equal(building.kind, "Building");
 
   const unknown = await refusal(uploadsPath, exchange, null, 401);
   assert.equal(unknown.code, "JobTokenRefused");
@@ -252,6 +243,8 @@ test("a build job of the dispatched run exchanges its GitHub token for one check
   const answered = await send("POST", uploadsPath, exchange, asJob(jobToken()));
   assert.equal(answered.status, 200, await answered.clone().text());
   const grant = PrebuildUploadGrantSchema.parse(await answered.json());
+  const building = await send("GET", `/v1/prebuilds/${prebuild.prebuildId}`, undefined, bearer);
+  assert.equal(PrebuildSchema.parse(await building.json()).status.state, "Building");
   assert.equal(grant.prebuildId, prebuild.prebuildId);
   assert.equal(grant.sha256, sha256(layer));
   const url = new URL(grant.url);

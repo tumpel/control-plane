@@ -8,7 +8,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
-import { type RunEvent, runOutcome } from "./github-actions.ts";
+import { dispatchCallerWorkflow, type PrebuildInputs, type RunEvent, runOutcome } from "./github-actions.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
@@ -60,8 +60,16 @@ export type BuildingRecorded =
   | { kind: "NotDispatched" }
   | { kind: "OtherCommit"; dispatchedSha: string };
 
-export type DispatchToken =
-  | { kind: "Token"; token: string }
+export interface PrebuildStartRecord {
+  prebuildId: string;
+  personaId: string;
+  key: PrebuildKey;
+  defaultBranch: string;
+  headSha: string;
+}
+
+export type DispatchedPrebuild =
+  | { kind: "Dispatched"; prebuild: Prebuild }
   | { kind: "NoInstallation" }
   | { kind: "Refused"; detail: string };
 
@@ -424,11 +432,43 @@ export class TenantPrebuilds extends TenantSessions {
     );
   }
 
-  async dispatchToken(tenantId: string, repository: GitHubRepository, now: number): Promise<DispatchToken> {
-    const minted: Minted = await this.repositoryToken(tenantId, repository, now);
-    if (minted.kind === "Minted") return { kind: "Token", token: minted.token };
+  async dispatchPrebuild(
+    tenantId: string,
+    target: GitHubRepository,
+    callerWorkflow: string,
+    start: PrebuildStartRecord,
+    inputs: PrebuildInputs,
+    now: number,
+  ): Promise<DispatchedPrebuild> {
+    const minted: Minted = await this.repositoryToken(tenantId, target, now);
     if (minted.kind === "NoToken") return { kind: "NoInstallation" };
-    return { kind: "Refused", detail: minted.detail };
+    if (minted.kind !== "Minted") return { kind: "Refused", detail: minted.detail };
+    return this.ctx.blockConcurrencyWhile(async (): Promise<DispatchedPrebuild> => {
+      const run = await dispatchCallerWorkflow(
+        (url, init) => fetch(url, init),
+        this.env.GITHUB_API_ORIGIN,
+        minted.token,
+        target,
+        { callerWorkflow, ref: start.defaultBranch, inputs },
+      );
+      if (!run.ok) {
+        return { kind: "Refused", detail: `${run.detail}, dispatching ${callerWorkflow} of ${start.key.repository}` };
+      }
+      const prebuild = await this.recordDispatchedPrebuild(
+        tenantId,
+        {
+          prebuildId: start.prebuildId,
+          personaId: start.personaId,
+          key: start.key,
+          defaultBranch: start.defaultBranch,
+          provider: "GitHubActions",
+          run: { runId: run.value.runId, headSha: start.headSha },
+          logUrl: run.value.htmlUrl,
+        },
+        now,
+      );
+      return { kind: "Dispatched", prebuild };
+    });
   }
 
   uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {

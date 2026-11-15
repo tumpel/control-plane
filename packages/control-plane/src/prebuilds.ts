@@ -1,7 +1,6 @@
 import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type GitHubRepository, githubRepository, repositoryUrl } from "./github.ts";
-import { dispatchCallerWorkflow } from "./github-actions.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import type { Outcome, Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -102,16 +101,6 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
   const tenant = env.TENANT.getByName(tenantId);
   const connection = await tenant.gitHubActionsConnection(tenantId);
   if (connection === null) return noBuildProvider("GitHubActions", key.repository);
-  const token = await tenant.dispatchToken(tenantId, target, now);
-  if (token.kind === "NoInstallation") {
-    return refuse(409, {
-      code: "GitHubNotConnected",
-      title: "GitHub not connected",
-      detail: `your tenant has not installed the stage's GitHub App, and a GitHub Actions prebuild of ${key.repository} dispatches its caller workflow with the App`,
-      fix: "Install it with tumpel github start on the repository's owner, then start the prebuild again",
-    });
-  }
-  if (token.kind === "Refused") return dispatchRefused(token.detail);
   const rootfs = await rootfsKey(env.RELEASES, image);
   if (rootfs.kind === "Missing") return imageNotReleased(rootfs.detail);
   const settings = settingsOf(env);
@@ -126,33 +115,30 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
     settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
     new Date(now),
   );
-  const run = await dispatchCallerWorkflow(
-    (url, init) => fetch(url, init),
-    env.GITHUB_API_ORIGIN,
-    token.token,
+  const dispatched = await tenant.dispatchPrebuild(
+    tenantId,
     target,
+    connection.callerWorkflow,
     {
-      callerWorkflow: connection.callerWorkflow,
-      ref: dispatch.defaultBranch,
-      inputs: { prebuildId, tenantId, apiOrigin: dispatch.apiOrigin, rootfsUrl, imageDigest: image.imageDigest },
+      prebuildId,
+      personaId: dispatch.personaId,
+      key,
+      defaultBranch: dispatch.defaultBranch,
+      headSha: dispatch.headSha,
     },
+    { prebuildId, tenantId, apiOrigin: dispatch.apiOrigin, rootfsUrl, imageDigest: image.imageDigest },
+    now,
   );
-  if (!run.ok) return dispatchRefused(`${run.detail}, dispatching ${connection.callerWorkflow} of ${key.repository}`);
-  return ok(
-    await tenant.recordDispatchedPrebuild(
-      tenantId,
-      {
-        prebuildId,
-        personaId: dispatch.personaId,
-        key,
-        defaultBranch: dispatch.defaultBranch,
-        provider: "GitHubActions",
-        run: { runId: run.value.runId, headSha: dispatch.headSha },
-        logUrl: run.value.htmlUrl,
-      },
-      now,
-    ),
-  );
+  if (dispatched.kind === "NoInstallation") {
+    return refuse(409, {
+      code: "GitHubNotConnected",
+      title: "GitHub not connected",
+      detail: `your tenant has not installed the stage's GitHub App, and a GitHub Actions prebuild of ${key.repository} dispatches its caller workflow with the App`,
+      fix: "Install it with tumpel github start on the repository's owner, then start the prebuild again",
+    });
+  }
+  if (dispatched.kind === "Refused") return dispatchRefused(dispatched.detail);
+  return ok(dispatched.prebuild);
 };
 
 const guestImage = async (

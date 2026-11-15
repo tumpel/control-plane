@@ -56,7 +56,7 @@ const notUploading = (prebuild: Prebuild): Response =>
   problem(409, {
     code: "PrebuildNotUploading",
     title: "Prebuild not uploading",
-    detail: `prebuild ${prebuild.prebuildId} is ${prebuild.status.state}, and only a Building prebuild takes its layer`,
+    detail: `prebuild ${prebuild.prebuildId} is ${prebuild.status.state}, and only a Dispatched or Building prebuild takes its layer`,
     fix: `Upload from the run the prebuild dispatched once it runs, or start a new prebuild with tumpel prebuild start --rebuild; read this one with tumpel prebuild get ${prebuild.prebuildId}`,
   });
 
@@ -139,7 +139,8 @@ const bound = async (
 ): Promise<Bound> => {
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
   if (tenant === null) return { ok: false, response: notFound() };
-  const target = await env.TENANT.getByName(tenantId).uploadTarget(tenantId, prebuildId);
+  const tenantStub = env.TENANT.getByName(tenantId);
+  const target = await tenantStub.uploadTarget(tenantId, prebuildId);
   if (target === null) return { ok: false, response: notFound() };
   const repository = claimOf(claims, "repository");
   if (repository === null || `https://github.com/${repository.toLowerCase()}` !== target.prebuild.repository) {
@@ -147,8 +148,16 @@ const bound = async (
   }
   const mismatch = bindClaims(target, claims, repository);
   if (mismatch !== null) return { ok: false, response: mismatch };
-  if (target.prebuild.status.state !== "Building") return { ok: false, response: notUploading(target.prebuild) };
-  return { ok: true, tenantId, target };
+  if (target.prebuild.status.state !== "Dispatched" || target.run.kind !== "Run") {
+    return target.prebuild.status.state === "Building"
+      ? { ok: true, tenantId, target }
+      : { ok: false, response: notUploading(target.prebuild) };
+  }
+  await tenantStub.recordPrebuildBuilding(tenantId, prebuildId, target.run.run, Date.now());
+  const building = await tenantStub.uploadTarget(tenantId, prebuildId);
+  if (building === null) return { ok: false, response: notFound() };
+  if (building.prebuild.status.state !== "Building") return { ok: false, response: notUploading(building.prebuild) };
+  return { ok: true, tenantId, target: building };
 };
 
 const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: PrebuildLayerUpload) => {
