@@ -18,6 +18,7 @@ import {
   OAuthTokenSchema,
   PersonaSchema,
   ProblemSchema,
+  ReportedHostUsageSchema,
   SecretSetSchema,
   SessionSchema,
   SnapshotSchema,
@@ -42,6 +43,7 @@ const CLONE_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const HOST_OFFLINE_GRACE_MS = 30_000;
+const USAGE = { boxesWarm: 0, loadAverage: 0.25, memoryAvailableMib: 6144 };
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
 const SETTINGS = {
@@ -155,23 +157,10 @@ class HostSide {
   }
 
   private beat(): void {
-    this.raw({
-      type: "Heartbeat",
-      sentAt: new Date().toISOString(),
-      usage: {
-        architecture: "Amd64",
-        boxCapacity: 8,
-        boxesRunning: 0,
-        boxesWarm: 0,
-        cpuCount: 4,
-        loadAverage: 0.25,
-        memoryTotalMib: 8192,
-        memoryAvailableMib: 6144,
-      },
-    });
+    this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE });
   }
 
-  static async connect(id: string, key: KeyObject): Promise<HostSide> {
+  static async connect(id: string, key: KeyObject, boxCapacity = 8): Promise<HostSide> {
     const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${id}/channel`);
     const challenge = await new Promise<string>((resolve, reject) => {
       socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
@@ -186,8 +175,9 @@ class HostSide {
       protocolVersion: ChannelProtocol.Version,
       supervisorVersion: "0.1.0",
       signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
+      boxCapacity,
+      usage: USAGE,
     });
-    side.beat();
     return side;
   }
 
@@ -287,13 +277,13 @@ const connectorToken = async (): Promise<string> => {
   return OAuthTokenSchema.parse(await token.json()).access_token;
 };
 
-const enrol = async (): Promise<{ id: string; key: KeyObject }> => {
+const enrol = async (name = "box"): Promise<{ id: string; key: KeyObject }> => {
   const minted = await postJson("/v1/enrolment-tokens", { expiresInSeconds: 600 }, bearer);
   const { token } = MintedEnrolmentTokenSchema.parse(await minted.json());
-  const dir = join(scratch, "host");
-  const tokenFile = join(scratch, "host.token");
+  const dir = join(scratch, name);
+  const tokenFile = join(scratch, `${name}.token`);
   writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
-  const child = spawn(SUPERVISOR, ["enrol", "--endpoint", origin, "--token-file", tokenFile, "--name", "box"], {
+  const child = spawn(SUPERVISOR, ["enrol", "--endpoint", origin, "--token-file", tokenFile, "--name", name], {
     env: { ...process.env, TUMPEL_SUPERVISOR_DIR: dir },
   });
   let stdout = "";
@@ -402,9 +392,14 @@ before(async () => {
   hostId = enrolled.id;
   host = await HostSide.connect(hostId, enrolled.key);
   await eventually(
-    "the host reading Online with its usage",
+    "the host reading Online",
     () => getJson(`/v1/hosts/${hostId}`, HostSchema),
-    (read) => read.state === "Online" && read.usage?.boxCapacity === 8,
+    (read) => read.state === "Online",
+  );
+  const [usage] = await getJson("/v1/hosts/usage", ReportedHostUsageSchema.array());
+  assert.deepEqual(
+    { hostId: usage?.hostId, boxCapacity: usage?.boxCapacity, boxesRunning: usage?.boxesRunning },
+    { hostId, boxCapacity: 8, boxesRunning: 0 },
   );
 });
 
@@ -943,4 +938,26 @@ test("a claimed turn fails HostOffline when its host disconnects and does not co
   const offline = await refused(`/v1/sessions/${started.session.sessionId}/stop`);
   assert.equal(offline.code, "HostOffline");
   assert.match(offline.detail, new RegExp(`host box \\(${hostId}\\), which is Offline`));
+});
+
+test("two sessions started at once on two hosts with one free slot each land on different hosts", async () => {
+  const first = await enrol("single-1");
+  const second = await enrol("single-2");
+  const sides = [await HostSide.connect(first.id, first.key, 1), await HostSide.connect(second.id, second.key, 1)];
+  await eventually(
+    "both single-slot hosts reading Online",
+    () => getJson("/v1/hosts", HostSchema.array()),
+    (hosts) => [first.id, second.id].every((id) => hosts.find((listed) => listed.hostId === id)?.state === "Online"),
+  );
+  const start = await sessionStart();
+  const responses = await Promise.all(
+    ["one", "two"].map((prompt) => postJson("/v1/sessions", { ...start, prompt }, bearer)),
+  );
+  const placed: string[] = [];
+  for (const response of responses) {
+    assert.equal(response.status, 200, await response.clone().text());
+    placed.push(StartedSessionSchema.parse(await response.json()).session.hostId);
+  }
+  assert.deepEqual(placed.toSorted(), [first.id, second.id].toSorted());
+  for (const side of sides) side.close();
 });

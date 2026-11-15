@@ -11,6 +11,7 @@ import tenant0010 from "../migrations/tenant/0010_persona_git_identity_required.
 import tenant0011 from "../migrations/tenant/0011_credential_handover_id.sql";
 import tenant0012 from "../migrations/tenant/0012_repository_credential_source.sql";
 import tenant0013 from "../migrations/tenant/0013_snapshot_chunks.sql";
+import tenant0014 from "../migrations/tenant/0014_host_usage.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -27,4 +28,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0011_credential_handover_id", sql: tenant0011 },
   { name: "0012_repository_credential_source", sql: tenant0012 },
   { name: "0013_snapshot_chunks", sql: tenant0013 },
+  { name: "0014_host_usage", sql: tenant0014 },
 ];

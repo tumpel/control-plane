@@ -122,14 +122,21 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts",
     NO_ARGUMENTS,
-    "List the tenant's hosts with their presence and last reported usage. Returns the Host[] of GET /v1/hosts; state is Enrolled, Online, Offline or Revoked, and usage holds boxCapacity, boxesRunning, boxesWarm, cpuCount, loadAverage, memoryTotalMib, memoryAvailableMib, architecture and heartbeatAt.",
+    "List the tenant's hosts with their presence. Returns the Host[] of GET /v1/hosts; state is Enrolled, Online, Offline or Revoked.",
+  ),
+  rest(
+    "tumpel_host_list_usage",
+    "GET",
+    "/v1/hosts/usage",
+    NO_ARGUMENTS,
+    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled. Returns the ReportedHostUsage[] of GET /v1/hosts/usage: hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib and updatedAt, when the last Hello or Heartbeat arrived.",
   ),
   rest(
     "tumpel_host_get",
     "GET",
     "/v1/hosts/{hostId}",
     HostPathSchema,
-    "Read one host with its presence, labels and last reported usage. Returns the Host of GET /v1/hosts/{hostId}.",
+    "Read one host with its presence and labels. Returns the Host of GET /v1/hosts/{hostId}.",
   ),
   rest(
     "tumpel_host_revoke",

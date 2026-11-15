@@ -5,6 +5,7 @@ import {
   HelloSchema,
   HostFrameSchema,
   HostHeartbeatSchema,
+  type HostUsageSchema,
   WelcomeSchema,
 } from "@tumpel/api/schemas";
 import { z } from "zod";
@@ -13,6 +14,7 @@ export const HEARTBEAT_INTERVAL_MS = 10_000;
 export const HEARTBEAT_DEADLINE_MS = 30_000;
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
+export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true });
 export const HostEnvelopeSchema = z.discriminatedUnion("type", [HelloSchema, HostHeartbeatSchema, HostFrameSchema]);
 export const ControlEnvelopeSchema = z.discriminatedUnion("type", [
   ChallengeSchema,
@@ -24,7 +26,7 @@ export const ControlEnvelopeSchema = z.discriminatedUnion("type", [
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
-export type HostUsage = Extract<HostEnvelope, { type: "Heartbeat" }>["usage"];
+export type HostUsage = z.infer<typeof HostUsageSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];

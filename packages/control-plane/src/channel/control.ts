@@ -5,6 +5,7 @@ import {
   type ControlMessage,
   decodeBase64,
   type Hello,
+  HelloVersionSchema,
   HostEnvelopeSchema,
   type HostMessage,
   type HostUsage,
@@ -39,7 +40,7 @@ export interface ControlContext {
 
 export type ControlEvent =
   | { kind: "None" }
-  | { kind: "Welcomed" }
+  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "Message"; message: HostMessage }
   | { kind: "Closed"; code: number; reason: string };
@@ -98,13 +99,6 @@ const hello = async (
   envelope: Hello,
   context: ControlContext,
 ): Promise<Received> => {
-  if (envelope.protocolVersion !== ChannelProtocol.Version) {
-    return close(
-      context.port,
-      CloseCode.UnsupportedVersion,
-      `protocol version ${envelope.protocolVersion} is not supported; this control plane speaks ${ChannelProtocol.Version}, update the supervisor`,
-    );
-  }
   const signed = helloBytes(connection.nonce, envelope.hostId);
   if (
     envelope.hostId !== context.host.hostId ||
@@ -120,7 +114,10 @@ const hello = async (
   const resent = await resend(await context.ledger.load(), (stored) => outbound(stored, context));
   context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: ChannelProtocol.Version });
   for (const frame of resent) context.port.send(frame);
-  return { connection: { phase: "Open" }, event: { kind: "Welcomed" } };
+  return {
+    connection: { phase: "Open" },
+    event: { kind: "Welcomed", boxCapacity: envelope.boxCapacity, usage: envelope.usage },
+  };
 };
 
 export const receive = async (
@@ -129,6 +126,16 @@ export const receive = async (
   context: ControlContext,
 ): Promise<Received> => {
   if (connection.phase === "Closed") return { connection, event: { kind: "None" } };
+  if (connection.phase === "AwaitingHello") {
+    const greeting = parseEnvelope(HelloVersionSchema, text);
+    if (greeting.ok && greeting.value.protocolVersion !== ChannelProtocol.Version) {
+      return close(
+        context.port,
+        CloseCode.UnsupportedVersion,
+        `protocol version ${greeting.value.protocolVersion} is not supported; this control plane speaks ${ChannelProtocol.Version}, update the supervisor`,
+      );
+    }
+  }
   const parsed = parseEnvelope(HostEnvelopeSchema, text);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;

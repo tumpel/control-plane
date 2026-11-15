@@ -16,6 +16,7 @@ import {
 } from "../src/channel/protocol.ts";
 
 const HOST_ID = "host-1";
+const USAGE = { boxesWarm: 1, loadAverage: 0.5, memoryAvailableMib: 4096 };
 
 const keyPair = (): { publicKey: string; privateKey: KeyObject } => {
   const pair = generateKeyPairSync("ed25519");
@@ -117,16 +118,31 @@ const setup = (revoked = false) => {
         link.connection = received.connection;
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
+      hello: async (privateKey: KeyObject = keys.privateKey) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
           type: "Hello",
           hostId: HOST_ID,
-          protocolVersion,
+          protocolVersion: ChannelProtocol.Version,
           supervisorVersion: "0.1.0",
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
+          boxCapacity: 8,
+          usage: USAGE,
         });
+      },
+      oldHello: async () => {
+        const [challenge] = sent;
+        assert.equal(challenge?.type, "Challenge");
+        const hello = {
+          type: "Hello",
+          hostId: HOST_ID,
+          protocolVersion: 1,
+          supervisorVersion: "0.1.0",
+          signature: sign(null, helloBytes(challenge.nonce, HOST_ID), keys.privateKey).toString("base64"),
+        };
+        const received = await control.receive(link.connection, JSON.stringify(hello), link.context);
+        link.connection = received.connection;
       },
     };
     link.connection = control.challenge(link.context.port);
@@ -144,7 +160,7 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   const link = channel.connect();
   await link.hello();
   assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.events, [{ kind: "Welcomed" }]);
+  assert.deepEqual(link.events, [{ kind: "Welcomed", boxCapacity: 8, usage: USAGE }]);
   assert.deepEqual(
     link.sent.map((envelope) => envelope.type),
     ["Challenge", "Welcome"],
@@ -165,9 +181,9 @@ test("a Hello signed by another key is closed as a bad signature", async () => {
   assert.equal(link.connection.phase, "Closed");
 });
 
-test("a Hello on protocol version 1 is refused and the supervisor told to update", async () => {
+test("a Hello on protocol version 1, without the fields later versions added, is refused and the supervisor told to update", async () => {
   const link = setup().connect();
-  await link.hello(undefined, 1);
+  await link.oldHello();
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
   assert.equal(
     link.closed?.reason,
