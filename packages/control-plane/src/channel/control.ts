@@ -13,10 +13,13 @@ import {
   helloBytes,
   type LedgerStore,
   type Port,
+  type PreparedClaudeSetup,
   type PreparedOffer,
   parseEnvelope,
   randomNonce,
   resend,
+  type StoredClaudeSetupCode,
+  type StoredClaudeSetupOffer,
   type StoredControlMessage,
   type StoredOffer,
   sequence,
@@ -35,6 +38,7 @@ export interface ControlContext {
   host: ControlHost;
   ledger: LedgerStore<StoredControlMessage>;
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
+  prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
   now(): Date;
 }
 
@@ -72,6 +76,9 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
 };
 
 const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
+  if (stored.type === "ClaudeSetupBoxOffer" || stored.type === "ClaudeSetupBoxCode") {
+    return (await context.prepareClaudeSetup(stored)).message;
+  }
   if (stored.type !== "TurnOffer") return stored;
   const prepared = await context.prepareOffer(stored);
   if (prepared.kind === "Withdrawn") return { type: "TurnWithdrawn", turnId: stored.turnId };

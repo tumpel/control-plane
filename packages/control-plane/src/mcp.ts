@@ -1,5 +1,7 @@
 import {
   ApiKeyMemberSchema,
+  ClaudeSetupPathSchema,
+  ClaudeSetupStartSchema,
   ConfigApiKeySchema,
   ConfigSecretSetSchema,
   ConfigSecretValueSchema,
@@ -59,7 +61,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects one more GitHub account or organization through the GitHub App, tumpel_github_list lists the connected ones, tumpel_github_delete removes one, and tumpel_github_get reads the App, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects one more GitHub account or organization through the GitHub App, tumpel_github_list lists the connected ones, tumpel_github_delete removes one, and tumpel_github_get reads the App, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_claude_setup_start mints a Claude subscription token into a secret set from a short-lived box and tumpel_claude_setup_get reads its sign-in URL and outcome; the person pastes the sign-in code into the dashboard or tumpel claude-setup submit-code, never through MCP. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -476,6 +478,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/prebuilds/latest",
     NO_ARGUMENTS,
     "List the newest prebuild of each repository the tenant has prebuilt, ordered by repository. Returns the Prebuild[] of GET /v1/prebuilds/latest.",
+  ),
+  rest(
+    "tumpel_claude_setup_start",
+    "POST",
+    "/v1/claude-setups",
+    ClaudeSetupStartSchema,
+    "Mint a Claude subscription token for a secret set without installing Claude Code: starts a short-lived box on an Online host that runs claude setup-token from the pinned Claude Code, with no secret set member and no GitHub token. Returns the ClaudeSetup of POST /v1/claude-setups in state Starting; poll tumpel_claude_setup_get until it is AwaitingCode, give the person its signInUrl, and have them paste the code the sign-in page shows into the dashboard or tumpel claude-setup submit-code --stdin, since the code never passes through MCP. Refused NoHostOnline when no Online host can run the box.",
+  ),
+  rest(
+    "tumpel_claude_setup_get",
+    "GET",
+    "/v1/claude-setups/{claudeSetupId}",
+    ClaudeSetupPathSchema,
+    "Read one Claude setup. Returns the ClaudeSetup of GET /v1/claude-setups/{claudeSetupId}; status.state is Starting, AwaitingCode with signInUrl and codeDueAt, Minting, Completed with the member CLAUDE_CODE_OAUTH_TOKEN and its expiresAt, or Failed with reason SetupUrlMissing, CodeRejected, SetupTimedOut or TokenNotStored and a detail naming the fix. It never carries the token.",
   ),
   rest(
     "tumpel_prebuild_get",

@@ -268,6 +268,10 @@ export class HostChannel extends DurableObject<Env> {
         const tenantId = await this.tenantOf(host.host_id);
         return this.env.TENANT.getByName(tenantId).prepareOffer(tenantId, offer.turnId, host.host_id, Date.now());
       },
+      prepareClaudeSetup: async (stored) => {
+        const tenantId = await this.tenantOf(host.host_id);
+        return this.env.TENANT.getByName(tenantId).prepareClaudeSetup(tenantId, stored, host.host_id, Date.now());
+      },
       now: () => new Date(),
     };
   }

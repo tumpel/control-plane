@@ -113,7 +113,7 @@ export const credentialRefused = (
   });
 };
 
-const why = (refused: Unplaceable): string => {
+export const why = (refused: Unplaceable): string => {
   const named = `${refused.host.name} (${refused.host.hostId})`;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NoImage") {
@@ -127,7 +127,7 @@ const why = (refused: Unplaceable): string => {
   return `${named} runs a turn in all ${refused.usage.boxCapacity} of its box slots`;
 };
 
-const placeableFix = (hosts: Unplaceable[], retry: string): string => {
+export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
   if (lacking === undefined) {
     return `Start tumpel-supervisor run on a host, or enrol one with tumpel host mint-token, then ${retry}`;
