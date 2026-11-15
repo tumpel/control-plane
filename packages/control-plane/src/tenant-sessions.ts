@@ -743,9 +743,6 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray()
       .map((row) => row.storage_key);
-    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
-      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
-    }
     this.ctx.storage.transactionSync(() => {
       for (const pending of ["snapshot_packs", "snapshot_chunks"]) {
         sql.exec(
@@ -757,6 +754,9 @@ export class TenantSessions extends DurableObject<Env> {
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
     });
+    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+    }
     await this.releaseChunks(tenantId, sessionId);
     await this.timers(tenantId, sessionId, {
       Claim: null,
