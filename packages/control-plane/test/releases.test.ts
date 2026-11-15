@@ -30,6 +30,16 @@ const RELEASE: ReleaseManifest = {
       rootfsDigest: "9".repeat(64),
     },
   ],
+  harnessLayers: [
+    {
+      harness: "ClaudeCode",
+      harnessVersion: "2.0.0",
+      architecture: "Amd64",
+      layerDigest: "1".repeat(64),
+      manifestDigest: "2".repeat(64),
+      sizeBytes: 65536,
+    },
+  ],
 };
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
