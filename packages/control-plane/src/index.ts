@@ -850,7 +850,8 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
       { "www-authenticate": `Bearer resource_metadata="${metadata}", scope="${SCOPE}"`, ...corsHeaders(request) },
     );
   }
-  const caller = await callerForAccessToken(env.DB, token, Date.now());
+  const now = Date.now();
+  const caller = (await callerForAccessToken(env.DB, token, now)) ?? (await callerForDeviceToken(env.DB, token, now));
   if (caller === null) {
     return mcpRefusal(
       401,
