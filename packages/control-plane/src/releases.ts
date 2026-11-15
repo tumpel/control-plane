@@ -5,6 +5,7 @@ import { issues } from "./http.ts";
 export type ReleaseManifest = z.infer<typeof ReleaseManifestSchema>;
 export type ReleaseImage = ReleaseManifest["images"][number];
 export type ReleaseSupervisor = ReleaseManifest["supervisors"][number];
+export type ReleaseCli = ReleaseManifest["clis"][number];
 export type HostArchitecture = z.infer<typeof HostArchitectureSchema>;
 
 export interface ReleaseBucket {
@@ -22,6 +23,8 @@ const arch = (architecture: HostArchitecture): string => architecture.toLowerCas
 
 export const supervisorKey = (supervisor: ReleaseSupervisor): string =>
   `supervisor/${arch(supervisor.architecture)}/${supervisor.sha256}`;
+
+export const cliKey = (cli: ReleaseCli): string => `cli/${arch(cli.architecture)}/${cli.sha256}`;
 
 const imagePrefix = (image: ReleaseImage): string =>
   `images/${image.harness}/${image.harnessVersion}/${arch(image.architecture)}`;
@@ -57,6 +60,7 @@ export const parseRelease = (text: string): ReleaseManifest => {
     ...duplicates(manifest.supervisors.map((supervisor) => supervisor.architecture)).map(
       (architecture) => `two supervisors for ${architecture}`,
     ),
+    ...duplicates(manifest.clis.map((cli) => cli.architecture)).map((architecture) => `two CLIs for ${architecture}`),
     ...duplicates(manifest.images.map((image) => `${image.harness} ${image.harnessVersion} ${image.architecture}`)).map(
       (image) => `two images for ${image}`,
     ),
