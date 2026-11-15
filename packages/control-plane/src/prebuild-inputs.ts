@@ -24,10 +24,6 @@ export const LOCKFILES = [
   "flake.lock",
 ];
 export const MANIFESTS = ["package.json"];
-const DEFAULT_INSTALLS: [string, string][] = [
-  ["package-lock.json", "npm ci"],
-  ["npm-shrinkwrap.json", "npm ci"],
-];
 const DEVCONTAINER_CONFIGS = [`${DEVCONTAINER_DIRECTORY}/devcontainer.json`, DEVCONTAINER_FILE];
 
 export type ConfigSource = z.infer<typeof PrebuildConfigSourceSchema>;
@@ -44,7 +40,6 @@ export type Inputs =
       kind: "Read";
       files: InputFile[];
       configSource: ConfigSource;
-      defaultCommands: string[];
       defaultBranch: string;
       headSha: string;
     }
@@ -144,7 +139,5 @@ export const readInputs = async (
     }
   }
   const configSource = files.some((file) => DEVCONTAINER_CONFIGS.includes(file.path)) ? "RepositoryFile" : "Default";
-  const install = DEFAULT_INSTALLS.find(([lockfile]) => files.some((file) => file.path === lockfile));
-  const defaultCommands = configSource === "Default" && install !== undefined ? [install[1]] : [];
-  return { kind: "Read", files, configSource, defaultCommands, defaultBranch: at.branch, headSha };
+  return { kind: "Read", files, configSource, defaultBranch: at.branch, headSha };
 };

@@ -84,7 +84,6 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
       { path: ".devcontainer/scripts/setup.sh", blobSha: "b5" },
     ],
     configSource: "RepositoryFile",
-    defaultCommands: [],
     defaultBranch: "trunk",
     headSha: HEAD,
   });
@@ -103,7 +102,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
   );
 });
 
-test("a repository without a devcontainer.json builds with the default config, which runs npm ci for an npm lockfile and reads package.json", async () => {
+test("a repository without a devcontainer.json builds with the default config, whose digest reads package.json and the npm lockfile", async () => {
   const bare = await readInputs(
     github({ [ROOT]: [{ path: "README.md", type: "blob", sha: "b3" }] }).fetcher,
     "https://api.github.com",
@@ -115,7 +114,6 @@ test("a repository without a devcontainer.json builds with the default config, w
     kind: "Read",
     files: [],
     configSource: "Default",
-    defaultCommands: [],
     defaultBranch: "trunk",
     headSha: HEAD,
   });
@@ -137,7 +135,6 @@ test("a repository without a devcontainer.json builds with the default config, w
   );
   assert.ok(npm.kind === "Read");
   assert.equal(npm.configSource, "Default");
-  assert.deepEqual(npm.defaultCommands, ["npm ci"]);
   assert.deepEqual(
     npm.files.map((file) => file.path),
     ["package.json", "package-lock.json", ".devcontainer/Dockerfile"],
