@@ -148,17 +148,17 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
       permissions: { actions: "write", contents: "write", workflows: "write" },
     });
   }
-  if (/^\/repos\/acme\/(app|fresh|web)$/.test(path)) return reply(response, 200, { default_branch: "main" });
-  if (/^\/repos\/acme\/(app|web)\/commits\/main$/.test(path)) {
+  if (/^\/repos\/acme\/(app|fresh|web|pair)$/.test(path)) return reply(response, 200, { default_branch: "main" });
+  if (/^\/repos\/acme\/(app|web|pair)\/commits\/main$/.test(path)) {
     return reply(response, 200, { sha: branchHead, commit: { tree: { sha: TREE_SHA } } });
   }
   if (path === "/repos/acme/fresh/commits/main") {
     return reply(response, 200, { sha: FRESH_HEAD, commit: { tree: { sha: TREE_SHA } } });
   }
-  if (/^\/repos\/acme\/(app|fresh|web)\/git\/trees\//.test(path) && path.endsWith(TREE_SHA)) {
+  if (/^\/repos\/acme\/(app|fresh|web|pair)\/git\/trees\//.test(path) && path.endsWith(TREE_SHA)) {
     return reply(response, 200, { tree: [{ path: "package-lock.json", type: "blob", sha: "2".repeat(40) }] });
   }
-  if (/^\/repos\/acme\/(app|web)\/contents\/\.github\/workflows\/tumpel-prebuild\.yml\?ref=main$/.test(path)) {
+  if (/^\/repos\/acme\/(app|web|pair)\/contents\/\.github\/workflows\/tumpel-prebuild\.yml\?ref=main$/.test(path)) {
     const example = callerWorkflowExample({ path: CALLER_WORKFLOW, apiOrigin: API_ORIGIN, branch: "main" });
     return reply(response, 200, {
       sha: "3".repeat(40),
@@ -181,7 +181,7 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
   }
   if (
     request.method === "POST" &&
-    /^\/repos\/acme\/(app|web)\/actions\/workflows\/tumpel-prebuild\.yml\/dispatches$/.test(path)
+    /^\/repos\/acme\/(app|web|pair)\/actions\/workflows\/tumpel-prebuild\.yml\/dispatches$/.test(path)
   ) {
     if (!runOnDispatch) return reply(response, 204, null);
     earlyInputs = readInputsAs(jobToken({ run_id: String(DISPATCHED_RUN) }));
@@ -306,8 +306,8 @@ after(async () => {
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
-const startOn = (repository: string) =>
-  send("POST", "/v1/prebuilds", { repository, personaId, provider: "GitHubActions", rebuild: true }, bearer);
+const startOn = (repository: string, rebuild = true) =>
+  send("POST", "/v1/prebuilds", { repository, personaId, provider: "GitHubActions", rebuild }, bearer);
 
 const startAt = async (headSha: string, repository = "https://github.com/acme/app") => {
   branchHead = headSha;
@@ -649,6 +649,27 @@ test("a start on a repository without the caller workflow commits it, starts no 
   assert.ok(gitHubCalls.includes("GET /repos/acme/fresh/commits/main"), gitHubCalls.join("\n"));
   assert.ok(!gitHubCalls.some((call) => call.endsWith("/dispatches")), gitHubCalls.join("\n"));
   assert.equal((await readPrebuild(started.prebuildId)).status.state, "Building");
+});
+
+test("two starts of the same inputs at the same moment dispatch once and answer the same prebuild", async () => {
+  gitHubCalls.length = 0;
+  runOnDispatch = false;
+  const responses = await Promise.all([
+    startOn("https://github.com/acme/pair", false),
+    startOn("https://github.com/acme/pair", false),
+  ]);
+  runOnDispatch = true;
+  const [first, second] = await Promise.all(
+    responses.map(async (response) => {
+      assert.equal(response.status, 200, await response.clone().text());
+      return PrebuildSchema.parse(await response.json());
+    }),
+  );
+  assert.equal(second?.prebuildId, first?.prebuildId);
+  const dispatches = gitHubCalls.filter(
+    (call) => call === "POST /repos/acme/pair/actions/workflows/tumpel-prebuild.yml/dispatches",
+  );
+  assert.equal(dispatches.length, 1, gitHubCalls.join("\n"));
 });
 
 test("the latest listing answers the newest prebuild of each repository, by repository", async () => {
