@@ -12,10 +12,14 @@ import {
   HealthSchema,
   HostEnrolSchema,
   HostLabelsSchema,
+  IssuerJwksSchema,
   IssuerKeyRotationSchema,
+  IssuerTokenMintSchema,
+  IssuerTokenSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
+  OpenIdConfigurationSchema,
   PersonaCreateSchema,
   PersonaFileUploadRequestSchema,
   PersonaFileUploadSchema,
@@ -66,7 +70,14 @@ import {
 } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
 import { bearerOf, type Caller, callerForDeviceToken, proofCaller, signUp, whoamiForEmail, whoamiOf } from "./identity";
-import { issuerOf } from "./issuer.ts";
+import {
+  ISSUER_DOCUMENT_HEADERS,
+  issuerOf,
+  issuerSubject,
+  JWKS_PATH,
+  OPENID_CONFIGURATION_PATH,
+  openIdConfiguration,
+} from "./issuer.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
 import {
   AUTHORIZATION_SERVER_PATH,
@@ -780,6 +791,56 @@ const handleIssuerRotate = async (request: Request, url: URL, env: Env): Promise
   );
 };
 
+const handleIssuerMint = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, IssuerTokenMintSchema, "issuerTokens.mint");
+  if (!body.ok) return body.response;
+  const persona = await env.TENANT.getByName(caller.tenantId).getPersona(caller.tenantId, body.value.personaId);
+  if (persona === null) return personaNotFound(body.value.personaId);
+  if (persona.name.includes(":")) {
+    return problem(422, {
+      code: "InvalidRequest",
+      title: "Colon in the persona name",
+      detail: `persona ${persona.name} holds a colon, which would let its token subject match another persona's trust rule`,
+      fix: "Rename the persona without a colon with PUT /v1/personas/{personaId}",
+    });
+  }
+  const issued = await issuerOf(env).signIssuerToken(
+    issuerSubject(caller.tenantId, persona.name),
+    body.value.audience,
+    {},
+  );
+  return json(
+    IssuerTokenSchema.parse({
+      token: issued.token,
+      kid: issued.kid,
+      subject: issued.subject,
+      audience: issued.audience,
+      expiresAt: new Date(issued.expiresAt).toISOString(),
+    }),
+  );
+};
+
+const handleIssuerHost = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const issuer = issuerOf(env);
+  if (request.method === "GET" && url.pathname === OPENID_CONFIGURATION_PATH) {
+    return json(OpenIdConfigurationSchema.parse(openIdConfiguration(issuer.issuer)), 200, ISSUER_DOCUMENT_HEADERS);
+  }
+  if (request.method === "GET" && url.pathname === JWKS_PATH) {
+    return json(IssuerJwksSchema.parse({ keys: await issuer.publishedKeys() }), 200, {
+      ...ISSUER_DOCUMENT_HEADERS,
+      "cache-control": "public, max-age=300",
+    });
+  }
+  return problem(404, {
+    code: "NotFound",
+    title: "No such issuer document",
+    detail: `the issuer ${issuer.issuer} serves ${OPENID_CONFIGURATION_PATH} and ${JWKS_PATH} only, not ${request.method} ${url.pathname}`,
+    fix: `GET ${issuer.issuer}${OPENID_CONFIGURATION_PATH}`,
+  });
+};
+
 const handleDeviceToken = async (request: Request, env: Env): Promise<Response> => {
   const params = await readParams(request);
   if (params.grant_type !== DEVICE_GRANT) {
@@ -1070,6 +1131,7 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
   "POST /v1/issuer-keys/rotate": handleIssuerRotate,
+  "POST /v1/issuer-tokens": handleIssuerMint,
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,
@@ -1136,6 +1198,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.hostname === env.ISSUER_HOSTNAME) return handleIssuerHost(request, url, env);
     const dashboard = dashboardCors(request, url);
     if (dashboard === null) return dispatch(request, url, env);
     if (request.method === "OPTIONS") {
