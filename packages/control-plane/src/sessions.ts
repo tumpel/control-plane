@@ -448,6 +448,8 @@ const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
   return turns;
 };
 
+const COMPACT_READ_PASSES = 8;
+
 export const readTranscript = async (
   env: Env,
   caller: Caller,
@@ -456,16 +458,17 @@ export const readTranscript = async (
 ): Promise<Outcome<TranscriptPage>> => {
   const compact = query.compact ?? false;
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
-  const readAfter = (after: number) =>
+  const chunkLines = settingsOf(env).transcriptChunkLines;
+  const readAfter = (after: number, limit: number) =>
     tenantOf(env, caller).transcriptCursor(
       caller.tenantId,
       sessionId,
       after,
       query.turnId ?? null,
-      query.limit ?? settingsOf(env).transcriptChunkLines,
+      limit,
       compact ? null : maxBytes,
     );
-  const cursor = await readAfter(query.after ?? 0);
+  const cursor = await readAfter(query.after ?? 0, query.limit ?? chunkLines);
   if (cursor === null) return sessionNotFound(sessionId);
   const compactor = compact ? compactorOf(cursor.harness) : null;
   if (compact && compactor === null) {
@@ -478,9 +481,10 @@ export const readTranscript = async (
   }
   let after = query.after ?? 0;
   let read = cursor;
-  for (;;) {
+  for (let pass = 1; ; pass += 1) {
     const page = pageOf(await linesOf(env, read), after, compactor, maxBytes);
-    if (page.lines.length > 0 || page.cursor === after || page.cursor >= read.lastLineSeq) {
+    const settled = page.lines.length > 0 || page.cursor === after || page.cursor >= read.lastLineSeq;
+    if (settled || pass === COMPACT_READ_PASSES) {
       const { sessionState } = read;
       const finished = !read.inFlight && page.cursor >= read.lastLineSeq;
       if (compactor === null) {
@@ -499,7 +503,7 @@ export const readTranscript = async (
         }),
       );
     }
-    const next = await readAfter(page.cursor);
+    const next = await readAfter(page.cursor, chunkLines);
     if (next === null) return sessionNotFound(sessionId);
     after = page.cursor;
     read = next;
