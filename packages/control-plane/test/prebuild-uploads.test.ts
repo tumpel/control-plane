@@ -165,6 +165,7 @@ before(async () => {
           ACCESS_ISSUER: keysOrigin,
           ACCESS_AUD,
           R2_STUB_ORIGIN: "https://r2.example.test",
+          DASHBOARD_ORIGIN: "https://app.tumpel.test",
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
           TUMPEL_SETTINGS: {
             dispatchGrantTtlSeconds: 300,
