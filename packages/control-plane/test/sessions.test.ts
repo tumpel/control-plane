@@ -537,7 +537,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
   assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
   await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
-  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 4096 });
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   const [snapshot] = await eventually(
     "a stored snapshot",
     () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -553,7 +553,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
       turnId,
       snapshotSeq: 1,
       storageKey: request.storageKey,
-      outcome: { state: "Stored", sizeBytes: 4096 },
+      outcome: { state: "Stored", uploadedBytes: 4096 },
       createdAt: 0,
       updatedAt: 0,
     },
@@ -615,7 +615,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   assert.equal(request.sessionId, sessionId);
   assert.equal(request.turnId, turnId);
   await store.put(request.storageKey, "snapshot bytes");
-  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 14 });
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
   const teardown = await host.next("BoxTeardown");
   assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId: offer.boxId });
   assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).state, "Stopping");
@@ -662,7 +662,7 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
   const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
   const warm = await host.next("SnapshotRequest");
   await store.put(warm.storageKey, '{"entries":[]}');
-  host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, sizeBytes: 14 });
+  host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
   await eventually(
     "a stored snapshot",
     () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -690,7 +690,7 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
   assert.equal(again.sessionId, sessionId);
   assert.equal(again.turnId, turnId);
   await store.put(again.storageKey, '{"entries":[]}');
-  host.send({ type: "SnapshotDone", snapshotId: again.snapshotId, sizeBytes: 14 });
+  host.send({ type: "SnapshotDone", snapshotId: again.snapshotId, uploadedBytes: 14 });
   await eventually(
     "a second stored snapshot",
     () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -740,50 +740,75 @@ const completedTurn = async (prompt: string) => {
   return { session: started.session, offer };
 };
 
+type Placement = { digest: string; packDigest: string; offset: number; length: number };
+
+const CHUNK_BYTES = 10;
+
+const placed = (packs: Record<string, string[]>): Placement[] =>
+  Object.entries(packs).flatMap(([packDigest, digests]) =>
+    digests.map((digest, index) => ({ digest, packDigest, offset: index * CHUNK_BYTES, length: CHUNK_BYTES })),
+  );
+
 const storedChunks = async (
   store: Store,
   sessionId: string,
   digests: string[],
-): Promise<{ request: Extract<ControlMessage, { type: "SnapshotRequest" }>; uploaded: string[] }> => {
+  packs: Record<string, string[]>,
+): Promise<{
+  request: Extract<ControlMessage, { type: "SnapshotRequest" }>;
+  held: Placement[];
+  uploaded: string[];
+}> => {
   const request = await host.next("SnapshotRequest");
   assert.equal(request.sessionId, sessionId);
   host.send({ type: "SnapshotChunks", snapshotId: request.snapshotId, part: 1, digests });
-  const answer = await host.next("SnapshotUploads");
+  const answer = await host.next("SnapshotChunksHeld");
   assert.equal(answer.snapshotId, request.snapshotId);
   assert.equal(answer.part, 1);
-  assert.equal(answer.uploadExpiresAt, request.uploadExpiresAt);
-  for (const upload of answer.uploads) {
+  const chunks = placed(packs);
+  host.send({
+    type: "SnapshotPacks",
+    snapshotId: request.snapshotId,
+    part: 1,
+    packs: Object.entries(packs).map(([packDigest, held]) => ({ packDigest, sizeBytes: held.length * CHUNK_BYTES })),
+    chunks,
+  });
+  const uploads = await host.next("SnapshotPackUploads");
+  assert.equal(uploads.uploadExpiresAt, request.uploadExpiresAt);
+  for (const upload of uploads.uploads) {
     const url = new URL(upload.url);
-    assert.equal(url.pathname, `/tumpel-sessions/${request.storageKey.split("/")[0]}/chunks/${upload.digest}`);
+    assert.equal(url.pathname, `/tumpel-sessions/${request.storageKey.split("/")[0]}/packs/${upload.packDigest}`);
     assert.equal(url.searchParams.get("X-Tumpel-Method"), "PUT");
-    await store.put(url.pathname.replace("/tumpel-sessions/", ""), "chunk bytes");
+    assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(upload.packDigest, "hex").toString("base64"));
+    await store.put(url.pathname.replace("/tumpel-sessions/", ""), "pack bytes");
   }
-  await store.put(request.storageKey, '{"entries":[]}');
-  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 64 });
+  await store.put(request.storageKey, '{"manifest":[]}');
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
   await eventually(
     "a stored snapshot",
     () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
     (snapshots) => snapshots.some((snapshot) => snapshot.outcome.state === "Stored"),
   );
-  return { request, uploaded: answer.uploads.map((upload) => upload.digest) };
+  return { request, held: answer.held, uploaded: uploads.uploads.map((upload) => upload.packDigest) };
 };
 
-test("a snapshot gets upload URLs only for chunks the tenant lacks, a restore only for its session's chunks, and an archive deletes the chunks no other session holds", async () => {
+test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive deletes the packs no live chunk lies in", async () => {
   const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
-  const [one, two, three, four] = ["1", "2", "3", "4"].map((digit) => digit.repeat(64)) as [
-    string,
-    string,
-    string,
-    string,
-  ];
+  const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
+  const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
   const first = await completedTurn("chunk the first");
-  const { request, uploaded } = await storedChunks(store, first.session.sessionId, [one, two]);
-  assert.deepEqual(uploaded, [one, two]);
+  const { request, held, uploaded } = await storedChunks(store, first.session.sessionId, [one, two], {
+    [packOne]: [one],
+    [packTwo]: [two],
+  });
+  assert.deepEqual(held, []);
+  assert.deepEqual(uploaded, [packOne, packTwo]);
   const tenantId = request.storageKey.split("/")[0] ?? "";
 
   const second = await completedTurn("chunk the second");
-  const shared = await storedChunks(store, second.session.sessionId, [two, three, three]);
-  assert.deepEqual(shared.uploaded, [three]);
+  const shared = await storedChunks(store, second.session.sessionId, [two, three, three], { [packThree]: [three] });
+  assert.deepEqual(shared.held, [{ digest: two, packDigest: packTwo, offset: 0, length: CHUNK_BYTES }]);
+  assert.deepEqual(shared.uploaded, [packThree]);
 
   await tool("tumpel_turn_send", { sessionId: first.session.sessionId, prompt: "restore me" }, TurnSchema);
   const restoring = await host.next("TurnOffer");
@@ -791,12 +816,25 @@ test("a snapshot gets upload URLs only for chunks the tenant lacks, a restore on
     restoring.snapshots.map((snapshot) => snapshot.snapshotId),
     [request.snapshotId],
   );
-  host.send({ type: "RestoreChunks", turnId: restoring.turnId, part: 1, digests: [one, three, four] });
+  host.send({
+    type: "RestoreChunks",
+    turnId: restoring.turnId,
+    part: 1,
+    chunks: [...placed({ [packOne]: [one], [packTwo]: [two], [packThree]: [three] })],
+  });
   const downloads = await host.next("RestoreDownloads");
   assert.equal(downloads.turnId, restoring.turnId);
+  assert.equal(downloads.downloadExpiresAt, restoring.snapshots[0]?.downloadExpiresAt);
   assert.deepEqual(
-    downloads.downloads.map((download) => [download.digest, new URL(download.url).searchParams.get("X-Tumpel-Method")]),
-    [[one, "GET"]],
+    downloads.packs.map((pack) => [
+      pack.packDigest,
+      pack.sizeBytes,
+      new URL(pack.url).searchParams.get("X-Tumpel-Method"),
+    ]),
+    [
+      [packOne, CHUNK_BYTES, "GET"],
+      [packTwo, CHUNK_BYTES, "GET"],
+    ],
   );
   await eventually(
     "the unclaimed restore turn reading Failed",
@@ -813,13 +851,17 @@ test("a snapshot gets upload URLs only for chunks the tenant lacks, a restore on
     (session) => session.state === "Stopped",
   );
   await tool("tumpel_session_archive", { sessionId: first.session.sessionId }, SessionSchema);
-  assert.equal(await store.head(`${tenantId}/chunks/${one}`), null);
-  assert.notEqual(await store.head(`${tenantId}/chunks/${two}`), null);
-  assert.notEqual(await store.head(`${tenantId}/chunks/${three}`), null);
+  assert.equal(await store.head(`${tenantId}/packs/${packOne}`), null);
+  assert.notEqual(await store.head(`${tenantId}/packs/${packTwo}`), null);
+  assert.notEqual(await store.head(`${tenantId}/packs/${packThree}`), null);
 
   const third = await completedTurn("chunk the third");
-  const again = await storedChunks(store, third.session.sessionId, [one, two]);
-  assert.deepEqual(again.uploaded, [one]);
+  const again = await storedChunks(store, third.session.sessionId, [one, two], { [packOne]: [one] });
+  assert.deepEqual(
+    again.held.map((placement) => placement.digest),
+    [two],
+  );
+  assert.deepEqual(again.uploaded, [packOne]);
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {

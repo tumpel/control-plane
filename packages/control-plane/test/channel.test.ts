@@ -64,7 +64,7 @@ const turnOffer: StoredControlMessage = {
   prompt: "hello",
 };
 
-const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, sizeBytes: 10 });
+const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
 
 const frame = (seq: number, ack: number, message: HostMessage): HostEnvelope => ({ type: "Frame", seq, ack, message });
 
