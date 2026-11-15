@@ -48,11 +48,9 @@ import {
   SubscriptionTokenMemberSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
-  TranscriptPageSchema,
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
-  WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
@@ -93,7 +91,7 @@ interface ToolDefinition {
   description: string;
   input: z.ZodObject;
   request: { method: Method; path: string } | null;
-  answer: "rest" | "whoami" | "transcript" | "configSecretSet" | "memberCommand" | "circleCIStartCommand";
+  answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand";
 }
 
 const DONE: Record<string, string> = {
@@ -178,7 +176,7 @@ export const TOOLS: ToolDefinition[] = [
       "Name the endpoint you signed in to and the tenant and principal this connector acts as. Returns {endpoint, tenant, principal}.",
     input: NO_ARGUMENTS,
     request: { method: "GET", path: "/v1/whoami" },
-    answer: "whoami",
+    answer: "rest",
   },
   rest("tumpel_devices_list", "GET", "/v1/devices", NO_ARGUMENTS, "List the devices signed in as you."),
   rest(
@@ -735,10 +733,10 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: "tumpel_transcript_read",
     description:
-      "Read a page of a session's harness-native JSONL transcript; turnId keeps one turn's lines, limit and maxBytes cap the page (the transcript chunk size and 32768 bytes by default). Pass compact true to poll a live ClaudeCode turn: it keeps the text the assistant wrote, shows each tool call as one line naming the tool and its first argument, drops tool results, and names the session once and each turn once above its lines. Pass the cursor of the previous page as after to read on; finished is true when no turn is in flight and no line follows. Returns {sessionState, lines, cursor, finished}, or with compact {sessionId, sessionState, cursor, finished, turns}.",
+      "Read a page of a session's harness-native JSONL transcript; turnId keeps one turn's lines, limit and maxBytes cap the page (the transcript chunk size and 32768 bytes by default). Pass compact true to poll a live ClaudeCode turn: it keeps the text the assistant wrote, shows each tool call as one line naming the tool and its first argument, drops tool results, and names the session once and each turn once above its lines. Pass the cursor of the previous page as after to read on; finished is true when no turn is in flight and no line follows. Returns {form: Raw, sessionState, lines, cursor, finished}, or with compact {form: Compact, sessionId, sessionState, turns, cursor, finished}.",
     input: SessionPathSchema.extend(TranscriptQuerySchema.shape),
     request: { method: "GET", path: "/v1/sessions/{sessionId}/transcript" },
-    answer: "transcript",
+    answer: "rest",
   },
   rest(
     "tumpel_session_handovers",
@@ -794,20 +792,6 @@ const refusalText = async (answer: Response): Promise<string> => {
   return `${problem.data.title}: ${problem.data.detail}. ${problem.data.fix}`;
 };
 
-type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
-
-const compactTranscript = (sessionId: unknown, page: TranscriptPage): string => {
-  const turns: { turnId: string; lines: { lineSeq: number; text: string }[] }[] = [];
-  for (const line of page.lines) {
-    const last = turns.at(-1);
-    const entry = { lineSeq: line.lineSeq, text: line.text };
-    if (last?.turnId === line.turnId) last.lines.push(entry);
-    else turns.push({ turnId: line.turnId, lines: [entry] });
-  }
-  const { sessionState, cursor, finished } = page;
-  return JSON.stringify({ sessionId, sessionState, cursor, finished, turns });
-};
-
 const runTool = async (
   tool: ToolDefinition,
   args: Record<string, unknown>,
@@ -820,14 +804,6 @@ const runTool = async (
     if (tool.answer === "rest") {
       const text = answer.status === 204 ? "" : await answer.text();
       return { ok: true, text: text || (DONE[tool.name] ?? "Done") };
-    }
-    if (tool.answer === "whoami") {
-      return { ok: true, text: JSON.stringify({ endpoint: origin, ...WhoamiSchema.parse(await answer.json()) }) };
-    }
-    if (tool.answer === "transcript") {
-      const text = await answer.text();
-      if (args.compact !== true) return { ok: true, text };
-      return { ok: true, text: compactTranscript(args.sessionId, TranscriptPageSchema.parse(JSON.parse(text))) };
     }
   }
   if (tool.answer === "memberCommand") return { ok: true, text: memberCommand(MEMBER_WITHOUT_VALUE.parse(args)) };

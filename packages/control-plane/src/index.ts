@@ -39,6 +39,7 @@ import {
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
   WhoamiSchema,
+  WhoamiWithEndpointSchema,
 } from "@tumpel/api/schemas";
 import {
   codeNotFoundPage,
@@ -310,7 +311,8 @@ const deviceCaller = async (request: Request, env: Env): Promise<Caller | Respon
 const handleWhoami = async (request: Request, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(WhoamiSchema.parse(await whoamiOf(env.DB, caller)));
+  const endpoint = new URL(request.url).origin;
+  return json(WhoamiWithEndpointSchema.parse({ ...(await whoamiOf(env.DB, caller)), endpoint }));
 };
 
 const handleListTenants = async (request: Request, env: Env): Promise<Response> => {
