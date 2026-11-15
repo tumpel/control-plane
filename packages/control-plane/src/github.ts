@@ -92,6 +92,7 @@ export const appManifest = (origin: string): GitHubAppManifest => ({
     workflows: "write",
     discussions: "write",
     actions: "write",
+    members: "read",
   },
   default_events: APP_EVENTS,
 });
@@ -454,6 +455,7 @@ export interface OAuthClient {
 export type Installer =
   | { kind: "Installer"; installation: GitHubInstallationRecord }
   | { kind: "NotInstaller"; detail: string }
+  | { kind: "MembershipUnreadable"; detail: string }
   | { kind: "Failed"; detail: string };
 
 const personDetail = (answer: { status: number; detail: string }, asked: string): string =>
@@ -489,7 +491,13 @@ const installerOf = async (
     GitHubOrgMembershipSchema,
     "GitHubOrgMembership",
   );
-  if (!membership.ok && (membership.status === 403 || membership.status === 404)) {
+  if (!membership.ok && membership.status === 403) {
+    return {
+      kind: "MembershipUnreadable",
+      detail: `GitHub refused this stage's App a read of your membership of the organization ${login}`,
+    };
+  }
+  if (!membership.ok && membership.status === 404) {
     return {
       kind: "NotInstaller",
       detail: `the GitHub account you authorized is no member of the organization ${login}; only an owner of ${login} connects it`,

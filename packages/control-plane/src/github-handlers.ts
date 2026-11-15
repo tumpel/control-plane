@@ -551,6 +551,15 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
   if (installer.kind === "Failed") {
     return refuseInstall(env, tenantId, 502, "GitHub did not confirm the installer", `${installer.detail}.`);
   }
+  if (installer.kind === "MembershipUnreadable") {
+    return refuseInstall(
+      env,
+      tenantId,
+      403,
+      "The App cannot read your organization membership yet",
+      `${installer.detail}. The App owner must grant the organization permission Members: read in the App's settings on GitHub, and an owner of the organization must accept the new permission on its installation.`,
+    );
+  }
   if (installer.kind === "NotInstaller") {
     return refuseInstall(
       env,
