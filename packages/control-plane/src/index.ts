@@ -777,7 +777,7 @@ const handleReleaseDownload = async (url: URL, env: Env): Promise<Response | nul
       code: "InvalidRequest",
       title: "Unknown architecture",
       detail: `releases.${kind} refused the path: ${issues(parsed.error)}`,
-      fix: "Ask for Amd64 for `uname -m` x86_64, Arm64 for aarch64",
+      fix: "Ask for Amd64, the one architecture releases build until an arm64 host passes the proof",
     });
   }
   const { architecture } = parsed.data;
