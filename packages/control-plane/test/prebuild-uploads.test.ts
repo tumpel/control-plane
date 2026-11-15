@@ -309,6 +309,7 @@ const recordCommit = async (headSha: string) => {
           guestImageDigest: "b".repeat(64),
         },
         configSource: "Default",
+        defaultCommands: ["npm ci"],
         defaultBranch: "main",
         headSha,
         rootfsKey: ROOTFS_KEY,
@@ -639,6 +640,8 @@ test("a start on a repository without the caller workflow commits it, starts no 
   assert.equal(response.status, 200, await response.clone().text());
   const started = PrebuildSchema.parse(await response.json());
   assert.equal(started.repository, "https://github.com/acme/fresh");
+  assert.equal(started.configSource, "Default");
+  assert.deepEqual(started.defaultCommands, ["npm ci"]);
   const early = await takeEarlyInputs();
   assert.equal(early.status, 200, await early.clone().text());
   assert.equal(PrebuildJobInputsSchema.parse(await early.json()).prebuildId, started.prebuildId);

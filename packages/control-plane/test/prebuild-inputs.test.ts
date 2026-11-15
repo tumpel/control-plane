@@ -84,6 +84,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
       { path: ".devcontainer/scripts/setup.sh", blobSha: "b5" },
     ],
     configSource: "RepositoryFile",
+    defaultCommands: [],
     defaultBranch: "trunk",
     headSha: HEAD,
   });
@@ -102,7 +103,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
   );
 });
 
-test("a repository without a devcontainer.json builds with the default config, read from the manifests it detects", async () => {
+test("a repository without a devcontainer.json builds with the default config, which runs npm ci for an npm lockfile and reads package.json", async () => {
   const bare = await readInputs(
     github({ [ROOT]: [{ path: "README.md", type: "blob", sha: "b3" }] }).fetcher,
     "https://api.github.com",
@@ -110,12 +111,22 @@ test("a repository without a devcontainer.json builds with the default config, r
     "t",
     AT_BRANCH,
   );
-  assert.deepEqual(bare, { kind: "Read", files: [], configSource: "Default", defaultBranch: "trunk", headSha: HEAD });
-  const python = await readInputs(
+  assert.deepEqual(bare, {
+    kind: "Read",
+    files: [],
+    configSource: "Default",
+    defaultCommands: [],
+    defaultBranch: "trunk",
+    headSha: HEAD,
+  });
+  const npm = await readInputs(
     github({
       [ROOT]: [
         { path: ".devcontainer", type: "tree", sha: "t1" },
-        { path: "requirements.txt", type: "blob", sha: "b4" },
+        { path: "package.json", type: "blob", sha: "b4" },
+        { path: "package-lock.json", type: "blob", sha: "b6" },
+        { path: "requirements.txt", type: "blob", sha: "b7" },
+        { path: "Cargo.toml", type: "blob", sha: "b8" },
       ],
       t1: [{ path: "Dockerfile", type: "blob", sha: "b1" }],
     }).fetcher,
@@ -124,11 +135,13 @@ test("a repository without a devcontainer.json builds with the default config, r
     "t",
     AT_BRANCH,
   );
-  assert.equal(python.kind === "Read" ? python.configSource : python.kind, "Default");
-  assert.deepEqual(python.kind === "Read" ? python.files.map((file) => file.path) : [], [
-    "requirements.txt",
-    ".devcontainer/Dockerfile",
-  ]);
+  assert.ok(npm.kind === "Read");
+  assert.equal(npm.configSource, "Default");
+  assert.deepEqual(npm.defaultCommands, ["npm ci"]);
+  assert.deepEqual(
+    npm.files.map((file) => file.path),
+    ["package.json", "package-lock.json", ".devcontainer/Dockerfile"],
+  );
 });
 
 test("a tree GitHub refuses reads Unreadable", async () => {

@@ -23,7 +23,11 @@ export const LOCKFILES = [
   "pubspec.lock",
   "flake.lock",
 ];
-export const MANIFESTS = ["Cargo.toml", "go.mod", "requirements.txt", "pyproject.toml"];
+export const MANIFESTS = ["package.json"];
+const DEFAULT_INSTALLS: [string, string][] = [
+  ["package-lock.json", "npm ci"],
+  ["npm-shrinkwrap.json", "npm ci"],
+];
 const DEVCONTAINER_CONFIGS = [`${DEVCONTAINER_DIRECTORY}/devcontainer.json`, DEVCONTAINER_FILE];
 
 export type ConfigSource = z.infer<typeof PrebuildConfigSourceSchema>;
@@ -36,7 +40,14 @@ export interface InputFile {
 }
 
 export type Inputs =
-  | { kind: "Read"; files: InputFile[]; configSource: ConfigSource; defaultBranch: string; headSha: string }
+  | {
+      kind: "Read";
+      files: InputFile[];
+      configSource: ConfigSource;
+      defaultCommands: string[];
+      defaultBranch: string;
+      headSha: string;
+    }
   | { kind: "Unreadable"; detail: string };
 
 export type DefaultBranch = { kind: "Branch"; branch: string } | { kind: "Unreadable"; detail: string };
@@ -133,5 +144,7 @@ export const readInputs = async (
     }
   }
   const configSource = files.some((file) => DEVCONTAINER_CONFIGS.includes(file.path)) ? "RepositoryFile" : "Default";
-  return { kind: "Read", files, configSource, defaultBranch: at.branch, headSha };
+  const install = DEFAULT_INSTALLS.find(([lockfile]) => files.some((file) => file.path === lockfile));
+  const defaultCommands = configSource === "Default" && install !== undefined ? [install[1]] : [];
+  return { kind: "Read", files, configSource, defaultCommands, defaultBranch: at.branch, headSha };
 };

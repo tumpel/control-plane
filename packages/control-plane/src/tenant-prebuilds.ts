@@ -125,6 +125,7 @@ export interface PrebuildCommit {
   personaId: string;
   key: PrebuildKey;
   configSource: ConfigSource;
+  defaultCommands: string[];
   defaultBranch: string;
   headSha: string;
   rootfsKey: string;
@@ -183,6 +184,7 @@ export interface PrebuildStartRecord {
   personaId: string;
   key: PrebuildKey;
   configSource: ConfigSource;
+  defaultCommands: string[];
   target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
@@ -252,6 +254,7 @@ type PrebuildRow = {
   guest_image_digest: string;
   provider: string;
   config_source: string;
+  default_commands: string;
   state: string;
   started_at: string;
   log_url: string;
@@ -275,7 +278,7 @@ type FailureRow = {
 };
 
 const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, provider, config_source,
-  state, started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
+  default_commands, state, started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
   prebuild_layers.layer_size_bytes, prebuild_layers.finished_at AS layer_finished_at,
   prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at,
   prebuild_uploads.layer_digest AS upload_layer_digest, prebuild_uploads.layer_size_bytes AS upload_layer_size_bytes
@@ -317,6 +320,7 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
     guestImageDigest: row.guest_image_digest,
     provider: row.provider,
     configSource: row.config_source,
+    defaultCommands: JSON.parse(row.default_commands),
     status: statusOf(row),
     startedAt: row.started_at,
     logUrl: row.log_url,
@@ -376,8 +380,8 @@ export class TenantPrebuilds extends TenantSessions {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-        provider, config_source, state, started_at, log_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'GitHubActions', ?, 'Dispatched', ?, ?, ?, ?)`,
+        provider, config_source, default_commands, state, started_at, log_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'GitHubActions', ?, ?, 'Dispatched', ?, ?, ?, ?)`,
         prebuildId,
         commit.personaId,
         commit.key.repository,
@@ -385,6 +389,7 @@ export class TenantPrebuilds extends TenantSessions {
         commit.key.inputDigest,
         commit.key.guestImageDigest,
         commit.configSource,
+        JSON.stringify(commit.defaultCommands),
         new Date(now).toISOString(),
         commit.logUrl,
         now,
@@ -700,6 +705,7 @@ export class TenantPrebuilds extends TenantSessions {
           personaId: start.personaId,
           key,
           configSource: inputs.configSource,
+          defaultCommands: inputs.defaultCommands,
           defaultBranch: branch,
           headSha: inputs.headSha,
           rootfsKey: start.rootfsKey,
@@ -1087,8 +1093,8 @@ export class TenantPrebuilds extends TenantSessions {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
           `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-          provider, config_source, state, started_at, log_url, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', ?, 'Building', ?, ?, ?, ?)`,
+          provider, config_source, default_commands, state, started_at, log_url, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', ?, ?, 'Building', ?, ?, ?, ?)`,
           prebuildId,
           start.personaId,
           start.key.repository,
@@ -1096,6 +1102,7 @@ export class TenantPrebuilds extends TenantSessions {
           start.key.inputDigest,
           start.key.guestImageDigest,
           start.configSource,
+          JSON.stringify(start.defaultCommands),
           new Date(now).toISOString(),
           pipelineLogUrl(project.projectSlug, answer.number),
           now,
