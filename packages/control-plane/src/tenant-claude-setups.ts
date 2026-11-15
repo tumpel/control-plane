@@ -166,6 +166,21 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return row === null ? null : toClaudeSetup(tenantId, row);
   }
 
+  async listClaudeSetups(tenantId: string, secretSetId: string, now: number): Promise<ClaudeSetup[]> {
+    const ids = this.ctx.storage.sql
+      .exec<{ claude_setup_id: string }>(
+        "SELECT claude_setup_id FROM claude_setups WHERE secret_set_id = ? ORDER BY created_at DESC, claude_setup_id",
+        secretSetId,
+      )
+      .toArray();
+    const setups: ClaudeSetup[] = [];
+    for (const { claude_setup_id: claudeSetupId } of ids) {
+      const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
+      if (row !== null) setups.push(toClaudeSetup(tenantId, row));
+    }
+    return setups;
+  }
+
   async submitClaudeSetupCode(
     tenantId: string,
     claudeSetupId: string,

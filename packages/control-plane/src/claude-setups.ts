@@ -1,12 +1,13 @@
 import {
   ClaudeSetupCodeSubmitSchema,
+  ClaudeSetupListQuerySchema,
   ClaudeSetupPathSchema,
   ClaudeSetupStartSchema,
   ClaudeSetupTokenWriteSchema,
 } from "@tumpel/api/schemas";
 import { pinnedEntry } from "./harness-catalog";
 import { listHosts } from "./hosts";
-import { json, parseBody, problem } from "./http";
+import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { placeableFix, why } from "./sessions";
@@ -98,6 +99,20 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
   });
 };
 
+const list = async (url: URL, env: Env, caller: Caller): Promise<Response> => {
+  const query = ClaudeSetupListQuerySchema.safeParse(Object.fromEntries(url.searchParams));
+  if (!query.success) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Invalid query",
+      detail: `claudeSetups.list refused the query: ${issues(query.error)}`,
+      fix: "Name the secret set, such as ?secretSetId=<secretSetId> from tumpel secret-set list",
+    });
+  }
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  return json(await tenant.listClaudeSetups(caller.tenantId, query.data.secretSetId, Date.now()));
+};
+
 const writeToken = async (request: Request, env: Env, claudeSetupId: string): Promise<Response> => {
   const authorization = request.headers.get("authorization") ?? "";
   const credential = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
@@ -135,10 +150,10 @@ export const handleClaudeSetups = async (
 ): Promise<Response | null> => {
   const posting = request.method === "POST";
   if (url.pathname === "/v1/claude-setups") {
-    if (!posting) return null;
+    if (!posting && request.method !== "GET") return null;
     const caller = await authenticate(request, env);
     if (caller instanceof Response) return caller;
-    return start(request, url, env, caller);
+    return posting ? start(request, url, env, caller) : list(url, env, caller);
   }
   const matched = SETUP_PATH.exec(url.pathname);
   if (matched === null) return null;
