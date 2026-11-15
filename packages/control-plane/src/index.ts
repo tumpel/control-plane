@@ -166,6 +166,7 @@ export interface Env extends SignerEnv {
   SECRETS_KEK?: string;
   ISSUER_HOSTNAME: string;
   DASHBOARD_ORIGIN: string;
+  GITHUB_API_ORIGIN: string;
 }
 
 const DEVICE_PAGE = "/device";

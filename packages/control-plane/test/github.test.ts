@@ -146,7 +146,7 @@ test("an installation token is minted for the session's repository with a JWT th
   const installation = { installationId: 7, accountLogin: "Octo" };
   const { fetcher, calls } = spiedFetch(201, { token: "ghs_minted", expires_at: "2026-11-15T11:00:00Z" });
 
-  const minted = await mintInstallationToken(fetcher, app, installation, "https://github.com/octo/widgets.git", now);
+  const minted = await mintInstallationToken(fetcher, app, installation, { owner: "octo", name: "widgets" }, now);
   assert.deepEqual(minted, { kind: "Minted", token: "ghs_minted", expiresAt: "2026-11-15T11:00:00Z" });
   assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
   assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { repositories: ["widgets"] });
@@ -178,7 +178,7 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     spiedFetch(422, { message: "There is at least one repository that does not exist or is not accessible" }).fetcher,
     app,
     installation,
-    "https://github.com/octo/private",
+    { owner: "octo", name: "private" },
     now,
   );
   assert.equal(notCovered.kind, "Outside");
@@ -189,19 +189,16 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     spiedFetch(503, { message: "Service Unavailable" }).fetcher,
     app,
     installation,
-    "https://github.com/octo/private",
+    { owner: "octo", name: "private" },
     now,
   );
   assert.equal(down.kind, "Refused");
   assert.doesNotMatch(down.kind === "Refused" ? down.detail : "", /add octo\/private/);
 
   const elsewhere = spiedFetch(201, {});
-  const foreign = await mintInstallationToken(elsewhere.fetcher, app, installation, "https://github.com/acme/x", now);
+  const foreign = await mintInstallationToken(elsewhere.fetcher, app, installation, { owner: "acme", name: "x" }, now);
   assert.equal(foreign.kind, "Outside");
   assert.equal(elsewhere.calls.length, 0);
-
-  const notGitHub = await mintInstallationToken(elsewhere.fetcher, app, installation, "https://gitlab.com/octo/x", now);
-  assert.deepEqual(notGitHub, { kind: "NoToken" });
 });
 
 test("a repository outside the installation uses the secret set's GITHUB_TOKEN, and is refused without one", () => {
@@ -333,27 +330,24 @@ test("the installation's repositories are read page by page until total_count, a
   assert.match(refused.detail, /GET https:\/\/api.github.com\/installation\/repositories with 401: Bad credentials/);
 });
 
-test("a repository's open issues are read page by page, newest update first, without pull requests", async () => {
-  const first = Array.from({ length: 100 }, (_, index) => gitHubIssue(index + 1, index % 10 === 0));
-  const { fetcher, calls } = answering([
-    [200, first],
-    [200, [gitHubIssue(101, false), gitHubIssue(102, true)]],
-  ]);
-  const listed = await listOpenIssues(fetcher, "ghs_repo", { owner: "octo", name: "widgets" });
+test("a repository's open issues are one page of the 100 last updated, without pull requests", async () => {
+  const page = Array.from({ length: 100 }, (_, index) => gitHubIssue(index + 1, index % 10 === 0));
+  const { fetcher, calls } = answering([[200, page]]);
+  const listed = await listOpenIssues(fetcher, "https://api.github.com", "ghs_repo", {
+    owner: "octo",
+    name: "widgets",
+  });
   assert.ok(listed.ok);
   assert.deepEqual(
     calls.map((call) => call.url),
-    [1, 2].map(
-      (page) =>
-        `https://api.github.com/repos/octo/widgets/issues?state=open&sort=updated&direction=desc&per_page=100&page=${page}`,
-    ),
+    ["https://api.github.com/repos/octo/widgets/issues?state=open&sort=updated&direction=desc&per_page=100"],
   );
-  assert.equal(listed.value.length, 91);
+  assert.equal(listed.value.length, 90);
   assert.ok(listed.value.every((issue) => issue.htmlUrl.includes("/issues/")));
   assert.deepEqual(GitHubIssueSchema.parse(listed.value.at(-1)), {
-    issueNumber: 101,
-    title: "issue 101",
-    htmlUrl: "https://github.com/octo/widgets/issues/101",
+    issueNumber: 100,
+    title: "issue 100",
+    htmlUrl: "https://github.com/octo/widgets/issues/100",
     labels: ["bug"],
     updatedAt: "2026-11-14T09:30:00Z",
   });

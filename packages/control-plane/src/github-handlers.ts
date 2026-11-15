@@ -161,13 +161,9 @@ const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, n
   }
   const access = await installationAccess(caller, url, env);
   if (!access.ok) return access.response;
-  const target = path.data;
-  const repository = `${GITHUB_WEB}/${target.owner}/${target.name}`;
-  const minted = await mintInstallationToken(fetcher, access.app, access.installation, repository, Date.now());
-  if (minted.kind === "NoToken")
-    throw new Error(`${repository} passed the path schema and is no GitHub repository URL`);
+  const minted = await mintInstallationToken(fetcher, access.app, access.installation, path.data, Date.now());
   if (minted.kind !== "Minted") return unreadable(minted.detail);
-  return listed(await listOpenIssues(fetcher, minted.token, target), GitHubIssueSchema);
+  return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, path.data), GitHubIssueSchema);
 };
 
 export const handleGitHubConnection = async (

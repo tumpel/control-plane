@@ -393,8 +393,7 @@ export class TenantPrebuilds extends TenantSessions {
     const variables = (await this.members(persona.secretSetId)).flatMap((member) =>
       member.kind === "Variable" ? [{ name: member.name, value: member.value }] : [],
     );
-    const url = `https://github.com/${repository.owner}/${repository.name}`;
-    const credential = repositoryCredential(variables, await this.repositoryToken(tenantId, url, now));
+    const credential = repositoryCredential(variables, await this.repositoryToken(tenantId, repository, now));
     if (credential.kind === "Refused") return credential;
     const token = credential.variables.find((variable) => variable.name === REPOSITORY_TOKEN)?.value;
     if (token === undefined) {
