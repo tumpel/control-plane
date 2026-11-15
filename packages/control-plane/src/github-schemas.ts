@@ -1,3 +1,8 @@
+import {
+  GitHubAccountKindSchema,
+  GitHubAccountRoleSchema,
+  GitHubAccountUnavailableReasonSchema,
+} from "@tumpel/api/schemas";
 import { z } from "zod";
 
 const GitHubIdSchema = z.int().min(1);
@@ -19,6 +24,7 @@ export const GitHubInstallStateSchema = z.object({
   email: EmailSchema,
   expiresAt: OffsetDateTimeSchema,
   returnUrl: z.string().url().optional(),
+  gitHubAccountId: GitHubIdSchema.optional(),
 });
 
 export const GitHubInstallerIdentityStateSchema = z.object({
@@ -139,6 +145,42 @@ export const GitHubUserSchema = z.object({
 export const GitHubUserInstallationsSchema = z.object({
   installations: z.array(z.object({ id: GitHubIdSchema }).loose()),
 });
+
+export const GitHubReachableInstallationSchema = z.object({
+  id: GitHubIdSchema,
+  account: z.object({ id: GitHubIdSchema, login: GitHubLoginSchema, type: z.enum(["User", "Organization"]) }),
+});
+
+export const GitHubReachableInstallationsSchema = z.object({
+  installations: z.array(z.unknown()),
+});
+
+export const GitHubOrganizationMembershipsSchema = z.array(
+  z.object({
+    role: z.string(),
+    organization: z.object({ id: GitHubIdSchema, login: GitHubLoginSchema }),
+  }),
+);
+
+const StoredAccountFields = {
+  gitHubAccountId: GitHubIdSchema,
+  login: GitHubLoginSchema,
+  kind: GitHubAccountKindSchema,
+  role: GitHubAccountRoleSchema,
+};
+
+export const StoredGitHubAccountSchema = z.discriminatedUnion("standing", [
+  z.object({ ...StoredAccountFields, standing: z.literal("Open") }),
+  z.object({ ...StoredAccountFields, standing: z.literal("Requested") }),
+  z.object({
+    ...StoredAccountFields,
+    standing: z.literal("Unavailable"),
+    installationId: GitHubIdSchema,
+    reason: GitHubAccountUnavailableReasonSchema,
+  }),
+]);
+
+export const StoredGitHubAccountsSchema = z.array(StoredGitHubAccountSchema);
 
 export const GitHubInstallationTokenSchema = z.object({
   token: z.string(),

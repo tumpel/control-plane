@@ -9,6 +9,8 @@ import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
+import type { StoredGitHubAccount } from "./github-accounts.ts";
+import { StoredGitHubAccountsSchema } from "./github-schemas.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
@@ -26,6 +28,8 @@ export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
+
+export type StoredGitHubAccounts = { accounts: StoredGitHubAccount[]; refreshedAt: number };
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
@@ -541,5 +545,35 @@ export class Tenant extends TenantCircleCIAuthorizations {
 
   unpin(harness: string): boolean {
     return this.ctx.storage.sql.exec("DELETE FROM harness_pins WHERE harness = ?", harness).rowsWritten > 0;
+  }
+
+  gitHubAccounts(): StoredGitHubAccounts | null {
+    const [row] = this.ctx.storage.sql
+      .exec<{ accounts: string; refreshed_at: number }>(
+        "SELECT accounts, refreshed_at FROM github_account_lists WHERE list_slot = 1",
+      )
+      .toArray();
+    if (row === undefined) return null;
+    return { accounts: StoredGitHubAccountsSchema.parse(JSON.parse(row.accounts)), refreshedAt: row.refreshed_at };
+  }
+
+  storeGitHubAccounts(accounts: StoredGitHubAccount[], now: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO github_account_lists (list_slot, accounts, refreshed_at) VALUES (1, ?, ?)
+      ON CONFLICT (list_slot) DO UPDATE SET accounts = excluded.accounts, refreshed_at = excluded.refreshed_at`,
+      JSON.stringify(StoredGitHubAccountsSchema.parse(accounts)),
+      now,
+    );
+  }
+
+  markGitHubAccountRequested(gitHubAccountId: number): void {
+    const stored = this.gitHubAccounts();
+    if (stored === null) return;
+    const accounts = stored.accounts.map((account) =>
+      account.gitHubAccountId === gitHubAccountId && account.standing === "Open"
+        ? { ...account, standing: "Requested" as const }
+        : account,
+    );
+    this.storeGitHubAccounts(accounts, stored.refreshedAt);
   }
 }

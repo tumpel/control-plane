@@ -487,14 +487,21 @@ const CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const CSRF_COOKIE = "__Host-tumpel_connect";
 const VICTIM = "victim@example.test";
 const MALLORY = "mallory@example.test";
-const ORG_INSTALLATION = { id: 88, account: { login: "victimorg", type: "Organization" } };
-const MALLORY_INSTALLATION = { id: 77, account: { login: "mallory", type: "User" } };
-const VICTIM_INSTALLATION = { id: 66, account: { login: "victim", type: "User" } };
-const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[] }> = {
-  ghu_victim: { id: 1, login: "victim", installations: [ORG_INSTALLATION, VICTIM_INSTALLATION] },
-  ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION] },
-  ghu_mallory: { id: 3, login: "mallory", installations: [MALLORY_INSTALLATION] },
-};
+const ORG_INSTALLATION = { id: 88, account: { id: 500, login: "victimorg", type: "Organization" } };
+const MALLORY_INSTALLATION = { id: 77, account: { id: 3, login: "mallory", type: "User" } };
+const VICTIM_INSTALLATION = { id: 66, account: { id: 1, login: "victim", type: "User" } };
+const VICTIM_ORG = { role: "admin", state: "active", organization: { id: 500, login: "victimorg" } };
+const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[]; organizations: unknown[] }> =
+  {
+    ghu_victim: {
+      id: 1,
+      login: "victim",
+      installations: [ORG_INSTALLATION, VICTIM_INSTALLATION],
+      organizations: [VICTIM_ORG],
+    },
+    ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION], organizations: [VICTIM_ORG] },
+    ghu_mallory: { id: 3, login: "mallory", installations: [MALLORY_INSTALLATION], organizations: [] },
+  };
 
 interface Database {
   prepare(query: string): { bind(...values: unknown[]): { first<T>(): Promise<T | null> } };
@@ -551,6 +558,7 @@ const gitHubStandIn = async (request: IncomingMessage, response: ServerResponse)
   if (path.startsWith("/user/installations")) {
     return answer(response, 200, { total_count: person.installations.length, installations: person.installations });
   }
+  if (path.startsWith("/user/memberships/orgs")) return answer(response, 200, person.organizations);
   return answer(response, 404, { message: "Not Found" });
 };
 
@@ -752,6 +760,20 @@ const delivered = async (installation: unknown, senderId: number): Promise<numbe
   });
   return answered.status;
 };
+
+test("a refresh returns only to a page on the dashboard's origin", async () => {
+  const headers = await bearerFor(VICTIM, victimTenant);
+  const elsewhere = await call(`/v1/github-connection/refresh?${form({ returnUrl: "https://evil.test/t/x" })}`, {
+    method: "POST",
+    headers,
+  });
+  assert.equal(elsewhere.status, 400);
+  const dashboard = await call(
+    `/v1/github-connection/refresh?${form({ returnUrl: "https://app.tumpel.test/t/x/connections" })}`,
+    { method: "POST", headers },
+  );
+  assert.equal(dashboard.status, 200);
+});
 
 test("an organization install connects only for the GitHub account its installation notice names, whichever arrives first", async () => {
   const mallorys = await startedState(MALLORY, malloryTenant);
