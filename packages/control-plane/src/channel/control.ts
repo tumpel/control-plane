@@ -7,6 +7,7 @@ import {
   type Hello,
   HostEnvelopeSchema,
   type HostMessage,
+  type HostUsage,
   heartbeat,
   helloBytes,
   type LedgerStore,
@@ -39,7 +40,7 @@ export interface ControlContext {
 export type ControlEvent =
   | { kind: "None" }
   | { kind: "Welcomed" }
-  | { kind: "Heartbeat" }
+  | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "Message"; message: HostMessage }
   | { kind: "Closed"; code: number; reason: string };
 
@@ -140,7 +141,7 @@ export const receive = async (
   if (envelope.type === "Hello") {
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
-  if (envelope.type === "Heartbeat") return { connection, event: { kind: "Heartbeat" } };
+  if (envelope.type === "Heartbeat") return { connection, event: { kind: "Heartbeat", usage: envelope.usage } };
   const outcome = accept(await context.ledger.load(), envelope);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {

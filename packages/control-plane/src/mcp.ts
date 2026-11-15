@@ -122,14 +122,14 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts",
     NO_ARGUMENTS,
-    "List the tenant's hosts with their presence. Returns the Host[] of GET /v1/hosts; state is Enrolled, Online, Offline or Revoked.",
+    "List the tenant's hosts with their presence and last reported usage. Returns the Host[] of GET /v1/hosts; state is Enrolled, Online, Offline or Revoked, and usage holds boxCapacity, boxesRunning, boxesWarm, cpuCount, loadAverage, memoryTotalMib, memoryAvailableMib, architecture and heartbeatAt.",
   ),
   rest(
     "tumpel_host_get",
     "GET",
     "/v1/hosts/{hostId}",
     HostPathSchema,
-    "Read one host with its presence and labels. Returns the Host of GET /v1/hosts/{hostId}.",
+    "Read one host with its presence, labels and last reported usage. Returns the Host of GET /v1/hosts/{hostId}.",
   ),
   rest(
     "tumpel_host_revoke",
@@ -255,7 +255,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema,
-    "Start a session on an online host of the tenant with its first prompt; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
+    "Start a session with its first prompt on the online host of the tenant with the most free box slots, then the most memory available; refused PoolExhausted when every host runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
   ),
   rest(
     "tumpel_session_list",

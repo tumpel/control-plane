@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  ChannelProtocol,
   CredentialHandoverSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
@@ -150,7 +151,24 @@ class HostSide {
   private constructor(socket: WebSocket) {
     this.socket = socket;
     socket.addEventListener("message", (event) => this.receive(String(event.data)));
-    this.heartbeat = setInterval(() => this.raw({ type: "Heartbeat", sentAt: new Date().toISOString() }), 10_000);
+    this.heartbeat = setInterval(() => this.beat(), 10_000);
+  }
+
+  private beat(): void {
+    this.raw({
+      type: "Heartbeat",
+      sentAt: new Date().toISOString(),
+      usage: {
+        architecture: "Amd64",
+        boxCapacity: 8,
+        boxesRunning: 0,
+        boxesWarm: 0,
+        cpuCount: 4,
+        loadAverage: 0.25,
+        memoryTotalMib: 8192,
+        memoryAvailableMib: 6144,
+      },
+    });
   }
 
   static async connect(id: string, key: KeyObject): Promise<HostSide> {
@@ -165,10 +183,11 @@ class HostSide {
     side.raw({
       type: "Hello",
       hostId: id,
-      protocolVersion: 2,
+      protocolVersion: ChannelProtocol.Version,
       supervisorVersion: "0.1.0",
       signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
     });
+    side.beat();
     return side;
   }
 
@@ -383,9 +402,9 @@ before(async () => {
   hostId = enrolled.id;
   host = await HostSide.connect(hostId, enrolled.key);
   await eventually(
-    "the host reading Online",
+    "the host reading Online with its usage",
     () => getJson(`/v1/hosts/${hostId}`, HostSchema),
-    (read) => read.state === "Online",
+    (read) => read.state === "Online" && read.usage?.boxCapacity === 8,
   );
 });
 
