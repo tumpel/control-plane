@@ -12,9 +12,10 @@ import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
+import { storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
 import { TenantClaudeSetups } from "./tenant-claude-setups";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
-import { memberRows, sealContext, toKey } from "./tenant-sessions";
+import { memberRows, sealContext } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
 export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & {
@@ -30,15 +31,21 @@ export type Written<T> = { ok: true; value: T } | { ok: false; constraint: strin
 
 export type SecretSetDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; personas: string[] };
 
+export type SecretSetsRead = { kind: "Read"; secretSets: SecretSet[] } | UnreadableSecretSet;
+
+export type SecretSetRead = { kind: "Found"; secretSet: SecretSet } | { kind: "NotFound" } | UnreadableSecretSet;
+
 export type SecretMemberSet =
   | { kind: "Set"; secretSet: SecretSet }
   | { kind: "SetNotFound" }
-  | { kind: "Conflict"; constraint: string };
+  | { kind: "Conflict"; constraint: string }
+  | UnreadableSecretSet;
 
 export type SecretMemberRemoved =
   | { kind: "Removed"; secretSet: SecretSet }
   | { kind: "SetNotFound" }
-  | { kind: "MemberNotFound" };
+  | { kind: "MemberNotFound" }
+  | UnreadableSecretSet;
 
 export type PersonaDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; sessions: string[] };
 
@@ -296,32 +303,55 @@ export class Tenant extends TenantClaudeSetups {
     return deleted ? { kind: "Deleted" } : { kind: "NotFound" };
   }
 
-  private secretSetsWhere(tenantId: string, where: string, ...bindings: string[]): SecretSet[] {
+  private secretSetsWhere(tenantId: string, where: string, ...bindings: string[]): SecretSetsRead {
     const sql = this.ctx.storage.sql;
-    return sql
+    const rows = sql
       .exec<SecretSetRow>(
         `SELECT secret_set_id, name, created_at, updated_at FROM secret_sets${where} ORDER BY created_at, secret_set_id`,
         ...bindings,
       )
-      .toArray()
-      .map((row) =>
+      .toArray();
+    const secretSets: SecretSet[] = [];
+    for (const row of rows) {
+      const stored = storedKeys(memberRows(sql, row.secret_set_id));
+      if (stored.kind === "Unreadable") {
+        return {
+          kind: "Unreadable",
+          secretSetId: row.secret_set_id,
+          name: row.name,
+          member: stored.name,
+          detail: stored.detail,
+        };
+      }
+      secretSets.push(
         SecretSetSchema.parse({
           secretSetId: row.secret_set_id,
           tenantId,
           name: row.name,
-          keys: memberRows(sql, row.secret_set_id).map(toKey),
+          keys: stored.keys,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         }),
       );
+    }
+    return { kind: "Read", secretSets };
   }
 
-  listSecretSets(tenantId: string): SecretSet[] {
+  listSecretSets(tenantId: string): SecretSetsRead {
     return this.secretSetsWhere(tenantId, "");
   }
 
-  getSecretSet(tenantId: string, secretSetId: string): SecretSet | null {
-    return this.secretSetsWhere(tenantId, " WHERE secret_set_id = ?", secretSetId)[0] ?? null;
+  getSecretSet(tenantId: string, secretSetId: string): SecretSetRead {
+    const read = this.secretSetsWhere(tenantId, " WHERE secret_set_id = ?", secretSetId);
+    if (read.kind === "Unreadable") return read;
+    const [secretSet] = read.secretSets;
+    return secretSet === undefined ? { kind: "NotFound" } : { kind: "Found", secretSet };
+  }
+
+  private rewrittenSecretSet(tenantId: string, secretSetId: string): SecretSet {
+    const read = this.getSecretSet(tenantId, secretSetId);
+    if (read.kind !== "Found") throw new Error(`secret set ${secretSetId} was written and then read back ${read.kind}`);
+    return read.secretSet;
   }
 
   private async sealMembers(secretSetId: string, secrets: readonly SecretMember[]): Promise<SealedMember[]> {
@@ -405,9 +435,7 @@ export class Tenant extends TenantClaudeSetups {
       }),
     );
     if (!written.ok) return written;
-    const created = this.getSecretSet(tenantId, secretSetId);
-    if (created === null) throw new Error(`secret set ${secretSetId} was created and then not found`);
-    return { ok: true, value: created };
+    return { ok: true, value: this.rewrittenSecretSet(tenantId, secretSetId) };
   }
 
   async updateSecretSet(
@@ -432,7 +460,7 @@ export class Tenant extends TenantClaudeSetups {
       }),
     );
     if (!written.ok) return written;
-    return { ok: true, value: written.value ? this.getSecretSet(tenantId, secretSetId) : null };
+    return { ok: true, value: written.value ? this.rewrittenSecretSet(tenantId, secretSetId) : null };
   }
 
   async setSecretMember(
@@ -454,8 +482,9 @@ export class Tenant extends TenantClaudeSetups {
       }),
     );
     if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
-    const secretSet = this.getSecretSet(tenantId, secretSetId);
-    return secretSet === null ? { kind: "SetNotFound" } : { kind: "Set", secretSet };
+    const read = this.getSecretSet(tenantId, secretSetId);
+    if (read.kind === "Found") return { kind: "Set", secretSet: read.secretSet };
+    return read.kind === "NotFound" ? { kind: "SetNotFound" } : read;
   }
 
   removeSecretMember(tenantId: string, secretSetId: string, name: string, now: number): SecretMemberRemoved {
@@ -467,9 +496,10 @@ export class Tenant extends TenantClaudeSetups {
       sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
       return true;
     });
-    const secretSet = this.getSecretSet(tenantId, secretSetId);
-    if (secretSet === null) return { kind: "SetNotFound" };
-    return removed ? { kind: "Removed", secretSet } : { kind: "MemberNotFound" };
+    const read = this.getSecretSet(tenantId, secretSetId);
+    if (read.kind === "NotFound") return { kind: "SetNotFound" };
+    if (read.kind === "Unreadable") return read;
+    return removed ? { kind: "Removed", secretSet: read.secretSet } : { kind: "MemberNotFound" };
   }
 
   deleteSecretSet(secretSetId: string): SecretSetDeleted {

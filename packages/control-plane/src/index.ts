@@ -169,6 +169,7 @@ import { handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { cliKey, currentRelease, imagesFor, type ReleaseManifest, supervisorKey } from "./releases";
+import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
 import type { PersonaWrite, Tenant } from "./tenant";
@@ -411,6 +412,9 @@ const conflict = (operation: string, name: string, constraint: string): Response
   });
 };
 
+const unreadable = (operation: string, read: UnreadableSecretSet): Response =>
+  problem(409, unreadableSecretSet(operation, read));
+
 const unknownSecretSet = (operation: string, secretSetId: string): Response =>
   problem(422, {
     code: "NotFound",
@@ -430,10 +434,10 @@ const personaWrite = async (
   operation: string,
 ): Promise<PersonaWritten> => {
   const tenant = env.TENANT.getByName(caller.tenantId);
-  const secretSet = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
-  if (secretSet === null) {
-    return { ok: false, response: unknownSecretSet(operation, body.secretSetId) };
-  }
+  const read = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
+  if (read.kind === "NotFound") return { ok: false, response: unknownSecretSet(operation, body.secretSetId) };
+  if (read.kind === "Unreadable") return { ok: false, response: unreadable(operation, read) };
+  const { secretSet } = read;
   const entry = pinnedEntry(await tenant.listPins(), body.harness);
   if (entry === undefined) {
     return {
@@ -542,8 +546,9 @@ const handlePersonaFileUpload = async (request: Request, _url: URL, env: Env): P
 const handleSecretSetsList = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const sets = await env.TENANT.getByName(caller.tenantId).listSecretSets(caller.tenantId);
-  return json(SecretSetSchema.array().parse(sets));
+  const read = await env.TENANT.getByName(caller.tenantId).listSecretSets(caller.tenantId);
+  if (read.kind === "Unreadable") return unreadable("secretSets.list", read);
+  return json(SecretSetSchema.array().parse(read.secretSets));
 };
 
 type TokenUserRead = { ok: true; user: GitHubUser | null } | { ok: false; response: Response };
@@ -617,8 +622,10 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
     if (!updated.ok) return conflict("secretSets.update", body.value.name, updated.constraint);
     return updated.value === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(updated.value));
   }
-  const secretSet = await tenant.getSecretSet(caller.tenantId, secretSetId);
-  return secretSet === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(secretSet));
+  const read = await tenant.getSecretSet(caller.tenantId, secretSetId);
+  if (read.kind === "NotFound") return secretSetNotFound(secretSetId);
+  if (read.kind === "Unreadable") return unreadable("secretSets.get", read);
+  return json(SecretSetSchema.parse(read.secretSet));
 };
 
 const SECRET_MEMBERS_PATH = /^\/v1\/secret-sets\/([^/]+)\/members(?:\/([^/]+))?$/;
@@ -644,6 +651,7 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
     const written = await tenant.setSecretMember(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
     if (written.kind === "Conflict") return conflict("secretSets.setMember", secretSetId, written.constraint);
     if (written.kind === "SetNotFound") return secretSetNotFound(secretSetId);
+    if (written.kind === "Unreadable") return unreadable("secretSets.setMember", written);
     return json(SecretSetSchema.parse(written.secretSet));
   }
   const name = decodeURIComponent(rawName ?? "");
@@ -653,6 +661,7 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
     : { kind: "MemberNotFound" as const };
   if (removed.kind === "Removed") return json(SecretSetSchema.parse(removed.secretSet));
   if (removed.kind === "SetNotFound") return secretSetNotFound(secretSetId);
+  if (removed.kind === "Unreadable") return unreadable("secretSets.removeMember", removed);
   return problem(404, {
     code: "NotFound",
     title: "No such member",

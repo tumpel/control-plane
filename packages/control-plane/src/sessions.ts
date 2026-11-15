@@ -17,6 +17,7 @@ import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import type { Unplaceable } from "./placement";
+import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings";
 import type {
   CredentialHandover,
@@ -215,10 +216,12 @@ const prepareStart = async (
       fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists, with tumpel config apply",
     });
   }
-  const secretSet = await tenant.getSecretSet(caller.tenantId, persona.secretSetId);
-  if (secretSet === null) {
+  const read = await tenant.getSecretSet(caller.tenantId, persona.secretSetId);
+  if (read.kind === "NotFound") {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
+  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet("sessions.start", read));
+  const { secretSet } = read;
   const credential = checkCredential(entry, secretSet.keys, now);
   if (credential.kind !== "Usable") {
     return credentialRefused(
