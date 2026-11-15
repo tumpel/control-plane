@@ -73,6 +73,8 @@ const liveHost = (hostId: string, state: string, labels: string[]) =>
     publicKey: "key",
     supervisorVersion: "0.1.0",
     labels,
+    supervisorUpdateStep: { state: "NotReported" },
+    supervisorUpdateFailure: { state: "NotReported" },
     createdAt: 1,
     updatedAt: 1,
   });
