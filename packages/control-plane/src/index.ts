@@ -158,7 +158,8 @@ const assertedEmail = async (request: Request, env: Env): Promise<PersonVerifica
   if (!signed.ok || signed.kind === "Person") return signed;
   return {
     ok: false,
-    reason: "a service token signs in only to approve or deny a device code; sign in to Access as a person",
+    reason:
+      "a service token signs in only to approve or deny a device code or an MCP connector; sign in to Access as a person",
   };
 };
 
@@ -826,17 +827,37 @@ const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
   return seeOther(`${url.origin}${CONSENT_PATH}?request=${requestId}`);
 };
 
-const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
-  const signed = await assertedEmail(request, env);
-  if (!signed.ok) return messagePage(401, "Sign in again", `${signed.reason}.`);
+type Consenter = { ok: true; caller: Caller; email: string } | { ok: false; response: Response };
+
+const consenter = async (request: Request, url: URL, env: Env): Promise<Consenter> => {
+  const signed = await assertedSigner(request, env);
+  if (!signed.ok) return { ok: false, response: messagePage(401, "Sign in again", `${signed.reason}.`) };
+  if (signed.kind === "ServiceToken") {
+    const caller = await decidingCaller(signed, url, env);
+    if (caller instanceof Response) return { ok: false, response: caller };
+    return { ok: true, caller, email: (await whoamiOf(env.DB, caller)).principal.email };
+  }
   const owner = await whoamiForEmail(env.DB, signed.email);
   if (owner === null) {
-    return messagePage(
-      403,
-      "No tenant",
-      `${signed.email} belongs to no tenant. Create one at ${url.origin}${DEVICE_PAGE}.`,
-    );
+    return {
+      ok: false,
+      response: messagePage(
+        403,
+        "No tenant",
+        `${signed.email} belongs to no tenant. Create one at ${url.origin}${DEVICE_PAGE}.`,
+      ),
+    };
   }
+  return {
+    ok: true,
+    caller: { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId },
+    email: signed.email,
+  };
+};
+
+const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const signed = await consenter(request, url, env);
+  if (!signed.ok) return signed.response;
   const expired = (): Response =>
     messagePage(
       404,
@@ -867,7 +888,7 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
     );
   }
   if (action !== "approve") return messagePage(400, "Bad request", "Choose Connect or Cancel.");
-  const code = await grantCode(env.DB, asked, owner.principal.principalId, Date.now());
+  const code = await grantCode(env.DB, asked, signed.caller.principalId, Date.now());
   return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
 };
 
