@@ -91,7 +91,12 @@ before(async () => {
     workers: [
       {
         configPath: "./wrangler.jsonc",
-        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, SECRETS_KEK: Buffer.alloc(32, 7).toString("base64") },
+        vars: {
+          ACCESS_ISSUER: issuer,
+          ACCESS_AUD: AUDIENCE,
+          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          DASHBOARD_ORIGIN: "https://app.tumpel.test",
+        },
       },
     ],
   });

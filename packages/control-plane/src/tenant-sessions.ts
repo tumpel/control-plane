@@ -42,8 +42,8 @@ import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
-import type { Deadline, DeadlineChanges, DeadlineName } from "./session-timer";
-import { settingsOf } from "./settings";
+import type { DeadlineChanges, DueDeadline } from "./session-timer";
+import { settingsOf, turnCredentialSeconds } from "./settings";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -1224,13 +1224,14 @@ export class TenantSessions extends DurableObject<Env> {
         session.session_id,
       )
       .toArray();
-    const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
-    const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
+    const credentialSeconds = turnCredentialSeconds(settings);
+    const snapshots = await this.downloads(stored, credentialSeconds, now);
+    const personaFiles = await this.personaFiles(tenantId, session.persona_id, credentialSeconds, now);
     return {
       kind: "Ready",
       credential: {
         credentialHandoverId: handover.credentialHandoverId,
-        expiresAt: iso(now + settings.dispatchGrantTtlSeconds * 1000),
+        expiresAt: iso(now + credentialSeconds * 1000),
         variables,
       },
       lastLineSeq: session.last_line_seq,
@@ -1489,7 +1490,7 @@ export class TenantSessions extends DurableObject<Env> {
       throw new Error(`host ${hostId} asked for the chunks of turn ${message.turnId}, which was never sent to it`);
     }
     const now = Date.now();
-    const expiresAt = offered.offered_at + settingsOf(this.env).turnClaimBudgetSeconds * 1000;
+    const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
     const seconds = Math.floor((expiresAt - now) / 1000);
     if (seconds < 1) return null;
     const packs = sql
@@ -1620,8 +1621,9 @@ export class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async deadlineReached(tenantId: string, sessionId: string, name: DeadlineName, deadline: Deadline): Promise<void> {
-    const { turnId } = deadline;
+  async deadlineReached(tenantId: string, sessionId: string, due: DueDeadline): Promise<void> {
+    const { turnId } = due.deadline;
+    const { name } = due;
     const turn = this.turnRow(turnId);
     const session = this.sessionRow(sessionId);
     if (turn === null || session === null) return;
@@ -1657,12 +1659,12 @@ export class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (name === "ImageFetch" && turn.state === "Offered") {
+    if (due.name === "ImageFetch" && turn.state === "Offered") {
       return this.failTurn(
         tenantId,
         turnId,
         "ImageFetchTimedOut",
-        `host ${session.host_id} started fetching guest image ${deadline.imageDigest} for turn ${turnId} and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
+        `host ${session.host_id} started fetching guest image ${due.deadline.imageDigest} for turn ${turnId} and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
         failedAt,
       );
     }

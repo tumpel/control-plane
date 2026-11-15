@@ -13,6 +13,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import type { z } from "zod";
 
 const AUDIENCE = "tumpel-oauth";
 const KID = "oauth-key";
@@ -32,6 +33,7 @@ let server: TestHarness;
 let origin: string;
 let issuer: string;
 
+type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
 type HarnessInit = NonNullable<Parameters<TestHarness["fetch"]>[1]>;
 type HarnessResponse = Awaited<ReturnType<TestHarness["fetch"]>>;
 
@@ -142,6 +144,11 @@ before(async () => {
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
+  await (await server.getWorker<{ DB: Database }>().getEnv()).DB.prepare(
+    "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at, first_party) VALUES (?, ?, ?, ?, 1) ON CONFLICT (client_id) DO UPDATE SET client_name = excluded.client_name, redirect_uris = excluded.redirect_uris, first_party = 1",
+  )
+    .bind(DASHBOARD_CLIENT, "the tumpel dashboard", JSON.stringify([DASHBOARD_CALLBACK]), Date.now())
+    .run();
 });
 
 after(async () => {
@@ -279,7 +286,7 @@ test("redeeming a spent authorization code again revokes the tokens it issued", 
   assert.equal((await mcp(issued.access_token, 2, "tools/list")).status, 401);
 });
 
-test("the dashboard client skips the approval step but not Access, and its access token reaches a REST route", async () => {
+const dashboardSignIn = async (): Promise<z.infer<typeof OAuthTokenSchema>> => {
   const pair = pkce();
   const ask = new URLSearchParams({
     response_type: "code",
@@ -310,23 +317,48 @@ test("the dashboard client skips the approval step but not Access, and its acces
     redirect_uri: DASHBOARD_CALLBACK,
   });
   assert.equal(issued.status, 200);
-  const signedIn = OAuthTokenSchema.parse(await issued.json());
+  return OAuthTokenSchema.parse(await issued.json());
+};
 
+test("the dashboard client skips the approval step but not Access, and its access token reaches a REST route", async () => {
+  const signedIn = await dashboardSignIn();
   const whoami = await call("/v1/whoami", {
     headers: { authorization: `Bearer ${signedIn.access_token}`, origin: DASHBOARD },
   });
   assert.equal(whoami.status, 200);
   assert.equal(whoami.headers.get("access-control-allow-origin"), DASHBOARD);
   assert.equal(WhoamiSchema.parse(await whoami.json()).tenant.name, "Tumpel proof");
+});
+
+test("signing out of the dashboard on one device revokes that sign-in and keeps the other", async () => {
+  const laptop = await dashboardSignIn();
+  const phone = await dashboardSignIn();
+  const refreshed = await token({
+    grant_type: "refresh_token",
+    client_id: DASHBOARD_CLIENT,
+    refresh_token: laptop.refresh_token,
+  });
+  assert.equal(refreshed.status, 200);
+  const laptopNow = OAuthTokenSchema.parse(await refreshed.json());
 
   const revoked = await call("/oauth/revoke", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ token: signedIn.refresh_token, client_id: DASHBOARD_CLIENT }).toString(),
+    body: new URLSearchParams({ token: laptopNow.refresh_token, client_id: DASHBOARD_CLIENT }).toString(),
   });
   assert.equal(revoked.status, 200);
-  const signedOut = await call("/v1/whoami", { headers: { authorization: `Bearer ${signedIn.access_token}` } });
-  assert.equal(signedOut.status, 401);
+  const whoami = async (accessToken: string): Promise<number> =>
+    (await call("/v1/whoami", { headers: { authorization: `Bearer ${accessToken}` } })).status;
+  assert.deepEqual(
+    [await whoami(laptop.access_token), await whoami(laptopNow.access_token), await whoami(phone.access_token)],
+    [401, 401, 200],
+  );
+  const phoneRefreshed = await token({
+    grant_type: "refresh_token",
+    client_id: DASHBOARD_CLIENT,
+    refresh_token: phone.refresh_token,
+  });
+  assert.equal(phoneRefreshed.status, 200);
 });
 
 test("an Origin outside the allow-list gets no access-control-allow-origin, the dashboard origin does", async () => {
