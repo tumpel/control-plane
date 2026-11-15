@@ -128,6 +128,7 @@ before(async () => {
           ACCESS_AUD: AUDIENCE,
           ACCESS_PROOF_COMMON_NAME: PROOF_CLIENT_ID,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          DASHBOARD_ORIGIN: "https://app.tumpel.test",
         },
       },
     ],

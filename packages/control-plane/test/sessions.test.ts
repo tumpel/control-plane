@@ -48,7 +48,7 @@ const USAGE = { boxesWarm: 0, loadAverage: 0.25, memoryAvailableMib: 6144 };
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
 const SETTINGS = {
-  dispatchGrantTtlSeconds: 300,
+  dispatchGrantTtlSeconds: CLAIM_BUDGET_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
   snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
   turnClaimBudgetSeconds: CLAIM_BUDGET_SECONDS,
@@ -405,6 +405,7 @@ before(async () => {
           TUMPEL_SETTINGS: SETTINGS,
           R2_STUB_ORIGIN,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          DASHBOARD_ORIGIN: "https://app.tumpel.test",
         },
       },
     ],
@@ -487,9 +488,9 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     assert.match(url ?? "", new RegExp(`^${R2_STUB_ORIGIN}/tumpel-releases/${key}\\?X-Tumpel-Method=GET`));
   }
   assert.equal(offer.image.fetchSeconds, IMAGE_FETCH_BUDGET_SECONDS);
-  assert.equal(
-    Date.parse(offer.image.downloadExpiresAt) - Date.parse(offer.personaFiles[0]?.downloadExpiresAt ?? ""),
-    IMAGE_FETCH_BUDGET_SECONDS * 1000,
+  assert.deepEqual(
+    [offer.credential.expiresAt, offer.personaFiles[0]?.downloadExpiresAt],
+    [offer.image.downloadExpiresAt, offer.image.downloadExpiresAt],
   );
   const { turnId } = offer;
   const { sessionId } = started.session;

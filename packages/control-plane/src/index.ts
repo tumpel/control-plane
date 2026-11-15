@@ -88,7 +88,6 @@ import {
   callerForAccessToken,
   clientFor,
   clientName,
-  DASHBOARD_CLIENT_ID,
   forgetAuthorization,
   grantCode,
   MCP_PATH,
@@ -150,7 +149,7 @@ export interface Env extends SignerEnv {
   ACCESS_PROOF_COMMON_NAME?: string;
   SECRETS_KEK?: string;
   ISSUER_HOSTNAME: string;
-  DASHBOARD_ORIGIN?: string;
+  DASHBOARD_ORIGIN: string;
 }
 
 const DEVICE_PAGE = "/device";
@@ -849,12 +848,19 @@ const handleDevicePage = async (request: Request, url: URL, env: Env): Promise<R
   return confirmPage(signed.email, owner.tenant.name, formatUserCode(pending.userCode), pending.deviceName);
 };
 
-const allowedOrigins = (env: Env): string[] =>
-  env.DASHBOARD_ORIGIN ? [...CONNECTOR_ORIGINS, env.DASHBOARD_ORIGIN] : CONNECTOR_ORIGINS;
+const allowedOrigins = (env: Env): string[] => {
+  if (!env.DASHBOARD_ORIGIN) {
+    throw new Error(
+      "DASHBOARD_ORIGIN is not set; deploy with npm run deploy, which sets it to https:// plus the tofu output app_hostname, or pass --var DASHBOARD_ORIGIN:https://<app hostname> to wrangler",
+    );
+  }
+  return [...CONNECTOR_ORIGINS, env.DASHBOARD_ORIGIN];
+};
 
 const corsHeaders = (request: Request, env: Env): Record<string, string> => {
+  const allowed = allowedOrigins(env);
   const origin = request.headers.get("origin");
-  if (origin === null || !allowedOrigins(env).includes(origin)) return {};
+  if (origin === null || !allowed.includes(origin)) return {};
   return {
     "access-control-allow-origin": origin,
     "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -947,7 +953,7 @@ const handleRegister = async (request: Request, env: Env): Promise<Response> => 
 
 const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
   const ask = readAuthorizeAsk(url);
-  const client = ask.clientId === "" ? null : await clientFor(env.DB, ask.clientId, env.DASHBOARD_ORIGIN);
+  const client = ask.clientId === "" ? null : await clientFor(env.DB, ask.clientId);
   if (client === null) {
     return problem(400, {
       code: "InvalidRequest",
@@ -993,7 +999,7 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "GET") {
     const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
     if (asked === null) return expired();
-    if (asked.clientId === DASHBOARD_CLIENT_ID) {
+    if (asked.firstParty) {
       const code = await grantCode(env.DB, asked, caller.principalId, Date.now());
       return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
     }

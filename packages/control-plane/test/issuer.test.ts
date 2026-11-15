@@ -19,7 +19,12 @@ let db: IssuerDatabase;
 before(async () => {
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
-    workers: [{ configPath: "./wrangler.jsonc", vars: { SECRETS_KEK: KEK, ISSUER_HOSTNAME: "id.test.tumpel.dev" } }],
+    workers: [
+      {
+        configPath: "./wrangler.jsonc",
+        vars: { SECRETS_KEK: KEK, ISSUER_HOSTNAME: "id.test.tumpel.dev", DASHBOARD_ORIGIN: "https://app.tumpel.test" },
+      },
+    ],
   });
   await server.listen();
   await server.getWorker().applyD1Migrations("DB");

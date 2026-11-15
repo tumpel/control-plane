@@ -15,15 +15,24 @@ export type DeadlineName =
 export interface Deadline {
   turnId: string;
   at: number;
-  imageDigest?: string;
 }
 
-export type DeadlineChanges = Partial<Record<DeadlineName, Deadline | null>>;
+export interface ImageFetchDeadline extends Deadline {
+  imageDigest: string;
+}
+
+type DeadlineOf<N extends DeadlineName> = N extends "ImageFetch" ? ImageFetchDeadline : Deadline;
+
+export type DueDeadline = { [N in DeadlineName]: { name: N; deadline: DeadlineOf<N> } }[DeadlineName];
+
+export type DeadlineChanges = { [N in DeadlineName]?: DeadlineOf<N> | null };
+
+type Deadlines = { [N in DeadlineName]?: DeadlineOf<N> };
 
 interface Timers {
   tenantId: string;
   sessionId: string;
-  deadlines: Partial<Record<DeadlineName, Deadline>>;
+  deadlines: Deadlines;
 }
 
 const TIMERS_KEY = "timers";
@@ -31,9 +40,9 @@ const TIMERS_KEY = "timers";
 export class SessionTimer extends DurableObject<Env> {
   async set(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
     const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, sessionId, deadlines: {} };
-    for (const [name, deadline] of Object.entries(changes) as [DeadlineName, Deadline | null][]) {
+    Object.assign(timers.deadlines, changes);
+    for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, Deadline | null][]) {
       if (deadline === null) delete timers.deadlines[name];
-      else timers.deadlines[name] = deadline;
     }
     await this.save(timers);
   }
@@ -42,14 +51,14 @@ export class SessionTimer extends DurableObject<Env> {
     const timers = await this.ctx.storage.get<Timers>(TIMERS_KEY);
     if (timers === undefined) return;
     const now = Date.now();
-    const due = (Object.entries(timers.deadlines) as [DeadlineName, Deadline][]).filter(
-      ([, deadline]) => deadline.at <= now,
-    );
-    for (const [name] of due) delete timers.deadlines[name];
+    const due = (Object.entries(timers.deadlines) as [DeadlineName, Deadline][])
+      .map(([name, deadline]) => ({ name, deadline }) as DueDeadline)
+      .filter(({ deadline }) => deadline.at <= now);
+    for (const { name } of due) delete timers.deadlines[name];
     await this.save(timers);
     const tenant = this.env.TENANT.getByName(timers.tenantId);
-    for (const [name, deadline] of due) {
-      await tenant.deadlineReached(timers.tenantId, timers.sessionId, name, deadline);
+    for (const reached of due) {
+      await tenant.deadlineReached(timers.tenantId, timers.sessionId, reached);
     }
   }
 

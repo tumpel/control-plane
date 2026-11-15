@@ -15,8 +15,6 @@ export const CONSENT_PATH = "/oauth/consent";
 export const TOKEN_PATH = "/oauth/token";
 export const REGISTER_PATH = "/oauth/register";
 export const REVOKE_PATH = "/oauth/revoke";
-export const DASHBOARD_CLIENT_ID = "tumpel-dashboard";
-export const DASHBOARD_CALLBACK_PATH = "/auth/callback";
 export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
 export const AUTHORIZATION_SERVER_PATH = "/.well-known/oauth-authorization-server";
 export const SCOPE = "tumpel";
@@ -72,6 +70,7 @@ export interface AuthorizationRequest {
   redirectUri: string;
   state: string | null;
   codeChallenge: string;
+  firstParty: boolean;
 }
 
 export type Refusal = { error: OAuthErrorCode; description: string };
@@ -105,11 +104,11 @@ export const registerClient = async (
     db
       .prepare(
         `DELETE FROM oauth_clients WHERE created_at <= ?
-          AND client_id <> ?
+          AND first_party = 0
           AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id AND t.expires_at > ?)
           AND NOT EXISTS (SELECT 1 FROM oauth_requests r WHERE r.client_id = oauth_clients.client_id AND r.expires_at > ?)`,
       )
-      .bind(now - CLIENT_TTL_MS, DASHBOARD_CLIENT_ID, now, now),
+      .bind(now - CLIENT_TTL_MS, now, now),
     db
       .prepare("INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)")
       .bind(clientId, name, JSON.stringify(redirectUris), now),
@@ -130,23 +129,9 @@ export interface RegisteredClient {
   clientId: string;
   clientName: string;
   redirectUris: string[];
-  firstParty: boolean;
 }
 
-export const clientFor = async (
-  db: D1Database,
-  clientId: string,
-  dashboardOrigin: string | undefined,
-): Promise<RegisteredClient | null> => {
-  if (clientId === DASHBOARD_CLIENT_ID) {
-    if (dashboardOrigin === undefined || dashboardOrigin === "") return null;
-    return {
-      clientId,
-      clientName: "the tumpel dashboard",
-      redirectUris: [`${dashboardOrigin}${DASHBOARD_CALLBACK_PATH}`],
-      firstParty: true,
-    };
-  }
+export const clientFor = async (db: D1Database, clientId: string): Promise<RegisteredClient | null> => {
   const row = await db
     .prepare("SELECT client_id, client_name, redirect_uris FROM oauth_clients WHERE client_id = ?")
     .bind(clientId)
@@ -154,7 +139,7 @@ export const clientFor = async (
   if (row === null) return null;
   const parsed: unknown = JSON.parse(row.redirect_uris);
   const redirectUris = Array.isArray(parsed) ? parsed.filter((uri): uri is string => typeof uri === "string") : [];
-  return { clientId: row.client_id, clientName: row.client_name, redirectUris, firstParty: false };
+  return { clientId: row.client_id, clientName: row.client_name, redirectUris };
 };
 
 export interface AuthorizeAsk {
@@ -259,7 +244,8 @@ export const pendingAuthorization = async (
 ): Promise<AuthorizationRequest | null> => {
   const row = await db
     .prepare(
-      `SELECT r.request_id, r.client_id, c.client_name, r.redirect_uri, r.state, r.state_sent, r.code_challenge
+      `SELECT r.request_id, r.client_id, c.client_name, c.first_party, r.redirect_uri, r.state, r.state_sent,
+        r.code_challenge
       FROM oauth_requests r JOIN oauth_clients c ON c.client_id = r.client_id
       WHERE r.request_id = ? AND r.expires_at > ?`,
     )
@@ -268,6 +254,7 @@ export const pendingAuthorization = async (
       request_id: string;
       client_id: string;
       client_name: string;
+      first_party: number;
       redirect_uri: string;
       state: string;
       state_sent: number;
@@ -281,6 +268,7 @@ export const pendingAuthorization = async (
     redirectUri: row.redirect_uri,
     state: row.state_sent === 0 ? null : row.state,
     codeChallenge: row.code_challenge,
+    firstParty: row.first_party === 1,
   };
 };
 
@@ -321,15 +309,25 @@ const pkceMatches = async (verifier: string, challenge: string): Promise<boolean
   return sameSecret(base64Url(digest), challenge);
 };
 
-const issue = async (db: D1Database, clientId: string, principalId: string, now: number): Promise<OAuthToken> => {
+interface Grant {
+  grantId: string;
+  clientId: string;
+  principalId: string;
+}
+
+const issue = async (db: D1Database, grant: Grant, now: number): Promise<OAuthToken> => {
   const accessToken = randomToken();
   const refreshToken = randomToken();
   const insert =
-    "INSERT INTO oauth_tokens (token_sha256, client_id, principal_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)";
+    "INSERT INTO oauth_tokens (token_sha256, grant_id, client_id, principal_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
+  const row = async (token: string, kind: string, ttl: number) =>
+    db
+      .prepare(insert)
+      .bind(await sha256Hex(token), grant.grantId, grant.clientId, grant.principalId, kind, now, now + ttl);
   await db.batch([
     db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= ?").bind(now),
-    db.prepare(insert).bind(await sha256Hex(accessToken), clientId, principalId, "access", now, now + ACCESS_TTL_MS),
-    db.prepare(insert).bind(await sha256Hex(refreshToken), clientId, principalId, "refresh", now, now + REFRESH_TTL_MS),
+    await row(accessToken, "access", ACCESS_TTL_MS),
+    await row(refreshToken, "refresh", REFRESH_TTL_MS),
   ]);
   return OAuthTokenSchema.parse({
     access_token: accessToken,
@@ -340,11 +338,8 @@ const issue = async (db: D1Database, clientId: string, principalId: string, now:
   });
 };
 
-const revokeGrants = async (db: D1Database, clientId: string, principalId: string): Promise<void> => {
-  await db
-    .prepare("DELETE FROM oauth_tokens WHERE client_id = ? AND principal_id = ?")
-    .bind(clientId, principalId)
-    .run();
+const revokeGrant = async (db: D1Database, grantId: string): Promise<void> => {
+  await db.prepare("DELETE FROM oauth_tokens WHERE grant_id = ?").bind(grantId).run();
 };
 
 const refuseGrant = (error: OAuthErrorCode, description: string): TokenOutcome => ({ ok: false, error, description });
@@ -383,11 +378,7 @@ export const redeemCode = async (
       expires_at: number;
     }>();
   if (spent === null) {
-    const reused = await db
-      .prepare("SELECT client_id, principal_id FROM oauth_codes WHERE code_sha256 = ? AND spent = 1")
-      .bind(codeHash)
-      .first<{ client_id: string; principal_id: string }>();
-    if (reused !== null) await revokeGrants(db, reused.client_id, reused.principal_id);
+    await revokeGrant(db, codeHash);
     return refuseGrant("invalid_grant", "the authorization code is unknown or already used");
   }
   if (spent.expires_at <= now) return refuseGrant("invalid_grant", "the authorization code expired");
@@ -400,7 +391,10 @@ export const redeemCode = async (
   if (!(await pkceMatches(redemption.codeVerifier, spent.code_challenge))) {
     return refuseGrant("invalid_grant", "code_verifier does not match the code_challenge");
   }
-  return { ok: true, token: await issue(db, spent.client_id, spent.principal_id, now) };
+  return {
+    ok: true,
+    token: await issue(db, { grantId: codeHash, clientId: spent.client_id, principalId: spent.principal_id }, now),
+  };
 };
 
 export const refreshGrant = async (
@@ -417,35 +411,40 @@ export const refreshGrant = async (
   const refreshHash = await sha256Hex(refreshToken);
   const spent = await db
     .prepare(
-      "UPDATE oauth_tokens SET spent = 1 WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 0 RETURNING client_id, principal_id, expires_at",
+      "UPDATE oauth_tokens SET spent = 1 WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 0 RETURNING grant_id, client_id, principal_id, expires_at",
     )
     .bind(refreshHash)
-    .first<{ client_id: string; principal_id: string; expires_at: number }>();
+    .first<{ grant_id: string; client_id: string; principal_id: string; expires_at: number }>();
   if (spent === null) {
     const reused = await db
-      .prepare(
-        "SELECT client_id, principal_id FROM oauth_tokens WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 1",
-      )
+      .prepare("SELECT grant_id FROM oauth_tokens WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 1")
       .bind(refreshHash)
-      .first<{ client_id: string; principal_id: string }>();
-    if (reused !== null) await revokeGrants(db, reused.client_id, reused.principal_id);
+      .first<{ grant_id: string }>();
+    if (reused !== null) await revokeGrant(db, reused.grant_id);
     return refuseGrant("invalid_grant", "the refresh token is unknown or already used");
   }
   if (spent.expires_at <= now) return refuseGrant("invalid_grant", "the refresh token expired");
   if (spent.client_id !== clientId) return refuseGrant("invalid_grant", "the refresh token belongs to another client");
-  return { ok: true, token: await issue(db, spent.client_id, spent.principal_id, now) };
+  return {
+    ok: true,
+    token: await issue(
+      db,
+      { grantId: spent.grant_id, clientId: spent.client_id, principalId: spent.principal_id },
+      now,
+    ),
+  };
 };
 
 export const revokeToken = async (db: D1Database, token: string, clientId: string): Promise<Refusal | null> => {
   const row = await db
-    .prepare("SELECT client_id, principal_id FROM oauth_tokens WHERE token_sha256 = ?")
+    .prepare("SELECT grant_id, client_id FROM oauth_tokens WHERE token_sha256 = ?")
     .bind(await sha256Hex(token))
-    .first<{ client_id: string; principal_id: string }>();
+    .first<{ grant_id: string; client_id: string }>();
   if (row === null) return null;
   if (row.client_id !== clientId) {
     return { error: "invalid_client", description: "the token was issued to another client" };
   }
-  await revokeGrants(db, row.client_id, row.principal_id);
+  await revokeGrant(db, row.grant_id);
   return null;
 };
 

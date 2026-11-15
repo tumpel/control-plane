@@ -10,3 +10,6 @@ export const settingsOf = (env: { TUMPEL_SETTINGS: unknown }): Settings => {
     `TUMPEL_SETTINGS does not match ControlPlaneSettings in packages/api: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "TUMPEL_SETTINGS"}: ${issue.message}`).join("; ")}; fix the vars in wrangler.jsonc`,
   );
 };
+
+export const turnCredentialSeconds = (settings: Settings): number =>
+  Math.max(settings.dispatchGrantTtlSeconds, settings.turnClaimBudgetSeconds + settings.turnImageFetchBudgetSeconds);

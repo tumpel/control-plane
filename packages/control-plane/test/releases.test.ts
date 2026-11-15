@@ -37,7 +37,9 @@ let origin: string;
 before(async () => {
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
-    workers: [{ configPath: "./wrangler.jsonc", vars: { R2_STUB_ORIGIN } }],
+    workers: [
+      { configPath: "./wrangler.jsonc", vars: { R2_STUB_ORIGIN, DASHBOARD_ORIGIN: "https://app.tumpel.test" } },
+    ],
   });
   origin = (await server.listen()).url.origin;
 });
