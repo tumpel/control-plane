@@ -227,19 +227,13 @@ export const unlinkInstallation = async (db: D1Database, installationId: number)
   ]);
 };
 
-export const recordInstaller = async (
-  db: D1Database,
-  installationId: number,
-  githubUserId: number,
-  now: number,
-): Promise<void> => {
+export const recordInstaller = async (db: D1Database, installationId: number, githubUserId: number): Promise<void> => {
   await db
     .prepare(
-      `INSERT INTO github_installers (installation_id, installer_github_user_id, recorded_at) VALUES (?, ?, ?)
-      ON CONFLICT (installation_id) DO UPDATE SET installer_github_user_id = excluded.installer_github_user_id,
-        recorded_at = excluded.recorded_at`,
+      `INSERT INTO github_installers (installation_id, installer_github_user_id) VALUES (?, ?)
+      ON CONFLICT (installation_id) DO UPDATE SET installer_github_user_id = excluded.installer_github_user_id`,
     )
-    .bind(installationId, githubUserId, now)
+    .bind(installationId, githubUserId)
     .run();
 };
 
