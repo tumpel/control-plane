@@ -1,14 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  advanceAuthorization,
-  CIRCLECI_REDIRECT_URI,
-  credentialStanding,
-  parseRedirect,
-  RENEWAL_WINDOW_MS,
-} from "../src/circleci-oauth.ts";
-
-const ID = "auth-1";
+import { CIRCLECI_REDIRECT_URI, credentialStanding, parseRedirect, RENEWAL_WINDOW_MS } from "../src/circleci-oauth.ts";
 
 test("a pasted redirect address yields its code and state", () => {
   assert.deepEqual(parseRedirect(`  ${CIRCLECI_REDIRECT_URI}?code=abc123&state=s-1\n`, CIRCLECI_REDIRECT_URI), {
@@ -48,36 +40,18 @@ test("the parser refuses what is not this redirect address with one state and a 
   }
 });
 
-test("each event proceeds only in its own phase", () => {
-  assert.deepEqual(advanceAuthorization(ID, "AwaitingRedirect", { kind: "Redirected" }), { kind: "Proceed" });
-  assert.deepEqual(advanceAuthorization(ID, "ChoosingOrganization", { kind: "Chosen" }), { kind: "Proceed" });
-  for (const state of ["ChoosingOrganization", "Completed", "Failed"] as const) {
-    const step = advanceAuthorization(ID, state, { kind: "Redirected" });
-    assert.equal(step.kind, "Refuse", state);
-    assert.match(step.kind === "Refuse" ? step.detail : "", new RegExp(`is ${state} and takes no redirect address`));
-  }
-  for (const state of ["AwaitingRedirect", "Completed", "Failed"] as const) {
-    assert.equal(advanceAuthorization(ID, state, { kind: "Chosen" }).kind, "Refuse", state);
-  }
-});
-
-test("a deadline fails a live phase AuthorizationTimedOut and leaves an ended one", () => {
-  for (const state of ["AwaitingRedirect", "ChoosingOrganization"] as const) {
-    const step = advanceAuthorization(ID, state, { kind: "Deadline" });
-    assert.equal(step.kind === "Fail" && step.reason, "AuthorizationTimedOut", state);
-  }
-  for (const state of ["Completed", "Failed"] as const) {
-    assert.deepEqual(advanceAuthorization(ID, state, { kind: "Deadline" }), { kind: "Ignore" });
-  }
-});
-
-test("an authorized token reads Expiring inside the renewal window and Reconnect from its expiry", () => {
+test("an authorized token reads Expiring inside the renewal window and Expired from its expiry", () => {
   const now = Date.parse("2026-11-15T12:00:00Z");
-  assert.deepEqual(credentialStanding(null, now), { state: "Connected" });
-  assert.deepEqual(credentialStanding(now + RENEWAL_WINDOW_MS + 1, now), { state: "Connected" });
-  assert.deepEqual(credentialStanding(now + RENEWAL_WINDOW_MS, now), {
+  assert.deepEqual(credentialStanding({ kind: "Pasted" }, now), { state: "Connected" });
+  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAt: now + RENEWAL_WINDOW_MS + 1 }, now), {
+    state: "Connected",
+  });
+  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAt: now + RENEWAL_WINDOW_MS }, now), {
     state: "Expiring",
     expiresAt: new Date(now + RENEWAL_WINDOW_MS).toISOString(),
   });
-  assert.deepEqual(credentialStanding(now, now), { state: "Reconnect", expiredAt: new Date(now).toISOString() });
+  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAt: now }, now), {
+    state: "Expired",
+    expiredAt: new Date(now).toISOString(),
+  });
 });

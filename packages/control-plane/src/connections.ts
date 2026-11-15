@@ -3,6 +3,7 @@ import {
   CircleCIConnectionStartSchema,
   ConnectedConnectionSchema,
   type ConnectionSummarySchema,
+  ExpiredConnectionSchema,
   ExpiringConnectionSchema,
   GitHubActionsConnectionLinkSchema,
   GitHubActionsConnectionStartSchema,
@@ -10,7 +11,6 @@ import {
   NamespaceConnectionStartSchema,
   NotConfiguredConnectionSchema,
   NotConnectedConnectionSchema,
-  ReconnectConnectionSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { CIRCLECI_CONFIG_EXAMPLE, CIRCLECI_ORB, circleCIIssuer, readMe } from "./circleci.ts";
@@ -62,18 +62,15 @@ const summary = (kind: string, account: string | null, configured: boolean): Con
   return ConnectedConnectionSchema.parse({ kind, state: "Connected", account });
 };
 
-const expiresAtOf = (row: CircleCIRow): number | null =>
-  row.credential.kind === "Authorized" ? row.credential.expiresAt : null;
-
 const circleCISummary = (row: CircleCIRow | null, now: number): ConnectionSummary => {
   if (row === null) return summary("CircleCI", null, true);
-  const standing = credentialStanding(expiresAtOf(row), now);
+  const standing = credentialStanding(row.credential, now);
   const account = row.accountLabel;
   if (standing.state === "Expiring") {
     return ExpiringConnectionSchema.parse({ kind: "CircleCI", account, ...standing });
   }
-  if (standing.state === "Reconnect") {
-    return ReconnectConnectionSchema.parse({ kind: "CircleCI", account, ...standing });
+  if (standing.state === "Expired") {
+    return ExpiredConnectionSchema.parse({ kind: "CircleCI", account, ...standing });
   }
   return summary("CircleCI", account, true);
 };
@@ -137,7 +134,7 @@ const circleCILink = (env: Env, tenantId: string, row: CircleCIRow | null): unkn
     row === null
       ? { state: "NotConnected" }
       : {
-          state: credentialStanding(expiresAtOf(row), Date.now()).state === "Reconnect" ? "Reconnect" : "Connected",
+          state: "Connected",
           connection: circleCIConnectionOf(env, tenantId, row),
         };
   return CircleCIConnectionLinkSchema.parse({

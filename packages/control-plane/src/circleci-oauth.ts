@@ -9,7 +9,8 @@ import type { Fetch } from "./github.ts";
 export type CircleCIAuthorization = z.infer<typeof CircleCIAuthorizationSchema>;
 export type CircleCIAuthorizationFailureReason = z.infer<typeof CircleCIAuthorizationFailureReasonSchema>;
 export type CircleCIOrganization = z.infer<typeof CircleCIOrganizationSchema>;
-export type CircleCIAuthorizationState = CircleCIAuthorization["status"]["state"];
+
+export type CircleCICredentialRow = { kind: "Authorized"; expiresAt: number } | { kind: "Pasted" };
 
 export const CIRCLECI_REDIRECT_URI = "http://127.0.0.1:47151/circleci/callback";
 export const CIRCLECI_CLIENT_NAME = "Tumpel";
@@ -18,6 +19,8 @@ export const CHOOSE_BUDGET_SECONDS = 600;
 export const RENEWAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 const CIRCLECI_OAUTH_TIMEOUT_MS = 10_000;
+
+const oauthUrl = (appOrigin: string, path: string): string => `${appOrigin.replace(/\/+$/, "")}${path}`;
 const AUTHORIZE_AGAIN = "connect CircleCI again from the dashboard or with tumpel circleci authorize";
 
 export type CircleCIRedirect =
@@ -55,47 +58,16 @@ export const parseRedirect = (raw: string, redirectUri: string): CircleCIRedirec
   return { kind: "Code", code, state };
 };
 
-export type CircleCIAuthorizationEvent = { kind: "Redirected" } | { kind: "Chosen" } | { kind: "Deadline" };
-
-export type CircleCIAuthorizationStep =
-  | { kind: "Proceed" }
-  | { kind: "Fail"; reason: CircleCIAuthorizationFailureReason; detail: string }
-  | { kind: "Refuse"; detail: string }
-  | { kind: "Ignore" };
-
-const isLive = (state: CircleCIAuthorizationState): boolean =>
-  state === "AwaitingRedirect" || state === "ChoosingOrganization";
-
-export const advanceAuthorization = (
-  circleCIAuthorizationId: string,
-  state: CircleCIAuthorizationState,
-  event: CircleCIAuthorizationEvent,
-): CircleCIAuthorizationStep => {
-  if (event.kind === "Deadline") {
-    if (!isLive(state)) return { kind: "Ignore" };
-    return {
-      kind: "Fail",
-      reason: "AuthorizationTimedOut",
-      detail:
-        state === "AwaitingRedirect"
-          ? `no redirect address reached CircleCI authorization ${circleCIAuthorizationId} within ${REDIRECT_BUDGET_SECONDS / 60} minutes; ${AUTHORIZE_AGAIN} and paste the address within that time`
-          : `no organization was chosen for CircleCI authorization ${circleCIAuthorizationId} within ${CHOOSE_BUDGET_SECONDS / 60} minutes and its token was discarded; ${AUTHORIZE_AGAIN}`,
-    };
-  }
-  const wanted: CircleCIAuthorizationState = event.kind === "Redirected" ? "AwaitingRedirect" : "ChoosingOrganization";
-  if (state === wanted) return { kind: "Proceed" };
-  const takes = event.kind === "Redirected" ? "redirect address" : "organization choice";
-  return {
-    kind: "Refuse",
-    detail: `CircleCI authorization ${circleCIAuthorizationId} is ${state} and takes no ${takes}`,
-  };
-};
-
 export const deniedDetail = (redirect: Extract<CircleCIRedirect, { kind: "Denied" }>): string =>
   `CircleCI sent the browser back with ${redirect.error}${redirect.description === "" ? "" : `: ${redirect.description}`}; choose Allow on CircleCI's page and ${AUTHORIZE_AGAIN}`;
 
 export const stateMismatchDetail = (circleCIAuthorizationId: string): string =>
-  `the pasted address carries another state than CircleCI authorization ${circleCIAuthorizationId} sent, so it belongs to another authorization; paste the address of the CircleCI tab this authorization opened, or ${AUTHORIZE_AGAIN}`;
+  `the pasted address carries another state than CircleCI authorization ${circleCIAuthorizationId} sent, so it belongs to another authorization; paste the address of the CircleCI tab this authorization opened`;
+
+export const timedOutDetail = (circleCIAuthorizationId: string, phase: string): string =>
+  phase === "ChoosingOrganization"
+    ? `no organization was chosen for CircleCI authorization ${circleCIAuthorizationId} within ${CHOOSE_BUDGET_SECONDS / 60} minutes and its token was discarded; ${AUTHORIZE_AGAIN}`
+    : `no redirect address reached CircleCI authorization ${circleCIAuthorizationId} within ${REDIRECT_BUDGET_SECONDS / 60} minutes; ${AUTHORIZE_AGAIN} and paste the address within that time`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -114,12 +86,13 @@ export const organizationsOf = (
 export type CredentialStanding =
   | { state: "Connected" }
   | { state: "Expiring"; expiresAt: string }
-  | { state: "Reconnect"; expiredAt: string };
+  | { state: "Expired"; expiredAt: string };
 
-export const credentialStanding = (expiresAt: number | null, now: number): CredentialStanding => {
-  if (expiresAt === null) return { state: "Connected" };
+export const credentialStanding = (credential: CircleCICredentialRow, now: number): CredentialStanding => {
+  if (credential.kind === "Pasted") return { state: "Connected" };
+  const { expiresAt } = credential;
   const at = new Date(expiresAt).toISOString();
-  if (expiresAt <= now) return { state: "Reconnect", expiredAt: at };
+  if (expiresAt <= now) return { state: "Expired", expiredAt: at };
   if (expiresAt - now <= RENEWAL_WINDOW_MS) return { state: "Expiring", expiresAt: at };
   return { state: "Connected" };
 };
@@ -128,7 +101,7 @@ export const authorizeUrl = (
   appOrigin: string,
   request: { clientId: string; redirectUri: string; challenge: string; state: string },
 ): string => {
-  const url = new URL("/oauth/authorize", appOrigin);
+  const url = new URL(oauthUrl(appOrigin, "/oauth/authorize"));
   url.search = new URLSearchParams({
     response_type: "code",
     client_id: request.clientId,
@@ -173,7 +146,7 @@ export const registerClient = async (
   appOrigin: string,
   redirectUri: string,
 ): Promise<ClientRegistration> => {
-  const response = await fetcher(new URL("/oauth/register", appOrigin).toString(), {
+  const response = await fetcher(oauthUrl(appOrigin, "/oauth/register"), {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json", "user-agent": "tumpel" },
     body: JSON.stringify({
@@ -220,7 +193,7 @@ export const exchangeCode = async (
   appOrigin: string,
   grant: { code: string; clientId: string; redirectUri: string; verifier: string },
 ): Promise<CodeExchange> => {
-  const response = await fetcher(new URL("/oauth/token", appOrigin).toString(), {
+  const response = await fetcher(oauthUrl(appOrigin, "/oauth/token"), {
     method: "POST",
     headers: {
       accept: "application/json",

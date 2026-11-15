@@ -97,7 +97,7 @@ export class SessionTimer extends DurableObject<Env> {
     for (const reached of due) {
       if (reached.name === "ClaudeSetup") await tenant.claudeSetupDeadlineReached(timers.tenantId, reached.deadline);
       else if (reached.name === "CircleCIAuthorization")
-        await tenant.circleCIAuthorizationDeadlineReached(reached.deadline);
+        await tenant.circleCIAuthorizationDeadlineReached(timers.tenantId, reached.deadline);
       else if (isPrebuildDeadline(reached)) await tenant.prebuildDeadlineReached(timers.tenantId, reached);
       else await tenant.deadlineReached(timers.tenantId, reached);
     }
