@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { HostSchema } from "@tumpel/api/schemas";
-import type { z } from "zod";
+import type { HostRecord as Host } from "../src/host-record.ts";
 import { type ImageAvailability, type Placement, placeSession } from "../src/placement.ts";
-
-type Host = z.infer<typeof HostSchema>;
 
 const HOST: Host = {
   hostId: "host-base",
@@ -44,8 +41,6 @@ test("a session goes to the online host with the most free box slots, ignoring o
       boxesWarm: 0,
       loadAverage: 0,
       memoryAvailableMib: 8192,
-      supervisorUpdateSteps: [],
-      supervisorUpdateFailures: [],
       createdAt: 0,
       updatedAt: 0,
     },
@@ -57,8 +52,6 @@ test("a session goes to the online host with the most free box slots, ignoring o
       boxesWarm: 0,
       loadAverage: 0.5,
       memoryAvailableMib: 8192,
-      supervisorUpdateSteps: [],
-      supervisorUpdateFailures: [],
       createdAt: 0,
       updatedAt: 0,
     },
@@ -70,8 +63,6 @@ test("a session goes to the online host with the most free box slots, ignoring o
       boxesWarm: 2,
       loadAverage: 0.5,
       memoryAvailableMib: 8192,
-      supervisorUpdateSteps: [],
-      supervisorUpdateFailures: [],
       createdAt: 0,
       updatedAt: 0,
     },
@@ -83,8 +74,6 @@ test("a session goes to the online host with the most free box slots, ignoring o
       boxesWarm: 0,
       loadAverage: 3.5,
       memoryAvailableMib: 2048,
-      supervisorUpdateSteps: [],
-      supervisorUpdateFailures: [],
       createdAt: 0,
       updatedAt: 0,
     },
@@ -105,8 +94,6 @@ test("equal free slots go to the host with the most memory available, and warm s
     boxesWarm: 0,
     loadAverage: 0.1,
     memoryAvailableMib: 900,
-    supervisorUpdateSteps: [],
-    supervisorUpdateFailures: [],
     createdAt: 0,
     updatedAt: 0,
   };
@@ -118,8 +105,6 @@ test("equal free slots go to the host with the most memory available, and warm s
     boxesWarm: 2,
     loadAverage: 1.5,
     memoryAvailableMib: 3000,
-    supervisorUpdateSteps: [],
-    supervisorUpdateFailures: [],
     createdAt: 0,
     updatedAt: 0,
   };
@@ -136,8 +121,6 @@ test("a host whose every slot is warm still takes a session, since the superviso
     boxesWarm: 2,
     loadAverage: 0.2,
     memoryAvailableMib: 1024,
-    supervisorUpdateSteps: [],
-    supervisorUpdateFailures: [],
     createdAt: 0,
     updatedAt: 0,
   };
@@ -158,8 +141,6 @@ test("a tenant whose hosts all run a turn in every slot is refused with each hos
     boxesWarm: 0,
     loadAverage: 2,
     memoryAvailableMib: 4096,
-    supervisorUpdateSteps: [],
-    supervisorUpdateFailures: [],
     createdAt: 0,
     updatedAt: 0,
   };
@@ -180,8 +161,6 @@ test("a host whose architecture has no image of the session's harness version in
     boxesWarm: 0,
     loadAverage: 0,
     memoryAvailableMib: 4096,
-    supervisorUpdateSteps: [],
-    supervisorUpdateFailures: [],
     createdAt: 0,
     updatedAt: 0,
   };

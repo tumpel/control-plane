@@ -41,7 +41,7 @@ import {
 } from "./github.ts";
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
-import { type Host, hostOf } from "./hosts";
+import { type HostRecord, hostOf } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
@@ -51,7 +51,7 @@ import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./r
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { settingsOf, turnCredentialSeconds } from "./settings";
-import { forgetSupervisorUpdates, type SupervisorUpdateMessage, supervisorUpdatesOf } from "./supervisor-updates";
+import { forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -71,7 +71,7 @@ type IdentityAnswer = { kind: "Identity"; identity: CommitIdentity } | { kind: "
 
 export interface NewSession {
   principalId: string;
-  hosts: Host[];
+  hosts: HostRecord[];
   harness: Session["harness"];
   harnessVersion: string;
   endpoint: string;
@@ -671,7 +671,6 @@ export class TenantSessions extends DurableObject<Env> {
         boxesWarm: row.boxes_warm,
         loadAverage: row.load_average,
         memoryAvailableMib: row.memory_available_mib,
-        ...supervisorUpdatesOf(sql, row.host_id),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }));
@@ -848,7 +847,7 @@ export class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  async sendTurn(tenantId: string, sessionId: string, prompt: string, hosts: Host[], now: number): Promise<Sent> {
+  async sendTurn(tenantId: string, sessionId: string, prompt: string, hosts: HostRecord[], now: number): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };

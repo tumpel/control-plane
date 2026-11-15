@@ -12,7 +12,7 @@ import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
-import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
+import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -167,7 +167,7 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
   });
 };
 
-const stranded = (session: Session, hosts: Host[], missingTurnIds: string[]): Refused => {
+const stranded = (session: Session, hosts: HostRecord[], missingTurnIds: string[]): Refused => {
   const host = hosts.find((listed) => listed.hostId === session.hostId);
   if (host === undefined) {
     throw new Error(`session ${session.sessionId} runs on host ${session.hostId}, which its tenant does not list`);

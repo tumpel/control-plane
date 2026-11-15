@@ -257,9 +257,15 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts/usage",
     NO_ARGUMENTS,
-    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib, supervisorUpdateSteps and supervisorUpdateFailures (the latest five supervisor update phases and failures the host reported, newest first) and updatedAt, when the last Hello or Heartbeat arrived.",
+    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib and updatedAt, when the last Hello or Heartbeat arrived.",
   ),
-  rest("tumpel_host_get", "GET", "/v1/hosts/{hostId}", HostPathSchema, "Read one host with its presence and labels."),
+  rest(
+    "tumpel_host_get",
+    "GET",
+    "/v1/hosts/{hostId}",
+    HostPathSchema,
+    "Read one host with its presence, labels and the latest supervisor update phase and failure it reported.",
+  ),
   rest(
     "tumpel_host_revoke",
     "POST",

@@ -1,17 +1,20 @@
 import {
   EnrolmentTokenSchema,
   type HostEnrolSchema,
-  HostSchema,
+  type HostSchema,
   MintedEnrolmentTokenSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
+import { type HostRecord, HostRecordSchema } from "./host-record";
 import type { Problem, ProblemStatus } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { NO_SUPERVISOR_UPDATES } from "./supervisor-updates";
 
 export type Host = z.infer<typeof HostSchema>;
+export type { HostRecord };
 export type MintedEnrolmentToken = z.infer<typeof MintedEnrolmentTokenSchema>;
 export type EnrolmentToken = z.infer<typeof EnrolmentTokenSchema>;
 export type HostEnrol = z.infer<typeof HostEnrolSchema>;
@@ -39,8 +42,8 @@ const HOST_COLUMNS =
 
 const HOST_SELECT = `${HOST_COLUMNS}, labels`;
 
-const toHost = (row: HostRow): Host =>
-  HostSchema.parse({
+const toHost = (row: HostRow): HostRecord =>
+  HostRecordSchema.parse({
     hostId: row.host_id,
     tenantId: row.tenant_id,
     name: row.name,
@@ -210,10 +213,10 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   if (!inserted?.meta.changes) return spent;
   const host = await hostOf(env.DB, token.tenant_id, hostId);
   if (host === null) throw new Error(`host ${hostId} was enrolled and then not found`);
-  return { ok: true, value: host };
+  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES } };
 };
 
-export const listHosts = async (db: D1Database, tenantId: string): Promise<Host[]> => {
+export const listHosts = async (db: D1Database, tenantId: string): Promise<HostRecord[]> => {
   const { results } = await db
     .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
@@ -221,12 +224,17 @@ export const listHosts = async (db: D1Database, tenantId: string): Promise<Host[
   return results.map(toHost);
 };
 
-export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<Host | null> => {
+export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostRecord | null> => {
   const row = await db
     .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? AND host_id = ?`)
     .bind(tenantId, hostId)
     .first<HostRow>();
   return row === null ? null : toHost(row);
+};
+
+export const withSupervisorUpdates = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
+  const updates = await env.TENANT.getByName(tenantId).supervisorUpdates();
+  return hosts.map((host) => ({ ...host, ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES) }));
 };
 
 export const hostNotFound = (hostId: string): Refused =>
@@ -245,7 +253,7 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
     .run();
   await env.TENANT.getByName(tenantId).forgetHostUsage(hostId);
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
-  return { ok: true, value: { ...host, state: "Revoked", updatedAt: now } };
+  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, state: "Revoked", updatedAt: now } };
 };
 
 export const setHostLabels = async (
@@ -254,7 +262,7 @@ export const setHostLabels = async (
   hostId: string,
   labels: string[],
   now: number,
-): Promise<Outcome<Host>> => {
+): Promise<Outcome<HostRecord>> => {
   const host = await hostOf(db, tenantId, hostId);
   if (host === null) return hostNotFound(hostId);
   if (host.state === "Revoked") {
