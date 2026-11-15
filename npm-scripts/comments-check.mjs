@@ -10,7 +10,16 @@ const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|in|of|delete|void|thro
 
 const tracked = execFileSync(
   "git",
-  ["ls-files", "--", "crates/**.rs", "packages/**.ts", "packages/**.mjs", "packages/**.tsp", "npm-scripts/*.mjs"],
+  [
+    "ls-files",
+    "--",
+    "crates/**.rs",
+    "packages/**.ts",
+    "packages/**.tsx",
+    "packages/**.mjs",
+    "packages/**.tsp",
+    "npm-scripts/*.mjs",
+  ],
   { cwd: ROOT, encoding: "utf8" },
 )
   .split("\n")
