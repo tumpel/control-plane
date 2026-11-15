@@ -89,6 +89,7 @@ import {
   refreshGrant,
   registerClient,
   resourceMetadataUrl,
+  SCOPE,
   startAuthorization,
   TOKEN_PATH,
   usableRedirect,
@@ -737,7 +738,7 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
         detail: `no bearer token reached ${MCP_PATH}`,
         fix: "Add tumpel as a custom connector, which registers itself and takes you through the sign-in",
       },
-      { "www-authenticate": `Bearer resource_metadata="${metadata}"`, ...corsHeaders(request) },
+      { "www-authenticate": `Bearer resource_metadata="${metadata}", scope="${SCOPE}"`, ...corsHeaders(request) },
     );
   }
   const caller = await callerForAccessToken(env.DB, token, Date.now());
@@ -750,7 +751,10 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
         detail: "this access token is unknown, expired or revoked",
         fix: "Connect the connector again",
       },
-      { "www-authenticate": `Bearer error="invalid_token", resource_metadata="${metadata}"`, ...corsHeaders(request) },
+      {
+        "www-authenticate": `Bearer error="invalid_token", resource_metadata="${metadata}", scope="${SCOPE}"`,
+        ...corsHeaders(request),
+      },
     );
   }
   return caller;
@@ -823,37 +827,12 @@ const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
   return seeOther(`${url.origin}${CONSENT_PATH}?request=${requestId}`);
 };
 
-type Consenter = { ok: true; caller: Caller; email: string } | { ok: false; response: Response };
-
-const consenter = async (request: Request, url: URL, env: Env): Promise<Consenter> => {
-  const signed = await assertedSigner(request, env);
-  if (!signed.ok) return { ok: false, response: messagePage(401, "Sign in again", `${signed.reason}.`) };
-  if (signed.kind === "ServiceToken") {
-    const caller = await decidingCaller(signed, url, env);
-    if (caller instanceof Response) return { ok: false, response: caller };
-    return { ok: true, caller, email: (await whoamiOf(env.DB, caller)).principal.email };
-  }
-  const owner = await whoamiForEmail(env.DB, signed.email);
-  if (owner === null) {
-    return {
-      ok: false,
-      response: messagePage(
-        403,
-        "No tenant",
-        `${signed.email} belongs to no tenant. Create one at ${url.origin}${DEVICE_PAGE}.`,
-      ),
-    };
-  }
-  return {
-    ok: true,
-    caller: { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId },
-    email: signed.email,
-  };
-};
-
 const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
-  const signed = await consenter(request, url, env);
-  if (!signed.ok) return signed.response;
+  const asserted = await assertedSigner(request, env);
+  if (!asserted.ok) return messagePage(401, "Sign in again", `${asserted.reason}.`);
+  const caller = await decidingCaller(asserted, url, env);
+  if (caller instanceof Response) return caller;
+  const email = (await whoamiOf(env.DB, caller)).principal.email;
   const expired = (): Response =>
     messagePage(
       404,
@@ -863,7 +842,7 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "GET") {
     const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
     if (asked === null) return expired();
-    return grantPage(signed.email, asked.clientName, new URL(asked.redirectUri).origin, asked.requestId, randomToken());
+    return grantPage(email, asked.clientName, new URL(asked.redirectUri).origin, asked.requestId, randomToken());
   }
   const form = new URLSearchParams(await request.text());
   const cookie = readCookie(request.headers.get("cookie"), CONSENT_CSRF_COOKIE);
@@ -884,7 +863,7 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
     );
   }
   if (action !== "approve") return messagePage(400, "Bad request", "Choose Connect or Cancel.");
-  const code = await grantCode(env.DB, asked, signed.caller.principalId, Date.now());
+  const code = await grantCode(env.DB, asked, caller.principalId, Date.now());
   return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
 };
 
