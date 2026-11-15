@@ -13,6 +13,32 @@ export const CIRCLECI_PARAMETERS = [
 
 export type CircleCIParameter = (typeof CIRCLECI_PARAMETERS)[number];
 
+export const CIRCLECI_WORKFLOW = "tumpel-prebuild";
+export const CIRCLECI_PARAMETER_LIMIT = 512;
+
+export interface CircleCIInputs {
+  prebuildId: string;
+  tenantId: string;
+  apiOrigin: string;
+  rootfsUrl: string;
+  imageDigest: string;
+}
+
+export const circleCIParameters = (inputs: CircleCIInputs): Record<CircleCIParameter, string> => ({
+  tumpel_prebuild_id: inputs.prebuildId,
+  tumpel_tenant_id: inputs.tenantId,
+  tumpel_api_origin: inputs.apiOrigin,
+  tumpel_rootfs_url: inputs.rootfsUrl,
+  tumpel_image_digest: inputs.imageDigest,
+});
+
+export const overLongParameter = (parameters: Record<string, string>): { name: string; length: number } | null => {
+  for (const [name, value] of Object.entries(parameters)) {
+    if (value.length > CIRCLECI_PARAMETER_LIMIT) return { name, length: value.length };
+  }
+  return null;
+};
+
 export const CIRCLECI_CONFIG_EXAMPLE = [
   "version: 2.1",
   "orbs:",
@@ -20,7 +46,7 @@ export const CIRCLECI_CONFIG_EXAMPLE = [
   "parameters:",
   ...CIRCLECI_PARAMETERS.map((name) => `  ${name}: { type: string, default: "" }`),
   "workflows:",
-  "  tumpel-prebuild:",
+  `  ${CIRCLECI_WORKFLOW}:`,
   "    jobs:",
   "      - tumpel/build:",
   "          rootfs-url: << pipeline.parameters.tumpel_rootfs_url >>",
@@ -37,7 +63,7 @@ export const CIRCLECI_CONFIG_EXAMPLE = [
 export const circleCIIssuer = (oidcOrigin: string, organizationId: string): string =>
   `${oidcOrigin.replace(/\/+$/, "")}/org/${organizationId}`;
 
-export type CircleCIAnswer<T> = { ok: true; value: T } | { ok: false; status: number; detail: string };
+export type CircleCIAnswer<T> = { ok: true; status: number; value: T } | { ok: false; status: number; detail: string };
 
 const CIRCLECI_TIMEOUT_MS = 10_000;
 
@@ -86,7 +112,7 @@ export const callCircleCI = async <T>(
     };
   }
   const parsed = schema.safeParse(parseJson(text));
-  if (parsed.success) return { ok: true, value: parsed.data };
+  if (parsed.success) return { ok: true, status: response.status, value: parsed.data };
   return {
     ok: false,
     status: response.status,
@@ -145,3 +171,125 @@ export const readPipelineDefinition = (
     PipelineDefinitionSchema,
     "CircleCIPipelineDefinition",
   );
+
+const PipelineCreatedSchema = z.object({ id: z.string(), state: z.string(), number: z.number() });
+const PipelineRunSchema = z.union([PipelineCreatedSchema, z.object({ message: z.string() })]);
+
+export type PipelineRun =
+  | { kind: "Created"; pipelineId: string; number: number }
+  | { kind: "Refused"; status: number; detail: string };
+
+export const triggerPipeline = async (
+  fetcher: Fetch,
+  api: string,
+  token: string,
+  run: { projectSlug: string; definitionId: string; branch: string; parameters: Record<string, string> },
+): Promise<PipelineRun> => {
+  const path = `/project/${slugPath(run.projectSlug)}/pipeline/run`;
+  const answer = await callCircleCI(
+    fetcher,
+    {
+      method: "POST",
+      url: v2(api, path),
+      token,
+      body: {
+        definition_id: run.definitionId,
+        config: { branch: run.branch },
+        checkout: { branch: run.branch },
+        parameters: run.parameters,
+      },
+    },
+    PipelineRunSchema,
+    "CircleCIPipelineRun",
+  );
+  if (!answer.ok) return { kind: "Refused", status: answer.status, detail: answer.detail };
+  if ("message" in answer.value) {
+    return {
+      kind: "Refused",
+      status: answer.status,
+      detail: `CircleCI answered POST /api/v2${path} with ${answer.status} and created no pipeline: ${answer.value.message}`,
+    };
+  }
+  if (answer.status !== 201 || answer.value.state === "errored") {
+    return {
+      kind: "Refused",
+      status: answer.status,
+      detail: `CircleCI answered POST /api/v2${path} with ${answer.status} and pipeline ${answer.value.id} in state ${answer.value.state}`,
+    };
+  }
+  return { kind: "Created", pipelineId: answer.value.id, number: answer.value.number };
+};
+
+export const pipelineLogUrl = (projectSlug: string, number: number): string =>
+  `https://app.circleci.com/pipelines/${projectSlug}/${number}`;
+
+const WebhookSchema = z.object({ id: z.string() });
+const MessageSchema = z.object({ message: z.string() });
+
+export const createWebhook = (
+  fetcher: Fetch,
+  api: string,
+  token: string,
+  hook: { projectId: string; url: string; signingSecret: string },
+) =>
+  callCircleCI(
+    fetcher,
+    {
+      method: "POST",
+      url: v2(api, "/webhook"),
+      token,
+      body: {
+        name: "tumpel prebuild",
+        events: ["workflow-completed"],
+        url: hook.url,
+        "verify-tls": true,
+        "signing-secret": hook.signingSecret,
+        scope: { id: hook.projectId, type: "project" },
+      },
+    },
+    WebhookSchema,
+    "CircleCIWebhook",
+  );
+
+export const deleteWebhook = (fetcher: Fetch, api: string, token: string, webhookId: string) =>
+  callCircleCI(
+    fetcher,
+    { method: "DELETE", url: v2(api, `/webhook/${encodeURIComponent(webhookId)}`), token, body: null },
+    MessageSchema,
+    "CircleCIMessage",
+  );
+
+export const WorkflowCompletedSchema = z.object({
+  type: z.string(),
+  workflow: z.object({ name: z.string(), status: z.string(), url: z.string().url() }),
+  pipeline: z.object({ id: z.string() }),
+  project: z.object({ id: z.string() }),
+});
+
+export type WorkflowCompleted = z.infer<typeof WorkflowCompletedSchema>;
+
+const hexBytes = (hex: string): Uint8Array<ArrayBuffer> =>
+  Uint8Array.from(hex.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16));
+
+export const verifyCircleCISignature = async (
+  secret: string,
+  body: ArrayBuffer,
+  header: string | null,
+): Promise<boolean> => {
+  const signatures = (header ?? "")
+    .split(",")
+    .map((part) => /^v1=([0-9a-f]{64})$/.exec(part.trim())?.[1])
+    .filter((hex): hex is string => hex !== undefined);
+  if (signatures.length === 0) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  for (const hex of signatures) {
+    if (await crypto.subtle.verify("HMAC", key, hexBytes(hex), body)) return true;
+  }
+  return false;
+};

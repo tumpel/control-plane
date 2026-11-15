@@ -93,6 +93,8 @@ const deviceToken = async (tenantId: string): Promise<string> => {
 const fakeCircleCI = (path: string, token: unknown): { status: number; body: unknown } => {
   if (token !== CIRCLECI_TOKEN) return { status: 401, body: { message: "Invalid token provided." } };
   if (path === "/me") return { status: 200, body: { id: "u1", login: "acme-bot", name: "Acme Bot" } };
+  if (path === "/webhook") return { status: 201, body: { id: "webhook-1" } };
+  if (path === "/webhook/webhook-1") return { status: 200, body: { message: "ok" } };
   if (path === `/project/${PROJECT_SLUG}`) {
     return { status: 200, body: { id: CIRCLECI_PROJECT, slug: PROJECT_SLUG, organization_id: CIRCLECI_ORGANIZATION } };
   }

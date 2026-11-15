@@ -88,7 +88,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   }
 
   private claudeSetupTimer(tenantId: string, claudeSetupId: string, at: number | null): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(claudeSetupId).set(tenantId, claudeSetupId, {
+    return this.env.SESSION_TIMER.getByName(claudeSetupId).set(tenantId, {
       ClaudeSetup: at === null ? null : { claudeSetupId, at },
     });
   }

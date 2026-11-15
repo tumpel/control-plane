@@ -572,7 +572,7 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, sessionId, changes);
+    return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, changes);
   }
 
   protected host(hostId: string) {

@@ -64,7 +64,7 @@ interface Timers {
 const TIMERS_KEY = "timers";
 
 export class SessionTimer extends DurableObject<Env> {
-  async set(tenantId: string, _ownerId: string, changes: DeadlineChanges): Promise<void> {
+  async set(tenantId: string, changes: DeadlineChanges): Promise<void> {
     const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, deadlines: {} };
     Object.assign(timers.deadlines, changes);
     for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, { at: number } | null][]) {

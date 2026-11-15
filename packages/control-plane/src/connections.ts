@@ -12,6 +12,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { CIRCLECI_CONFIG_EXAMPLE, CIRCLECI_ORB, circleCIIssuer, readMe } from "./circleci.ts";
+import { deleteCircleCIWebhooks } from "./circleci-projects.ts";
 import { CALLER_WORKFLOW_EXAMPLE, REUSABLE_WORKFLOW } from "./github-actions.ts";
 import { installationsOf, storedApp } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
@@ -201,7 +202,17 @@ export const handleConnections = async (
   if (refused) return refused;
   if (route.action === "START") return connect(request, env, caller, route.provider);
   if (route.action === "DELETE") {
-    await tenantOf(env, caller).deleteBuildConnection(route.provider);
+    const tenant = tenantOf(env, caller);
+    const token = route.provider === "CircleCI" ? await tenant.circleCIToken() : null;
+    if (token !== null) {
+      const refused = await deleteCircleCIWebhooks(
+        env,
+        token,
+        (await tenant.circleCIWebhooks()).map((webhook) => webhook.webhookId),
+      );
+      if (refused !== null) return refused;
+    }
+    await tenant.deleteBuildConnection(route.provider);
     return noContent();
   }
   return json(await readLink(env, caller, route.provider));

@@ -59,6 +59,7 @@ import {
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
+import { handleCircleCIEvents } from "./circleci-events.ts";
 import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, type Call, planConfig } from "./configs.ts";
@@ -1432,7 +1433,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (resource) return resource;
   const sessions = await handleSessions(request, url, env, deviceCaller);
   if (sessions) return sessions;
-  const uploads = await handlePrebuildUploads(request, url, env);
+  const uploads = (await handlePrebuildUploads(request, url, env)) ?? (await handleCircleCIEvents(request, url, env));
   if (uploads) return uploads;
   const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
   if (prebuilds) return prebuilds;

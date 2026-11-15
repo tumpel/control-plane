@@ -10,6 +10,13 @@ import {
   PrebuildSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import {
+  CIRCLECI_WORKFLOW,
+  type PipelineRun,
+  pipelineLogUrl,
+  triggerPipeline,
+  type WorkflowCompleted,
+} from "./circleci.ts";
 import { seal, unseal } from "./envelope.ts";
 import {
   type GitHubAnswer,
@@ -46,7 +53,19 @@ export interface CircleCIBinding {
   projectSlug: string;
   projectId: string;
   pipelineDefinitionId: string;
+  webhookId: string;
+  signingSecret: string;
 }
+
+export interface CircleCIWebhook {
+  circleCIProjectId: string;
+  webhookId: string;
+}
+
+export type DispatchedCircleCI =
+  | { kind: "Dispatched"; prebuild: Prebuild }
+  | { kind: "NotConnected" }
+  | { kind: "Refused"; detail: string };
 
 export type CircleCIProjectAdded =
   | { kind: "Added"; project: CircleCIProject }
@@ -63,6 +82,9 @@ type CircleCIProjectRow = {
 };
 
 const CIRCLECI_TOKEN_CONTEXT = "circleci-connection/api_token";
+
+const webhookSecretContext = (circleCIProjectId: string): string =>
+  `circleci-projects/${circleCIProjectId}/signing_secret`;
 
 const toCircleCIProject = (tenantId: string, row: CircleCIProjectRow): CircleCIProject =>
   CircleCIProjectSchema.parse({
@@ -333,7 +355,7 @@ export class TenantPrebuilds extends TenantSessions {
   }
 
   private prebuildTimers(tenantId: string, prebuildId: string, changes: DeadlineChanges): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(prebuildId).set(tenantId, prebuildId, changes);
+    return this.env.SESSION_TIMER.getByName(prebuildId).set(tenantId, changes);
   }
 
   private async failPrebuild(
@@ -713,17 +735,22 @@ export class TenantPrebuilds extends TenantSessions {
     return row === undefined ? null : toCircleCIProject(tenantId, row);
   }
 
-  addCircleCIProject(tenantId: string, binding: CircleCIBinding, now: number): CircleCIProjectAdded {
+  async addCircleCIProject(tenantId: string, binding: CircleCIBinding, now: number): Promise<CircleCIProjectAdded> {
     const held = this.circleCIProjectOf(tenantId, binding.repository);
     if (held !== null) return { kind: "Bound", project: held };
+    const circleCIProjectId = crypto.randomUUID();
+    await this.holdDataKey();
+    const sealed = await seal(await this.dataKey(), binding.signingSecret, webhookSecretContext(circleCIProjectId));
     this.ctx.storage.sql.exec(
       `INSERT INTO circleci_projects (circleci_project_id, repository, project_slug, project_id, pipeline_definition_id,
-      created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(),
+      webhook_id, signing_secret_sealed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      circleCIProjectId,
       binding.repository,
       binding.projectSlug,
       binding.projectId,
       binding.pipelineDefinitionId,
+      binding.webhookId,
+      sealed,
       now,
       now,
     );
@@ -731,6 +758,123 @@ export class TenantPrebuilds extends TenantSessions {
     if (project === null)
       throw new Error(`the CircleCI binding of ${binding.repository} was written and then not found`);
     return { kind: "Added", project };
+  }
+
+  circleCIWebhooks(): CircleCIWebhook[] {
+    return this.ctx.storage.sql
+      .exec<{ circleci_project_id: string; webhook_id: string }>(
+        "SELECT circleci_project_id, webhook_id FROM circleci_projects ORDER BY repository",
+      )
+      .toArray()
+      .map((row) => ({ circleCIProjectId: row.circleci_project_id, webhookId: row.webhook_id }));
+  }
+
+  async circleCIWebhookSecret(projectId: string): Promise<string | null> {
+    const [row] = this.ctx.storage.sql
+      .exec<{ circleci_project_id: string; signing_secret_sealed: string }>(
+        "SELECT circleci_project_id, signing_secret_sealed FROM circleci_projects WHERE project_id = ?",
+        projectId,
+      )
+      .toArray();
+    if (row === undefined) return null;
+    return unseal(
+      await this.dataKey(),
+      row.signing_secret_sealed,
+      webhookSecretContext(row.circleci_project_id),
+      "delete the CircleCI project binding and add it again",
+    );
+  }
+
+  async dispatchCircleCIPrebuild(
+    tenantId: string,
+    start: PrebuildStartRecord,
+    project: CircleCIProject,
+    parameters: Record<string, string>,
+    now: number,
+  ): Promise<DispatchedCircleCI> {
+    const token = await this.circleCIToken();
+    if (token === null) return { kind: "NotConnected" };
+    const { prebuildId } = start;
+    const run = await this.ctx.blockConcurrencyWhile(async (): Promise<PipelineRun> => {
+      const answer = await triggerPipeline((url, init) => fetch(url, init), this.env.CIRCLECI_API_ORIGIN, token, {
+        projectSlug: project.projectSlug,
+        definitionId: project.pipelineDefinitionId,
+        branch: start.defaultBranch,
+        parameters,
+      });
+      if (answer.kind !== "Created") return answer;
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
+          provider, state, started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', 'Building', ?, ?, ?, ?)`,
+          prebuildId,
+          start.personaId,
+          start.key.repository,
+          start.defaultBranch,
+          start.key.inputDigest,
+          start.key.guestImageDigest,
+          new Date(now).toISOString(),
+          pipelineLogUrl(project.projectSlug, answer.number),
+          now,
+          now,
+        );
+        this.ctx.storage.sql.exec(
+          "INSERT INTO prebuild_pipelines (prebuild_id, pipeline_id, circleci_project_id, head_sha, created_at) VALUES (?, ?, ?, ?, ?)",
+          prebuildId,
+          answer.pipelineId,
+          project.circleCIProjectId,
+          start.headSha,
+          now,
+        );
+      });
+      return answer;
+    });
+    if (run.kind === "Refused") {
+      const reconnect =
+        run.status === 401 || run.status === 403
+          ? "; the token is expired or revoked, so connect again with tumpel circleci start --token-stdin"
+          : "";
+      return {
+        kind: "Refused",
+        detail: `${run.detail}, running pipeline definition ${project.pipelineDefinitionId} of ${project.projectSlug}${reconnect}`,
+      };
+    }
+    await this.prebuildTimers(tenantId, prebuildId, {
+      PrebuildBuild: { prebuildId, at: now + settingsOf(this.env).prebuildBuildBudgetSeconds * 1000 },
+    });
+    const prebuild = this.getPrebuild(tenantId, prebuildId);
+    if (prebuild === null) throw new Error(`prebuild ${prebuildId} was written and then not found`);
+    return { kind: "Dispatched", prebuild };
+  }
+
+  async circleCIWorkflowCompleted(tenantId: string, event: WorkflowCompleted, now: number): Promise<void> {
+    if (event.type !== "workflow-completed" || event.workflow.name !== CIRCLECI_WORKFLOW) return;
+    const [row] = this.ctx.storage.sql
+      .exec<{ prebuild_id: string }>(
+        "SELECT prebuild_id FROM prebuild_pipelines WHERE pipeline_id = ?",
+        event.pipeline.id,
+      )
+      .toArray();
+    if (row === undefined) return;
+    const { status, url } = event.workflow;
+    await this.failPrebuild(
+      tenantId,
+      row.prebuild_id,
+      ["Dispatched", "Building"],
+      status === "success"
+        ? {
+            phase: "Upload",
+            detail: `workflow ${CIRCLECI_WORKFLOW} of pipeline ${event.pipeline.id} succeeded and never completed the layer upload; its log is at ${url}`,
+            fix: "Keep the orb's upload job in the workflow, requiring the build job, then start the prebuild again with tumpel prebuild start --rebuild",
+          }
+        : {
+            phase: "Build",
+            detail: `workflow ${CIRCLECI_WORKFLOW} of pipeline ${event.pipeline.id} ended ${status} before the layer upload completed; its log is at ${url}`,
+            fix: "Fix what the workflow's log names in the devcontainer, its lifecycle commands or the CircleCI config, then start the prebuild again with tumpel prebuild start --rebuild",
+          },
+      url,
+      now,
+    );
   }
 
   deleteCircleCIProject(circleCIProjectId: string): boolean {
