@@ -77,6 +77,8 @@ import {
   installationsOf,
   linkInstallation,
   oauthClient,
+  recordedInstaller,
+  recordInstaller,
   refreshInstallation,
   setInstallationStatus,
   storeApp,
@@ -550,6 +552,7 @@ const verifiedInstaller = async (
     client,
     code,
     installationId,
+    await recordedInstaller(env.DB, installationId),
   );
   if (installer.kind === "Failed") {
     return {
@@ -557,7 +560,7 @@ const verifiedInstaller = async (
       response: htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, installer.detail)),
     };
   }
-  if (installer.kind === "MembershipUnreadable") {
+  if (installer.kind === "InstallerUnknown") {
     return {
       ok: false,
       response: refuseInstall(
@@ -565,9 +568,9 @@ const verifiedInstaller = async (
         url,
         email,
         tenantId,
-        403,
-        "GitHub refused a read of your organization membership",
-        `${installer.detail.replace(/\.$/, "")}. Clear what GitHub names, such as the App's Members: read permission, the organization's SAML single sign-on or its IP allow list, then connect again.`,
+        409,
+        "GitHub has not named the installer yet",
+        `${installer.detail}. GitHub sends that notice when the App is installed, sometimes a moment after you return here. An installation made before this control plane recorded installers has no such notice: uninstall the App on GitHub and install it again.`,
       ),
     };
   }
@@ -738,15 +741,18 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
       code: "InvalidRequest",
       title: "Not an installation event",
       detail: `the installation delivery does not parse: ${issues(delivery.error)}`,
-      fix: "Send installation events in the shape GitHub documents, with an action and an installation",
+      fix: "Send installation events in the shape GitHub documents, with an action, an installation and a sender",
     });
   }
-  const { action, installation } = delivery.data;
+  const { action, installation, sender } = delivery.data;
   if (action === "deleted") {
     await unlinkInstallation(env.DB, installation.id);
     return noContent;
   }
   const now = Date.now();
+  if (action === "created" || action === "new_permissions_accepted") {
+    await recordInstaller(env.DB, installation.id, sender.id, now);
+  }
   await refreshInstallation(env.DB, installation, now);
   if (action === "suspend") await setInstallationStatus(env.DB, installation.id, "Suspended", now);
   if (action === "unsuspend") await setInstallationStatus(env.DB, installation.id, "Active", now);

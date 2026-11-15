@@ -65,7 +65,6 @@ const GitHubAppPermissionsSchema = z.object({
   workflows: z.literal("write"),
   discussions: z.literal("write"),
   actions: z.literal("write"),
-  members: z.literal("read"),
 });
 
 export const GitHubAppManifestSchema = z.object({
@@ -117,11 +116,6 @@ export const GitHubUserSchema = z.object({
   login: GitHubLoginSchema,
 });
 
-export const GitHubOrgMembershipSchema = z.object({
-  state: z.string(),
-  role: z.string(),
-});
-
 export const GitHubUserInstallationsSchema = z.object({
   installations: z.array(z.object({ id: GitHubIdSchema }).loose()),
 });
@@ -143,6 +137,7 @@ export const GitHubErrorSchema = z.object({
 export const GitHubInstallationEventSchema = z.object({
   action: z.string(),
   installation: GitHubInstallationRecordSchema,
+  sender: z.object({ id: GitHubIdSchema }),
 });
 
 export const GitHubInstallationRepositoriesSchema = z.object({
