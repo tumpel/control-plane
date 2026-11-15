@@ -4,7 +4,7 @@ import {
   PrebuildUploadGrantSchema,
   PrebuildUploadStartSchema,
 } from "@tumpel/api/schemas";
-import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAG } from "./github-actions";
+import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAGS } from "./github-actions";
 import { json, parseBody, problem } from "./http";
 import type { Env } from "./index";
 import { jwtVerifier, type VerifyJwt } from "./jwt";
@@ -16,7 +16,6 @@ type Bound = { ok: true; tenantId: string; target: UploadTarget } | { ok: false;
 
 const UPLOADS_PATH = /^\/v1\/prebuilds\/([^/]+)\/uploads(\/complete)?$/;
 const DISPATCH_EVENT = "workflow_dispatch";
-const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
 
 export const prebuildLayerKey = (tenantId: string, prebuildId: string, digest: string): string =>
   `${tenantId}/prebuilds/${prebuildId}/layers/${digest}`;
@@ -71,7 +70,7 @@ const isReusableWorkflow = (jobWorkflow: string | null): boolean => {
   const prefix = `${REUSABLE_WORKFLOW_PATH}@refs/tags/`;
   if (jobWorkflow === null || !jobWorkflow.startsWith(prefix)) return false;
   const tag = jobWorkflow.slice(prefix.length);
-  return tag === REUSABLE_WORKFLOW_TAG || RELEASE_TAG.test(tag);
+  return REUSABLE_WORKFLOW_TAGS.test(tag);
 };
 
 const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repository: string): Response | null => {
@@ -121,7 +120,7 @@ const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repos
     return tokenMismatch(
       "job_workflow_ref",
       `the token comes from job workflow ${jobWorkflow ?? "(none)"}, and a prebuild uploads only from ${REUSABLE_WORKFLOW}`,
-      `Call ${REUSABLE_WORKFLOW} from the caller workflow, as tumpel github-actions get shows, then start the prebuild again`,
+      `Call ${REUSABLE_WORKFLOW} or a release tag v1.x.y from the caller workflow, as tumpel github-actions get shows, then start the prebuild again; a commit SHA pin is refused because its job_workflow_ref names no release tag`,
     );
   }
   if (run.kind === "NoRun") {

@@ -2,10 +2,10 @@ import { callGitHub, type Fetch, type GitHubAnswer, type GitHubRepository } from
 import { GitHubWorkflowDispatchSchema } from "./github-schemas.ts";
 
 export const REUSABLE_WORKFLOW_PATH = "tumpel/workflows/.github/workflows/prebuild.yml";
-export const REUSABLE_WORKFLOW_TAG = "v1";
-export const REUSABLE_WORKFLOW = `${REUSABLE_WORKFLOW_PATH}@${REUSABLE_WORKFLOW_TAG}`;
+export const REUSABLE_WORKFLOW = `${REUSABLE_WORKFLOW_PATH}@v1`;
+export const REUSABLE_WORKFLOW_TAGS = /^v1(?:\.\d+\.\d+)?$/;
 
-const INPUTS: [string, string][] = [
+export const DISPATCH_INPUTS: [string, string][] = [
   ["prebuildId", "The prebuild Tumpel started"],
   ["tenantId", "The tenant that started the prebuild"],
   ["apiOrigin", "The Tumpel API the upload job calls"],
@@ -19,7 +19,7 @@ export const CALLER_WORKFLOW_EXAMPLE = [
   "on:",
   "  workflow_dispatch:",
   "    inputs:",
-  ...INPUTS.flatMap(([name, description]) => [
+  ...DISPATCH_INPUTS.flatMap(([name, description]) => [
     `      ${name}:`,
     `        description: ${description}`,
     "        required: true",
@@ -34,7 +34,7 @@ export const CALLER_WORKFLOW_EXAMPLE = [
   "  prebuild:",
   `    uses: ${REUSABLE_WORKFLOW}`,
   "    with:",
-  ...INPUTS.map(([name]) => `      ${name}: \${{ inputs.${name} }}`),
+  ...DISPATCH_INPUTS.map(([name]) => `      ${name}: \${{ inputs.${name} }}`),
   "",
 ].join("\n");
 
