@@ -480,7 +480,11 @@ export type RecordedInstaller = { kind: "Recorded"; githubUserId: number } | { k
 export type Installer =
   | { kind: "Installer"; installation: GitHubInstallationRecord }
   | { kind: "NotInstaller"; detail: string }
-  | { kind: "InstallerUnknown"; detail: string }
+  | { kind: "InstallerUnknown"; detail: string };
+
+export type InstallationAccess =
+  | { kind: "Accessible"; user: GitHubUser; installation: GitHubInstallationRecord }
+  | { kind: "NotInstaller"; detail: string }
   | { kind: "Failed"; detail: string };
 
 const personDetail = (answer: { status: number; detail: string }, asked: string): string =>
@@ -520,8 +524,7 @@ export const verifyInstaller = async (
   client: OAuthClient,
   code: string,
   installationId: number,
-  recorded: RecordedInstaller,
-): Promise<Installer> => {
+): Promise<InstallationAccess> => {
   const { api, web } = origins;
   const exchanged = await callGitHub(
     fetcher,
@@ -572,7 +575,7 @@ export const verifyInstaller = async (
   }
   const user = await tokenUser(fetcher, api, token);
   if (!user.ok) return { kind: "Failed", detail: personDetail(user, "who you are") };
-  return installedBy(user.value, installation.data, recorded);
+  return { kind: "Accessible", user: user.value, installation: installation.data };
 };
 
 export const convertManifest = async (

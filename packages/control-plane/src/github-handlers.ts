@@ -41,6 +41,7 @@ import {
   type GitHubAnswer,
   type GitHubInstallationRecord,
   installationSettings,
+  installedBy,
   installUrl,
   listInstallationRepositories,
   listOpenIssues,
@@ -48,6 +49,7 @@ import {
   mintInstallationToken,
   mintInstallationWideToken,
   parseJson,
+  type RecordedInstaller,
   readState,
   STATE_KEY_PURPOSE,
   STATE_TTL_MS,
@@ -546,20 +548,29 @@ const verifiedInstaller = async (
   if (client === null) {
     return { ok: false, response: htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId)) };
   }
-  const installer = await verifyInstaller(
+  const access = await verifyInstaller(
     fetcher,
     { api: env.GITHUB_API_ORIGIN, web: env.GITHUB_WEB_ORIGIN },
     client,
     code,
     installationId,
-    await recordedInstaller(env.DB, installationId),
   );
-  if (installer.kind === "Failed") {
+  if (access.kind === "Failed") {
     return {
       ok: false,
-      response: htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, installer.detail)),
+      response: htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, access.detail)),
     };
   }
+  if (access.kind === "NotInstaller") {
+    return {
+      ok: false,
+      response: htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, access.detail)),
+    };
+  }
+  const { user, installation } = access;
+  const recorded: RecordedInstaller =
+    installation.account.type === "User" ? { kind: "Unrecorded" } : await recordedInstaller(env.DB, installation.id);
+  const installer = installedBy(user, installation, recorded);
   if (installer.kind === "InstallerUnknown") {
     return {
       ok: false,
@@ -751,7 +762,7 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   }
   const now = Date.now();
   if (action === "created" || action === "new_permissions_accepted") {
-    await recordInstaller(env.DB, installation.id, sender.id, now);
+    await recordInstaller(env.DB, installation.id, sender.id);
   }
   await refreshInstallation(env.DB, installation, now);
   if (action === "suspend") await setInstallationStatus(env.DB, installation.id, "Suspended", now);

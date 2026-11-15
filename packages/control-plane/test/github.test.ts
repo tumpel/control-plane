@@ -23,6 +23,7 @@ import {
   dashboardReturn,
   type Fetch,
   importAppKey,
+  installedBy,
   listInstallationRepositories,
   listOpenIssues,
   mintInstallationToken,
@@ -283,18 +284,19 @@ test("a repository outside the installation uses the secret set's GITHUB_TOKEN, 
 
 const oauthClient = { clientId: "Iv23client", clientSecret: "client-secret" };
 
-const unrecorded = { kind: "Unrecorded" as const };
-
 const origins = { api: "https://api.github.com", web: "https://github.com" };
 
-test("an installation links only when the person who authorized the App installed it", async () => {
+test("an installation is accessible only when the authorized account can access it", async () => {
   const record = { id: 7, account: { login: "octo", type: "User" } };
   const listed = { total_count: 1, installations: [record] };
   const exchanged: [number, unknown] = [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }];
 
   const owned = answering([exchanged, [200, listed], [200, { id: 1, login: "Octo" }]]);
-  const installer = await verifyInstaller(owned.fetcher, origins, oauthClient, "code-1", 7, unrecorded);
-  assert.deepEqual(installer, { kind: "Installer", installation: record });
+  assert.deepEqual(await verifyInstaller(owned.fetcher, origins, oauthClient, "code-1", 7), {
+    kind: "Accessible",
+    user: { githubUserId: 1, login: "Octo" },
+    installation: record,
+  });
   assert.equal(owned.calls[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(header(owned.calls[0]?.init ?? {}, "accept"), "application/json");
   assert.deepEqual(JSON.parse(String(owned.calls[0]?.init.body)), {
@@ -306,43 +308,38 @@ test("an installation links only when the person who authorized the App installe
   assert.equal(header(owned.calls[1]?.init ?? {}, "authorization"), "Bearer ghu_user");
 
   const someoneElses = answering([exchanged, [200, listed]]);
-  assert.equal(
-    (await verifyInstaller(someoneElses.fetcher, origins, oauthClient, "code-1", 8, unrecorded)).kind,
-    "NotInstaller",
-  );
+  assert.equal((await verifyInstaller(someoneElses.fetcher, origins, oauthClient, "code-1", 8)).kind, "NotInstaller");
 
-  const collaborator = answering([exchanged, [200, listed], [200, { id: 2, login: "reader" }]]);
-  assert.equal(
-    (await verifyInstaller(collaborator.fetcher, origins, oauthClient, "code-1", 7, unrecorded)).kind,
-    "NotInstaller",
-  );
+  const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
+  const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7);
+  assert.equal(failed.kind, "Failed");
+  assert.equal(spent.calls.length, 1);
+});
 
-  const organization = { id: 9, account: { login: "acme", type: "Organization" } };
-  const orgListed: [number, unknown] = [200, { total_count: 1, installations: [organization] }];
-  const installerAnswers: [number, unknown][] = [exchanged, orgListed, [200, { id: 5, login: "owner" }]];
-  const byInstaller = answering(installerAnswers);
-  assert.deepEqual(
-    await verifyInstaller(byInstaller.fetcher, origins, oauthClient, "code-1", 9, {
-      kind: "Recorded",
-      githubUserId: 5,
-    }),
-    { kind: "Installer", installation: organization },
-  );
-  const otherOwner = answering(installerAnswers);
-  const mismatch = await verifyInstaller(otherOwner.fetcher, origins, oauthClient, "code-1", 9, {
-    kind: "Recorded",
-    githubUserId: 6,
+test("a personal account links only to its own login, and an organization only to its recorded installer", () => {
+  const personal = { id: 7, account: { login: "octo", type: "User" as const } };
+  assert.deepEqual(installedBy({ githubUserId: 1, login: "Octo" }, personal, { kind: "Unrecorded" }), {
+    kind: "Installer",
+    installation: personal,
   });
+  assert.equal(
+    installedBy({ githubUserId: 2, login: "reader" }, personal, { kind: "Recorded", githubUserId: 2 }).kind,
+    "NotInstaller",
+  );
+
+  const organization = { id: 9, account: { login: "acme", type: "Organization" as const } };
+  const owner = { githubUserId: 5, login: "owner" };
+  assert.equal(installedBy(owner, organization, { kind: "Unrecorded" }).kind, "InstallerUnknown");
+  assert.deepEqual(installedBy(owner, organization, { kind: "Recorded", githubUserId: 5 }), {
+    kind: "Installer",
+    installation: organization,
+  });
+  const mismatch = installedBy(owner, organization, { kind: "Recorded", githubUserId: 6 });
   assert.equal(mismatch.kind, "NotInstaller");
   assert.match(
     mismatch.kind === "NotInstaller" ? mismatch.detail : "",
     /owner, who did not install the App on the organization acme/,
   );
-
-  const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
-  const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7, unrecorded);
-  assert.equal(failed.kind, "Failed");
-  assert.equal(spent.calls.length, 1);
 });
 
 test("the handover names where GITHUB_TOKEN came from, and an installation token replaces the secret set's", () => {
