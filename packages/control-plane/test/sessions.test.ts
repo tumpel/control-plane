@@ -400,6 +400,7 @@ const sessionStart = async (name = "Default") => {
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
 const GITHUB_USER = { id: 4242, login: "ticket-worker" };
+let userReads = 0;
 
 const createPersona = async (name: string, secrets: unknown[], files: unknown[] = []): Promise<void> => {
   const created = await postJson("/v1/secret-sets", { name: `${name} secrets`, secrets }, bearer);
@@ -428,6 +429,7 @@ before(async () => {
   github = createServer((request, response) => {
     const path = (request.url ?? "").toLowerCase();
     if (path === "/user" && request.headers.authorization === "Bearer ghp-e2e") {
+      userReads += 1;
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(GITHUB_USER));
       return;
@@ -539,6 +541,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     [offer.gitAuthorName, offer.gitAuthorEmail],
     ["ticket-worker", "4242+ticket-worker@users.noreply.github.com"],
   );
+  assert.equal(userReads, 1, "the control plane reads the token's GitHub user once, when the secret set is written");
   assert.deepEqual(
     [offer.image.imageDigest, offer.image.kernelDigest, offer.image.manifestDigest],
     [IMAGE_DIGEST, KERNEL_DIGEST, MANIFEST_DIGEST],
@@ -698,6 +701,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
   await createPersona("Archivable", [
     { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
   ]);
   const start = await sessionStart("Archivable");
   const started = await tool("tumpel_session_start", { ...start, prompt: "stop me" }, StartedSessionSchema);
@@ -1123,16 +1127,35 @@ test("a claimed turn whose TurnRepositoryReady is lost fails NoFirstOutput once 
   assert.match(failure.detail, new RegExp(`no line for turn ${offer.turnId}`));
 });
 
-test("a clone refused without GITHUB_TOKEN in the handover asks for it in the persona's secret set, and no other clone failure does", async () => {
+test("a turn without a GitHub credential fails RepositoryTokenRefused before an offer, and a GITHUB_TOKEN GitHub refuses is refused at the write", async () => {
+  const stale = await postJson(
+    "/v1/secret-sets",
+    { name: "Stale secrets", secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-stale" }] },
+    bearer,
+  );
+  assert.equal(stale.status, 400);
+  const refusal = ProblemSchema.parse(await stale.json());
+  assert.equal(refusal.code, "InvalidRequest");
+  assert.match(refusal.detail, /member GITHUB_TOKEN: GitHub answered GET \S+\/user with 404/);
+  assert.ok(!JSON.stringify(refusal).includes("ghp-stale"));
+
   await createPersona("NoGithub", [{ kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY }]);
-  for (const [name, cause, asks] of [
-    ["NoGithub", "Refused", true],
-    ["NoGithub", "TimedOut", false],
-    ["NoGithub", "DirectoryNotEmpty", false],
-    ["NoGithub", "Other", false],
-    ["Default", "Refused", false],
-  ] as const) {
-    const response = await postJson("/v1/sessions", { ...(await sessionStart(name)), prompt: "clone fails" }, bearer);
+  const response = await postJson("/v1/sessions", { ...(await sessionStart("NoGithub")), prompt: "no token" }, bearer);
+  assert.equal(response.status, 200);
+  const { turn } = StartedSessionSchema.parse(await response.json());
+  await eventually(
+    "the turn reading Failed",
+    () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
+    (read) => read.state === "Failed",
+  );
+  const failure = await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema);
+  assert.equal(failure.reason, "RepositoryTokenRefused");
+  assert.match(failure.detail, /holds no GITHUB_TOKEN/);
+});
+
+test("a clone failure names the persona's secret set", async () => {
+  for (const cause of ["Refused", "TimedOut", "DirectoryNotEmpty", "Other"] as const) {
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "clone fails" }, bearer);
     assert.equal(response.status, 200);
     const offer = await host.next("TurnOffer");
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
@@ -1150,8 +1173,7 @@ test("a clone refused without GITHUB_TOKEN in the handover asks for it in the pe
     );
     const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
     assert.equal(failure.reason, "RepositoryCloneFailed");
-    assert.equal(/needs a Variable member GITHUB_TOKEN/.test(failure.detail), asks, failure.detail);
-    assert.match(failure.detail, new RegExp(`secret set ${name} secrets`));
+    assert.match(failure.detail, /The persona runs on secret set Default secrets$/);
   }
 });
 

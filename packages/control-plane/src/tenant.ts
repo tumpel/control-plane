@@ -8,6 +8,7 @@ import {
 import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal } from "./envelope.ts";
+import type { GitHubUser } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
@@ -323,9 +324,24 @@ export class Tenant extends TenantPrebuilds {
     return sealed;
   }
 
-  private writeSecrets(secretSetId: string, secrets: readonly SealedMember[], now: number): void {
+  private writeSecrets(
+    secretSetId: string,
+    secrets: readonly SealedMember[],
+    githubUser: GitHubUser | null,
+    now: number,
+  ): void {
     const sql = this.ctx.storage.sql;
     sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
+    sql.exec("DELETE FROM secret_set_github_users WHERE secret_set_id = ?", secretSetId);
+    if (githubUser !== null) {
+      sql.exec(
+        "INSERT INTO secret_set_github_users (secret_set_id, github_user_id, login, created_at) VALUES (?, ?, ?, ?)",
+        secretSetId,
+        githubUser.githubUserId,
+        githubUser.login,
+        now,
+      );
+    }
     for (const { member, sealed } of secrets) {
       sql.exec(
         "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -352,7 +368,12 @@ export class Tenant extends TenantPrebuilds {
     }
   }
 
-  async createSecretSet(tenantId: string, secretSet: SecretSetWrite, now: number): Promise<Written<SecretSet>> {
+  async createSecretSet(
+    tenantId: string,
+    secretSet: SecretSetWrite,
+    githubUser: GitHubUser | null,
+    now: number,
+  ): Promise<Written<SecretSet>> {
     const secretSetId = crypto.randomUUID();
     const sealed = await this.sealMembers(secretSetId, secretSet.secrets);
     const written = uniquely(() =>
@@ -364,7 +385,7 @@ export class Tenant extends TenantPrebuilds {
           now,
           now,
         );
-        this.writeSecrets(secretSetId, sealed, now);
+        this.writeSecrets(secretSetId, sealed, githubUser, now);
       }),
     );
     if (!written.ok) return written;
@@ -377,6 +398,7 @@ export class Tenant extends TenantPrebuilds {
     tenantId: string,
     secretSetId: string,
     secretSet: SecretSetWrite,
+    githubUser: GitHubUser | null,
     now: number,
   ): Promise<Written<SecretSet | null>> {
     const sealed = await this.sealMembers(secretSetId, secretSet.secrets);
@@ -389,7 +411,7 @@ export class Tenant extends TenantPrebuilds {
           secretSetId,
         );
         if (updated.rowsWritten === 0) return false;
-        this.writeSecrets(secretSetId, sealed, now);
+        this.writeSecrets(secretSetId, sealed, githubUser, now);
         return true;
       }),
     );

@@ -61,6 +61,7 @@ import {
   startDeviceCode,
 } from "./device";
 import { checkCredential } from "./dispatch-variables.ts";
+import { type GitHubUser, REPOSITORY_TOKEN, tokenUser } from "./github.ts";
 import { handleGitHubConnection, handleGitHubPage, handleGitHubWebhook } from "./github-handlers.ts";
 import { effectiveVersions, HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
@@ -502,12 +503,41 @@ const handleSecretSetsList = async (request: Request, _url: URL, env: Env): Prom
   return json(SecretSetSchema.array().parse(sets));
 };
 
+type TokenUserRead = { ok: true; user: GitHubUser | null } | { ok: false; response: Response };
+
+const repositoryTokenUser = async (
+  env: Env,
+  secrets: readonly z.infer<typeof SecretSetCreateSchema>["secrets"][number][],
+  operation: string,
+): Promise<TokenUserRead> => {
+  const token = secrets.find((member) => member.kind === "Variable" && member.name === REPOSITORY_TOKEN);
+  if (token === undefined) return { ok: true, user: null };
+  const read = await tokenUser((url, init) => fetch(url, init), env.GITHUB_API_ORIGIN, token.value);
+  if (read.ok) return { ok: true, user: read.value };
+  return {
+    ok: false,
+    response: problem(400, {
+      code: "InvalidRequest",
+      title: "GitHub token refused",
+      detail: `${operation} refused the value of member ${REPOSITORY_TOKEN}: ${read.detail}`,
+      fix: `Write a ${REPOSITORY_TOKEN} that GitHub accepts; the box commits as its GitHub user`,
+    }),
+  };
+};
+
 const handleSecretSetCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, SecretSetCreateSchema, "secretSets.create");
   if (!body.ok) return body.response;
-  const created = await env.TENANT.getByName(caller.tenantId).createSecretSet(caller.tenantId, body.value, Date.now());
+  const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.create");
+  if (!githubUser.ok) return githubUser.response;
+  const created = await env.TENANT.getByName(caller.tenantId).createSecretSet(
+    caller.tenantId,
+    body.value,
+    githubUser.user,
+    Date.now(),
+  );
   if (!created.ok) return conflict("secretSets.create", body.value.name, created.constraint);
   return json(SecretSetSchema.parse(created.value));
 };
@@ -538,7 +568,9 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
   if (request.method === "PUT") {
     const body = await parseBody(request, SecretSetUpdateSchema, "secretSets.update");
     if (!body.ok) return body.response;
-    const updated = await tenant.updateSecretSet(caller.tenantId, secretSetId, body.value, Date.now());
+    const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.update");
+    if (!githubUser.ok) return githubUser.response;
+    const updated = await tenant.updateSecretSet(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
     if (!updated.ok) return conflict("secretSets.update", body.value.name, updated.constraint);
     return updated.value === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(updated.value));
   }

@@ -18,6 +18,7 @@ export interface StoredApp {
   slug: string;
   ownerLogin: string;
   htmlUrl: string;
+  botUserId: number | null;
 }
 
 type AppRow = {
@@ -26,6 +27,7 @@ type AppRow = {
   client_id: string;
   owner_login: string;
   html_url: string;
+  bot_user_id: number | null;
   wrapped_data_key: string;
   client_secret_sealed: string;
   webhook_secret_sealed: string;
@@ -46,7 +48,7 @@ const fromBase64 = (text: string): Uint8Array<ArrayBuffer> => Uint8Array.from(at
 const appRow = (db: D1Database): Promise<AppRow | null> =>
   db
     .prepare(
-      "SELECT app_id, slug, client_id, owner_login, html_url, wrapped_data_key, client_secret_sealed, webhook_secret_sealed, private_key_sealed FROM github_apps WHERE github_app_slot = 1",
+      "SELECT app_id, slug, client_id, owner_login, html_url, bot_user_id, wrapped_data_key, client_secret_sealed, webhook_secret_sealed, private_key_sealed FROM github_apps WHERE github_app_slot = 1",
     )
     .first<AppRow>();
 
@@ -54,7 +56,13 @@ export const storedApp = async (db: D1Database): Promise<StoredApp | null> => {
   const row = await appRow(db);
   return row === null
     ? null
-    : { appId: row.app_id, slug: row.slug, ownerLogin: row.owner_login, htmlUrl: row.html_url };
+    : {
+        appId: row.app_id,
+        slug: row.slug,
+        ownerLogin: row.owner_login,
+        htmlUrl: row.html_url,
+        botUserId: row.bot_user_id,
+      };
 };
 
 const unsealed = async (
@@ -91,6 +99,7 @@ export const storeApp = async (
   db: D1Database,
   keyStore: KeyStore,
   conversion: GitHubAppConversion,
+  botUserId: number | null,
   now: number,
 ): Promise<AppStored> => {
   const pkcs8 = pkcs8FromPem(conversion.pem);
@@ -98,9 +107,9 @@ export const storeApp = async (
   const dataKey = await generateDataKey();
   const result = await db
     .prepare(
-      `INSERT INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
-        client_secret_sealed, webhook_secret_sealed, private_key_sealed, created_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (github_app_slot) DO NOTHING`,
+      `INSERT INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, bot_user_id,
+        wrapped_data_key, client_secret_sealed, webhook_secret_sealed, private_key_sealed, created_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (github_app_slot) DO NOTHING`,
     )
     .bind(
       conversion.id,
@@ -108,6 +117,7 @@ export const storeApp = async (
       conversion.client_id,
       conversion.owner.login,
       conversion.html_url,
+      botUserId,
       await keyStore.wrap(dataKey),
       await seal(dataKey, conversion.client_secret, "github-app/client_secret"),
       await seal(dataKey, conversion.webhook_secret, "github-app/webhook_secret"),
@@ -118,6 +128,10 @@ export const storeApp = async (
   const app = await storedApp(db);
   if (app === null) throw new Error("github_apps holds no App right after the insert; check the D1 migrations");
   return result.meta.changes === 1 ? { kind: "Stored", app } : { kind: "Exists", app };
+};
+
+export const storeBotUserId = async (db: D1Database, botUserId: number): Promise<void> => {
+  await db.prepare("UPDATE github_apps SET bot_user_id = ? WHERE github_app_slot = 1").bind(botUserId).run();
 };
 
 type InstallationRow = { installation_id: number; tenant_id: string; account_login: string; created_at: number };

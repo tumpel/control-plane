@@ -5,6 +5,8 @@ import { GitHubIssueSchema, GitHubRepositorySchema } from "@tumpel/api/schemas";
 import { deriveSigningKey } from "../src/envelope.ts";
 import {
   appManifest,
+  botLogin,
+  botUserId,
   commitIdentity,
   convertManifest,
   type Fetch,
@@ -17,6 +19,7 @@ import {
   readState,
   repositoryCredential,
   signState,
+  tokenUser,
   verifyInstaller,
   verifyWebhookSignature,
   withRepositoryToken,
@@ -381,31 +384,33 @@ test("a repository's open issues are one page of the 100 last updated, without p
   });
 });
 
-test("the box commits as the installed App's bot, else as the GitHub user of the secret set's token", async () => {
-  const app = { appId: 42, slug: "tumpel-dev" };
-  const unused = answering([]);
-  assert.deepEqual(await commitIdentity(unused.fetcher, "https://api.github.test", app, "ghp_set", "set-1"), {
-    kind: "Identity",
-    identity: { gitAuthorName: "tumpel-dev[bot]", gitAuthorEmail: "42+tumpel-dev[bot]@users.noreply.github.com" },
+test("the box commits as the App's bot under its own user id, or as the GitHub user of the secret set's token", async () => {
+  const bot = spiedFetch(200, { id: 9001, login: "tumpel-dev[bot]", type: "Bot" });
+  const botId = await botUserId(bot.fetcher, "https://api.github.test", "tumpel-dev", null);
+  assert.deepEqual(botId, { ok: true, value: 9001 });
+  assert.equal(bot.calls[0]?.url, "https://api.github.test/users/tumpel-dev[bot]");
+  assert.equal(header(bot.calls[0]?.init ?? {}, "authorization"), null);
+  assert.deepEqual(commitIdentity({ githubUserId: 9001, login: botLogin("tumpel-dev") }), {
+    gitAuthorName: "tumpel-dev[bot]",
+    gitAuthorEmail: "9001+tumpel-dev[bot]@users.noreply.github.com",
   });
-  assert.equal(unused.calls.length, 0);
 
   const { fetcher, calls } = spiedFetch(200, { id: 4242, login: "octo-cat", name: "Octo" });
-  assert.deepEqual(await commitIdentity(fetcher, "https://api.github.test", null, "ghp_set", "set-1"), {
-    kind: "Identity",
-    identity: { gitAuthorName: "octo-cat", gitAuthorEmail: "4242+octo-cat@users.noreply.github.com" },
-  });
+  const user = await tokenUser(fetcher, "https://api.github.test", "ghp_set");
+  assert.deepEqual(user, { ok: true, value: { githubUserId: 4242, login: "octo-cat" } });
   assert.equal(calls[0]?.url, "https://api.github.test/user");
   assert.equal(header(calls[0]?.init ?? {}, "authorization"), "Bearer ghp_set");
+  assert.deepEqual(commitIdentity({ githubUserId: 4242, login: "octo-cat" }), {
+    gitAuthorName: "octo-cat",
+    gitAuthorEmail: "4242+octo-cat@users.noreply.github.com",
+  });
 
-  const refused = await commitIdentity(
+  const refused = await tokenUser(
     spiedFetch(401, { message: "Bad credentials" }).fetcher,
     "https://api.github.test",
-    null,
     "ghp_stale",
-    "set-1",
   );
-  assert.equal(refused.kind, "Unresolved");
-  assert.match(refused.kind === "Unresolved" ? refused.detail : "", /401: Bad credentials.*secret set set-1/);
+  assert.equal(refused.ok, false);
+  assert.match(refused.ok ? "" : refused.detail, /GET \S+\/user with 401: Bad credentials/);
   assert.doesNotMatch(JSON.stringify(refused), /ghp_stale/);
 });
