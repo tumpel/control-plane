@@ -1,6 +1,7 @@
 import {
   ConfigApiKeySchema,
   ConfigSecretSetSchema,
+  ConfigSecretValueSchema,
   ConfigSecretVariableSchema,
   ConfigSubscriptionTokenSchema,
   DevicePathSchema,
@@ -29,6 +30,8 @@ import {
   SessionStartFromIssueSchema,
   SessionStartSchema,
   SnapshotPathSchema,
+  TenantConfigApplySchema,
+  TenantConfigPlanRequestSchema,
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
@@ -49,7 +52,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -89,6 +92,15 @@ const KEY_NAMES_ONLY = ConfigSecretSetSchema.extend({
 
 const KEY_NAMES_RULE =
   "Secret values never pass through MCP and this tool writes nothing: each member names its kind (Variable, ApiKey, or SubscriptionToken with its expiresAt), a provider for a credential, and only the environment variable (valueFrom.env) its value is read from, which the server cannot resolve. Returns the ConfigSecretSet entry to put in secretSets of the tenant config file; export each named variable on your machine and run tumpel config apply <file>, which writes the values.";
+
+const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
+  secretValues: z
+    .array(ConfigSecretValueSchema.pick({ env: true }).strict())
+    .max(
+      0,
+      "secret values never pass through MCP; apply a config that writes secret values from the dashboard or with tumpel config apply",
+    ),
+});
 
 const rest = (name: string, method: Method, path: string, input: z.ZodObject, description: string): ToolDefinition => ({
   name,
@@ -315,6 +327,27 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/github-connection/repositories/{owner}/{name}/issues",
     GitHubRepositoryPathSchema,
     "List the open issues of a repository the installation covers, most recently updated first, without pull requests. Returns the GitHubIssue[] of GET /v1/github-connection/repositories/{owner}/{name}/issues: issueNumber, title, htmlUrl, labels and updatedAt.",
+  ),
+  rest(
+    "tumpel_oauth_grant_list",
+    "GET",
+    "/v1/oauth-grants",
+    NO_ARGUMENTS,
+    "List the OAuth clients, such as this connector or the dashboard, that hold a live token for you in this tenant. Returns the OAuthGrant[] of GET /v1/oauth-grants: clientId, clientName, redirectOrigin and lastUsedAt.",
+  ),
+  rest(
+    "tumpel_config_plan",
+    "POST",
+    "/v1/tenant-config/plan",
+    TenantConfigPlanRequestSchema,
+    "Plan the changes that make the tenant match a TenantConfig, and change nothing. Send the config, the sha256 digest and sizeBytes of each persona file by its from path, and the expiresAt of each expiry variable. A persona, secret set or pin the config leaves out is deleted. Returns the ConfigPlan of POST /v1/tenant-config/plan: each change with its action, resource, name and description.",
+  ),
+  rest(
+    "tumpel_config_apply",
+    "POST",
+    "/v1/tenant-config/apply",
+    NO_SECRET_VALUES,
+    "Apply a TenantConfig: the plan of tumpel_config_plan, made in order, writing every secret set again. Secret values never pass through MCP, so secretValues must be empty and a config with secret sets is refused for the missing values; the dashboard or tumpel config apply writes those. Send each persona file Inline (base64 content) or Stored by digest. Returns the ConfigPlan of POST /v1/tenant-config/apply.",
   ),
   rest(
     "tumpel_connection_list",

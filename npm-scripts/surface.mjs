@@ -30,6 +30,8 @@ const NOUNS = {
   Connections: "connection",
   GitHubActionsConnections: "github-actions",
   NamespaceConnections: "namespace",
+  TenantConfigs: "config",
+  OAuthGrants: "oauth-grant",
 };
 const VERBS = {
   Identity_listTenants: "tenants",

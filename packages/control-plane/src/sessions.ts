@@ -109,7 +109,7 @@ export const credentialRefused = (
     code: "CredentialExpired",
     title: "Subscription token expired",
     detail: `subscription token ${refusal.name} of ${owner} expired at ${refusal.expiresAt}`,
-    fix: `Write a fresh token and its expiresAt with tumpel config apply --rewrite-secrets, then ${retry}`,
+    fix: `Write a fresh token and its expiresAt with tumpel config apply, then ${retry}`,
   });
 };
 

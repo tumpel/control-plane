@@ -34,11 +34,14 @@ import {
   SecretSetSchema,
   SecretSetUpdateSchema,
   SignUpSchema,
+  TenantConfigApplySchema,
+  TenantConfigPlanRequestSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
+import { applyConfig, type Call, planConfig } from "./configs.ts";
 import { handleConnections } from "./connections.ts";
 import { randomToken, sameSecret } from "./crypto";
 import {
@@ -105,6 +108,7 @@ import {
   clientName,
   forgetAuthorization,
   grantCode,
+  listGrants,
   MCP_PATH,
   PROTECTED_RESOURCE_PATH,
   pendingAuthorization,
@@ -276,6 +280,40 @@ const handleListTenants = async (request: Request, env: Env): Promise<Response> 
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   return json(await listTenants(env.DB, caller));
+};
+
+const callAs =
+  (env: Env, caller: Caller, origin: string): Call =>
+  (method, path, body) => {
+    const request = new Request(`${origin}${path}`, {
+      method,
+      headers: body === null ? {} : { "content-type": "application/json" },
+      body: body === null ? null : JSON.stringify(body),
+    });
+    connectorCallers.set(request, caller);
+    return dispatch(request, new URL(request.url), env);
+  };
+
+const handleConfigPlan = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, TenantConfigPlanRequestSchema, "tenantConfigs.plan");
+  if (!body.ok) return body.response;
+  return planConfig(body.value, callAs(env, caller, url.origin));
+};
+
+const handleConfigApply = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, TenantConfigApplySchema, "tenantConfigs.apply");
+  if (!body.ok) return body.response;
+  return applyConfig(body.value, callAs(env, caller, url.origin));
+};
+
+const handleGrantsList = async (request: Request, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(await listGrants(env.DB, caller, Date.now()));
 };
 
 const handleDevicesList = async (request: Request, env: Env): Promise<Response> => {
@@ -1057,6 +1095,11 @@ const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
 const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const asserted = await assertedSigner(request, env);
   if (!asserted.ok) return messagePage(401, "Sign in again", `${asserted.reason}.`);
+  if (request.method === "GET" && asserted.kind === "Person") {
+    const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
+    const tenantless = (await membershipsOfEmail(env.DB, asserted.email)).length === 0;
+    if (asked?.firstParty === true && tenantless) return signUpPage(asserted.email);
+  }
   const memberships = await signerMemberships(asserted, url, env);
   if (memberships instanceof Response) return memberships;
   const [first, ...others] = memberships;
@@ -1179,6 +1222,9 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/device/approve": handleDeviceApprove,
   "POST /v1/device/deny": handleDeviceDeny,
   "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
+  "GET /v1/oauth-grants": (request, _url, env) => handleGrantsList(request, env),
+  "POST /v1/tenant-config/plan": handleConfigPlan,
+  "POST /v1/tenant-config/apply": handleConfigApply,
   "GET /v1/personas": (request, _url, env) => handlePersonasList(request, env),
   "POST /v1/personas": handlePersonaCreate,
   "POST /v1/personas/file-uploads": handlePersonaFileUpload,

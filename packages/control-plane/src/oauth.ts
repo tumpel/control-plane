@@ -1,6 +1,7 @@
 import {
   AuthorizationServerMetadataSchema,
   OAuthClientSchema,
+  OAuthGrantSchema,
   OAuthTokenSchema,
   ProtectedResourceMetadataSchema,
 } from "@tumpel/api/schemas";
@@ -32,6 +33,7 @@ const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 type OAuthClient = z.infer<typeof OAuthClientSchema>;
 type OAuthToken = z.infer<typeof OAuthTokenSchema>;
+type OAuthGrant = z.infer<typeof OAuthGrantSchema>;
 
 export const resourceOf = (origin: string): string => `${origin}${MCP_PATH}`;
 
@@ -472,4 +474,30 @@ export const callerForAccessToken = async (db: D1Database, token: string, now: n
     .bind(await sha256Hex(token), now)
     .first<{ tenant_id: string; principal_id: string; role: Role }>();
   return row === null ? null : { tenantId: row.tenant_id, principalId: row.principal_id, role: row.role };
+};
+
+export const listGrants = async (db: D1Database, caller: Caller, now: number): Promise<OAuthGrant[]> => {
+  const rows = await db
+    .prepare(
+      `SELECT c.client_id, c.client_name, c.redirect_uris, MAX(t.created_at) AS last_used_at
+      FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id
+      WHERE t.tenant_id = ? AND t.principal_id = ? AND t.spent = 0 AND t.expires_at > ?
+      GROUP BY c.client_id ORDER BY last_used_at DESC`,
+    )
+    .bind(caller.tenantId, caller.principalId, now)
+    .all<{ client_id: string; client_name: string; redirect_uris: string; last_used_at: number }>();
+  return rows.results.flatMap((row) => {
+    const parsed: unknown = JSON.parse(row.redirect_uris);
+    const first = Array.isArray(parsed) ? parsed.find((uri): uri is string => typeof uri === "string") : undefined;
+    const redirect = first === undefined ? null : parsedUrl(first);
+    if (redirect === null) return [];
+    return [
+      OAuthGrantSchema.parse({
+        clientId: row.client_id,
+        clientName: row.client_name,
+        redirectOrigin: redirect.origin,
+        lastUsedAt: row.last_used_at,
+      }),
+    ];
+  });
 };
