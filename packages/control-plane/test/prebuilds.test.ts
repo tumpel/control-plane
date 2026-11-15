@@ -5,6 +5,8 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CircleCIConnectionLinkSchema,
+  CircleCIProjectSchema,
   ConnectionSummarySchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
@@ -26,6 +28,12 @@ const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
 const EMAIL = "prebuilds@example.test";
 const REPOSITORY = "https://github.com/acme/app.git";
+const CIRCLECI_TOKEN = "circleci-personal-token";
+const CIRCLECI_ORGANIZATION = "6f1c2b3a-0d4e-4f5a-9b8c-7d6e5f4a3b2c";
+const CIRCLECI_PROJECT = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const CIRCLECI_DEFINITION = "11111111-2222-4333-8444-555555555555";
+const FOREIGN_DEFINITION = "99999999-2222-4333-8444-555555555555";
+const PROJECT_SLUG = `circleci/${CIRCLECI_ORGANIZATION}/${CIRCLECI_PROJECT}`;
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
@@ -82,10 +90,41 @@ const deviceToken = async (tenantId: string): Promise<string> => {
   return DeviceTokenSchema.parse(await granted.json()).access_token;
 };
 
+const fakeCircleCI = (path: string, token: unknown): { status: number; body: unknown } => {
+  if (token !== CIRCLECI_TOKEN) return { status: 401, body: { message: "Invalid token provided." } };
+  if (path === "/me") return { status: 200, body: { id: "u1", login: "acme-bot", name: "Acme Bot" } };
+  if (path === `/project/${PROJECT_SLUG}`) {
+    return { status: 200, body: { id: CIRCLECI_PROJECT, slug: PROJECT_SLUG, organization_id: CIRCLECI_ORGANIZATION } };
+  }
+  const definition = /^\/projects\/([^/]+)\/pipeline-definitions\/([^/]+)$/.exec(path);
+  if (
+    definition?.[1] === CIRCLECI_PROJECT &&
+    (definition[2] === CIRCLECI_DEFINITION || definition[2] === FOREIGN_DEFINITION)
+  ) {
+    const repo = { full_name: definition[2] === CIRCLECI_DEFINITION ? "Acme/App" : "acme/other", external_id: "7" };
+    return {
+      status: 200,
+      body: {
+        id: definition[2],
+        config_source: { provider: "github_app", repo, file_path: ".circleci/tumpel-prebuild.yml" },
+        checkout_source: { provider: "github_app", repo },
+      },
+    };
+  }
+  return { status: 404, body: { message: "Not found." } };
+};
+
 before(async () => {
-  certs = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ keys: [jwk] }));
+  certs = createServer((request, response) => {
+    const path = request.url ?? "";
+    if (!path.startsWith("/circleci/api/v2/")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ keys: [jwk] }));
+      return;
+    }
+    const answer = fakeCircleCI(path.slice("/circleci/api/v2".length), request.headers["circle-token"]);
+    response.writeHead(answer.status, { "content-type": "application/json" });
+    response.end(JSON.stringify(answer.body));
   });
   await new Promise<void>((resolve) => certs.listen(0, "127.0.0.1", resolve));
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
@@ -99,6 +138,7 @@ before(async () => {
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          CIRCLECI_API_ORIGIN: `${issuer}/circleci`,
         },
       },
     ],
@@ -130,6 +170,9 @@ test("a prebuild start refuses before it stores anything: an unconnected provide
   assert.equal(problem.code, "NoBuildProvider");
   assert.match(problem.detail, /GitHubActions/);
   assert.match(problem.fix, /tumpel github-actions start/);
+  const circleCI = await refused("POST", "/v1/prebuilds", { ...start, provider: "CircleCI" }, 409);
+  assert.equal(circleCI.code, "NoBuildProvider");
+  assert.match(circleCI.fix, /tumpel circleci start --token-stdin/);
   const namespace = await refused("POST", "/v1/prebuilds", { ...start, provider: "Namespace", rebuild: true }, 409);
   assert.equal(namespace.code, "NoBuildProvider");
   assert.match(namespace.fix, /tumpel namespace start/);
@@ -163,6 +206,7 @@ test("the connection list holds one row per provider, and a connected build prov
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
     { kind: "GitHub", state: "NotConfigured" },
     { kind: "GitHubActions", state: "NotConnected" },
+    { kind: "CircleCI", state: "NotConnected" },
     { kind: "Namespace", state: "NotConfigured" },
   ]);
 
@@ -195,13 +239,14 @@ test("the connection list holds one row per provider, and a connected build prov
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
     { kind: "GitHub", state: "NotConfigured" },
     { kind: "GitHubActions", state: "Connected", account: "acme on GitHub Actions" },
+    { kind: "CircleCI", state: "NotConnected" },
     { kind: "Namespace", state: "NotConfigured" },
   ]);
 
   assert.equal((await send("DELETE", "/v1/github-actions-connection", undefined, bearer)).status, 204);
   assert.deepEqual(
     (await rest(ConnectionRows, "GET", "/v1/connections")).map((row) => row.state),
-    ["NotConfigured", "NotConnected", "NotConfigured"],
+    ["NotConfigured", "NotConnected", "NotConnected", "NotConfigured"],
   );
 });
 
@@ -238,5 +283,49 @@ test("the latest listing answers the newest prebuild of each repository, by repo
   assert.deepEqual(
     latest.map((prebuild) => prebuild.prebuildId),
     [app.prebuildId, web.prebuildId],
+  );
+});
+
+test("CircleCI connects only with a token CircleCI accepts, binds a repository to a definition that checks it out, and a disconnect drops the bindings", async () => {
+  const start = { accountLabel: "acme on CircleCI", organizationId: CIRCLECI_ORGANIZATION, apiToken: "mistyped" };
+  const binding = { repository: REPOSITORY, projectSlug: PROJECT_SLUG, pipelineDefinitionId: CIRCLECI_DEFINITION };
+  assert.equal((await refused("POST", "/v1/circleci-projects", binding, 409)).code, "NoBuildProvider");
+
+  const mistyped = await refused("POST", "/v1/circleci-connection/start", start, 422);
+  assert.equal(mistyped.code, "CircleCITokenRefused");
+  assert.match(mistyped.detail, /\/api\/v2\/me with 401: Invalid token provided/);
+  assert.equal((await rest(CircleCIConnectionLinkSchema, "GET", "/v1/circleci-connection")).link.state, "NotConnected");
+
+  const connected = await rest(CircleCIConnectionLinkSchema, "POST", "/v1/circleci-connection/start", {
+    ...start,
+    apiToken: CIRCLECI_TOKEN,
+  });
+  assert.ok(connected.link.state === "Connected");
+  assert.equal(connected.link.connection.issuer, `https://oidc.circleci.com/org/${CIRCLECI_ORGANIZATION}`);
+  assert.equal(connected.orb, "tumpel/prebuild@1");
+  assert.doesNotMatch(JSON.stringify(connected), new RegExp(CIRCLECI_TOKEN));
+
+  const foreign = await refused(
+    "POST",
+    "/v1/circleci-projects",
+    { ...binding, pipelineDefinitionId: FOREIGN_DEFINITION },
+    422,
+  );
+  assert.equal(foreign.code, "CircleCIDefinitionMismatch");
+  assert.match(foreign.detail, /checks out acme\/other/);
+  const missing = await refused("POST", "/v1/circleci-projects", { ...binding, projectSlug: "gh/acme/missing" }, 404);
+  assert.equal(missing.code, "CircleCIProjectMissing");
+
+  const bound = await rest(CircleCIProjectSchema, "POST", "/v1/circleci-projects", binding);
+  assert.equal(bound.repository, "https://github.com/acme/app");
+  assert.equal(bound.projectId, CIRCLECI_PROJECT);
+  assert.equal((await refused("POST", "/v1/circleci-projects", binding, 409)).code, "Conflict");
+  assert.deepEqual(await rest(CircleCIProjectSchema.array(), "GET", "/v1/circleci-projects"), [bound]);
+
+  assert.equal((await send("DELETE", "/v1/circleci-connection", undefined, bearer)).status, 204);
+  assert.deepEqual(await rest(CircleCIProjectSchema.array(), "GET", "/v1/circleci-projects"), []);
+  assert.equal(
+    (await refused("DELETE", `/v1/circleci-projects/${bound.circleCIProjectId}`, undefined, 404)).code,
+    "NotFound",
   );
 });

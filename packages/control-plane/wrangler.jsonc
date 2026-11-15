@@ -22,6 +22,8 @@
     "RELEASES_BUCKET_NAME": "tumpel-releases",
     "GITHUB_API_ORIGIN": "https://api.github.com",
     "GITHUB_WEB_ORIGIN": "https://github.com",
+    "CIRCLECI_API_ORIGIN": "https://circleci.com",
+    "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -72,6 +74,8 @@
         "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
         "GITHUB_API_ORIGIN": "https://api.github.com",
         "GITHUB_WEB_ORIGIN": "https://github.com",
+        "CIRCLECI_API_ORIGIN": "https://circleci.com",
+        "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,

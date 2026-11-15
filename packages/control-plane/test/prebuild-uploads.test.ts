@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,7 @@ import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
 import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
+import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 const ACCESS_AUD = "tumpel-prebuild-uploads-e2e";
 const ACCESS_KID = "access-key";
@@ -31,7 +32,9 @@ const RUN = { runId: 42, headSha: HEAD_SHA };
 const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
 const WEBHOOK_SECRET = "prebuild-uploads-webhook-secret";
 const INSTALLATION_ID = 77;
-const BUDGET_SECONDS = 5;
+const BUDGET_SECONDS = 900;
+const TREE_SHA = "1".repeat(40);
+const DISPATCHED_RUN = 9001;
 
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = rsa();
@@ -63,12 +66,13 @@ let tenantId: string;
 let personaId: string;
 let nextRun = 500;
 
-type Store = { put(key: string, value: Uint8Array): Promise<unknown> };
+type Store = { put(key: string, value: Uint8Array | string): Promise<unknown> };
 type TenantStub = {
   recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown>;
+  prebuildDeadlineReached(tenantId: string, due: unknown): Promise<void>;
 };
 type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
-type Bindings = { DB: Database; STORE: Store; TENANT: { getByName(name: string): TenantStub } };
+type Bindings = { DB: Database; STORE: Store; RELEASES: Store; TENANT: { getByName(name: string): TenantStub } };
 
 const assertion = (): string => {
   const now = nowSeconds();
@@ -108,8 +112,43 @@ const jobToken = (overrides: Record<string, unknown> = {}): string =>
 
 const asJob = (token: string) => ({ authorization: `Bearer ${token}` });
 
+let inProgressDelivery: Promise<Response> | null = null;
+
+const reply = (response: ServerResponse, status: number, body: unknown) => {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(body));
+};
+
+const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, path: string) => {
+  request.resume();
+  if (request.method === "POST" && /^\/app\/installations\/\d+\/access_tokens$/.test(path)) {
+    return reply(response, 201, {
+      token: "installation-token",
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+  }
+  if (path === "/repos/acme/app") return reply(response, 200, { default_branch: "main" });
+  if (path === "/repos/acme/app/branches/main") {
+    return reply(response, 200, { commit: { sha: HEAD_SHA, commit: { tree: { sha: TREE_SHA } } } });
+  }
+  if (path === `/repos/acme/app/git/trees/${TREE_SHA}`) {
+    return reply(response, 200, { tree: [{ path: "package-lock.json", type: "blob", sha: "2".repeat(40) }] });
+  }
+  if (request.method === "POST" && path === "/repos/acme/app/actions/workflows/tumpel-prebuild.yml/dispatches") {
+    inProgressDelivery = fetch(`${origin}/github/webhook`, runEvent(DISPATCHED_RUN, "in_progress", null, HEAD_SHA));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return reply(response, 200, {
+      workflow_run_id: DISPATCHED_RUN,
+      run_url: `https://api.github.com/repos/acme/app/actions/runs/${DISPATCHED_RUN}`,
+      html_url: `https://github.com/acme/app/actions/runs/${DISPATCHED_RUN}`,
+    });
+  }
+  return reply(response, 404, { message: "Not Found" });
+};
+
 before(async () => {
   keys = createServer((request, response) => {
+    if (request.url?.startsWith("/api/")) return void fakeGitHub(request, response, request.url.slice("/api".length));
     const routes: Record<string, unknown> = {
       "/cdn-cgi/access/certs": { keys: [publicJwk(access.publicKey, ACCESS_KID)] },
       "/github/.well-known/jwks": { keys: [publicJwk(job.publicKey, JOB_KID)] },
@@ -131,6 +170,7 @@ before(async () => {
           ACCESS_AUD,
           R2_STUB_ORIGIN: "https://r2.example.test",
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          GITHUB_API_ORIGIN: `${keysOrigin}/api`,
           SECRETS_KEK,
           TUMPEL_SETTINGS: {
             dispatchGrantTtlSeconds: 300,
@@ -183,6 +223,7 @@ before(async () => {
   );
   GitHubActionsConnectionLinkSchema.parse(await connected.json());
   const env = await server.getWorker<Bindings>().getEnv();
+  await env.RELEASES.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
   const keyStore = workersSecretKeyStore(SECRETS_KEK);
   const dataKey = await generateDataKey();
   const privateKey = app.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
@@ -432,7 +473,12 @@ test("connecting another account from Tumpel adds its installation and keeps the
   assert.equal((await linkInstallation(db, "another-tenant", tumpel, Date.now())).kind, "OtherTenant");
 });
 
-const deliver = async (runId: number, action: string, conclusion: string | null, headSha = HEAD_SHA) => {
+const runEvent = (
+  runId: number,
+  action: string,
+  conclusion: string | null,
+  headSha: string,
+): { method: string; headers: Record<string, string>; body: string } => {
   const body = JSON.stringify({
     action,
     installation: { id: INSTALLATION_ID },
@@ -446,11 +492,15 @@ const deliver = async (runId: number, action: string, conclusion: string | null,
     },
   });
   const signature = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex")}`;
-  const response = await server.fetch(`${origin}/github/webhook`, {
+  return {
     method: "POST",
     headers: { "content-type": "application/json", "x-github-event": "workflow_run", "x-hub-signature-256": signature },
     body,
-  });
+  };
+};
+
+const deliver = async (runId: number, action: string, conclusion: string | null, headSha = HEAD_SHA) => {
+  const response = await server.fetch(`${origin}/github/webhook`, runEvent(runId, action, conclusion, headSha));
   assert.equal(response.status, 204, await response.text());
 };
 
@@ -461,15 +511,6 @@ const failure = async (prebuildId: string) => {
   const response = await send("GET", `/v1/prebuilds/${prebuildId}/failure`, undefined, bearer);
   assert.equal(response.status, 200, await response.clone().text());
   return PrebuildFailureSchema.parse(await response.json());
-};
-
-const settled = async (prebuildId: string, state: string) => {
-  const deadline = Date.now() + 15_000;
-  for (;;) {
-    const prebuild = await readPrebuild(prebuildId);
-    if (prebuild.status.state === state || Date.now() > deadline) return prebuild;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
 };
 
 test("a dispatched run reports in_progress, the prebuild builds, and a failed run fails it in phase Build with the run's log", async () => {
@@ -503,15 +544,36 @@ test("a run that starts on another commit than the start read fails in phase Dis
 });
 
 test("a run that never starts fails in phase Dispatch, and a build past its budget fails in phase Build", async () => {
+  const stub = (await server.getWorker<Bindings>().getEnv()).TENANT.getByName(tenantId);
   const waiting = await dispatchedRun();
   const building = await dispatchedRun();
   await deliver(building.runId, "in_progress", null);
-  const unstarted = await settled(waiting.prebuild.prebuildId, "Failed");
+  const reach = (name: string, prebuildId: string) =>
+    stub.prebuildDeadlineReached(tenantId, { name, deadline: { prebuildId, at: Date.now() } });
+  await reach("PrebuildDispatch", waiting.prebuild.prebuildId);
+  await reach("PrebuildDispatch", building.prebuild.prebuildId);
+  await reach("PrebuildBuild", building.prebuild.prebuildId);
+  const unstarted = await readPrebuild(waiting.prebuild.prebuildId);
   assert.ok(unstarted.status.state === "Failed");
   assert.equal(unstarted.status.phase, "Dispatch");
-  assert.match((await failure(waiting.prebuild.prebuildId)).detail, /prebuildDispatchBudgetSeconds 5/);
-  const overdue = await settled(building.prebuild.prebuildId, "Failed");
+  assert.match((await failure(waiting.prebuild.prebuildId)).detail, /prebuildDispatchBudgetSeconds 900/);
+  const overdue = await readPrebuild(building.prebuild.prebuildId);
   assert.ok(overdue.status.state === "Failed");
   assert.equal(overdue.status.phase, "Build");
-  assert.match((await failure(building.prebuild.prebuildId)).detail, /prebuildBuildBudgetSeconds 5/);
+  assert.match((await failure(building.prebuild.prebuildId)).detail, /prebuildBuildBudgetSeconds 900/);
+});
+
+test("a run that reports in_progress before GitHub answers the dispatch still finds its run recorded and builds", async () => {
+  const response = await send(
+    "POST",
+    "/v1/prebuilds",
+    { repository: "https://github.com/acme/app", personaId, provider: "GitHubActions", rebuild: true },
+    bearer,
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  const started = PrebuildSchema.parse(await response.json());
+  assert.ok(inProgressDelivery !== null);
+  assert.equal((await inProgressDelivery).status, 204);
+  assert.equal(started.logUrl, `https://github.com/acme/app/actions/runs/${DISPATCHED_RUN}`);
+  assert.equal((await readPrebuild(started.prebuildId)).status.state, "Building");
 });

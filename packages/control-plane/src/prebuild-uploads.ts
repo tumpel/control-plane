@@ -164,16 +164,10 @@ const bound = async (
   }
   const mismatch = bindClaims(target, claims, repository);
   if (mismatch !== null) return { ok: false, response: mismatch };
-  if (target.prebuild.status.state !== "Dispatched" || target.run.kind !== "Run") {
-    return target.prebuild.status.state === "Building"
-      ? { ok: true, tenantId, target }
-      : { ok: false, response: notUploading(target.prebuild) };
+  if (target.prebuild.status.state === "Dispatched" && target.run.kind === "Run") {
+    await tenantStub.recordPrebuildBuilding(tenantId, prebuildId, target.run.run, Date.now());
   }
-  await tenantStub.recordPrebuildBuilding(tenantId, prebuildId, target.run.run, Date.now());
-  const building = await tenantStub.uploadTarget(tenantId, prebuildId);
-  if (building === null) return { ok: false, response: notFound() };
-  if (building.prebuild.status.state !== "Building") return { ok: false, response: notUploading(building.prebuild) };
-  return { ok: true, tenantId, target: building };
+  return { ok: true, tenantId, target };
 };
 
 const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: PrebuildLayerUpload) => {

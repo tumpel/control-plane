@@ -23,6 +23,7 @@ const PREBUILD_ARCHITECTURE = "Amd64";
 
 const CONNECT_COMMANDS: Record<BuildProvider, string> = {
   GitHubActions: "tumpel github-actions start",
+  CircleCI: "tumpel circleci start --token-stdin",
   Namespace: "tumpel namespace start",
 };
 
@@ -68,6 +69,14 @@ const buildProviderUnavailable = (provider: BuildProvider, repository: string): 
     fix: "Start the prebuild again once the operator deploys a control plane that dispatches to this provider",
   });
 
+const circleCIProjectMissing = (repository: string): Refused =>
+  refuse(409, {
+    code: "CircleCIProjectMissing",
+    title: "Repository not bound to CircleCI",
+    detail: `your tenant has bound no CircleCI project to ${repository}, so CircleCI has no pipeline to run its prebuild`,
+    fix: "Bind it once with tumpel circleci project add --repository <url> --project-slug <slug> --pipeline-definition-id <uuid>, then start the prebuild again",
+  });
+
 const dispatchRefused = (detail: string): Refused =>
   refuse(409, {
     code: "DispatchRefused",
@@ -107,16 +116,17 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
   );
   const dispatched = await tenant.dispatchPrebuild(
     tenantId,
-    target,
     connection.callerWorkflow,
     {
       prebuildId,
       personaId: dispatch.personaId,
       key,
+      target,
       defaultBranch: dispatch.defaultBranch,
       headSha: dispatch.headSha,
+      rootfsUrl,
+      apiOrigin: dispatch.apiOrigin,
     },
-    { prebuildId, tenantId, apiOrigin: dispatch.apiOrigin, rootfsUrl, imageDigest: image.imageDigest },
     now,
   );
   if (dispatched.kind === "NoInstallation") {
@@ -206,6 +216,9 @@ export const startPrebuild = async (
   if (!start.rebuild) {
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
+  }
+  if (start.provider === "CircleCI" && (await tenant.circleCIProjectOf(caller.tenantId, repository)) === null) {
+    return circleCIProjectMissing(repository);
   }
   if (start.provider !== "GitHubActions") return buildProviderUnavailable(start.provider, repository);
   return dispatchGitHubActions(
