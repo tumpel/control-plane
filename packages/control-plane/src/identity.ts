@@ -83,8 +83,8 @@ export const listTenants = async (db: D1Database, caller: Caller): Promise<Membe
   );
 };
 
-const OWNED_BY_EMAIL = `SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
-  WHERE p.email = ? AND m.role = 'Owner'`;
+const OWNED_BY_NAME = `SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
+  JOIN tenants t ON t.tenant_id = m.tenant_id WHERE p.email = ? AND m.role = 'Owner' AND t.name = ?`;
 
 export const signUp = async (
   db: D1Database,
@@ -102,22 +102,24 @@ export const signUp = async (
     db
       .prepare(
         `INSERT INTO tenants (tenant_id, name, created_at, updated_at)
-        SELECT ?, ?, ?, ? WHERE NOT EXISTS (${OWNED_BY_EMAIL}) RETURNING tenant_id`,
+        SELECT ?, ?, ?, ? WHERE NOT EXISTS (${OWNED_BY_NAME}) RETURNING tenant_id`,
       )
-      .bind(tenantId, name, now, now, email),
+      .bind(tenantId, name, now, now, email, name),
     db
       .prepare(
         `INSERT INTO memberships (tenant_id, principal_id, role, created_at)
         SELECT ?, principal_id, 'Owner', ? FROM principals
-        WHERE email = ? AND EXISTS (SELECT 1 FROM tenants WHERE tenant_id = ?) AND NOT EXISTS (${OWNED_BY_EMAIL})`,
+        WHERE email = ? AND EXISTS (SELECT 1 FROM tenants WHERE tenant_id = ?) AND NOT EXISTS (${OWNED_BY_NAME})`,
       )
-      .bind(tenantId, now, email, tenantId, email),
+      .bind(tenantId, now, email, tenantId, email, name),
   ]);
   const row = await db
-    .prepare(`${WHOAMI_SELECT} WHERE p.email = ? AND m.role = 'Owner' ORDER BY m.created_at, m.tenant_id LIMIT 1`)
-    .bind(email)
+    .prepare(
+      `${WHOAMI_SELECT} WHERE p.email = ? AND m.role = 'Owner' AND t.name = ? ORDER BY m.created_at, m.tenant_id LIMIT 1`,
+    )
+    .bind(email, name)
     .first<WhoamiRow>();
-  if (row === null) throw new Error(`sign-up for ${email} left no tenant it owns`);
+  if (row === null) throw new Error(`sign-up for ${email} left no tenant it owns named ${name}`);
   return { whoami: toWhoami(row), created: tenant?.results.length === 1 };
 };
 

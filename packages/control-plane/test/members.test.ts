@@ -332,10 +332,13 @@ test("an expired, revoked or forged invitation is refused", async () => {
   assert.deepEqual([joined.tenant.tenantId, joined.principal.role], [acme, "Owner"]);
 });
 
-test("signing up twice, also at once, answers the one tenant the person owns", async () => {
-  const [first, second] = await Promise.all([signUp(ERIN, "Erin"), signUp(ERIN, "Erin again")]);
+test("signing up one name twice, also at once, answers one tenant, and another name a second", async () => {
+  const [first, second] = await Promise.all([signUp(ERIN, "Erin"), signUp(ERIN, "Erin")]);
   assert.equal(second, first);
-  assert.equal(await signUp(ERIN, "Erin later"), first);
+  assert.equal(await signUp(ERIN, "Erin"), first);
+  const later = await signUp(ERIN, "Erin later");
+  assert.notEqual(later, first);
+  assert.equal(await signUp(ERIN, "Erin later"), later);
   const env = await server.getWorker<{ DB: Database }>().getEnv();
   const owned = await env.DB.prepare(
     `SELECT COUNT(*) AS tenants FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
@@ -343,5 +346,5 @@ test("signing up twice, also at once, answers the one tenant the person owns", a
   )
     .bind(ERIN)
     .first<{ tenants: number }>();
-  assert.deepEqual(owned, { tenants: 1 });
+  assert.deepEqual(owned, { tenants: 2 });
 });
