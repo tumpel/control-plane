@@ -253,11 +253,14 @@ const STORE_DELETE_BATCH = 1000;
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
-type HostEvent = Exclude<SessionHostMessage, ChunkAsk>;
-export type ChunkReply = Extract<
+type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
+type HostEvent = Exclude<SessionHostMessage, ChunkAsk | CloneFailed>;
+type TurnEvent = Exclude<HostEvent, { type: "SnapshotDone" | "SnapshotFailed" | "BoxGone" | "BoxTeardownFailed" }>;
+type ChunkReply = Extract<
   StoredControlMessage,
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
 >;
+export type HostReply = ChunkReply | Extract<StoredControlMessage, { type: "BoxDiscard" | "ClaudeSetupBoxDiscard" }>;
 
 const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
 
@@ -1460,10 +1463,11 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.state === "Offline";
   }
 
-  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<ChunkReply | null> {
+  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<HostReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
+    if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
     await this.hostEvent(tenantId, hostId, message);
     return null;
   }
@@ -1674,6 +1678,23 @@ export class TenantSessions extends DurableObject<Env> {
     };
   }
 
+  private async cloneFailed(tenantId: string, hostId: string, message: CloneFailed): Promise<HostReply | null> {
+    const { turn, session } = this.offeredTurn(hostId, message);
+    if (!IN_FLIGHT.includes(turn.state)) return null;
+    const detail = this.cloneFailureDetail(session, message.detail);
+    await this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt, "Failed");
+    return { type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id };
+  }
+
+  private offeredTurn(hostId: string, message: TurnEvent | CloneFailed): { turn: TurnRow; session: SessionRow } {
+    const turn = this.turnRow(message.turnId);
+    const session = turn === null ? null : this.sessionRow(turn.session_id);
+    if (turn === null || session === null || turn.host_id !== hostId) {
+      throw new Error(`host ${hostId} sent ${message.type} for turn ${message.turnId}, which is not offered to it`);
+    }
+    return { turn, session };
+  }
+
   private async hostEvent(tenantId: string, hostId: string, message: HostEvent): Promise<void> {
     if (message.type === "SnapshotDone" || message.type === "SnapshotFailed") {
       return this.snapshotAnswer(tenantId, hostId, message);
@@ -1681,11 +1702,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (message.type === "BoxGone" || message.type === "BoxTeardownFailed") {
       return this.teardownAnswer(tenantId, hostId, message);
     }
-    const turn = this.turnRow(message.turnId);
-    const session = turn === null ? null : this.sessionRow(turn.session_id);
-    if (turn === null || session === null || turn.host_id !== hostId) {
-      throw new Error(`host ${hostId} sent ${message.type} for turn ${message.turnId}, which is not offered to it`);
-    }
+    const { turn, session } = this.offeredTurn(hostId, message);
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     if (message.type === "TurnImageFetching") {
@@ -1721,16 +1738,6 @@ export class TenantSessions extends DurableObject<Env> {
       const settings = settingsOf(this.env);
       return this.timers(tenantId, session.session_id, {
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
-      });
-    }
-    if (message.type === "TurnRepositoryCloneFailed") {
-      if (!IN_FLIGHT.includes(turn.state)) return;
-      const detail = this.cloneFailureDetail(session, message.detail);
-      await this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt, "Failed");
-      return this.host(session.host_id).send({
-        type: "BoxDiscard",
-        sessionId: session.session_id,
-        boxId: session.box_id,
       });
     }
     if (message.type === "TurnFailed") {

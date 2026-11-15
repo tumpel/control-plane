@@ -28,7 +28,9 @@ import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./r
 import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
-import { type ChunkReply, sealContext, type TenantHostMessage } from "./tenant-sessions";
+import { type HostReply, sealContext, type TenantHostMessage } from "./tenant-sessions";
+
+type ClaudeSetupDiscard = Extract<HostReply, { type: "ClaudeSetupBoxDiscard" }>;
 
 const HARNESS = "ClaudeCode";
 const PROVIDER = "Anthropic";
@@ -89,7 +91,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   ): Promise<ClaudeSetupRow | null> {
     const row = this.claudeSetupRow(claudeSetupId);
     if (row === null || !overdue(row, now)) return row;
-    await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, now);
+    await this.discardClaudeSetupBox(row, await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, now));
     return this.claudeSetupRow(claudeSetupId);
   }
 
@@ -164,7 +166,9 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     );
     const row = this.claudeSetupRow(claudeSetupId);
     if (row === null) throw new Error(`Claude setup ${claudeSetupId} was created and then not found`);
-    if (running !== null && superseded) await this.endFailedClaudeSetup(tenantId, running, true);
+    if (running !== null && superseded) {
+      await this.discardClaudeSetupBox(running, await this.endFailedClaudeSetup(tenantId, running, true));
+    }
     await this.claudeSetupTimer(tenantId, claudeSetupId, dueAt);
     const offer: StoredClaudeSetupOffer = { type: "ClaudeSetupBoxOffer", claudeSetupId, boxId: row.box_id };
     await this.host(row.host_id).send(offer);
@@ -190,7 +194,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const running = this.runningClaudeSetupRow(secretSetId);
     if (running === null) return [];
     if (!overdue(running, now)) return [toClaudeSetup(tenantId, running)];
-    await this.stepClaudeSetup(tenantId, running, { kind: "Deadline" }, now);
+    await this.discardClaudeSetupBox(running, await this.stepClaudeSetup(tenantId, running, { kind: "Deadline" }, now));
     return [];
   }
 
@@ -316,9 +320,9 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     detail: string,
     now: number,
     discard: boolean,
-  ): Promise<void> {
-    if (!this.markClaudeSetupFailed(row, reason, detail, now)) return;
-    await this.endFailedClaudeSetup(tenantId, row, discard);
+  ): Promise<ClaudeSetupDiscard | null> {
+    if (!this.markClaudeSetupFailed(row, reason, detail, now)) return null;
+    return this.endFailedClaudeSetup(tenantId, row, discard);
   }
 
   private markClaudeSetupFailed(
@@ -340,14 +344,18 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     );
   }
 
-  private async endFailedClaudeSetup(tenantId: string, row: ClaudeSetupRow, discard: boolean): Promise<void> {
+  private async endFailedClaudeSetup(
+    tenantId: string,
+    row: ClaudeSetupRow,
+    discard: boolean,
+  ): Promise<ClaudeSetupDiscard | null> {
     await this.claudeSetupTimer(tenantId, row.claude_setup_id, null);
-    if (!discard) return;
-    await this.host(row.host_id).send({
-      type: "ClaudeSetupBoxDiscard",
-      claudeSetupId: row.claude_setup_id,
-      boxId: row.box_id,
-    });
+    if (!discard) return null;
+    return { type: "ClaudeSetupBoxDiscard", claudeSetupId: row.claude_setup_id, boxId: row.box_id };
+  }
+
+  private async discardClaudeSetupBox(row: ClaudeSetupRow, discard: ClaudeSetupDiscard | null): Promise<void> {
+    if (discard !== null) await this.host(row.host_id).send(discard);
   }
 
   private async stepClaudeSetup(
@@ -355,13 +363,12 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     row: ClaudeSetupRow,
     event: ClaudeSetupEvent,
     now: number,
-  ): Promise<void> {
+  ): Promise<ClaudeSetupDiscard | null> {
     const step = advance(row.claude_setup_id, stateOf(row), event, settingsOf(this.env));
     if (step.kind === "Fail") {
-      await this.failClaudeSetup(tenantId, row, step.reason, step.detail, now, event.kind !== "BoxFailed");
-      return;
+      return this.failClaudeSetup(tenantId, row, step.reason, step.detail, now, event.kind !== "BoxFailed");
     }
-    if (step.kind !== "Advance" || event.kind !== "Url") return;
+    if (step.kind !== "Advance" || event.kind !== "Url") return null;
     const dueAt = now + step.dueInSeconds * 1000;
     this.ctx.storage.sql.exec(
       "UPDATE claude_setups SET state = ?, sign_in_url = ?, phase_due_at = ?, updated_at = ? WHERE claude_setup_id = ? AND state = 'Starting'",
@@ -372,9 +379,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       row.claude_setup_id,
     );
     await this.claudeSetupTimer(tenantId, row.claude_setup_id, dueAt);
+    return null;
   }
 
-  override async hostMessage(tenantId: string, hostId: string, message: TenantHostMessage): Promise<ChunkReply | null> {
+  override async hostMessage(tenantId: string, hostId: string, message: TenantHostMessage): Promise<HostReply | null> {
     if (!isClaudeSetupMessage(message)) return super.hostMessage(tenantId, hostId, message);
     const row = this.claudeSetupRow(message.claudeSetupId);
     if (row === null || row.host_id !== hostId) {
@@ -386,14 +394,13 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       message.type === "ClaudeSetupBoxUrl"
         ? { kind: "Url", signInUrl: message.signInUrl }
         : { kind: "BoxFailed", reason: message.reason, detail: message.detail };
-    await this.stepClaudeSetup(tenantId, row, event, Date.now());
-    return null;
+    return this.stepClaudeSetup(tenantId, row, event, Date.now());
   }
 
   async claudeSetupDeadlineReached(tenantId: string, deadline: ClaudeSetupDeadline): Promise<void> {
     const row = this.claudeSetupRow(deadline.claudeSetupId);
     if (row === null || row.phase_due_at !== deadline.at) return;
-    await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, Date.now());
+    await this.discardClaudeSetupBox(row, await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, Date.now()));
   }
 
   private async claudeSetupImage(
