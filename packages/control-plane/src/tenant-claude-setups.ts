@@ -20,7 +20,7 @@ import {
 } from "./claude-setup.ts";
 import { base64Url, sameSecret } from "./crypto";
 import { seal, unseal } from "./envelope.ts";
-import { type Host, hostOf } from "./hosts";
+import { type HostRecord, hostOf } from "./hosts";
 import { keyStoreOf } from "./key-store.ts";
 import { placeSession, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
@@ -40,7 +40,7 @@ export interface NewClaudeSetup {
   principalId: string;
   secretSetId: string;
   harnessVersion: string;
-  hosts: Host[];
+  hosts: HostRecord[];
   endpoint: string;
 }
 

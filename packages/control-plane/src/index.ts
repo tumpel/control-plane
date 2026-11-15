@@ -98,6 +98,7 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
+  withSupervisorUpdates,
 } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
 import {
@@ -822,7 +823,7 @@ const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Respo
 const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await listHosts(env.DB, caller.tenantId));
+  return json(await withSupervisorUpdates(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
 };
 
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -965,14 +966,18 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
     const body = await parseBody(request, HostLabelsSchema, "hosts.setLabels");
     if (!body.ok) return body.response;
     const labelled = await setHostLabels(env.DB, caller.tenantId, hostId, body.value.labels, Date.now());
-    return labelled.ok ? json(labelled.value) : refusal(labelled);
+    if (!labelled.ok) return refusal(labelled);
+    const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+    return json(host);
   }
   if (revoking) {
     const revoked = await revokeHost(env, caller.tenantId, hostId, Date.now());
     return revoked.ok ? json(revoked.value) : refusal(revoked);
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
-  return host === null ? refusal(hostNotFound(hostId)) : json(host);
+  if (host === null) return refusal(hostNotFound(hostId));
+  const [withUpdates] = await withSupervisorUpdates(env, caller.tenantId, [host]);
+  return json(withUpdates);
 };
 
 const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<Response> => {
