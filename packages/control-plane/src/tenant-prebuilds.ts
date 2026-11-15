@@ -34,6 +34,7 @@ import {
   type RunEvent,
   syncCallerWorkflow,
 } from "./github-actions.ts";
+import type { ConfigSource } from "./prebuild-inputs.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
@@ -117,6 +118,7 @@ export interface PrebuildKey {
   repository: string;
   inputDigest: string;
   guestImageDigest: string;
+  configSource: ConfigSource;
 }
 
 export interface PrebuildRun {
@@ -229,6 +231,7 @@ type PrebuildRow = {
   input_digest: string;
   guest_image_digest: string;
   provider: string;
+  config_source: string;
   state: string;
   started_at: string;
   log_url: string;
@@ -251,8 +254,8 @@ type FailureRow = {
   created_at: number;
 };
 
-const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, provider, state,
-  started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
+const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, provider, config_source,
+  state, started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
   prebuild_layers.layer_size_bytes, prebuild_layers.finished_at AS layer_finished_at,
   prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at,
   prebuild_uploads.layer_digest AS upload_layer_digest, prebuild_uploads.layer_size_bytes AS upload_layer_size_bytes
@@ -293,6 +296,7 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
     inputDigest: row.input_digest,
     guestImageDigest: row.guest_image_digest,
     provider: row.provider,
+    configSource: row.config_source,
     status: statusOf(row),
     startedAt: row.started_at,
     logUrl: row.log_url,
@@ -352,7 +356,8 @@ export class TenantPrebuilds extends TenantSessions {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-        provider, state, started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+        provider, config_source, state, started_at, log_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
         prebuildId,
         dispatch.personaId,
         dispatch.key.repository,
@@ -360,6 +365,7 @@ export class TenantPrebuilds extends TenantSessions {
         dispatch.key.inputDigest,
         dispatch.key.guestImageDigest,
         dispatch.provider,
+        dispatch.key.configSource,
         new Date(now).toISOString(),
         dispatch.logUrl,
         now,
@@ -1006,13 +1012,15 @@ export class TenantPrebuilds extends TenantSessions {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
           `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-          provider, state, started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', 'Building', ?, ?, ?, ?)`,
+          provider, config_source, state, started_at, log_url, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'CircleCI', ?, 'Building', ?, ?, ?, ?)`,
           prebuildId,
           start.personaId,
           start.key.repository,
           start.defaultBranch,
           start.key.inputDigest,
           start.key.guestImageDigest,
+          start.key.configSource,
           new Date(now).toISOString(),
           pipelineLogUrl(project.projectSlug, answer.number),
           now,

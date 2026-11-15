@@ -38,6 +38,7 @@ import tenant0037 from "../migrations/tenant/0037_openrouter_authorizations.sql"
 import tenant0038 from "../migrations/tenant/0038_github_account_readings.sql";
 import tenant0039 from "../migrations/tenant/0039_claude_setup_reports.sql";
 import tenant0040 from "../migrations/tenant/0040_openrouter_authorization_exchanges.sql";
+import tenant0041 from "../migrations/tenant/0041_prebuild_config_source.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -81,4 +82,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0038_github_account_readings", sql: tenant0038 },
   { name: "0039_claude_setup_reports", sql: tenant0039 },
   { name: "0040_openrouter_authorization_exchanges", sql: tenant0040 },
+  { name: "0041_prebuild_config_source", sql: tenant0041 },
 ];
