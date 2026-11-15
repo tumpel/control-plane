@@ -100,7 +100,6 @@ export type Sent =
   | { kind: "Stopping" }
   | { kind: "Archived" }
   | { kind: "Failed" }
-  | { kind: "PersonaGone"; personaId: string }
   | { kind: "CredentialRefused"; personaId: string; refusal: CredentialRefusal };
 
 export type Stop =
@@ -861,7 +860,6 @@ export class TenantSessions extends DurableObject<Env> {
     if (session.state === "Failed") return { kind: "Failed" };
     const running = this.inFlightTurn(sessionId);
     if (running !== null) return { kind: "InFlight", turnId: running };
-    if (this.personaRow(session.persona_id) === null) return { kind: "PersonaGone", personaId: session.persona_id };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
     if (hosts.some((host) => host.hostId === session.host_id && host.state === "Online")) {

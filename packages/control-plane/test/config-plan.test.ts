@@ -231,18 +231,19 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
     ),
   },
   {
-    name: "a persona left out that completed a turn stops the plan",
+    name: "a persona left out with a session that is not Failed stops the plan",
     desired: desired(config()),
     live: steady({
       personas: [livePersona("p1", "Default", "ClaudeCode", "s1"), livePersona("p2", "Old", "ClaudeCode", "s1")],
       sessions: [
         liveSession("a1", "p2", "Archived"),
         liveSession("i1", "p2", "Idle"),
+        liveSession("f1", "p2", "Failed"),
         liveSession("o1", "p1", "Running"),
       ],
     }),
     planned: problems(
-      "delete persona Old (p2) will be refused: it is the persona of session a1, i1, and a persona that completed a turn stays; keep the persona in the config",
+      "delete persona Old (p2) will be refused: it is the persona of session a1, i1, and a persona stays while any of its sessions is not Failed; keep the persona in the config",
     ),
   },
   {

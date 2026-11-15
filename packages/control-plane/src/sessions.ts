@@ -361,14 +361,6 @@ export const sendTurn = async (
       fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
     });
   }
-  if (sent.kind === "PersonaGone") {
-    return refuse(409, {
-      code: "Conflict",
-      title: "Persona deleted",
-      detail: `session ${sessionId} ran on persona ${sent.personaId}, which was deleted, so it takes no more turns`,
-      fix: "Start a new session with another persona",
-    });
-  }
   return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
 };
 
