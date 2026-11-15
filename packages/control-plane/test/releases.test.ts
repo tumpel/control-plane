@@ -7,6 +7,7 @@ import { parseRelease, type ReleaseManifest } from "../src/releases.ts";
 
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const SUPERVISOR_SHA = "a".repeat(64);
+const CLI_SHA = "f".repeat(64);
 const IMAGE = "b".repeat(64);
 const KERNEL = "c".repeat(64);
 const MANIFEST = "d".repeat(64);
@@ -16,6 +17,7 @@ const RELEASE: ReleaseManifest = {
   commit: "e".repeat(40),
   channelProtocolVersion: ChannelProtocol.Version,
   supervisors: [{ architecture: "Amd64", sha256: SUPERVISOR_SHA, sizeBytes: 4096 }],
+  clis: [{ architecture: "Amd64", sha256: CLI_SHA, sizeBytes: 2048 }],
   images: [
     {
       harness: "ClaudeCode",
@@ -58,6 +60,12 @@ test("current.json parses against ReleaseManifest and refuses another channel pr
     /does not match ReleaseManifest in packages\/api\/release\.tsp: commit/,
   );
   assert.throws(() => parseRelease(JSON.stringify({ ...RELEASE, supervisors: [] })), /supervisors/);
+  assert.throws(() => parseRelease(JSON.stringify({ ...RELEASE, clis: [] })), /clis/);
+  const { clis: _clis, ...withoutClis } = RELEASE;
+  assert.throws(() => parseRelease(JSON.stringify(withoutClis)), /clis/);
+  const [cli] = RELEASE.clis;
+  assert.ok(cli);
+  assert.throws(() => parseRelease(JSON.stringify({ ...RELEASE, clis: [cli, cli] })), /two CLIs for Amd64/);
   const [image] = RELEASE.images;
   assert.ok(image);
   assert.throws(
@@ -97,4 +105,20 @@ test("with no current.json the release reads NoRelease, and once published it re
     /release 0\.2\.0 carries supervisors for Amd64, not Arm64/,
   );
   assert.equal((await get("/v1/releases/supervisor/Sparc")).status, 400);
+});
+
+test("the CLI download redirects to the current release's CLI binary for the architecture", async () => {
+  await (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
+  const redirect = await get("/v1/releases/cli/Amd64");
+  assert.equal(redirect.status, 302);
+  assert.equal(redirect.headers.get("cache-control"), "no-store");
+  const location = new URL(redirect.headers.get("location") ?? "");
+  assert.equal(location.origin, R2_STUB_ORIGIN);
+  assert.equal(location.pathname, `/tumpel-releases/cli/amd64/${CLI_SHA}`);
+  assert.equal(location.searchParams.get("X-Tumpel-Method"), "GET");
+
+  const arm = await get("/v1/releases/cli/Arm64");
+  assert.equal(arm.status, 404);
+  assert.match(ProblemSchema.parse(await arm.json()).detail, /release 0\.2\.0 carries CLIs for Amd64, not Arm64/);
+  assert.equal((await get("/v1/releases/cli/Sparc")).status, 400);
 });

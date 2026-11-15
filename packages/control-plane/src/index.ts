@@ -27,6 +27,7 @@ import {
   PersonaPathSchema,
   PersonaSchema,
   PersonaUpdateSchema,
+  ReleaseCliPathSchema,
   ReleaseSupervisorPathSchema,
   SecretSetCreateSchema,
   SecretSetPathSchema,
@@ -136,7 +137,7 @@ import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./pe
 import { handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
-import { currentRelease, imagesFor, supervisorKey } from "./releases";
+import { cliKey, currentRelease, imagesFor, type ReleaseManifest, supervisorKey } from "./releases";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
 import type { PersonaWrite, Tenant } from "./tenant";
@@ -623,8 +624,27 @@ const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promi
   return json(await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId));
 };
 
-const SUPERVISOR_DOWNLOAD_SECONDS = 300;
-const SUPERVISOR_PATH = /^\/v1\/releases\/supervisor\/([^/]+)$/;
+const RELEASE_DOWNLOAD_SECONDS = 300;
+const RELEASE_DOWNLOAD_PATH = /^\/v1\/releases\/(supervisor|cli)\/([^/]+)$/;
+
+const RELEASE_BINARIES = {
+  supervisor: {
+    pathSchema: ReleaseSupervisorPathSchema,
+    binaries: (manifest: ReleaseManifest) => manifest.supervisors,
+    key: supervisorKey,
+    plural: "supervisors",
+    title: "No supervisor for this architecture",
+    fix: "Run the host on one of those architectures, or publish a release that builds the supervisor for it",
+  },
+  cli: {
+    pathSchema: ReleaseCliPathSchema,
+    binaries: (manifest: ReleaseManifest) => manifest.clis,
+    key: cliKey,
+    plural: "CLIs",
+    title: "No CLI for this architecture",
+    fix: "Run the CLI on one of those architectures, or publish a release that builds the CLI for it",
+  },
+} as const;
 
 const noRelease = (): Response =>
   problem(404, {
@@ -639,28 +659,31 @@ const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Pro
   return release.kind === "Published" ? json(release.manifest) : noRelease();
 };
 
-const handleSupervisorDownload = async (url: URL, env: Env): Promise<Response | null> => {
-  const matched = SUPERVISOR_PATH.exec(url.pathname);
-  if (matched?.[1] === undefined) return null;
-  const parsed = ReleaseSupervisorPathSchema.safeParse({ architecture: decodeURIComponent(matched[1]) });
+const handleReleaseDownload = async (url: URL, env: Env): Promise<Response | null> => {
+  const matched = RELEASE_DOWNLOAD_PATH.exec(url.pathname);
+  if (matched?.[1] === undefined || matched[2] === undefined) return null;
+  const kind = matched[1] === "cli" ? "cli" : "supervisor";
+  const binary = RELEASE_BINARIES[kind];
+  const parsed = binary.pathSchema.safeParse({ architecture: decodeURIComponent(matched[2]) });
   if (!parsed.success) {
     return problem(400, {
       code: "InvalidRequest",
       title: "Unknown architecture",
-      detail: `releases.supervisor refused the path: ${issues(parsed.error)}`,
+      detail: `releases.${kind} refused the path: ${issues(parsed.error)}`,
       fix: "Ask for Amd64 for `uname -m` x86_64, Arm64 for aarch64",
     });
   }
   const { architecture } = parsed.data;
   const release = await currentRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") return noRelease();
-  const supervisor = release.manifest.supervisors.find((each) => each.architecture === architecture);
-  if (supervisor === undefined) {
+  const published = binary.binaries(release.manifest);
+  const found = published.find((each) => each.architecture === architecture);
+  if (found === undefined) {
     return problem(404, {
       code: "NotFound",
-      title: "No supervisor for this architecture",
-      detail: `release ${release.manifest.releaseVersion} carries supervisors for ${release.manifest.supervisors.map((each) => each.architecture).join(", ")}, not ${architecture}`,
-      fix: "Run the host on one of those architectures, or publish a release that builds the supervisor for it",
+      title: binary.title,
+      detail: `release ${release.manifest.releaseVersion} carries ${binary.plural} for ${published.map((each) => each.architecture).join(", ")}, not ${architecture}`,
+      fix: binary.fix,
     });
   }
   const location = await signerOf(
@@ -668,7 +691,7 @@ const handleSupervisorDownload = async (url: URL, env: Env): Promise<Response | 
     env.RELEASES_BUCKET_NAME,
     env.RELEASES_ACCESS_KEY_ID,
     env.RELEASES_SECRET_ACCESS_KEY,
-  ).presign("GET", supervisorKey(supervisor), SUPERVISOR_DOWNLOAD_SECONDS, new Date());
+  ).presign("GET", binary.key(found), RELEASE_DOWNLOAD_SECONDS, new Date());
   return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
 };
 
@@ -1218,7 +1241,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const host = await handleHost(request, url, env);
   if (host) return host;
   if (request.method === "GET") {
-    const download = await handleSupervisorDownload(url, env);
+    const download = await handleReleaseDownload(url, env);
     if (download) return download;
   }
   return problem(404, {
