@@ -65,12 +65,22 @@ const SETTINGS = {
   gitHubActionsIssuer: "https://token.actions.githubusercontent.com",
 };
 
+type WorkerConfig = Extract<
+  Extract<Parameters<typeof createTestHarness>[0], object>["workers"][number],
+  { config: unknown }
+>["config"];
+
+const { env: _stages, ...config }: WorkerConfig & { env?: unknown } = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../wrangler.jsonc", import.meta.url)), "utf8"),
+);
+
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
 
 type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
+type StoredTimerStub = { store(timers: unknown, at: number): Promise<void> };
 type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
 
 const IMAGE_DIGEST = "b".repeat(64);
@@ -458,15 +468,19 @@ before(async () => {
     root: fileURLToPath(new URL("..", import.meta.url)),
     workers: [
       {
-        configPath: "./wrangler.jsonc",
-        vars: {
-          ACCESS_ISSUER: issuer,
-          ACCESS_AUD: AUDIENCE,
-          TUMPEL_SETTINGS: SETTINGS,
-          R2_STUB_ORIGIN,
-          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
-          DASHBOARD_ORIGIN: "https://app.tumpel.test",
-          GITHUB_API_ORIGIN: `http://127.0.0.1:${(github.address() as AddressInfo).port}`,
+        config: {
+          ...config,
+          main: "./test/fixtures/stored-timer-worker.ts",
+          vars: {
+            ...config.vars,
+            ACCESS_ISSUER: issuer,
+            ACCESS_AUD: AUDIENCE,
+            TUMPEL_SETTINGS: SETTINGS,
+            R2_STUB_ORIGIN,
+            SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+            DASHBOARD_ORIGIN: "https://app.tumpel.test",
+            GITHUB_API_ORIGIN: `http://127.0.0.1:${(github.address() as AddressInfo).port}`,
+          },
         },
       },
     ],
@@ -1054,6 +1068,28 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NotClaimed");
   assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
+});
+
+test("a session timer stored before its owner field was dropped still fails an unclaimed turn NotClaimed", async () => {
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "stored timer" }, bearer);
+  assert.equal(response.status, 200);
+  const started = StartedSessionSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  const { sessionId, tenantId } = started.session;
+  const at = Date.now() + 500;
+  const env = await server.getWorker<{ SESSION_TIMER: { getByName(name: string): StoredTimerStub } }>().getEnv();
+  await env.SESSION_TIMER.getByName(sessionId).store(
+    { tenantId, sessionId, deadlines: { Claim: { turnId: offer.turnId, at } } },
+    at,
+  );
+
+  await eventually(
+    "the turn reading Failed",
+    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
+  const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+  assert.equal(failure.reason, "NotClaimed");
 });
 
 test("a start from an issue over MCP refuses a missing or closed issue, and an open one saves the issue and offers its prompt", async () => {

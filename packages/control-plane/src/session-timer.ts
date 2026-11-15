@@ -50,15 +50,14 @@ type Deadlines = { [N in DeadlineName]?: DeadlineOf<N> };
 
 interface Timers {
   tenantId: string;
-  ownerId: string;
   deadlines: Deadlines;
 }
 
 const TIMERS_KEY = "timers";
 
 export class SessionTimer extends DurableObject<Env> {
-  async set(tenantId: string, ownerId: string, changes: DeadlineChanges): Promise<void> {
-    const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, ownerId, deadlines: {} };
+  async set(tenantId: string, _ownerId: string, changes: DeadlineChanges): Promise<void> {
+    const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, deadlines: {} };
     Object.assign(timers.deadlines, changes);
     for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, { at: number } | null][]) {
       if (deadline === null) delete timers.deadlines[name];
@@ -78,7 +77,7 @@ export class SessionTimer extends DurableObject<Env> {
     const tenant = this.env.TENANT.getByName(timers.tenantId);
     for (const reached of due) {
       if (isPrebuildDeadline(reached)) await tenant.prebuildDeadlineReached(timers.tenantId, reached);
-      else await tenant.deadlineReached(timers.tenantId, timers.ownerId, reached);
+      else await tenant.deadlineReached(timers.tenantId, reached);
     }
   }
 

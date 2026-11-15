@@ -1730,12 +1730,14 @@ export class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async deadlineReached(tenantId: string, sessionId: string, due: SessionDueDeadline): Promise<void> {
+  async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
     const { turnId } = due.deadline;
     const { name } = due;
     const turn = this.turnRow(turnId);
+    if (turn === null) return;
+    const sessionId = turn.session_id;
     const session = this.sessionRow(sessionId);
-    if (turn === null || session === null) return;
+    if (session === null) return;
     const settings = settingsOf(this.env);
     const failedAt = iso(Date.now());
     if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
