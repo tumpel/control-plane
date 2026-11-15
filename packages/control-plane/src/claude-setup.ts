@@ -46,7 +46,7 @@ const isLive = (state: ClaudeSetupState): state is LivePhase =>
 
 const START_AGAIN = "start the Claude setup again";
 
-export const mintTimedOut = (claudeSetupId: string, budgets: ClaudeSetupBudgets): string =>
+const mintTimedOut = (claudeSetupId: string, budgets: ClaudeSetupBudgets): string =>
   `Claude Code minted no token for Claude setup ${claudeSetupId} within claudeSetupMintBudgetSeconds ${budgets.claudeSetupMintBudgetSeconds} of the code; ${START_AGAIN}`;
 
 const timedOut = (claudeSetupId: string, phase: LivePhase, budgets: ClaudeSetupBudgets): ClaudeSetupStep => {
@@ -87,7 +87,11 @@ export const advance = (
   }
   if (event.kind === "Code") {
     return state === "AwaitingCode"
-      ? { kind: "Advance", state: "Minting", dueInSeconds: budgets.claudeSetupMintBudgetSeconds }
+      ? {
+          kind: "Advance",
+          state: "Minting",
+          dueInSeconds: budgets.claudeSetupMintBudgetSeconds + budgets.claudeSetupReportBudgetSeconds,
+        }
       : {
           kind: "Refuse",
           detail:

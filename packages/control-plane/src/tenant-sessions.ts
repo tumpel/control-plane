@@ -241,13 +241,9 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const STORE_DELETE_BATCH = 1000;
 
-export type SessionHostMessage = Exclude<
-  HostMessage,
-  { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" | "ClaudeSetupBoxPrinted" }
->;
+export type SessionHostMessage = Exclude<HostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type HostEvent = Exclude<SessionHostMessage, ChunkAsk>;
-export type HostReply = ChunkReply | Extract<StoredControlMessage, { type: "ClaudeSetupBoxDiscard" }>;
 export type ChunkReply = Extract<
   StoredControlMessage,
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
@@ -1416,7 +1412,7 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.state === "Offline";
   }
 
-  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<HostReply | null> {
+  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<ChunkReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);

@@ -829,86 +829,80 @@ test("a setup box token writes its own setup's member once, only while the setup
   });
 });
 
-test("a Minting setup lists as the one to resume, and listed or read past its mint budget asks its box what Claude Code printed, then fails SetupTimedOut with those lines or with the box's silence, even when its alarm never fired", async () => {
-  const mintingSetup = async (name: string) => {
-    const created = await postJson("/v1/secret-sets", { name, secrets: [] }, bearer);
-    assert.equal(created.status, 200, await created.clone().text());
-    const { secretSetId } = SecretSetSchema.parse(await created.json());
-    const started = await postJson("/v1/claude-setups", { secretSetId }, bearer);
-    assert.equal(started.status, 200, await started.clone().text());
-    assert.equal(ClaudeSetupSchema.parse(await started.json()).status.state, "Starting");
-    const offer = await host.next("ClaudeSetupBoxOffer");
-    const { claudeSetupId } = offer;
-    const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
-    host.send({
-      type: "ClaudeSetupBoxUrl",
-      claudeSetupId,
-      signInUrl: "https://claude.ai/oauth/authorize?state=overdue",
-    });
-    await eventually("the setup reading AwaitingCode", status, (setup) => setup.status.state === "AwaitingCode");
-    const coded = await postJson(`/v1/claude-setups/${claudeSetupId}/code`, { code: "overdue-code" }, bearer);
-    assert.equal(coded.status, 200, await coded.clone().text());
-    const minting = ClaudeSetupSchema.parse(await coded.json());
-    assert.ok(minting.status.state === "Minting" && Date.parse(minting.status.tokenDueAt) > Date.now());
-    await host.next("ClaudeSetupBoxCode");
-    const listed = () => getJson(`/v1/claude-setups?secretSetId=${secretSetId}`, ClaudeSetupSchema.array());
-    const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: offer.tenantId });
-    const overdue = () =>
-      storage.exec(
-        "UPDATE claude_setups SET phase_due_at = ? WHERE claude_setup_id = ?",
-        Date.now() - 1,
-        claudeSetupId,
-      );
-    return { offer, status, listed, overdue };
-  };
-  const failure = async (status: () => Promise<z.infer<typeof ClaudeSetupSchema>>) => {
-    const read = await status();
-    assert.ok(read.status.state === "Failed" && read.status.reason === "SetupTimedOut");
-    return read.status.detail;
-  };
-
-  const answered = await mintingSetup("Overdue setup secrets");
-  const { claudeSetupId, tenantId } = answered.offer;
-  assert.deepEqual(
-    (await answered.listed()).map((setup) => [setup.claudeSetupId, setup.status.state]),
-    [[claudeSetupId, "Minting"]],
+test("a box whose Claude Code mints no token within the code's mint budget fails its setup SetupTimedOut with the lines it printed", async () => {
+  const created = await postJson("/v1/secret-sets", { name: "Mint budget secrets", secrets: [] }, bearer);
+  assert.equal(created.status, 200, await created.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const started = await postJson("/v1/claude-setups", { secretSetId }, bearer);
+  assert.equal(started.status, 200, await started.clone().text());
+  const { claudeSetupId } = await host.next("ClaudeSetupBoxOffer");
+  const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
+  host.send({ type: "ClaudeSetupBoxUrl", claudeSetupId, signInUrl: "https://claude.ai/oauth/authorize?state=mint" });
+  await eventually("the setup reading AwaitingCode", status, (setup) => setup.status.state === "AwaitingCode");
+  const codedAt = Date.now();
+  const coded = await postJson(`/v1/claude-setups/${claudeSetupId}/code`, { code: "mint-code" }, bearer);
+  assert.equal(coded.status, 200, await coded.clone().text());
+  const minting = ClaudeSetupSchema.parse(await coded.json());
+  assert.ok(minting.status.state === "Minting");
+  assert.ok(
+    Date.parse(minting.status.tokenDueAt) >=
+      codedAt + (SETTINGS.claudeSetupMintBudgetSeconds + SETTINGS.claudeSetupReportBudgetSeconds) * 1000,
+    "the control plane waits past the box's own mint budget",
   );
-  await answered.overdue();
-  assert.deepEqual(
-    (await answered.listed()).map((setup) => [setup.claudeSetupId, setup.status.state]),
-    [[claudeSetupId, "Minting"]],
-    "the setup stays Minting while its box reports",
-  );
-  const report = await host.next("ClaudeSetupBoxReport");
-  assert.deepEqual([report.claudeSetupId, report.boxId], [claudeSetupId, answered.offer.boxId]);
+  const code = await host.next("ClaudeSetupBoxCode");
+  assert.equal(code.mintBudgetSeconds, SETTINGS.claudeSetupMintBudgetSeconds);
+  const detail =
+    "Claude Code minted no token within mintBudgetSeconds 120 of the code. Claude Code printed after the code: Exchanging the code / Couldn't reach console.anthropic.com; start the Claude setup again";
   host.send({
-    type: "ClaudeSetupBoxPrinted",
+    type: "ClaudeSetupBoxFailed",
     claudeSetupId,
-    lines: ["Exchanging the code", "Couldn't reach console.anthropic.com"],
-  });
-  assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, claudeSetupId);
-  assert.deepEqual(await answered.listed(), []);
-  const detail = await failure(answered.status);
-  assert.match(detail, /minted no token/);
-  assert.match(
+    reason: "SetupTimedOut",
     detail,
-    /Claude Code printed after the code: Exchanging the code \/ Couldn't reach console\.anthropic\.com$/,
-  );
+    failedAt: new Date().toISOString(),
+  });
+  const failed = await eventually("the setup reading Failed", status, (setup) => setup.status.state === "Failed");
+  assert.ok(failed.status.state === "Failed" && failed.status.reason === "SetupTimedOut");
+  assert.equal(failed.status.detail, detail);
+  assert.deepEqual(await getJson(`/v1/claude-setups?secretSetId=${secretSetId}`, ClaudeSetupSchema.array()), []);
+});
 
-  const silent = await mintingSetup("Silent setup secrets");
-  await silent.overdue();
-  assert.equal((await silent.status()).status.state, "Minting");
-  assert.equal((await host.next("ClaudeSetupBoxReport")).claudeSetupId, silent.offer.claudeSetupId);
-  await silent.overdue();
-  assert.match(
-    await failure(silent.status),
-    /did not say what Claude Code printed within claudeSetupReportBudgetSeconds 10/,
+test("a Minting setup whose box says nothing lists as the one to resume, and listed or read past the host deadline fails SetupTimedOut and discards its box even when its alarm never fired", async () => {
+  const created = await postJson("/v1/secret-sets", { name: "Silent setup secrets", secrets: [] }, bearer);
+  assert.equal(created.status, 200, await created.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const started = await postJson("/v1/claude-setups", { secretSetId }, bearer);
+  assert.equal(started.status, 200, await started.clone().text());
+  const offer = await host.next("ClaudeSetupBoxOffer");
+  const { claudeSetupId, tenantId } = offer;
+  const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
+  host.send({ type: "ClaudeSetupBoxUrl", claudeSetupId, signInUrl: "https://claude.ai/oauth/authorize?state=silent" });
+  await eventually("the setup reading AwaitingCode", status, (setup) => setup.status.state === "AwaitingCode");
+  const coded = await postJson(`/v1/claude-setups/${claudeSetupId}/code`, { code: "silent-code" }, bearer);
+  assert.equal(coded.status, 200, await coded.clone().text());
+  await host.next("ClaudeSetupBoxCode");
+  const listed = () => getJson(`/v1/claude-setups?secretSetId=${secretSetId}`, ClaudeSetupSchema.array());
+  assert.deepEqual(
+    (await listed()).map((setup) => [setup.claudeSetupId, setup.status.state]),
+    [[claudeSetupId, "Minting"]],
   );
-  assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, silent.offer.claudeSetupId);
+  const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenantId });
+  await storage.exec(
+    "UPDATE claude_setups SET phase_due_at = ? WHERE claude_setup_id = ?",
+    Date.now() - 1,
+    claudeSetupId,
+  );
+  assert.deepEqual(await listed(), []);
+  const read = await status();
+  assert.ok(read.status.state === "Failed" && read.status.reason === "SetupTimedOut");
+  assert.match(
+    read.status.detail,
+    /minted no token for Claude setup .* within claudeSetupMintBudgetSeconds 120 of the code/,
+  );
+  assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, claudeSetupId);
   const late = await postJson(
     `/v1/claude-setups/${claudeSetupId}/token`,
     { tenantId, value: "overdue-subscription-token" },
-    { authorization: `Bearer ${answered.offer.tokenCredential}` },
+    { authorization: `Bearer ${offer.tokenCredential}` },
   );
   assert.equal(late.status, 409, await late.clone().text());
   assert.equal(ProblemSchema.parse(await late.json()).code, "ClaudeSetupNotWaiting");

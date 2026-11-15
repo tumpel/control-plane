@@ -12,7 +12,6 @@ import {
   type ClaudeSetupEvent,
   type ClaudeSetupFailureReason,
   type ClaudeSetupRow,
-  mintTimedOut,
   overdue,
   setupOffer,
   stateOf,
@@ -29,7 +28,7 @@ import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./r
 import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
-import { type HostReply, sealContext } from "./tenant-sessions";
+import { type ChunkReply, sealContext } from "./tenant-sessions";
 
 const HARNESS = "ClaudeCode";
 const PROVIDER = "Anthropic";
@@ -68,20 +67,10 @@ type TokenWritten =
   | { kind: "NotStored"; detail: string }
   | { kind: "NotWaiting"; detail: string };
 
-type ClaudeSetupHostMessage = Extract<
-  HostMessage,
-  { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" | "ClaudeSetupBoxPrinted" }
->;
+type ClaudeSetupHostMessage = Extract<HostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 
 const isClaudeSetupMessage = (message: HostMessage): message is ClaudeSetupHostMessage =>
-  message.type === "ClaudeSetupBoxUrl" ||
-  message.type === "ClaudeSetupBoxFailed" ||
-  message.type === "ClaudeSetupBoxPrinted";
-
-const printedAfterCode = (lines: string[]): string =>
-  lines.length === 0
-    ? "Claude Code printed nothing after the code"
-    : `Claude Code printed after the code: ${lines.join(" / ")}`;
+  message.type === "ClaudeSetupBoxUrl" || message.type === "ClaudeSetupBoxFailed";
 
 const codeContext = (claudeSetupId: string): string => `claude-setup/${claudeSetupId}/code`;
 
@@ -202,8 +191,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (running === null) return [];
     if (!overdue(running, now)) return [toClaudeSetup(tenantId, running)];
     await this.stepClaudeSetup(tenantId, running, { kind: "Deadline" }, now);
-    const still = this.runningClaudeSetupRow(secretSetId);
-    return still === null ? [] : [toClaudeSetup(tenantId, still)];
+    return [];
   }
 
   async submitClaudeSetupCode(
@@ -369,10 +357,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     now: number,
   ): Promise<void> {
     const step = advance(row.claude_setup_id, stateOf(row), event, settingsOf(this.env));
-    if (step.kind === "Fail" && event.kind === "Deadline" && row.state === "Minting") {
-      await this.mintDeadline(tenantId, row, now);
-      return;
-    }
     if (step.kind === "Fail") {
       await this.failClaudeSetup(tenantId, row, step.reason, step.detail, now, event.kind !== "BoxFailed");
       return;
@@ -390,61 +374,13 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     await this.claudeSetupTimer(tenantId, row.claude_setup_id, dueAt);
   }
 
-  private claudeSetupAsked(claudeSetupId: string): boolean {
-    return (
-      this.ctx.storage.sql.exec("SELECT 1 FROM claude_setup_reports WHERE claude_setup_id = ?", claudeSetupId).toArray()
-        .length > 0
-    );
-  }
-
-  private async mintDeadline(tenantId: string, row: ClaudeSetupRow, now: number): Promise<void> {
-    const settings = settingsOf(this.env);
-    const seconds = settings.claudeSetupReportBudgetSeconds;
-    if (this.claudeSetupAsked(row.claude_setup_id)) {
-      const detail = `${mintTimedOut(row.claude_setup_id, settings)}. The box did not say what Claude Code printed within claudeSetupReportBudgetSeconds ${seconds}; check that host ${row.host_id} is Online and runs the current supervisor`;
-      await this.failClaudeSetup(tenantId, row, "SetupTimedOut", detail, now, true);
-      return;
-    }
-    const sql = this.ctx.storage.sql;
-    const dueAt = now + seconds * 1000;
-    sql.exec("INSERT INTO claude_setup_reports (claude_setup_id, asked_at) VALUES (?, ?)", row.claude_setup_id, now);
-    sql.exec(
-      "UPDATE claude_setups SET phase_due_at = ?, updated_at = ? WHERE claude_setup_id = ? AND state = 'Minting'",
-      dueAt,
-      now,
-      row.claude_setup_id,
-    );
-    await this.claudeSetupTimer(tenantId, row.claude_setup_id, dueAt);
-    await this.host(row.host_id).send({
-      type: "ClaudeSetupBoxReport",
-      claudeSetupId: row.claude_setup_id,
-      boxId: row.box_id,
-    });
-  }
-
-  private async claudeSetupPrinted(
-    tenantId: string,
-    row: ClaudeSetupRow,
-    lines: string[],
-    now: number,
-  ): Promise<HostReply | null> {
-    if (row.state !== "Minting" || !this.claudeSetupAsked(row.claude_setup_id)) return null;
-    const detail = `${mintTimedOut(row.claude_setup_id, settingsOf(this.env))}. ${printedAfterCode(lines)}`;
-    if (!this.markClaudeSetupFailed(row, "SetupTimedOut", detail, now)) return null;
-    await this.claudeSetupTimer(tenantId, row.claude_setup_id, null);
-    return { type: "ClaudeSetupBoxDiscard", claudeSetupId: row.claude_setup_id, boxId: row.box_id };
-  }
-
-  override async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<HostReply | null> {
+  override async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<ChunkReply | null> {
     if (!isClaudeSetupMessage(message)) return super.hostMessage(tenantId, hostId, message);
     const row = this.claudeSetupRow(message.claudeSetupId);
     if (row === null || row.host_id !== hostId) {
       throw new Error(
         `host ${hostId} sent ${message.type} for Claude setup ${message.claudeSetupId}, which tenant ${tenantId} did not offer it`,
       );
-    }
-    if (message.type === "ClaudeSetupBoxPrinted") {
-      return this.claudeSetupPrinted(tenantId, row, message.lines, Date.now());
     }
     const event: ClaudeSetupEvent =
       message.type === "ClaudeSetupBoxUrl"
@@ -527,7 +463,13 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       const code = await unseal(await this.dataKey(), sealed.sealed_code, codeContext(row.claude_setup_id));
       return {
         kind: "Ready",
-        message: { type: "ClaudeSetupBoxCode", claudeSetupId: row.claude_setup_id, boxId: row.box_id, code },
+        message: {
+          type: "ClaudeSetupBoxCode",
+          claudeSetupId: row.claude_setup_id,
+          boxId: row.box_id,
+          code,
+          mintBudgetSeconds: settingsOf(this.env).claudeSetupMintBudgetSeconds,
+        },
       };
     }
     const image = await this.claudeSetupImage(tenantId, row, hostId, now);
