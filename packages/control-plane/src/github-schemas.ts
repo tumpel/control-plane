@@ -54,7 +54,7 @@ export const GitHubAppManifestSchema = z.object({
   callback_urls: z.array(z.string().url()),
   setup_url: z.string().url(),
   setup_on_update: z.literal(true),
-  public: z.literal(false),
+  public: z.literal(true),
   request_oauth_on_install: z.literal(true),
   default_permissions: GitHubAppPermissionsSchema,
   default_events: z.array(z.string()),
