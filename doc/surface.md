@@ -29,6 +29,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `HarnessCatalog_unpin`             | `tumpel_harness_unpin`         | `tumpel harness unpin`         |
 | `Hosts_get`                        | `tumpel_host_get`              | `tumpel host get`              |
 | `Hosts_list`                       | `tumpel_host_list`             | `tumpel host list`             |
+| `Hosts_listUsage`                  | `tumpel_host_list_usage`       | `tumpel host list-usage`       |
 | `Hosts_revoke`                     | `tumpel_host_revoke`           | `tumpel host revoke`           |
 | `Hosts_setLabels`                  | `tumpel_host_set_labels`       | `tumpel host set-labels`       |
 | `Identity_whoami`                  | `tumpel_whoami`                | `tumpel whoami`                |

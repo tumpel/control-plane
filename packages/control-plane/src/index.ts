@@ -540,6 +540,12 @@ const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<R
   return json(await listHosts(env.DB, caller.tenantId));
 };
 
+const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  return json(await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId));
+};
+
 const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/labels)?$/;
 
 const handleHost = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
@@ -934,6 +940,7 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/enrolment-tokens": handleMint,
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
+  "GET /v1/hosts/usage": handleListHostUsage,
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`OPTIONS ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),

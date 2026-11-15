@@ -17,6 +17,7 @@ import type { z } from "zod";
 import {
   HEARTBEAT_DEADLINE_MS,
   type HostMessage,
+  type HostUsage,
   type PersonaFileDownload,
   type PreparedOffer,
   type SnapshotDownload,
@@ -32,10 +33,12 @@ import {
 import { generateDataKey, unseal } from "./envelope.ts";
 import { type Minted, mintInstallationToken, repositoryCredential } from "./github.ts";
 import { appKey, installationOf } from "./github-store.ts";
-import { catalogEntry } from "./harness-catalog";
+import { catalogEntry, IMAGE_ARCHITECTURES } from "./harness-catalog";
+import type { Host } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
+import { placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
@@ -54,7 +57,7 @@ export type StopFailure = z.infer<typeof StopFailureSchema>;
 
 export interface NewSession {
   principalId: string;
-  hostId: string;
+  hosts: Host[];
   harness: Session["harness"];
   harnessVersion: string;
   endpoint: string;
@@ -65,6 +68,8 @@ export interface SessionFilter {
   state?: SessionState;
   hostId?: string;
 }
+
+export type Started = { kind: "Started"; started: StartedSession } | { kind: "Unplaced"; hosts: Unplaceable[] };
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
@@ -174,6 +179,16 @@ type SnapshotRow = {
   reason: string | null;
   detail: string | null;
   failed_at: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type HostUsageRow = {
+  host_id: string;
+  box_capacity: number;
+  boxes_warm: number;
+  load_average: number;
+  memory_available_mib: number;
   created_at: number;
   updated_at: number;
 };
@@ -528,12 +543,74 @@ export class TenantSessions extends DurableObject<Env> {
     return turn;
   }
 
-  async startSession(tenantId: string, input: NewSession, now: number): Promise<StartedSession> {
+  hostHello(hostId: string, boxCapacity: number, usage: HostUsage, now: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO host_usage (host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (host_id) DO UPDATE SET box_capacity = excluded.box_capacity, boxes_warm = excluded.boxes_warm,
+        load_average = excluded.load_average, memory_available_mib = excluded.memory_available_mib, updated_at = excluded.updated_at`,
+      hostId,
+      boxCapacity,
+      usage.boxesWarm,
+      usage.loadAverage,
+      usage.memoryAvailableMib,
+      now,
+      now,
+    );
+  }
+
+  hostUsage(hostId: string, usage: HostUsage, now: number): void {
+    const updated = this.ctx.storage.sql.exec(
+      "UPDATE host_usage SET boxes_warm = ?, load_average = ?, memory_available_mib = ?, updated_at = ? WHERE host_id = ?",
+      usage.boxesWarm,
+      usage.loadAverage,
+      usage.memoryAvailableMib,
+      now,
+      hostId,
+    );
+    if (updated.rowsWritten === 0) {
+      throw new Error(`host ${hostId} sent a Heartbeat, but its tenant holds no usage from its Hello`);
+    }
+  }
+
+  listHostUsage(tenantId: string): ReportedHostUsage[] {
+    const sql = this.ctx.storage.sql;
+    const running = new Map(
+      sql
+        .exec<{ host_id: string; running: number }>(
+          `SELECT sessions.host_id, COUNT(*) AS running FROM turns JOIN sessions ON sessions.session_id = turns.session_id
+          WHERE turns.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) GROUP BY sessions.host_id`,
+          ...IN_FLIGHT,
+        )
+        .toArray()
+        .map((row) => [row.host_id, row.running]),
+    );
+    return sql
+      .exec<HostUsageRow>(
+        "SELECT host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at FROM host_usage ORDER BY created_at, host_id",
+      )
+      .toArray()
+      .map((row) => ({
+        hostId: row.host_id,
+        tenantId,
+        boxCapacity: row.box_capacity,
+        boxesRunning: running.get(row.host_id) ?? 0,
+        boxesWarm: row.boxes_warm,
+        loadAverage: row.load_average,
+        memoryAvailableMib: row.memory_available_mib,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  async startSession(tenantId: string, input: NewSession, now: number): Promise<Started> {
     const { start } = input;
+    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), IMAGE_ARCHITECTURES);
+    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
-      host_id: input.hostId,
+      host_id: placement.host.hostId,
       box_id: crypto.randomUUID(),
       persona_id: start.personaId,
       repository: start.repository,
@@ -568,7 +645,7 @@ export class TenantSessions extends DurableObject<Env> {
       return this.insertTurn(session.session_id, session.box_id, start.prompt, now);
     });
     await this.offer(tenantId, session, turn);
-    return { session: toSession(tenantId, session), turn: toTurn(tenantId, turn) };
+    return { kind: "Started", started: { session: toSession(tenantId, session), turn: toTurn(tenantId, turn) } };
   }
 
   async sendTurn(tenantId: string, sessionId: string, prompt: string, now: number): Promise<Sent> {
