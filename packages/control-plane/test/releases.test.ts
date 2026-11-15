@@ -63,44 +63,57 @@ after(async () => {
 
 const get = (path: string) => server.fetch(`${origin}${path}`, { redirect: "manual" });
 
-test("current.json parses against ReleaseManifest and refuses another channel protocol version or a repeated image", () => {
-  assert.deepEqual(parseRelease(JSON.stringify(RELEASE)), RELEASE);
-  assert.throws(() => parseRelease("{"), /current\.json in the release bucket is not JSON/);
-  assert.throws(
-    () => parseRelease(JSON.stringify({ ...RELEASE, commit: "main" })),
+const refused = (text: string): string => {
+  const parsed = parseRelease(text);
+  assert.equal(parsed.ok, false);
+  return parsed.ok ? "" : parsed.detail;
+};
+
+test("current.json parses against ReleaseManifest, keeps its channel protocol version and names a repeated image", () => {
+  assert.deepEqual(parseRelease(JSON.stringify(RELEASE)), { ok: true, manifest: RELEASE });
+  const older = { ...RELEASE, channelProtocolVersion: ChannelProtocol.Version - 1 };
+  assert.deepEqual(parseRelease(JSON.stringify(older)), { ok: true, manifest: older });
+  assert.match(refused("{"), /current\.json in the release bucket is not JSON/);
+  assert.match(
+    refused(JSON.stringify({ ...RELEASE, commit: "main" })),
     /does not match ReleaseManifest in packages\/api\/release\.tsp: commit/,
   );
-  assert.throws(() => parseRelease(JSON.stringify({ ...RELEASE, supervisors: [] })), /supervisors/);
-  assert.throws(() => parseRelease(JSON.stringify({ ...RELEASE, clis: [] })), /clis/);
+  assert.match(refused(JSON.stringify({ ...RELEASE, supervisors: [] })), /supervisors/);
+  assert.match(refused(JSON.stringify({ ...RELEASE, clis: [] })), /clis/);
   const { clis: _clis, ...withoutClis } = RELEASE;
-  assert.throws(() => parseRelease(JSON.stringify(withoutClis)), /clis/);
+  assert.match(refused(JSON.stringify(withoutClis)), /clis/);
   const [cli] = RELEASE.clis;
   assert.ok(cli);
-  assert.throws(() => parseRelease(JSON.stringify({ ...RELEASE, clis: [cli, cli] })), /two CLIs for Amd64/);
+  assert.match(refused(JSON.stringify({ ...RELEASE, clis: [cli, cli] })), /two CLIs for Amd64/);
   const [image] = RELEASE.images;
   assert.ok(image);
-  assert.throws(
-    () => parseRelease(JSON.stringify({ ...RELEASE, channelProtocolVersion: ChannelProtocol.Version + 1 })),
-    new RegExp(
-      `built for channel protocol version ${ChannelProtocol.Version + 1}, and this control plane speaks ${ChannelProtocol.Version}`,
-    ),
-  );
-  assert.throws(
-    () => parseRelease(JSON.stringify({ ...RELEASE, images: [image, image] })),
+  assert.match(
+    refused(JSON.stringify({ ...RELEASE, images: [image, image] })),
     /two images for ClaudeCode 2\.0\.0 Amd64/,
   );
 });
 
-test("with no current.json the release reads NoRelease, and once published it reads back and redirects to its supervisor", async () => {
+test("with no current.json the release reads NoRelease, a malformed one ReleaseUnreadable, and a published one of an older protocol reads back and redirects to its supervisor", async () => {
   const missing = await get("/v1/releases/current");
   assert.equal(missing.status, 404);
   assert.equal(ProblemSchema.parse(await missing.json()).code, "NoRelease");
   assert.equal(ProblemSchema.parse(await (await get("/v1/releases/supervisor/Amd64")).json()).code, "NoRelease");
 
-  await (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
+  const releases = (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES;
+  await releases.put("current.json", JSON.stringify({ ...RELEASE, commit: "main" }));
+  for (const path of ["/v1/releases/current", "/v1/releases/supervisor/Amd64", "/v1/releases/cli/Amd64"]) {
+    const unreadable = await get(path);
+    assert.equal(unreadable.status, 503);
+    const body = ProblemSchema.parse(await unreadable.json());
+    assert.equal(body.code, "ReleaseUnreadable");
+    assert.match(body.detail, /the published release is unreadable: current\.json .* commit/);
+  }
+
+  const older = { ...RELEASE, channelProtocolVersion: ChannelProtocol.Version - 1 };
+  await releases.put("current.json", JSON.stringify(older));
   const current = await get("/v1/releases/current");
   assert.equal(current.status, 200);
-  assert.deepEqual(ReleaseManifestSchema.parse(await current.json()), RELEASE);
+  assert.deepEqual(ReleaseManifestSchema.parse(await current.json()), older);
 
   const redirect = await get("/v1/releases/supervisor/Amd64");
   assert.equal(redirect.status, 302);

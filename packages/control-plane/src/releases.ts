@@ -1,4 +1,4 @@
-import { ChannelProtocol, type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
+import { type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { issues } from "./http.ts";
 
@@ -13,6 +13,8 @@ export interface ReleaseBucket {
 }
 
 export type ReleaseRead = { kind: "Published"; manifest: ReleaseManifest } | { kind: "Unpublished" };
+
+export type ReleaseLookup = ReleaseRead | { kind: "Unreadable"; detail: string };
 
 export const CURRENT_RELEASE_KEY = "current.json";
 export const RELEASE_CACHE_MS = 30_000;
@@ -39,25 +41,23 @@ export const kernelKey = (image: ReleaseImage): string => `kernels/${arch(image.
 
 const duplicates = (keys: string[]): string[] => [...new Set(keys.filter((key, index) => keys.indexOf(key) !== index))];
 
-export const parseRelease = (text: string): ReleaseManifest => {
+export type ReleaseParse = { ok: true; manifest: ReleaseManifest } | { ok: false; detail: string };
+
+export const parseRelease = (text: string): ReleaseParse => {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (error) {
-    throw new Error(`${CURRENT_RELEASE_KEY} in the release bucket is not JSON (${String(error)}); ${republish}`);
+    return { ok: false, detail: `${CURRENT_RELEASE_KEY} in the release bucket is not JSON (${String(error)})` };
   }
   const parsed = ReleaseManifestSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new Error(
-      `${CURRENT_RELEASE_KEY} in the release bucket does not match ReleaseManifest in packages/api/release.tsp: ${issues(parsed.error)}; ${republish}`,
-    );
+    return {
+      ok: false,
+      detail: `${CURRENT_RELEASE_KEY} in the release bucket does not match ReleaseManifest in packages/api/release.tsp: ${issues(parsed.error)}`,
+    };
   }
   const manifest = parsed.data;
-  if (manifest.channelProtocolVersion !== ChannelProtocol.Version) {
-    throw new Error(
-      `${CURRENT_RELEASE_KEY} of release ${manifest.releaseVersion} is built for channel protocol version ${manifest.channelProtocolVersion}, and this control plane speaks ${ChannelProtocol.Version}; ${republish} from the commit this control plane is deployed from`,
-    );
-  }
   const repeated = [
     ...duplicates(manifest.supervisors.map((supervisor) => supervisor.architecture)).map(
       (architecture) => `two supervisors for ${architecture}`,
@@ -68,24 +68,32 @@ export const parseRelease = (text: string): ReleaseManifest => {
     ),
   ];
   if (repeated.length > 0) {
-    throw new Error(
-      `${CURRENT_RELEASE_KEY} of release ${manifest.releaseVersion}: ${repeated.join("; ")}; ${republish}`,
-    );
+    return {
+      ok: false,
+      detail: `${CURRENT_RELEASE_KEY} of release ${manifest.releaseVersion}: ${repeated.join("; ")}`,
+    };
   }
-  return manifest;
+  return { ok: true, manifest };
 };
 
 let cached: { readAt: number; manifest: ReleaseManifest } | undefined;
 
-export const currentRelease = async (bucket: ReleaseBucket, now: number): Promise<ReleaseRead> => {
+export const readRelease = async (bucket: ReleaseBucket, now: number): Promise<ReleaseLookup> => {
   if (cached !== undefined && now - cached.readAt < RELEASE_CACHE_MS) {
     return { kind: "Published", manifest: cached.manifest };
   }
   const object = await bucket.get(CURRENT_RELEASE_KEY);
   if (object === null) return { kind: "Unpublished" };
-  const manifest = parseRelease(await object.text());
-  cached = { readAt: now, manifest };
-  return { kind: "Published", manifest };
+  const parsed = parseRelease(await object.text());
+  if (!parsed.ok) return { kind: "Unreadable", detail: parsed.detail };
+  cached = { readAt: now, manifest: parsed.manifest };
+  return { kind: "Published", manifest: parsed.manifest };
+};
+
+export const currentRelease = async (bucket: ReleaseBucket, now: number): Promise<ReleaseRead> => {
+  const release = await readRelease(bucket, now);
+  if (release.kind === "Unreadable") throw new Error(`${release.detail}; ${republish}`);
+  return release;
 };
 
 export const imagesFor = (release: ReleaseRead, harness: string, harnessVersion: string): ReleaseImage[] =>

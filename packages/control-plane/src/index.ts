@@ -54,6 +54,7 @@ import {
   signUpPage,
   type TenantChoice,
   unknownClientPage,
+  unreadableReleasePage,
 } from "@tumpel/pages";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
@@ -170,7 +171,7 @@ import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./pe
 import { handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
-import { cliKey, currentRelease, imagesFor, type ReleaseManifest, supervisorKey } from "./releases";
+import { cliKey, currentRelease, imagesFor, type ReleaseManifest, readRelease, supervisorKey } from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
@@ -852,9 +853,19 @@ const noRelease = (): Response =>
     fix: "Publish a release with the release workflow, then try again",
   });
 
+const unreadableRelease = (detail: string): Response =>
+  problem(503, {
+    code: "ReleaseUnreadable",
+    title: "The published release is unreadable",
+    detail: `the published release is unreadable: ${detail}`,
+    fix: "Publish a release with the release workflow, then try again",
+  });
+
 const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Promise<Response> => {
-  const release = await currentRelease(env.RELEASES, Date.now());
-  return release.kind === "Published" ? json(release.manifest) : noRelease();
+  const release = await readRelease(env.RELEASES, Date.now());
+  if (release.kind === "Unpublished") return noRelease();
+  if (release.kind === "Unreadable") return unreadableRelease(release.detail);
+  return json(release.manifest);
 };
 
 const handleInstallScript = async (_request: Request, url: URL): Promise<Response> =>
@@ -884,10 +895,14 @@ const handleReleaseDownload = async (request: Request, url: URL, env: Env): Prom
     });
   }
   const { architecture } = parsed.data;
-  const release = await currentRelease(env.RELEASES, Date.now());
+  const release = await readRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") {
     if (!browser) return noRelease();
     return htmlPage(env, url, 404, (links) => noReleasePage(links, url.href));
+  }
+  if (release.kind === "Unreadable") {
+    if (!browser) return unreadableRelease(release.detail);
+    return htmlPage(env, url, 503, (links) => unreadableReleasePage(links, url.href, release.detail));
   }
   const published = binary.binaries(release.manifest);
   const found = published.find((each) => each.architecture === architecture);
