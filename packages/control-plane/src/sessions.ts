@@ -27,7 +27,7 @@ import type {
   Turn,
   TurnFailure,
 } from "./tenant-sessions";
-import { DEFAULT_PAGE_BYTES, decodeLines, pageOf } from "./transcript";
+import { compactorOf, DEFAULT_PAGE_BYTES, decodeLines, pageOf } from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
@@ -323,14 +323,26 @@ export const readTranscript = async (
   query: TranscriptQuery,
 ): Promise<Outcome<TranscriptPage>> => {
   const after = query.after ?? 0;
+  const compact = query.compact ?? false;
+  const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
   const cursor = await tenantOf(env, caller).transcriptCursor(
     caller.tenantId,
     sessionId,
     after,
     query.turnId ?? null,
     query.limit ?? settingsOf(env).transcriptChunkLines,
+    compact ? null : maxBytes,
   );
   if (cursor === null) return sessionNotFound(sessionId);
+  const compactor = compact ? compactorOf(cursor.harness) : null;
+  if (compact && compactor === null) {
+    return refuse(422, {
+      code: "InvalidRequest",
+      title: "No compact form for the harness",
+      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; only ClaudeCode has one`,
+      fix: "Read the transcript without compact",
+    });
+  }
   const lines =
     cursor.kind === "Lines"
       ? cursor.lines
@@ -341,15 +353,13 @@ export const readTranscript = async (
           }
           return decodeLines(await object.text());
         })();
-  const page = pageOf(lines, after, query.compact ?? false, query.maxBytes ?? DEFAULT_PAGE_BYTES);
-  const tail = await tenantOf(env, caller).transcriptTail(sessionId, page.nextCursor, query.turnId ?? null);
+  const page = pageOf(lines, after, compactor, maxBytes);
   return ok(
     TranscriptPageSchema.parse({
       sessionState: cursor.sessionState,
       lines: page.lines,
-      cursor: page.nextCursor,
-      nextCursor: page.nextCursor,
-      finished: !tail.more && !tail.running,
+      cursor: page.cursor,
+      finished: !cursor.inFlight && page.cursor >= cursor.lastLineSeq,
     }),
   );
 };

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compactText, pageOf, type TranscriptLine } from "../src/transcript.ts";
+import {
+  type Compactor,
+  compactorOf,
+  encodeChunk,
+  pageOf,
+  rangeAfter,
+  type TranscriptLine,
+} from "../src/transcript.ts";
 
 const line = (lineSeq: number, text: string): TranscriptLine => ({
   sessionId: "ses_1",
@@ -10,6 +17,12 @@ const line = (lineSeq: number, text: string): TranscriptLine => ({
   text,
   createdAt: 0,
 });
+
+const claudeCode = (): Compactor => {
+  const compactor = compactorOf("ClaudeCode");
+  assert.ok(compactor);
+  return compactor;
+};
 
 const assistant = (...content: unknown[]): string => JSON.stringify({ type: "assistant", message: { content } });
 
@@ -29,7 +42,7 @@ const SAMPLE = [
 ];
 
 test("compact keeps assistant text, shortens a tool call to its name and first argument, and drops tool results", () => {
-  assert.deepEqual(SAMPLE.map(compactText), [
+  assert.deepEqual(SAMPLE.map(claudeCode()), [
     null,
     "Reading the config.",
     "[Read] /work/app/tumpel.json",
@@ -39,47 +52,40 @@ test("compact keeps assistant text, shortens a tool call to its name and first a
   ]);
 });
 
-test("a compact page drops lines without ending early, and its nextCursor passes the dropped tail", () => {
+test("a compact page drops lines without ending early, and its cursor passes the dropped tail", () => {
   const page = pageOf(
     SAMPLE.map((text, index) => line(index + 1, text)),
     0,
-    true,
+    claudeCode(),
     32768,
   );
   assert.deepEqual(
     page.lines.map((kept) => kept.lineSeq),
     [2, 3, 5],
   );
-  assert.equal(page.nextCursor, 6);
+  assert.equal(page.cursor, 6);
 });
 
 test("a page with no line to read keeps the cursor it was given", () => {
-  assert.deepEqual(pageOf([], 7, true, 100), { lines: [], nextCursor: 7 });
+  assert.deepEqual(pageOf([], 7, claudeCode(), 100), { lines: [], cursor: 7 });
+  assert.deepEqual(pageOf([], 7, null, 100), { lines: [], cursor: 7 });
 });
 
-test("the byte cap cuts a page on a line boundary and nextCursor is the last line before the cut", () => {
+test("only ClaudeCode has a compact form", () => {
+  assert.equal(compactorOf("Codex"), null);
+  assert.equal(compactorOf("OpenCode"), null);
+  assert.equal(compactorOf("PiDev"), null);
+});
+
+test("a raw read cuts a chunk on a line boundary at the byte cap and always holds one line", () => {
   const lines = [line(4, "a".repeat(10)), line(5, "b".repeat(10)), line(6, "c".repeat(10)), line(7, "d".repeat(10))];
-  const page = pageOf(lines, 3, false, 25);
-  assert.deepEqual(
-    page.lines.map((kept) => kept.lineSeq),
-    [4, 5],
-  );
-  assert.equal(page.nextCursor, 5);
-  const rest = pageOf(lines.slice(2), page.nextCursor, false, 25);
-  assert.deepEqual(
-    rest.lines.map((kept) => kept.lineSeq),
-    [6, 7],
-  );
-  assert.equal(rest.nextCursor, 7);
-});
-
-test("the byte cap counts bytes, and a page always holds one line even when it exceeds the cap", () => {
-  const page = pageOf([line(1, "é".repeat(10)), line(2, "ok")], 0, false, 5);
-  assert.deepEqual(
-    page.lines.map((kept) => kept.lineSeq),
-    [1],
-  );
-  assert.equal(page.nextCursor, 1);
+  const { lineSeqs, offsets } = encodeChunk(lines);
+  const size = (offsets[1] ?? 0) - (offsets[0] ?? 0);
+  assert.deepEqual(rangeAfter(lineSeqs, offsets, 3, 10, size * 2 + 1), { offset: 0, length: size * 2 });
+  assert.deepEqual(rangeAfter(lineSeqs, offsets, 5, 10, size * 2), { offset: size * 2, length: size * 2 });
+  assert.deepEqual(rangeAfter(lineSeqs, offsets, 3, 10, 1), { offset: 0, length: size });
+  assert.deepEqual(rangeAfter(lineSeqs, offsets, 3, 3, null), { offset: 0, length: size * 3 });
+  assert.equal(rangeAfter(lineSeqs, offsets, 7, 10, null), null);
 });
 
 test("a compact cut leaves the dropped lines before the cut line behind the cursor", () => {
@@ -88,10 +94,10 @@ test("a compact cut leaves the dropped lines before the cut line behind the curs
     line(2, JSON.stringify({ type: "user", message: { content: [{ type: "tool_result" }] } })),
     line(3, assistant({ type: "text", text: "bbbb" })),
   ];
-  const page = pageOf(lines, 0, true, 6);
+  const page = pageOf(lines, 0, claudeCode(), 6);
   assert.deepEqual(
     page.lines.map((kept) => kept.lineSeq),
     [1],
   );
-  assert.equal(page.nextCursor, 2);
+  assert.equal(page.cursor, 2);
 });

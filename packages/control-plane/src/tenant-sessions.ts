@@ -37,7 +37,7 @@ import { personaFileKey } from "./persona-files";
 import { signerOf } from "./presign";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
-import { chunkKey, encodeChunk, type Range, rangeAfter, type TranscriptLine } from "./transcript";
+import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
@@ -83,9 +83,12 @@ export type Archive =
   | { kind: "NotFound" }
   | { kind: "NotStopped"; state: SessionState };
 
-export type TranscriptCursor =
-  | { kind: "Chunk"; sessionState: SessionState; storageKey: string; range: Range }
-  | { kind: "Lines"; sessionState: SessionState; lines: TranscriptLine[] };
+export type TranscriptCursor = {
+  sessionState: SessionState;
+  harness: Session["harness"];
+  lastLineSeq: number;
+  inFlight: boolean;
+} & ({ kind: "Chunk"; storageKey: string; range: Range } | { kind: "Lines"; lines: TranscriptLine[] });
 
 type SessionRow = {
   session_id: string;
@@ -807,11 +810,29 @@ export class TenantSessions extends DurableObject<Env> {
     after: number,
     turnId: string | null,
     limit: number,
+    maxBytes: number | null,
   ): TranscriptCursor | null {
     const session = this.sessionRow(sessionId);
     if (session === null) return null;
-    const sessionState = SessionSchema.shape.state.parse(session.state);
     const sql = this.ctx.storage.sql;
+    const [tail] = sql
+      .exec<{ last_line_seq: number; in_flight: number }>(
+        `SELECT MAX(
+          COALESCE((SELECT MAX(last_line_seq) FROM transcript_chunks WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2)), 0),
+          COALESCE((SELECT MAX(line_seq) FROM transcript_pending WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2)), 0)
+        ) AS last_line_seq,
+        EXISTS (SELECT 1 FROM turns WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2) AND state IN (${IN_FLIGHT.map((_, index) => `?${index + 3}`).join(", ")})) AS in_flight`,
+        sessionId,
+        turnId,
+        ...IN_FLIGHT,
+      )
+      .toArray();
+    const known = {
+      sessionState: SessionSchema.shape.state.parse(session.state),
+      harness: SessionSchema.shape.harness.parse(session.harness),
+      lastLineSeq: tail?.last_line_seq ?? 0,
+      inFlight: tail?.in_flight === 1,
+    };
     const [chunk] = sql
       .exec<ChunkRow>(
         `SELECT storage_key, line_seqs, offsets FROM transcript_chunks
@@ -823,9 +844,9 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (chunk !== undefined) {
-      const range = rangeAfter(JSON.parse(chunk.line_seqs), JSON.parse(chunk.offsets), after, limit);
+      const range = rangeAfter(JSON.parse(chunk.line_seqs), JSON.parse(chunk.offsets), after, limit, maxBytes);
       if (range === null) throw new Error(`transcript chunk ${chunk.storage_key} holds no line after ${after}`);
-      return { kind: "Chunk", sessionState, storageKey: chunk.storage_key, range };
+      return { ...known, kind: "Chunk", storageKey: chunk.storage_key, range };
     }
     const lines = sql
       .exec<PendingRow>(
@@ -839,38 +860,7 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray()
       .map((row) => toLine(tenantId, row));
-    return { kind: "Lines", sessionState, lines };
-  }
-
-  transcriptTail(sessionId: string, after: number, turnId: string | null): { more: boolean; running: boolean } {
-    const sql = this.ctx.storage.sql;
-    const [pending] = sql
-      .exec<{ found: number }>(
-        `SELECT 1 AS found FROM transcript_pending
-        WHERE session_id = ?1 AND line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3) LIMIT 1`,
-        sessionId,
-        after,
-        turnId,
-      )
-      .toArray();
-    const [chunk] = sql
-      .exec<{ found: number }>(
-        `SELECT 1 AS found FROM transcript_chunks
-        WHERE session_id = ?1 AND last_line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3) LIMIT 1`,
-        sessionId,
-        after,
-        turnId,
-      )
-      .toArray();
-    const [running] = sql
-      .exec<{ found: number }>(
-        `SELECT 1 AS found FROM turns
-        WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2) AND state IN (${IN_FLIGHT.map((state) => `'${state}'`).join(", ")}) LIMIT 1`,
-        sessionId,
-        turnId,
-      )
-      .toArray();
-    return { more: pending !== undefined || chunk !== undefined, running: running !== undefined };
+    return { ...known, kind: "Lines", lines: linesWithin(lines, maxBytes) };
   }
 
   async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
