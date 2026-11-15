@@ -16,8 +16,7 @@ const FIXTURE: InputFile[] = [
 const TARGET = { owner: "acme", name: "app" };
 const HEAD = "1".repeat(40);
 const ROOT = "2".repeat(40);
-const COMMITTED = "3".repeat(40);
-const AT_BRANCH = { branch: "trunk", ref: "trunk" };
+const AT_BRANCH = "trunk";
 
 test("the input digest hashes each file's path and git blob sha in byte order of the path, whatever order they arrive in", async () => {
   const lines = [
@@ -44,9 +43,6 @@ const github = (trees: Record<string, Entry[]>) => {
     if (url.endsWith("/repos/acme/app")) return Response.json({ default_branch: "trunk" });
     if (url.endsWith("/repos/acme/app/commits/trunk")) {
       return Response.json({ sha: HEAD, commit: { tree: { sha: ROOT } } });
-    }
-    if (url.endsWith(`/repos/acme/app/commits/${COMMITTED}`)) {
-      return Response.json({ sha: COMMITTED, commit: { tree: { sha: ROOT } } });
     }
     const tree = /\/git\/trees\/([^?]+)/.exec(url)?.[1] ?? "";
     const entries = trees[tree];
@@ -84,7 +80,6 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
       { path: ".devcontainer/scripts/setup.sh", blobSha: "b5" },
     ],
     configSource: "RepositoryFile",
-    defaultBranch: "trunk",
     headSha: HEAD,
   });
   assert.deepEqual(
@@ -114,7 +109,6 @@ test("a repository without a devcontainer.json builds with the default config, w
     kind: "Read",
     files: [],
     configSource: "Default",
-    defaultBranch: "trunk",
     headSha: HEAD,
   });
   const npm = await readInputs(
@@ -151,12 +145,4 @@ test("a tree GitHub refuses reads Unreadable", async () => {
   );
   assert.equal(missing.kind, "Unreadable");
   assert.match(missing.kind === "Unreadable" ? missing.detail : "", /acme\/app/);
-});
-
-test("inputs read at a commit name that commit as the head, so a start that committed the caller workflow records the commit its run builds", async () => {
-  const { fetcher, calls } = github({ [ROOT]: [{ path: "package-lock.json", type: "blob", sha: "b6" }] });
-  const inputs = await readInputs(fetcher, "https://api.github.com", TARGET, "t", { branch: "trunk", ref: COMMITTED });
-  assert.equal(inputs.kind === "Read" ? inputs.headSha : inputs.kind, COMMITTED);
-  assert.equal(inputs.kind === "Read" ? inputs.defaultBranch : inputs.kind, "trunk");
-  assert.equal(calls[0]?.url, `https://api.github.com/repos/acme/app/commits/${COMMITTED}`);
 });

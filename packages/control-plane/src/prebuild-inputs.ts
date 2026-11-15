@@ -40,17 +40,11 @@ export type Inputs =
       kind: "Read";
       files: InputFile[];
       configSource: ConfigSource;
-      defaultBranch: string;
       headSha: string;
     }
   | { kind: "Unreadable"; detail: string };
 
 export type DefaultBranch = { kind: "Branch"; branch: string } | { kind: "Unreadable"; detail: string };
-
-export interface InputsAt {
-  branch: string;
-  ref: string;
-}
 
 const countsAtRoot = (path: string): boolean =>
   path === DEVCONTAINER_FILE || LOCKFILES.includes(path) || MANIFESTS.includes(path);
@@ -107,16 +101,10 @@ export const readInputs = async (
   api: string,
   target: GitHubRepository,
   token: string,
-  at: InputsAt,
+  ref: string,
 ): Promise<Inputs> => {
   const base = repositoryBase(api, target);
-  const head = await read(
-    fetcher,
-    `${base}/commits/${encodeURIComponent(at.ref)}`,
-    token,
-    GitHubCommitSchema,
-    "commit",
-  );
+  const head = await read(fetcher, `${base}/commits/${encodeURIComponent(ref)}`, token, GitHubCommitSchema, "commit");
   if (!head.ok) return unreadable(target, head.detail);
   const headSha = head.value.sha;
   const root = await read(fetcher, `${base}/git/trees/${head.value.commit.tree.sha}`, token, TreeSchema, "git tree");
@@ -139,5 +127,5 @@ export const readInputs = async (
     }
   }
   const configSource = files.some((file) => DEVCONTAINER_CONFIGS.includes(file.path)) ? "RepositoryFile" : "Default";
-  return { kind: "Read", files, configSource, defaultBranch: at.branch, headSha };
+  return { kind: "Read", files, configSource, headSha };
 };

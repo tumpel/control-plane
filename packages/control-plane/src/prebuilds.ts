@@ -11,7 +11,7 @@ import type { ConfigSource } from "./prebuild-inputs.ts";
 import { inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import { signerOf } from "./presign";
 import { currentRelease, imagesFor, type ReleaseImage, rootfsKey } from "./releases";
-import { settingsOf } from "./settings";
+import { apiOriginOf, settingsOf } from "./settings";
 import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
 
 export type PrebuildStart = z.infer<typeof PrebuildStartSchema>;
@@ -184,7 +184,7 @@ const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: 
     case "TokenRefused":
       return tokenRefused(target, started.detail);
     case "Unreadable":
-      return repositoryUnreadable(started.detail);
+      return installationUnreadable(target, started.detail);
     case "PermissionMissing":
       return appPermissionMissing(target, started.permissions);
     case "CallerRefused":
@@ -307,7 +307,7 @@ export const startPrebuild = async (
         target,
         repository,
         image: image.value,
-        apiOrigin,
+        apiOrigin: apiOriginOf(env),
         rebuild: start.rebuild === true,
       },
       now,
@@ -318,10 +318,7 @@ export const startPrebuild = async (
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
   const described = await readDefaultBranch(fetcher, env.GITHUB_API_ORIGIN, target, token.token);
   if (described.kind === "Unreadable") return repositoryUnreadable(described.detail);
-  const inputs = await readInputs(fetcher, env.GITHUB_API_ORIGIN, target, token.token, {
-    branch: described.branch,
-    ref: described.branch,
-  });
+  const inputs = await readInputs(fetcher, env.GITHUB_API_ORIGIN, target, token.token, described.branch);
   if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);
   const key = {
     repository,
@@ -342,7 +339,7 @@ export const startPrebuild = async (
       key,
       configSource: inputs.configSource,
       target,
-      defaultBranch: inputs.defaultBranch,
+      defaultBranch: described.branch,
       headSha: inputs.headSha,
       image: image.value,
       apiOrigin,
@@ -350,6 +347,14 @@ export const startPrebuild = async (
     now,
   );
 };
+
+const installationUnreadable = (target: GitHubRepository, detail: string): Refused =>
+  refuse(409, {
+    code: "RepositoryUnreadable",
+    title: "Repository unreadable",
+    detail,
+    fix: `Give the GitHub App installation on ${target.owner} access to ${target.owner}/${target.name}, then start the prebuild again`,
+  });
 
 const repositoryUnreadable = (detail: string): Refused =>
   refuse(409, {

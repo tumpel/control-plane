@@ -11,6 +11,7 @@ export const RUN_EVENTS = ["push", "workflow_dispatch"];
 export interface CallerWorkflowOf {
   path: string;
   apiOrigin: string;
+  branch: string;
 }
 
 export const callerWorkflowExample = (caller: CallerWorkflowOf): string =>
@@ -19,6 +20,8 @@ export const callerWorkflowExample = (caller: CallerWorkflowOf): string =>
     "",
     "on:",
     "  push:",
+    "    branches:",
+    `      - ${caller.branch}`,
     "    paths:",
     `      - ${caller.path}`,
     "  workflow_dispatch:",
@@ -42,18 +45,22 @@ const DISPATCH_PERMISSIONS = ["actions"];
 const COMMIT_PERMISSIONS = ["contents", "workflows"];
 const ACTIONS_DISABLED = /disabled/i;
 
-export type CallerWorkflowSync =
+export type CallerWorkflowRead =
   | { kind: "Current" }
-  | { kind: "Committed"; commitSha: string }
+  | { kind: "Stale"; file: StaleCallerFile }
   | { kind: "PermissionMissing"; permissions: string[] }
   | { kind: "Refused"; detail: string };
+
+export type CallerWorkflowCommit = { kind: "Committed"; commitSha: string } | { kind: "Refused"; detail: string };
 
 export type Dispatched =
   | { kind: "Dispatched" }
   | { kind: "ActionsDisabled"; detail: string }
   | { kind: "Refused"; detail: string };
 
-type CallerFile = { kind: "Absent" } | { kind: "Current" } | { kind: "Stale"; blobSha: string };
+export type StaleCallerFile = { kind: "Absent" } | { kind: "Stale"; blobSha: string };
+
+type CallerFile = StaleCallerFile | { kind: "Current" };
 
 const missingWrite = (granted: Record<string, string>, needed: string[]): string[] =>
   needed
@@ -80,7 +87,7 @@ const readCallerFile = async (
   api: string,
   token: string,
   target: GitHubRepository,
-  location: { path: string; branch: string; example: string },
+  location: CallerWorkflowOf,
 ): Promise<GitHubAnswer<CallerFile>> => {
   const answer = await callGitHub(
     fetcher,
@@ -95,40 +102,49 @@ const readCallerFile = async (
     "GitHubFile",
   );
   if (!answer.ok) return answer.status === 404 ? { ok: true, value: { kind: "Absent" } } : answer;
-  if (fromBase64(answer.value.content) === location.example) return { ok: true, value: { kind: "Current" } };
+  if (fromBase64(answer.value.content) === callerWorkflowExample(location))
+    return { ok: true, value: { kind: "Current" } };
   return { ok: true, value: { kind: "Stale", blobSha: answer.value.sha } };
 };
 
-export const syncCallerWorkflow = async (
+export const readCallerWorkflow = async (
   fetcher: Fetch,
   api: string,
   minted: { token: string; permissions: Record<string, string> },
   target: GitHubRepository,
-  caller: CallerWorkflowOf & { branch: string },
-): Promise<CallerWorkflowSync> => {
-  const example = callerWorkflowExample(caller);
-  const file = await readCallerFile(fetcher, api, minted.token, target, { ...caller, example });
+  caller: CallerWorkflowOf,
+): Promise<CallerWorkflowRead> => {
+  const file = await readCallerFile(fetcher, api, minted.token, target, caller);
   if (!file.ok) return { kind: "Refused", detail: `${file.detail}, reading ${caller.path}` };
   const needed =
     file.value.kind === "Current" ? DISPATCH_PERMISSIONS : [...DISPATCH_PERMISSIONS, ...COMMIT_PERMISSIONS];
   const missing = missingWrite(minted.permissions, needed);
   if (missing.length > 0) return { kind: "PermissionMissing", permissions: missing };
   if (file.value.kind === "Current") return { kind: "Current" };
+  return { kind: "Stale", file: file.value };
+};
+
+export const commitCallerWorkflow = async (
+  fetcher: Fetch,
+  api: string,
+  token: string,
+  target: GitHubRepository,
+  caller: CallerWorkflowOf & { file: StaleCallerFile },
+): Promise<CallerWorkflowCommit> => {
+  const { file } = caller;
   const committed = await callGitHub(
     fetcher,
     {
       method: "PUT",
       url: contentsUrl(api, target, caller.path),
       accept: API_MEDIA_TYPE,
-      bearer: minted.token,
+      bearer: token,
       body: {
         message:
-          file.value.kind === "Absent"
-            ? "ci: add the tumpel prebuild workflow"
-            : "ci: update the tumpel prebuild workflow",
-        content: toBase64(example),
+          file.kind === "Absent" ? "ci: add the tumpel prebuild workflow" : "ci: update the tumpel prebuild workflow",
+        content: toBase64(callerWorkflowExample(caller)),
         branch: caller.branch,
-        ...(file.value.kind === "Stale" ? { sha: file.value.blobSha } : {}),
+        ...(file.kind === "Stale" ? { sha: file.blobSha } : {}),
       },
     },
     GitHubFileCommitSchema,

@@ -11,5 +11,12 @@ export const settingsOf = (env: { TUMPEL_SETTINGS: unknown }): Settings => {
   );
 };
 
+export const apiOriginOf = (env: { API_ORIGIN: string }): string => {
+  if (env.API_ORIGIN) return env.API_ORIGIN;
+  throw new Error(
+    "API_ORIGIN is not set; deploy with npm run deploy, which sets it to https:// plus the tofu output hostname, or pass --var API_ORIGIN:https://<api hostname> to wrangler",
+  );
+};
+
 export const turnCredentialSeconds = (settings: Settings): number =>
   Math.max(settings.dispatchGrantTtlSeconds, settings.turnClaimBudgetSeconds + settings.turnImageFetchBudgetSeconds);

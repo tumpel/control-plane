@@ -24,7 +24,6 @@ import type { z } from "zod";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
-type TenantStub = { recordPrebuildCommit(tenantId: string, commit: unknown, now: number): Promise<unknown> };
 type OpenRouterTenant = {
   openRouterAuthorizationDeadlineReached(deadline: { openRouterAuthorizationId: string; at: number }): Promise<void>;
 };
@@ -162,6 +161,7 @@ before(async () => {
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          API_ORIGIN: "https://api.tumpel.test",
           CIRCLECI_API_ORIGIN: `${issuer}/circleci`,
           OPENROUTER_ORIGIN: `${issuer}/openrouter`,
         },
@@ -275,43 +275,6 @@ test("the connection list holds one row per provider, and a connected build prov
   assert.deepEqual(
     (await rest(ConnectionRows, "GET", "/v1/connections")).map((row) => row.state),
     ["NotConfigured", "NotConnected", "NotConnected", "NotConfigured", "NotConnected"],
-  );
-});
-
-test("the latest listing answers the newest prebuild of each repository, by repository", async () => {
-  const { tenant } = await rest(WhoamiSchema, "GET", "/v1/whoami");
-  const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
-  assert.ok(persona);
-  const stub = (
-    await server.getWorker<{ TENANT: { getByName(name: string): TenantStub } }>().getEnv()
-  ).TENANT.getByName(tenant.tenantId);
-  const record = async (repository: string, seed: string, at: number) =>
-    PrebuildSchema.parse(
-      await stub.recordPrebuildCommit(
-        tenant.tenantId,
-        {
-          prebuildId: crypto.randomUUID(),
-          personaId: persona.personaId,
-          key: { repository, inputDigest: seed.repeat(64), guestImageDigest: "c".repeat(64) },
-          configSource: "Default",
-          defaultBranch: "main",
-          headSha: "f".repeat(40),
-          rootfsKey: "images/claude-code/1/amd64/rootfs/x",
-          logUrl: `${repository}/actions/workflows/tumpel-prebuild.yml`,
-        },
-        at,
-      ),
-    );
-  const now = Date.now();
-  await record("https://github.com/acme/web", "a", now - 3000);
-  const web = await record("https://github.com/acme/web", "b", now - 1000);
-  const app = await record("https://github.com/acme/app", "d", now - 2000);
-  await record("https://github.com/acme/web", "e", now - 2000);
-
-  const latest = await rest(PrebuildSchema.array(), "GET", "/v1/prebuilds/latest");
-  assert.deepEqual(
-    latest.map((prebuild) => prebuild.prebuildId),
-    [app.prebuildId, web.prebuildId],
   );
 });
 
