@@ -9,6 +9,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ChannelProtocol,
+  ClaudeSetupSchema,
   CredentialHandoverSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
@@ -712,6 +713,94 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     () => getJson(`/v1/turns/${next.turnId}`, TurnSchema),
     (turn) => turn.state === "Failed",
   );
+});
+
+test("a setup box token writes its own setup's member once, only while the setup is Minting", async () => {
+  const created = await postJson(
+    "/v1/secret-sets",
+    { name: "Claude setup secrets", secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" }] },
+    bearer,
+  );
+  assert.equal(created.status, 200, await created.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const startSetup = async () => {
+    const response = await postJson("/v1/claude-setups", { secretSetId }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const setup = ClaudeSetupSchema.parse(await response.json());
+    const offer = await host.next("ClaudeSetupBoxOffer");
+    assert.equal(offer.claudeSetupId, setup.claudeSetupId);
+    return offer;
+  };
+  const first = await startSetup();
+  const second = await startSetup();
+  const token = "setup-e2e-subscription-token";
+  const write = (claudeSetupId: string, credential: string, tenantId = first.tenantId) =>
+    postJson(
+      `/v1/claude-setups/${claudeSetupId}/token`,
+      { tenantId, value: token, expiresAt: "2027-11-15T17:09:00+00:00" },
+      { authorization: `Bearer ${credential}` },
+    );
+  const status = (claudeSetupId: string) => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
+
+  assert.equal(
+    (await write(first.claudeSetupId, first.tokenCredential)).status,
+    409,
+    "a Starting setup takes no token",
+  );
+
+  host.send({
+    type: "ClaudeSetupBoxUrl",
+    claudeSetupId: first.claudeSetupId,
+    signInUrl: "https://claude.ai/oauth/authorize?state=e2e",
+  });
+  await eventually(
+    "the setup reading AwaitingCode",
+    () => status(first.claudeSetupId),
+    (setup) => setup.status.state === "AwaitingCode",
+  );
+  assert.equal(
+    (await write(first.claudeSetupId, first.tokenCredential)).status,
+    409,
+    "an AwaitingCode setup takes no token",
+  );
+  const coded = await postJson(`/v1/claude-setups/${first.claudeSetupId}/code`, { code: "e2e-code" }, bearer);
+  assert.equal(coded.status, 200, await coded.clone().text());
+  assert.equal((await host.next("ClaudeSetupBoxCode")).claudeSetupId, first.claudeSetupId);
+
+  for (const [credential, tenantId, what] of [
+    [second.tokenCredential, first.tenantId, "another setup's token"],
+    [first.tokenCredential, crypto.randomUUID(), "the token under another tenant"],
+  ] as const) {
+    const refusal = await write(first.claudeSetupId, credential, tenantId);
+    assert.equal(refusal.status, 401, `${what}: ${await refusal.clone().text()}`);
+    assert.equal(ProblemSchema.parse(await refusal.json()).code, "ClaudeSetupBoxTokenRefused");
+  }
+  assert.equal((await status(first.claudeSetupId)).status.state, "Minting");
+
+  const stored = await write(first.claudeSetupId, first.tokenCredential);
+  assert.equal(stored.status, 204, await stored.clone().text());
+  const again = await write(first.claudeSetupId, first.tokenCredential);
+  assert.equal(again.status, 409, "a second write is refused");
+  assert.equal(ProblemSchema.parse(await again.json()).code, "ClaudeSetupNotWaiting");
+
+  const completed = await status(first.claudeSetupId);
+  assert.equal(completed.status.state, "Completed");
+  assert.equal(JSON.stringify(completed).includes(token), false);
+  const set = await getJson(`/v1/secret-sets/${secretSetId}`, SecretSetSchema);
+  assert.deepEqual(
+    set.keys.map((key) => ({ kind: key.kind, name: key.name })).toSorted((a, b) => a.name.localeCompare(b.name)),
+    [
+      { kind: "SubscriptionToken", name: "CLAUDE_CODE_OAUTH_TOKEN" },
+      { kind: "Variable", name: "GITHUB_TOKEN" },
+    ],
+  );
+  host.send({
+    type: "ClaudeSetupBoxFailed",
+    claudeSetupId: second.claudeSetupId,
+    reason: "SetupUrlMissing",
+    detail: "the e2e leaves this setup",
+    failedAt: new Date().toISOString(),
+  });
 });
 
 const deletePersona = (personaId: string) => call(`/v1/personas/${personaId}`, { method: "DELETE", headers: bearer });
