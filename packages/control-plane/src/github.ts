@@ -292,7 +292,9 @@ export interface GitHubRepository {
 }
 
 export const githubRepository = (repository: string): GitHubRepository | null => {
-  const matched = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(repository);
+  const matched = /^(?:https:\/\/github\.com\/)?([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(
+    repository.trim(),
+  );
   return matched?.[1] === undefined || matched[2] === undefined ? null : { owner: matched[1], name: matched[2] };
 };
 

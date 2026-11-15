@@ -549,7 +549,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/prebuilds",
     PrebuildStartSchema,
-    "Start a prebuild of a repository's default branch on the named build provider, GitHubActions, CircleCI or Namespace; personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it, and whose harness version picks the guest image. Returns the Prebuild of POST /v1/prebuilds; a stored or running prebuild with the same key comes back unless rebuild is true. Refused NoBuildProvider when the named provider is not connected, and BuildProviderUnavailable while this control plane cannot dispatch to it.",
+    "Start a prebuild of a repository's default branch on the named build provider, GitHubActions, CircleCI or Namespace; repository is owner/name or https://github.com/owner/name, as tumpel_session_start takes it; personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it, and whose harness version picks the guest image. Returns the Prebuild of POST /v1/prebuilds; a stored or running prebuild with the same key comes back unless rebuild is true. Refused NoBuildProvider when the named provider is not connected, and BuildProviderUnavailable while this control plane cannot dispatch to it.",
   ),
   rest(
     "tumpel_prebuild_list",
