@@ -4,7 +4,7 @@ import { decodeBase64 } from "./channel/protocol.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
 import type { Problem } from "./http.ts";
 
-export type PersonaFileWrite = z.infer<typeof PersonaCreateSchema>["files"][number];
+export type PersonaFileWrite = NonNullable<z.infer<typeof PersonaCreateSchema>["files"]>[number];
 
 export interface StoredFile {
   path: string;
