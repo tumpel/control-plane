@@ -1,5 +1,6 @@
 import {
   GitHubAccountListSchema,
+  type GitHubAccountUnavailableReasonSchema,
   GitHubConnectionSchema,
   GitHubInstallationSchema,
   GitHubInstallStartSchema,
@@ -42,6 +43,7 @@ import {
   type Fetch,
   type GitHubAnswer,
   type GitHubInstallationRecord,
+  type GitHubUser,
   installationSettings,
   installedBy,
   installUrl,
@@ -62,8 +64,9 @@ import {
   verifyWebhookSignature,
   WEBHOOK_PATH,
 } from "./github.ts";
-import { accountList, accountRows, type LinkDecision, linkDecision, readAccounts } from "./github-accounts.ts";
+import { accountList, installedRows, readAccounts } from "./github-accounts.ts";
 import {
+  GitHubAccountsRefreshStateSchema,
   GitHubInstallationChoiceQuerySchema,
   GitHubInstallationChoiceStateSchema,
   GitHubInstallationEventSchema,
@@ -79,8 +82,10 @@ import {
 import {
   appKey,
   type GitHubInstallation,
+  holdersOf,
   installationOn,
   installationsOf,
+  installersOf,
   linkInstallation,
   oauthClient,
   recordedInstaller,
@@ -155,24 +160,6 @@ const returnRefused = (operation: string, detail: string, env: Env): Response =>
     fix: `Leave returnUrl out, or name a page on ${env.DASHBOARD_ORIGIN || "the dashboard"}`,
   });
 
-const tenantState = async (
-  caller: Caller,
-  env: Env,
-  expiresAt: string,
-  returnUrl: string | undefined,
-  gitHubAccountId: number | null,
-): Promise<string> => {
-  const { principal } = await whoamiOf(env.DB, caller);
-  return signState(await stateKey(env), {
-    purpose: "Installation",
-    tenantId: caller.tenantId,
-    email: principal.email,
-    expiresAt,
-    ...(returnUrl === undefined ? {} : { returnUrl }),
-    ...(gitHubAccountId === null ? {} : { gitHubAccountId }),
-  });
-};
-
 const GITHUB_ID = /^[1-9][0-9]{0,15}$/;
 
 const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
@@ -193,21 +180,38 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
   if (app === null) return appMissing(url.origin);
   const expiresAt = expiry(Date.now());
   const gitHubAccountId = account === null ? null : Number(account);
-  const state = await tenantState(caller, env, expiresAt, back.returnUrl, gitHubAccountId);
+  const { principal } = await whoamiOf(env.DB, caller);
+  const state = await signState(await stateKey(env), {
+    purpose: "Installation",
+    tenantId: caller.tenantId,
+    email: principal.email,
+    expiresAt,
+    ...(back.returnUrl === undefined ? {} : { returnUrl: back.returnUrl }),
+    ...(gitHubAccountId === null ? {} : { gitHubAccountId }),
+  });
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state, gitHubAccountId), expiresAt }));
 };
 
 const handleListAccounts = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
   if ((await storedApp(env.DB)) === null) return appMissing(url.origin);
-  const stored = await env.TENANT.getByName(caller.tenantId).gitHubAccounts();
-  if (stored === null) return json(GitHubAccountListSchema.parse({ state: "Unlisted" }));
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  const stored = await tenant.gitHubReading();
   const installations = await installationsOf(env.DB, caller.tenantId);
+  if (stored === null) {
+    return json(GitHubAccountListSchema.parse({ state: "Unlisted", accounts: installedRows(installations) }));
+  }
+  const reachable = stored.reading.installations.map((installation) => installation.id);
+  const accounts = accountList({
+    tenantId: caller.tenantId,
+    reading: stored.reading,
+    requests: await tenant.installRequests(),
+    installations,
+    holders: await holdersOf(env.DB, reachable),
+    installers: await installersOf(env.DB, reachable),
+    now: Date.now(),
+  });
   return json(
-    GitHubAccountListSchema.parse({
-      state: "Listed",
-      refreshedAt: new Date(stored.refreshedAt).toISOString(),
-      accounts: accountList(stored.accounts, installations),
-    }),
+    GitHubAccountListSchema.parse({ state: "Listed", refreshedAt: new Date(stored.readAt).toISOString(), accounts }),
   );
 };
 
@@ -219,7 +223,14 @@ const handleRefresh = async (caller: Caller, url: URL, env: Env): Promise<Respon
   const client = await oauthClient(env.DB, keyStoreOf(env));
   if (client === null) return appMissing(url.origin);
   const expiresAt = expiry(Date.now());
-  const state = await tenantState(caller, env, expiresAt, back.returnUrl, null);
+  const { principal } = await whoamiOf(env.DB, caller);
+  const state = await signState(await stateKey(env), {
+    purpose: "AccountsRefresh",
+    tenantId: caller.tenantId,
+    email: principal.email,
+    expiresAt,
+    returnUrl: back.returnUrl ?? `${dashboardOrigin(env)}/t/${encodeURIComponent(caller.tenantId)}/connections`,
+  });
   const authorizeAt = authorizeUrl(env.GITHUB_WEB_ORIGIN, client.clientId, `${url.origin}${APP_INSTALLED_PATH}`, state);
   return json(GitHubRefreshStartSchema.parse({ authorizeUrl: authorizeAt, expiresAt }));
 };
@@ -416,6 +427,41 @@ const ownedTenants = async (env: Env, email: string): Promise<z.infer<typeof Who
 const ownsTenant = async (env: Env, email: string, tenantId: string): Promise<boolean> =>
   (await ownedTenants(env, email)).some(({ tenant }) => tenant.tenantId === tenantId);
 
+type UnavailableReason = z.infer<typeof GitHubAccountUnavailableReasonSchema>;
+type Refusal = { reason: UnavailableReason; detail: string };
+
+const otherTenantRefusal = (record: GitHubInstallationRecord): Refusal => ({
+  reason: "OtherTenant",
+  detail: `another Tumpel tenant holds installation ${record.id} on ${record.account.login}; disconnect it there, then refresh`,
+});
+
+const unavailablePage = (
+  env: Env,
+  url: URL,
+  email: string,
+  tenantId: string | null,
+  installation: GitHubInstallationRecord,
+  refusal: Refusal,
+): Response => {
+  if (refusal.reason === "OtherTenant") {
+    return htmlPage(env, url, 409, (links) =>
+      installationInUsePage(links, email, tenantId, installation.account.login, installationSettings(installation.id)),
+    );
+  }
+  if (refusal.reason === "NotInstaller") {
+    return htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, refusal.detail));
+  }
+  return refuseInstall(
+    env,
+    url,
+    email,
+    tenantId,
+    409,
+    "GitHub has not named the installer yet",
+    `${refusal.detail}. GitHub sends that notice when the App is installed, sometimes a moment after you return here. An installation made before this control plane recorded installers has no such notice: uninstall the App on GitHub and install it again.`,
+  );
+};
+
 const linked = async (
   env: Env,
   url: URL,
@@ -424,11 +470,8 @@ const linked = async (
   record: GitHubInstallationRecord,
 ): Promise<Response> => {
   const outcome = await linkInstallation(env.DB, tenantId, record, Date.now());
-  if (outcome.kind === "OtherTenant") {
-    return htmlPage(env, url, 409, (links) =>
-      installationInUsePage(links, email, tenantId, record.account.login, installationSettings(record.id)),
-    );
-  }
+  if (outcome.kind === "OtherTenant")
+    return unavailablePage(env, url, email, tenantId, record, otherTenantRefusal(record));
   const installation = {
     tenantId: outcome.installation.tenantId,
     accountLogin: outcome.installation.accountLogin,
@@ -546,6 +589,38 @@ const handleChoice = async (request: Request, env: Env, url: URL, email: string)
 
 type StartedBy = { ok: true; tenantId: string; returnUrl: string | undefined } | { ok: false; response: Response };
 
+const ownerRefusal = async (
+  env: Env,
+  url: URL,
+  email: string,
+  claims: { tenantId: string; email: string },
+  started: string,
+): Promise<Response | null> => {
+  if (claims.email !== email) {
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      403,
+      "Request refused",
+      `${started} was started by ${claims.email}, and you are signed in as ${email}. Each person connects GitHub from their own Tumpel session.`,
+    );
+  }
+  if (!(await ownsTenant(env, email, claims.tenantId))) {
+    return refuseInstall(
+      env,
+      url,
+      email,
+      null,
+      403,
+      "Request refused",
+      `${email} is no longer an Owner of tenant ${claims.tenantId}, and only an Owner connects GitHub.`,
+    );
+  }
+  return null;
+};
+
 const startedBy = async (env: Env, url: URL, email: string, stateText: string): Promise<StartedBy> => {
   const state = await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
   if (!state.ok) {
@@ -562,36 +637,9 @@ const startedBy = async (env: Env, url: URL, email: string, stateText: string): 
       ),
     };
   }
-  const { tenantId, returnUrl } = state.claims;
-  if (state.claims.email !== email) {
-    return {
-      ok: false,
-      response: refuseInstall(
-        env,
-        url,
-        email,
-        null,
-        403,
-        "Request refused",
-        `This installation was started by ${state.claims.email}, and you are signed in as ${email}. Each person connects GitHub from their own Tumpel session.`,
-      ),
-    };
-  }
-  if (!(await ownsTenant(env, email, tenantId))) {
-    return {
-      ok: false,
-      response: refuseInstall(
-        env,
-        url,
-        email,
-        null,
-        403,
-        "Request refused",
-        `${email} is no longer an Owner of tenant ${tenantId}, and only an Owner connects GitHub.`,
-      ),
-    };
-  }
-  return { ok: true, tenantId, returnUrl };
+  const refused = await ownerRefusal(env, url, email, state.claims, "This installation");
+  if (refused !== null) return { ok: false, response: refused };
+  return { ok: true, tenantId: state.claims.tenantId, returnUrl: state.claims.returnUrl };
 };
 
 type Verified = { ok: true; installation: GitHubInstallationRecord } | { ok: false; response: Response };
@@ -631,45 +679,31 @@ const verifiedInstaller = async (
   const recorded: RecordedInstaller =
     installation.account.type === "User" ? { kind: "Unrecorded" } : await recordedInstaller(env.DB, installation.id);
   const installer = installedBy(user, installation, recorded);
-  if (installer.kind === "InstallerUnknown") {
-    return {
-      ok: false,
-      response: refuseInstall(
-        env,
-        url,
-        email,
-        tenantId,
-        409,
-        "GitHub has not named the installer yet",
-        `${installer.detail}. GitHub sends that notice when the App is installed, sometimes a moment after you return here. An installation made before this control plane recorded installers has no such notice: uninstall the App on GitHub and install it again.`,
-      ),
-    };
-  }
-  if (installer.kind === "NotInstaller") {
-    return {
-      ok: false,
-      response: htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, installer.detail)),
-    };
+  if (installer.kind !== "Installer") {
+    const refusal = { reason: installer.kind, detail: installer.detail };
+    return { ok: false, response: unavailablePage(env, url, email, tenantId, installation, refusal) };
   }
   return { ok: true, installation: installer.installation };
 };
 
-type Outcome = { installation: GitHubInstallationRecord; decision: LinkDecision };
+type LinkOutcome = { kind: "Linked" } | ({ kind: "Unavailable" } & Refusal);
+type Outcome = { installation: GitHubInstallationRecord; outcome: LinkOutcome };
 type Refreshed = { ok: true; outcomes: Map<number, Outcome> } | { ok: false; detail: string };
 
-const linkedDecision = async (
+const linkReachable = async (
   env: Env,
   tenantId: string,
-  record: GitHubInstallationRecord,
+  user: GitHubUser,
+  installation: GitHubInstallationRecord,
   now: number,
-): Promise<LinkDecision> => {
-  const outcome = await linkInstallation(env.DB, tenantId, record, now);
-  if (outcome.kind === "Linked") return { kind: "Link", installation: record };
-  return {
-    kind: "Unavailable",
-    reason: "OtherTenant",
-    detail: `another Tumpel tenant linked installation ${record.id} on ${record.account.login} a moment ago; disconnect it there, then refresh`,
-  };
+): Promise<LinkOutcome> => {
+  const recorded: RecordedInstaller =
+    installation.account.type === "User" ? { kind: "Unrecorded" } : await recordedInstaller(env.DB, installation.id);
+  const binding = installedBy(user, installation, recorded);
+  if (binding.kind !== "Installer") return { kind: "Unavailable", reason: binding.kind, detail: binding.detail };
+  const linking = await linkInstallation(env.DB, tenantId, installation, now);
+  if (linking.kind === "Linked") return { kind: "Linked" };
+  return { kind: "Unavailable", ...otherTenantRefusal(installation) };
 };
 
 const refreshAccounts = async (env: Env, client: OAuthClient, tenantId: string, code: string): Promise<Refreshed> => {
@@ -679,25 +713,10 @@ const refreshAccounts = async (env: Env, client: OAuthClient, tenantId: string, 
   const now = Date.now();
   const outcomes = new Map<number, Outcome>();
   for (const installation of reading.value.installations) {
-    const decided = linkDecision(
-      tenantId,
-      await tenantOfInstallation(env.DB, installation.id),
-      reading.value.user,
-      installation,
-      installation.account.type === "User" ? { kind: "Unrecorded" } : await recordedInstaller(env.DB, installation.id),
-    );
-    const decision = decided.kind === "Link" ? await linkedDecision(env, tenantId, installation, now) : decided;
-    outcomes.set(installation.id, { installation, decision });
+    const outcome = await linkReachable(env, tenantId, reading.value.user, installation, now);
+    outcomes.set(installation.id, { installation, outcome });
   }
-  const tenant = env.TENANT.getByName(tenantId);
-  const previous = await tenant.gitHubAccounts();
-  const requested = new Set(
-    (previous?.accounts ?? []).flatMap((account) =>
-      account.standing === "Requested" ? [account.gitHubAccountId] : [],
-    ),
-  );
-  const decisions = new Map([...outcomes].map(([installationId, { decision }]) => [installationId, decision]));
-  await tenant.storeGitHubAccounts(accountRows(reading.value, decisions, requested), now);
+  await env.TENANT.getByName(tenantId).storeGitHubReading(reading.value, now);
   return { ok: true, outcomes };
 };
 
@@ -709,33 +728,6 @@ const backTo = (returnUrl: string, outcome: Record<string, string>): Response =>
   target.searchParams.set("from", "github");
   for (const [name, value] of Object.entries(outcome)) target.searchParams.set(name, value);
   return seeOther(target.href);
-};
-
-const unavailablePage = (
-  env: Env,
-  url: URL,
-  email: string,
-  tenantId: string,
-  installation: GitHubInstallationRecord,
-  decision: Extract<LinkDecision, { kind: "Unavailable" }>,
-): Response => {
-  if (decision.reason === "OtherTenant") {
-    return htmlPage(env, url, 409, (links) =>
-      installationInUsePage(links, email, tenantId, installation.account.login, installationSettings(installation.id)),
-    );
-  }
-  if (decision.reason === "NotInstaller") {
-    return htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, decision.detail));
-  }
-  return refuseInstall(
-    env,
-    url,
-    email,
-    tenantId,
-    409,
-    "GitHub has not named the installer yet",
-    `${decision.detail}. GitHub sends that notice when the App is installed, sometimes a moment after you return here. An installation made before this control plane recorded installers has no such notice: uninstall the App on GitHub and install it again.`,
-  );
 };
 
 const installReturn = async (
@@ -754,17 +746,17 @@ const installReturn = async (
     if (returnUrl !== undefined) return backTo(returnUrl, { failed: refreshed.detail });
     return htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, refreshed.detail));
   }
-  const outcome = refreshed.outcomes.get(installationId);
-  if (outcome === undefined) {
+  const found = refreshed.outcomes.get(installationId);
+  if (found === undefined) {
     const detail = `installation ${installationId} is not among the installations of this stage's GitHub App that the GitHub account you authorized can access`;
     return htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, detail));
   }
-  const { installation, decision } = outcome;
-  if (decision.kind === "Unavailable") {
+  const { installation, outcome } = found;
+  if (outcome.kind === "Unavailable") {
     if (returnUrl !== undefined) {
-      return backTo(returnUrl, { refused: decision.reason, account: installation.account.login });
+      return backTo(returnUrl, { refused: outcome.reason, account: installation.account.login });
     }
-    return unavailablePage(env, url, email, tenantId, installation, decision);
+    return unavailablePage(env, url, email, tenantId, installation, outcome);
   }
   if (returnUrl !== undefined) return backTo(returnUrl, {});
   const connected = {
@@ -780,16 +772,15 @@ const accountsReturn = async (
   url: URL,
   email: string,
   code: string,
-  stateText: string,
+  claims: z.infer<typeof GitHubAccountsRefreshStateSchema>,
 ): Promise<Response> => {
-  const started = await startedBy(env, url, email, stateText);
-  if (!started.ok) return started.response;
-  const { tenantId } = started;
+  const refused = await ownerRefusal(env, url, email, claims, "This GitHub sign-in");
+  if (refused !== null) return refused;
+  const { tenantId, returnUrl } = claims;
   const client = await oauthClient(env.DB, keyStoreOf(env));
   if (client === null) return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId));
-  const back = started.returnUrl ?? `${dashboardOrigin(env)}/t/${encodeURIComponent(tenantId)}/connections`;
   const refreshed = await refreshAccounts(env, client, tenantId, code);
-  return backTo(back, refreshed.ok ? {} : { failed: refreshed.detail });
+  return backTo(returnUrl, refreshed.ok ? {} : { failed: refreshed.detail });
 };
 
 const askInstallerIdentity = async (env: Env, url: URL, email: string, installationId: number): Promise<Response> => {
@@ -810,7 +801,7 @@ const handleInstallerIdentity = async (env: Env, url: URL, email: string): Promi
   const state = await readState(
     await stateKey(env),
     callback.data.state,
-    z.union([GitHubInstallStateSchema, GitHubInstallerIdentityStateSchema]),
+    z.union([GitHubAccountsRefreshStateSchema, GitHubInstallerIdentityStateSchema]),
     Date.now(),
   );
   if (!state.ok) {
@@ -824,9 +815,8 @@ const handleInstallerIdentity = async (env: Env, url: URL, email: string): Promi
       `The GitHub sign-in for this installation is no longer valid: ${state.reason}.`,
     );
   }
-  if (state.claims.purpose === "Installation") {
-    return accountsReturn(env, url, email, callback.data.code, callback.data.state);
-  }
+  if (state.claims.purpose === "AccountsRefresh")
+    return accountsReturn(env, url, email, callback.data.code, state.claims);
   if (state.claims.email !== email) {
     return refuseInstall(
       env,
@@ -856,8 +846,9 @@ const handleInstalled = async (env: Env, url: URL, email: string): Promise<Respo
         ? null
         : await readState(await stateKey(env), action.data.state, GitHubInstallStateSchema, Date.now());
     if (requested?.ok === true && requested.claims.email === email && requested.claims.gitHubAccountId !== undefined) {
-      await env.TENANT.getByName(requested.claims.tenantId).markGitHubAccountRequested(
+      await env.TENANT.getByName(requested.claims.tenantId).recordInstallRequest(
         requested.claims.gitHubAccountId,
+        Date.now(),
       );
     }
     if (requested?.ok === true && requested.claims.returnUrl !== undefined)

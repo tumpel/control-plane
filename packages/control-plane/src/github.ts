@@ -2,6 +2,7 @@ import type { GitHubIssueSchema, GitHubRepositorySchema, RepositoryCredentialSou
 import type { z } from "zod";
 import type { DispatchVariable } from "./dispatch-variables.ts";
 import {
+  type GitHubAccountsRefreshStateSchema,
   GitHubAppConversionSchema,
   type GitHubAppManifestSchema,
   GitHubBotUserSchema,
@@ -30,6 +31,7 @@ export type GitHubIssueRecord = z.infer<typeof GitHubIssueRecordSchema>;
 export type GitHubState =
   | z.infer<typeof GitHubManifestStateSchema>
   | z.infer<typeof GitHubInstallStateSchema>
+  | z.infer<typeof GitHubAccountsRefreshStateSchema>
   | z.infer<typeof GitHubInstallationChoiceStateSchema>
   | z.infer<typeof GitHubInstallerIdentityStateSchema>;
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -42,6 +44,7 @@ export const WEBHOOK_PATH = "/github/webhook";
 export const STATE_KEY_PURPOSE = "tumpel-github-state-v1";
 export const STATE_TTL_MS = 3_600_000;
 export const GITHUB_TIMEOUT_MS = 10_000;
+export const INSTALL_REQUEST_TTL_MS = 604_800_000;
 const API_VERSION = "2022-11-28";
 export const API_MEDIA_TYPE = "application/vnd.github+json";
 const JSON_MEDIA_TYPE = "application/json";
@@ -500,9 +503,9 @@ export const installedBy = (
   installation: GitHubInstallationRecord,
   recorded: RecordedInstaller,
 ): Installer => {
-  const { login, type } = installation.account;
+  const { id, login, type } = installation.account;
   if (type === "User") {
-    if (user.login.toLowerCase() === login.toLowerCase()) return { kind: "Installer", installation };
+    if (user.githubUserId === id) return { kind: "Installer", installation };
     return {
       kind: "NotInstaller",
       detail: `installation ${installation.id} is on the personal account ${login}, and you authorized GitHub as ${user.login}; only ${login} connects their own account`,

@@ -275,3 +275,23 @@ export const tenantOfInstallation = async (db: D1Database, installationId: numbe
     .first<{ tenant_id: string }>();
   return row?.tenant_id ?? null;
 };
+
+export const holdersOf = async (db: D1Database, installationIds: number[]): Promise<Map<number, string>> => {
+  const { results } = await db
+    .prepare(
+      "SELECT installation_id, tenant_id FROM github_installations WHERE installation_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(JSON.stringify(installationIds))
+    .all<{ installation_id: number; tenant_id: string }>();
+  return new Map(results.map((row) => [row.installation_id, row.tenant_id]));
+};
+
+export const installersOf = async (db: D1Database, installationIds: number[]): Promise<Map<number, number>> => {
+  const { results } = await db
+    .prepare(
+      "SELECT installation_id, installer_github_user_id FROM github_installers WHERE installation_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(JSON.stringify(installationIds))
+    .all<{ installation_id: number; installer_github_user_id: number }>();
+  return new Map(results.map((row) => [row.installation_id, row.installer_github_user_id]));
+};

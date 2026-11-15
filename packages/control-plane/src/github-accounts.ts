@@ -1,4 +1,4 @@
-import type { GitHubAccountSchema, GitHubAccountUnavailableReasonSchema } from "@tumpel/api/schemas";
+import type { GitHubAccountInstalledSchema, GitHubAccountSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import {
   API_MEDIA_TYPE,
@@ -6,33 +6,23 @@ import {
   exchangeUserCode,
   type Fetch,
   type GitHubAnswer,
-  type GitHubInstallationRecord,
-  type GitHubUser,
+  INSTALL_REQUEST_TTL_MS,
   installedBy,
   type OAuthClient,
   personDetail,
-  type RecordedInstaller,
   tokenUser,
 } from "./github.ts";
 import {
   GitHubOrganizationMembershipsSchema,
-  GitHubReachableInstallationSchema,
   GitHubReachableInstallationsSchema,
-  type StoredGitHubAccountSchema,
+  type GitHubReadingSchema,
 } from "./github-schemas.ts";
 import type { GitHubInstallation } from "./github-store.ts";
 
 export type GitHubAccount = z.infer<typeof GitHubAccountSchema>;
-export type StoredGitHubAccount = z.infer<typeof StoredGitHubAccountSchema>;
-export type UnavailableReason = z.infer<typeof GitHubAccountUnavailableReasonSchema>;
-export type ReachableInstallation = z.infer<typeof GitHubReachableInstallationSchema>;
-export type OrganizationMembership = { gitHubAccountId: number; login: string; admin: boolean };
-
-export interface GitHubReading {
-  user: GitHubUser;
-  installations: ReachableInstallation[];
-  organizations: OrganizationMembership[];
-}
+export type InstalledAccount = z.infer<typeof GitHubAccountInstalledSchema>;
+export type GitHubReading = z.infer<typeof GitHubReadingSchema>;
+export type InstallRequest = { gitHubAccountId: number; requestedAt: number };
 
 const PAGE = "per_page=100";
 
@@ -73,89 +63,67 @@ export const readAccounts = async (
     ok: true,
     value: {
       user: user.value,
-      installations: installations.value.installations.flatMap((candidate) => {
-        const parsed = GitHubReachableInstallationSchema.safeParse(candidate);
-        return parsed.success ? [parsed.data] : [];
-      }),
+      installations: installations.value.installations,
       organizations: memberships.value.map(({ role, organization }) => ({
         gitHubAccountId: organization.id,
         login: organization.login,
-        admin: role === "admin",
+        role: role === "admin" ? "Owner" : "Member",
       })),
     },
   };
 };
 
-export type LinkDecision =
-  | { kind: "Held" }
-  | { kind: "Link"; installation: GitHubInstallationRecord }
-  | { kind: "Unavailable"; reason: UnavailableReason; detail: string };
+export interface AccountFacts {
+  tenantId: string;
+  reading: GitHubReading;
+  requests: InstallRequest[];
+  installations: GitHubInstallation[];
+  holders: ReadonlyMap<number, string>;
+  installers: ReadonlyMap<number, number>;
+  now: number;
+}
 
-export const linkDecision = (
-  tenantId: string,
-  holder: string | null,
-  user: GitHubUser,
-  installation: GitHubInstallationRecord,
-  recorded: RecordedInstaller,
-): LinkDecision => {
-  if (holder === tenantId) return { kind: "Held" };
-  if (holder !== null) {
-    return {
-      kind: "Unavailable",
-      reason: "OtherTenant",
-      detail: `another Tumpel tenant holds installation ${installation.id} on ${installation.account.login}; disconnect it there, then refresh`,
-    };
-  }
-  const binding = installedBy(user, installation, recorded);
-  if (binding.kind === "Installer") return { kind: "Link", installation: binding.installation };
-  return { kind: "Unavailable", reason: binding.kind, detail: binding.detail };
-};
+export const installedRows = (installations: GitHubInstallation[]): InstalledAccount[] =>
+  installations.map((installation) => ({
+    state: "Installed",
+    installationId: installation.installationId,
+    login: installation.accountLogin,
+    status: installation.status,
+    linkedAt: new Date(installation.createdAt).toISOString(),
+  }));
 
-export const accountRows = (
-  reading: GitHubReading,
-  decisions: ReadonlyMap<number, LinkDecision>,
-  requested: ReadonlySet<number>,
-): StoredGitHubAccount[] => {
-  const { user, organizations, installations } = reading;
+export const accountList = (facts: AccountFacts): GitHubAccount[] => {
+  const { tenantId, reading, requests, installations, holders, installers, now } = facts;
+  const { user } = reading;
   const accounts = [
     { gitHubAccountId: user.githubUserId, login: user.login, kind: "Personal" as const, role: "Owner" as const },
-    ...organizations.map((organization) => ({
-      gitHubAccountId: organization.gitHubAccountId,
-      login: organization.login,
-      kind: "Organization" as const,
-      role: organization.admin ? ("Owner" as const) : ("Member" as const),
-    })),
+    ...reading.organizations.map((organization) => ({ ...organization, kind: "Organization" as const })),
   ];
-  return accounts.map((account) => {
-    const installation = installations.find((candidate) => candidate.account.id === account.gitHubAccountId);
-    const decision = installation === undefined ? undefined : decisions.get(installation.id);
-    if (installation !== undefined && decision?.kind === "Unavailable") {
-      return { ...account, standing: "Unavailable", installationId: installation.id, reason: decision.reason };
-    }
-    if (installation === undefined && requested.has(account.gitHubAccountId))
-      return { ...account, standing: "Requested" };
-    return { ...account, standing: "Open" };
+  const held = new Set(installations.map((installation) => installation.installationId));
+  const open = (account: (typeof accounts)[number]): GitHubAccount => ({
+    ...account,
+    state: account.role === "Owner" ? "Install" : "Request",
   });
-};
-
-export const accountList = (stored: StoredGitHubAccount[], installations: GitHubInstallation[]): GitHubAccount[] =>
-  stored.map((row) => {
-    const account = { gitHubAccountId: row.gitHubAccountId, login: row.login, kind: row.kind, role: row.role };
-    const held = installations.find(
-      (installation) => installation.accountLogin.toLowerCase() === row.login.toLowerCase(),
+  const rows = accounts.flatMap((account): GitHubAccount[] => {
+    const installation = reading.installations.find((candidate) => candidate.account.id === account.gitHubAccountId);
+    if (installation === undefined) {
+      const request = requests.find((candidate) => candidate.gitHubAccountId === account.gitHubAccountId);
+      const pending = request !== undefined && now - request.requestedAt < INSTALL_REQUEST_TTL_MS;
+      return [pending ? { ...account, state: "Requested" } : open(account)];
+    }
+    if (held.has(installation.id)) return [];
+    const holder = holders.get(installation.id);
+    if (holder !== undefined && holder !== tenantId) {
+      return [{ ...account, state: "Unavailable", installationId: installation.id, reason: "OtherTenant" }];
+    }
+    const installer = installers.get(installation.id);
+    const binding = installedBy(
+      user,
+      installation,
+      installer === undefined ? { kind: "Unrecorded" } : { kind: "Recorded", githubUserId: installer },
     );
-    if (held !== undefined) {
-      return {
-        ...account,
-        state: "Installed",
-        installationId: held.installationId,
-        status: held.status,
-        linkedAt: new Date(held.createdAt).toISOString(),
-      };
-    }
-    if (row.standing === "Unavailable") {
-      return { ...account, state: "Unavailable", installationId: row.installationId, reason: row.reason };
-    }
-    if (row.standing === "Requested") return { ...account, state: "Requested" };
-    return { ...account, state: row.role === "Owner" ? "Install" : "Request" };
+    if (binding.kind === "Installer") return [open(account)];
+    return [{ ...account, state: "Unavailable", installationId: installation.id, reason: binding.kind }];
   });
+  return [...installedRows(installations), ...rows];
+};
