@@ -420,8 +420,9 @@ test("a tenant holds an installation per account, a suspension changes only that
     .bind(INSTALLATION_ID + 1, tenantId, "octo", Date.now(), Date.now())
     .run();
   const octo = { id: INSTALLATION_ID + 1, account: { login: "octo", type: "User" } };
+  const sender = { id: 4242, login: "octo" };
 
-  await signedDelivery("installation", { action: "suspend", installation: octo });
+  await signedDelivery("installation", { action: "suspend", installation: octo, sender });
   assert.deepEqual(
     (await installations()).map(({ accountLogin, status }) => [accountLogin, status]),
     [
@@ -430,7 +431,7 @@ test("a tenant holds an installation per account, a suspension changes only that
     ],
   );
 
-  await signedDelivery("installation", { action: "deleted", installation: octo });
+  await signedDelivery("installation", { action: "deleted", installation: octo, sender });
   assert.deepEqual(
     (await installations()).map((installation) => installation.accountLogin),
     ["acme"],
