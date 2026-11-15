@@ -151,12 +151,12 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     });
   }
 
-  supervisorUpdate(hostId: string, message: SupervisorUpdateMessage, now: number): void {
-    recordSupervisorUpdate(this.ctx.storage.sql, hostId, message, now);
+  supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
+    recordSupervisorUpdate(this.ctx.storage.sql, hostId, message);
   }
 
-  supervisorUpdates(): Record<string, SupervisorUpdates> {
-    return supervisorUpdatesByHost(this.ctx.storage.sql);
+  supervisorUpdates(hostIds: string[]): Record<string, SupervisorUpdates> {
+    return supervisorUpdatesByHost(this.ctx.storage.sql, hostIds);
   }
 
   private async sealPlaintext(): Promise<void> {

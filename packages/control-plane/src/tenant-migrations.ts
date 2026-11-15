@@ -46,6 +46,7 @@ import tenant0045 from "../migrations/tenant/0045_prebuild_default_commands.sql"
 import tenant0046 from "../migrations/tenant/0046_supervisor_update_latest.sql";
 import tenant0047 from "../migrations/tenant/0047_drop_prebuild_default_commands.sql";
 import tenant0048 from "../migrations/tenant/0048_prebuild_head_sha.sql";
+import tenant0049 from "../migrations/tenant/0049_supervisor_update_latest_without_updated_at.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -97,4 +98,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0046_supervisor_update_latest", sql: tenant0046 },
   { name: "0047_drop_prebuild_default_commands", sql: tenant0047 },
   { name: "0048_prebuild_head_sha", sql: tenant0048 },
+  { name: "0049_supervisor_update_latest_without_updated_at", sql: tenant0049 },
 ];
