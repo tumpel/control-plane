@@ -8,7 +8,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
-import { dispatchCallerWorkflow, type PrebuildInputs, type RunEvent, runOutcome } from "./github-actions.ts";
+import { dispatchCallerWorkflow, type PrebuildInputs, type RunEvent } from "./github-actions.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
@@ -54,11 +54,6 @@ export interface PrebuildDispatch {
 export type CallerWorkflow = { kind: "Connected"; callerWorkflow: string } | { kind: "NotConnected" };
 
 export type RecordedRun = { kind: "Run"; run: PrebuildRun } | { kind: "NoRun" };
-
-export type BuildingRecorded =
-  | { kind: "Building" }
-  | { kind: "NotDispatched" }
-  | { kind: "OtherCommit"; dispatchedSha: string };
 
 export interface PrebuildStartRecord {
   prebuildId: string;
@@ -307,16 +302,11 @@ export class TenantPrebuilds extends TenantSessions {
     return failed;
   }
 
-  async recordPrebuildBuilding(
-    tenantId: string,
-    prebuildId: string,
-    run: PrebuildRun,
-    now: number,
-  ): Promise<BuildingRecorded> {
+  async recordPrebuildBuilding(tenantId: string, prebuildId: string, run: PrebuildRun, now: number): Promise<boolean> {
     const recorded = this.recordedRun(prebuildId);
     const prebuild = this.getPrebuild(tenantId, prebuildId);
     if (recorded.kind === "NoRun" || recorded.run.runId !== run.runId || prebuild?.status.state !== "Dispatched") {
-      return { kind: "NotDispatched" };
+      return false;
     }
     if (recorded.run.headSha !== run.headSha) {
       await this.failPrebuild(
@@ -331,19 +321,19 @@ export class TenantPrebuilds extends TenantSessions {
         prebuild.logUrl,
         now,
       );
-      return { kind: "OtherCommit", dispatchedSha: recorded.run.headSha };
+      return false;
     }
     const moved = this.ctx.storage.sql.exec(
       "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
       now,
       prebuildId,
     ).rowsWritten;
-    if (moved === 0) return { kind: "NotDispatched" };
+    if (moved === 0) return false;
     await this.prebuildTimers(tenantId, prebuildId, {
       PrebuildDispatch: null,
       PrebuildBuild: { prebuildId, at: now + settingsOf(this.env).prebuildBuildBudgetSeconds * 1000 },
     });
-    return { kind: "Building" };
+    return true;
   }
 
   async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
@@ -352,39 +342,29 @@ export class TenantPrebuilds extends TenantSessions {
       .toArray();
     if (row === undefined) return;
     const prebuildId = row.prebuild_id;
-    const outcome = runOutcome(event);
-    if (outcome.kind === "Started") {
-      await this.recordPrebuildBuilding(tenantId, prebuildId, { runId: event.runId, headSha: event.headSha }, now);
-      return;
-    }
-    if (outcome.kind === "Failed") {
-      await this.failPrebuild(
-        tenantId,
-        prebuildId,
-        ["Dispatched", "Building"],
-        {
-          phase: "Build",
-          detail: `run ${event.runId} ended ${outcome.conclusion} before the layer upload completed; its log is at ${event.htmlUrl}`,
-          fix: "Fix what the run's log names in the devcontainer or its lifecycle commands, then start the prebuild again with tumpel prebuild start --rebuild",
-        },
-        event.htmlUrl,
-        now,
-      );
-      return;
-    }
-    if (outcome.kind === "Succeeded") {
-      await this.failPrebuild(
-        tenantId,
-        prebuildId,
-        ["Dispatched", "Building"],
-        {
-          phase: "Upload",
-          detail: `run ${event.runId} succeeded and never completed the layer upload; its log is at ${event.htmlUrl}`,
-          fix: "Call the reusable workflow from the caller workflow unchanged, so its upload job runs, then start the prebuild again with tumpel prebuild start --rebuild",
-        },
-        event.htmlUrl,
-        now,
-      );
+    switch (event.action) {
+      case "in_progress":
+        await this.recordPrebuildBuilding(tenantId, prebuildId, { runId: event.runId, headSha: event.headSha }, now);
+        return;
+      case "completed":
+        await this.failPrebuild(
+          tenantId,
+          prebuildId,
+          ["Dispatched", "Building"],
+          event.conclusion === "success"
+            ? {
+                phase: "Upload",
+                detail: `run ${event.runId} succeeded and never completed the layer upload; its log is at ${event.htmlUrl}`,
+                fix: "Call the reusable workflow from the caller workflow unchanged, so its upload job runs, then start the prebuild again with tumpel prebuild start --rebuild",
+              }
+            : {
+                phase: "Build",
+                detail: `run ${event.runId} ended ${event.conclusion ?? "without a conclusion"} before the layer upload completed; its log is at ${event.htmlUrl}`,
+                fix: "Fix what the run's log names in the devcontainer or its lifecycle commands, then start the prebuild again with tumpel prebuild start --rebuild",
+              },
+          event.htmlUrl,
+          now,
+        );
     }
   }
 

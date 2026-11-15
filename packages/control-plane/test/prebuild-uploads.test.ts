@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
@@ -9,12 +9,15 @@ import {
   DeviceTokenSchema,
   GitHubActionsConnectionLinkSchema,
   PersonaSchema,
+  PrebuildFailureSchema,
   PrebuildSchema,
   PrebuildUploadGrantSchema,
   ProblemSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { generateDataKey, seal } from "../src/envelope.ts";
+import { workersSecretKeyStore } from "../src/key-store.ts";
 
 const ACCESS_AUD = "tumpel-prebuild-uploads-e2e";
 const ACCESS_KID = "access-key";
@@ -23,10 +26,15 @@ const EMAIL = "uploads@example.test";
 const CALLER_WORKFLOW = ".github/workflows/tumpel-prebuild.yml";
 const HEAD_SHA = "c".repeat(40);
 const RUN = { runId: 42, headSha: HEAD_SHA };
+const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
+const WEBHOOK_SECRET = "prebuild-uploads-webhook-secret";
+const INSTALLATION_ID = 77;
+const BUDGET_SECONDS = 5;
 
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = rsa();
 const job = rsa();
+const app = rsa();
 const publicJwk = (key: KeyObject, kid: string) => ({
   ...key.export({ format: "jwk" }),
   kid,
@@ -51,12 +59,14 @@ let githubIssuer: string;
 let bearer: Record<string, string>;
 let tenantId: string;
 let personaId: string;
+let nextRun = 500;
 
 type Store = { put(key: string, value: Uint8Array): Promise<unknown> };
 type TenantStub = {
   recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown>;
 };
-type Bindings = { STORE: Store; TENANT: { getByName(name: string): TenantStub } };
+type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
+type Bindings = { DB: Database; STORE: Store; TENANT: { getByName(name: string): TenantStub } };
 
 const assertion = (): string => {
   const now = nowSeconds();
@@ -119,7 +129,7 @@ before(async () => {
           ACCESS_AUD,
           R2_STUB_ORIGIN: "https://r2.example.test",
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
-          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          SECRETS_KEK,
           TUMPEL_SETTINGS: {
             dispatchGrantTtlSeconds: 300,
             snapshotDelaySeconds: 30,
@@ -130,8 +140,8 @@ before(async () => {
             turnTotalBudgetSeconds: 3600,
             transcriptChunkLines: 64,
             prebuildUploadBudgetSeconds: 900,
-            prebuildDispatchBudgetSeconds: 600,
-            prebuildBuildBudgetSeconds: 3600,
+            prebuildDispatchBudgetSeconds: BUDGET_SECONDS,
+            prebuildBuildBudgetSeconds: BUDGET_SECONDS,
             gitHubActionsIssuer: githubIssuer,
           },
         },
@@ -167,6 +177,32 @@ before(async () => {
     bearer,
   );
   GitHubActionsConnectionLinkSchema.parse(await connected.json());
+  const env = await server.getWorker<Bindings>().getEnv();
+  const keyStore = workersSecretKeyStore(SECRETS_KEK);
+  const dataKey = await generateDataKey();
+  const privateKey = app.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
+  await env.DB.prepare(
+    `INSERT INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
+    client_secret_sealed, webhook_secret_sealed, private_key_sealed, created_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      1,
+      "tumpel-runs",
+      "Iv1.runs",
+      "acme",
+      "https://github.com/apps/tumpel-runs",
+      await keyStore.wrap(dataKey),
+      await seal(dataKey, "runs-client-secret", "github-app/client_secret"),
+      await seal(dataKey, WEBHOOK_SECRET, "github-app/webhook_secret"),
+      await seal(dataKey, privateKey, "github-app/private_key"),
+      Date.now(),
+    )
+    .run();
+  await env.DB.prepare(
+    "INSERT INTO github_installations (installation_id, tenant_id, account_login, created_at) VALUES (?, ?, ?, ?)",
+  )
+    .bind(INSTALLATION_ID, tenantId, "acme", Date.now())
+    .run();
 });
 
 after(async () => {
@@ -278,4 +314,113 @@ test("a job of the dispatched run exchanges its GitHub token for one checked lay
   assert.deepEqual(PrebuildSchema.parse(await read.json()).status, converting.status);
   assert.equal((await refusal(uploadsPath, exchange, jobToken(), 409)).code, "PrebuildNotUploading");
   assert.equal((await refusal(`${uploadsPath}/complete`, completion, jobToken(), 409)).code, "PrebuildNotUploading");
+});
+
+const dispatchedRun = async () => {
+  const env = await server.getWorker<Bindings>().getEnv();
+  nextRun += 1;
+  const prebuild = PrebuildSchema.parse(
+    await env.TENANT.getByName(tenantId).recordDispatchedPrebuild(
+      tenantId,
+      {
+        prebuildId: crypto.randomUUID(),
+        personaId,
+        key: {
+          repository: "https://github.com/acme/app",
+          inputDigest: "a".repeat(64),
+          guestImageDigest: "b".repeat(64),
+        },
+        defaultBranch: "main",
+        provider: "GitHubActions",
+        run: { runId: nextRun, headSha: HEAD_SHA },
+        logUrl: `https://github.com/acme/app/actions/runs/${nextRun}`,
+      },
+      Date.now(),
+    ),
+  );
+  return { prebuild, runId: nextRun };
+};
+
+const deliver = async (runId: number, action: string, conclusion: string | null, headSha = HEAD_SHA) => {
+  const body = JSON.stringify({
+    action,
+    installation: { id: INSTALLATION_ID },
+    repository: { full_name: "acme/app" },
+    workflow_run: {
+      id: runId,
+      head_sha: headSha,
+      html_url: `https://github.com/acme/app/actions/runs/${runId}/attempts/1`,
+      status: action === "completed" ? "completed" : action,
+      conclusion,
+    },
+  });
+  const signature = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex")}`;
+  const response = await server.fetch(`${origin}/github/webhook`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-github-event": "workflow_run", "x-hub-signature-256": signature },
+    body,
+  });
+  assert.equal(response.status, 204, await response.text());
+};
+
+const readPrebuild = async (prebuildId: string) =>
+  PrebuildSchema.parse(await (await send("GET", `/v1/prebuilds/${prebuildId}`, undefined, bearer)).json());
+
+const failure = async (prebuildId: string) => {
+  const response = await send("GET", `/v1/prebuilds/${prebuildId}/failure`, undefined, bearer);
+  assert.equal(response.status, 200, await response.clone().text());
+  return PrebuildFailureSchema.parse(await response.json());
+};
+
+const settled = async (prebuildId: string, state: string) => {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const prebuild = await readPrebuild(prebuildId);
+    if (prebuild.status.state === state || Date.now() > deadline) return prebuild;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+};
+
+test("a dispatched run reports in_progress, the prebuild builds, and a failed run fails it in phase Build with the run's log", async () => {
+  const { prebuild, runId } = await dispatchedRun();
+  await deliver(runId + 1000, "in_progress", null);
+  assert.equal((await readPrebuild(prebuild.prebuildId)).status.state, "Dispatched");
+  await deliver(runId, "requested", null);
+  await deliver(runId, "in_progress", null);
+  assert.equal((await readPrebuild(prebuild.prebuildId)).status.state, "Building");
+  await deliver(runId, "completed", "failure");
+  const failed = await readPrebuild(prebuild.prebuildId);
+  assert.ok(failed.status.state === "Failed");
+  assert.equal(failed.status.phase, "Build");
+  assert.equal(failed.logUrl, `https://github.com/acme/app/actions/runs/${runId}/attempts/1`);
+  assert.match((await failure(prebuild.prebuildId)).detail, /ended failure/);
+});
+
+test("a run that starts on another commit than the start read fails in phase Dispatch, and a run that succeeds without an upload fails in phase Upload", async () => {
+  const moved = await dispatchedRun();
+  await deliver(moved.runId, "in_progress", null, "d".repeat(40));
+  const failed = await readPrebuild(moved.prebuild.prebuildId);
+  assert.ok(failed.status.state === "Failed");
+  assert.equal(failed.status.phase, "Dispatch");
+
+  const silent = await dispatchedRun();
+  await deliver(silent.runId, "in_progress", null);
+  await deliver(silent.runId, "completed", "success");
+  const unuploaded = await readPrebuild(silent.prebuild.prebuildId);
+  assert.ok(unuploaded.status.state === "Failed");
+  assert.equal(unuploaded.status.phase, "Upload");
+});
+
+test("a run that never starts fails in phase Dispatch, and a build past its budget fails in phase Build", async () => {
+  const waiting = await dispatchedRun();
+  const building = await dispatchedRun();
+  await deliver(building.runId, "in_progress", null);
+  const unstarted = await settled(waiting.prebuild.prebuildId, "Failed");
+  assert.ok(unstarted.status.state === "Failed");
+  assert.equal(unstarted.status.phase, "Dispatch");
+  assert.match((await failure(waiting.prebuild.prebuildId)).detail, /prebuildDispatchBudgetSeconds 5/);
+  const overdue = await settled(building.prebuild.prebuildId, "Failed");
+  assert.ok(overdue.status.state === "Failed");
+  assert.equal(overdue.status.phase, "Build");
+  assert.match((await failure(building.prebuild.prebuildId)).detail, /prebuildBuildBudgetSeconds 5/);
 });
