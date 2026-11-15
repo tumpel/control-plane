@@ -6,6 +6,7 @@ const budgets = {
   claudeSetupUrlBudgetSeconds: 300,
   claudeSetupCodeBudgetSeconds: 600,
   claudeSetupMintBudgetSeconds: 120,
+  claudeSetupReportBudgetSeconds: 10,
 };
 
 test("each phase advances on its own event, fails on its budget with its named reason, and refuses a code out of turn", () => {
