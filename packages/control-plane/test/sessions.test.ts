@@ -818,7 +818,7 @@ test("a setup box token writes its own setup's member once, only while the setup
   });
 });
 
-test("a Minting setup lists as the one to resume, and read past its mint budget reads and lists Failed SetupTimedOut and discards its box even when its alarm never fired", async () => {
+test("a Minting setup lists as the one to resume, and listed or read past its mint budget fails SetupTimedOut and discards its box even when its alarm never fired", async () => {
   const created = await postJson("/v1/secret-sets", { name: "Overdue setup secrets", secrets: [] }, bearer);
   assert.equal(created.status, 200, await created.clone().text());
   const { secretSetId } = SecretSetSchema.parse(await created.json());
@@ -850,14 +850,11 @@ test("a Minting setup lists as the one to resume, and read past its mint budget 
     claudeSetupId,
   );
 
+  assert.deepEqual(await listed(), []);
   const read = await status();
   assert.equal(read.status.state, "Failed");
   assert.ok(read.status.state === "Failed" && read.status.reason === "SetupTimedOut");
   assert.match(read.status.state === "Failed" ? read.status.detail : "", /minted no token/);
-  assert.deepEqual(
-    (await listed()).map((setup) => setup.status.state),
-    ["Failed"],
-  );
   assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, claudeSetupId);
   const late = await postJson(
     `/v1/claude-setups/${claudeSetupId}/token`,
