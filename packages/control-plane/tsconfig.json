@@ -13,5 +13,5 @@
     "types": ["@cloudflare/workers-types"],
     "allowImportingTsExtensions": true
   },
-  "include": ["src"]
+  "include": ["src", "test/fixtures/*.ts"]
 }

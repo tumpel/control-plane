@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  ChannelProtocol,
+  CloseCode,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
   HostSchema,
@@ -15,13 +17,22 @@ import {
   ProblemSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import { HEARTBEAT_DEADLINE_MS } from "../src/channel/protocol.ts";
+import { ControlEnvelopeSchema, HEARTBEAT_DEADLINE_MS, helloBytes } from "../src/channel/protocol.ts";
 
 const AUDIENCE = "tumpel-hosts-e2e";
 const KID = "hosts-e2e-key";
 const EMAIL = "hosts@example.test";
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
+
+type WorkerConfig = Extract<
+  Extract<Parameters<typeof createTestHarness>[0], object>["workers"][number],
+  { config: unknown }
+>["config"];
+
+const { env: _stages, ...config }: WorkerConfig & { env?: unknown } = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../wrangler.jsonc", import.meta.url)), "utf8"),
+);
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
@@ -121,11 +132,15 @@ before(async () => {
     root: fileURLToPath(new URL("..", import.meta.url)),
     workers: [
       {
-        configPath: "./wrangler.jsonc",
-        vars: {
-          ACCESS_ISSUER: issuer,
-          ACCESS_AUD: AUDIENCE,
-          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+        config: {
+          ...config,
+          main: "./test/fixtures/slow-hello-worker.ts",
+          vars: {
+            ...config.vars,
+            ACCESS_ISSUER: issuer,
+            ACCESS_AUD: AUDIENCE,
+            SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          },
         },
       },
     ],
@@ -207,6 +222,62 @@ test("a supervisor whose channel state is gone exits with ChannelStateLost", asy
   const finished = await supervisor(enrolled.dir, ["run"]).finished;
   assert.equal(finished.code, 4);
   assert.match(finished.stderr, /ChannelStateLost/);
+});
+
+test("a frame the host sends the moment Welcome arrives is accepted while the tenant's hostHello is still in flight", async () => {
+  const keys = generateKeyPairSync("ed25519");
+  const publicKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x ?? "", "base64url").toString("base64");
+  const enrolled = await postJson("/v1/hosts/enrol", {
+    name: "eager",
+    architecture: "Amd64",
+    cpuCount: 1,
+    memoryBytes: 1024,
+    publicKey,
+    supervisorVersion: "0.1.0",
+    enrolmentToken: await mint(),
+  });
+  assert.equal(enrolled.status, 200);
+  const { hostId } = HostSchema.parse(await enrolled.json());
+
+  const frame = (seq: number): string =>
+    JSON.stringify({
+      type: "Frame",
+      seq,
+      ack: 0,
+      message: {
+        type: "SnapshotFailed",
+        snapshotId: "snapshot-eager",
+        reason: "BoxNotFound",
+        detail: "no box",
+        failedAt: "2026-11-15T10:00:00+01:00",
+      },
+    });
+  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${hostId}/channel`);
+  const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+    socket.addEventListener("close", (event) => resolve({ code: event.code, reason: event.reason }), { once: true });
+  });
+  socket.addEventListener("message", (event) => {
+    const envelope = ControlEnvelopeSchema.parse(JSON.parse(String(event.data)));
+    if (envelope.type === "Welcome") socket.send(frame(1));
+    if (envelope.type !== "Challenge") return;
+    socket.send(
+      JSON.stringify({
+        type: "Hello",
+        hostId,
+        protocolVersion: ChannelProtocol.Version,
+        supervisorVersion: "0.1.0",
+        signature: sign(null, helloBytes(envelope.nonce, hostId), keys.privateKey).toString("base64"),
+        boxCapacity: 1,
+        usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 1024 },
+      }),
+    );
+  });
+
+  await waitForState(hostId, "Online", 15_000);
+  const early = await Promise.race([closed, sleep(1_000).then(() => null)]);
+  assert.equal(early, null, `the channel closed after Welcome: ${JSON.stringify(early)}`);
+  socket.send(frame(3));
+  assert.deepEqual(await closed, { code: CloseCode.ProtocolError, reason: "frame gap: expected seq 2, got 3" });
 });
 
 test("an unknown enrolment token is refused", async () => {

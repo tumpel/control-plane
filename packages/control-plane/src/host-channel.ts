@@ -133,6 +133,7 @@ export class HostChannel extends DurableObject<Env> {
     attachment.lastReceivedAt = now;
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
+    socket.serializeAttachment(attachment);
     if (event.kind === "Message") {
       const { message: received } = event;
       await this.ctx.blockConcurrencyWhile(async () => {
