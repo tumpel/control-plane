@@ -241,7 +241,6 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   const tokenResponse = await form("/oauth/token", redemption);
   assert.equal(tokenResponse.status, 200);
   const oauthToken = OAuthTokenSchema.parse(await tokenResponse.json());
-  assert.equal(await oauthErrorOf(await form("/oauth/token", redemption)), "invalid_grant");
 
   const unauthorised = await mcp("", 1, "tools/list");
   assert.equal(unauthorised.status, 401);
@@ -262,6 +261,13 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   ).json()) as { result: { content: { text: string }[] } };
   const overMcp = WhoamiSchema.parse(JSON.parse(called.result.content[0]?.text ?? ""));
   assert.deepEqual(overMcp, overRest);
+
+  const initializedByDevice = await mcp(deviceToken.access_token, 4, "initialize", { protocolVersion: "2025-06-18" });
+  assert.equal(initializedByDevice.status, 200);
+
+  assert.equal(await oauthErrorOf(await form("/oauth/token", redemption)), "invalid_grant");
+  const afterReuse = await mcp(oauthToken.access_token, 5, "tools/list");
+  assert.equal(afterReuse.status, 401);
 
   const revoked = await call(`/v1/devices/${device.deviceId}`, { method: "DELETE", headers: bearer });
   assert.equal(revoked.status, 204);
