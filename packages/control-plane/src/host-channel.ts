@@ -17,6 +17,7 @@ import {
 import { migrateDurableObject } from "./durable-migrate";
 import { problem } from "./http";
 import type { Env } from "./index";
+import { isSupervisorUpdate } from "./supervisor-updates";
 
 const HOST_MIGRATIONS = [
   { name: "0001_host", sql: host0001 },
@@ -202,7 +203,12 @@ export class HostChannel extends DurableObject<Env> {
 
   private async forward(hostId: string, message: HostMessage): Promise<StoredControlMessage | null> {
     const tenantId = await this.tenantOf(hostId);
-    return this.env.TENANT.getByName(tenantId).hostMessage(tenantId, hostId, message);
+    const tenant = this.env.TENANT.getByName(tenantId);
+    if (isSupervisorUpdate(message)) {
+      await tenant.supervisorUpdate(hostId, message, Date.now());
+      return null;
+    }
+    return tenant.hostMessage(tenantId, hostId, message);
   }
 
   private host(): HostRow | null {

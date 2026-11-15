@@ -51,6 +51,7 @@ import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./r
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { settingsOf, turnCredentialSeconds } from "./settings";
+import { forgetSupervisorUpdates, type SupervisorUpdateMessage, supervisorUpdatesOf } from "./supervisor-updates";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -241,7 +242,8 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const STORE_DELETE_BATCH = 1000;
 
-export type SessionHostMessage = Exclude<HostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
+export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
+export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type HostEvent = Exclude<SessionHostMessage, ChunkAsk>;
 export type ChunkReply = Extract<
@@ -640,6 +642,7 @@ export class TenantSessions extends DurableObject<Env> {
 
   forgetHostUsage(hostId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
+    forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
   listHostUsage(tenantId: string): ReportedHostUsage[] {
@@ -666,6 +669,7 @@ export class TenantSessions extends DurableObject<Env> {
         boxesWarm: row.boxes_warm,
         loadAverage: row.load_average,
         memoryAvailableMib: row.memory_available_mib,
+        ...supervisorUpdatesOf(sql, row.host_id),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }));
