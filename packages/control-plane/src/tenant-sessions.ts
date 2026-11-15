@@ -38,7 +38,7 @@ import type { Host } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
-import { placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
+import { placeSession, placeTurn, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
@@ -73,6 +73,8 @@ export type Started = { kind: "Started"; started: StartedSession } | { kind: "Un
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
+  | { kind: "Stranded"; missingTurnIds: string[] }
+  | { kind: "Unplaced"; hosts: Unplaceable[] }
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
   | { kind: "Stopping" }
@@ -603,6 +605,24 @@ export class TenantSessions extends DurableObject<Env> {
       }));
   }
 
+  private snapshotCoverage(sessionId: string): { completedTurnIds: string[]; snapshottedTurnIds: Set<string> } {
+    const sql = this.ctx.storage.sql;
+    const completedTurnIds = sql
+      .exec<{ turn_id: string }>(
+        "SELECT turn_id FROM turns WHERE session_id = ? AND state = 'Completed' ORDER BY created_at, turn_id",
+        sessionId,
+      )
+      .toArray()
+      .map((row) => row.turn_id);
+    const snapshottedTurnIds = new Set(
+      sql
+        .exec<{ turn_id: string }>("SELECT turn_id FROM snapshots WHERE session_id = ?", sessionId)
+        .toArray()
+        .map((row) => row.turn_id),
+    );
+    return { completedTurnIds, snapshottedTurnIds };
+  }
+
   async startSession(tenantId: string, input: NewSession, now: number): Promise<Started> {
     const { start } = input;
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), IMAGE_ARCHITECTURES);
@@ -648,7 +668,7 @@ export class TenantSessions extends DurableObject<Env> {
     return { kind: "Started", started: { session: toSession(tenantId, session), turn: toTurn(tenantId, turn) } };
   }
 
-  async sendTurn(tenantId: string, sessionId: string, prompt: string, now: number): Promise<Sent> {
+  async sendTurn(tenantId: string, sessionId: string, prompt: string, hosts: Host[], now: number): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -657,17 +677,31 @@ export class TenantSessions extends DurableObject<Env> {
     if (running !== null) return { kind: "InFlight", turnId: running };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
-    const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
+    const { completedTurnIds, snapshottedTurnIds } = this.snapshotCoverage(sessionId);
+    const placement = placeTurn(
+      session.host_id,
+      hosts,
+      this.listHostUsage(tenantId),
+      IMAGE_ARCHITECTURES,
+      completedTurnIds,
+      snapshottedTurnIds,
+    );
+    if (placement.kind === "Stranded") return placement;
+    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    const moved = placement.kind === "Placed";
+    const hostId = moved ? placement.host.hostId : session.host_id;
+    const boxId = moved || session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        "UPDATE sessions SET state = 'Running', box_id = ?, updated_at = ? WHERE session_id = ?",
+        "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
+        hostId,
         boxId,
         now,
         sessionId,
       );
       return this.insertTurn(sessionId, boxId, prompt, now);
     });
-    await this.offer(tenantId, { ...session, box_id: boxId }, turn);
+    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
