@@ -57,8 +57,11 @@ type TurnFailureReason = TurnFailure["reason"];
 type SessionState = Session["state"];
 export type StopFailure = z.infer<typeof StopFailureSchema>;
 
+export type SessionOrigin = Session["origin"];
+
 export interface NewSession {
   principalId: string;
+  origin: SessionOrigin;
   hosts: Host[];
   harness: Session["harness"];
   harnessVersion: string;
@@ -116,6 +119,30 @@ type SessionRow = {
   endpoint: string;
   created_at: number;
   updated_at: number;
+};
+
+type SessionViewRow = {
+  session_id: string;
+  principal_id: string;
+  host_id: string;
+  box_id: string;
+  persona_id: string;
+  repository: string;
+  harness: string;
+  harness_version: string;
+  model: string;
+  state: string;
+  created_at: number;
+  updated_at: number;
+  last_turn_id: string;
+  last_turn_state: string;
+  last_turn_at: number;
+  issue_owner: string | null;
+  issue_name: string | null;
+  issue_number: number | null;
+  issue_title: string | null;
+  issue_html_url: string | null;
+  issue_branch: string | null;
 };
 
 type TurnRow = {
@@ -209,6 +236,12 @@ type SnapshotRequestRow = {
 
 const SESSION_SELECT =
   "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at FROM sessions";
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.created_at, s.updated_at,
+  t.turn_id AS last_turn_id, t.state AS last_turn_state, t.updated_at AS last_turn_at,
+  i.owner AS issue_owner, i.name AS issue_name, i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch
+  FROM sessions AS s
+  JOIN turns AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
+  LEFT JOIN session_issues AS i ON i.session_id = s.session_id`;
 const TURN_SELECT =
   "SELECT turn_id, session_id, host_id, box_id, prompt, state, line_count, created_at, updated_at FROM turns";
 const SNAPSHOT_SELECT = `SELECT * FROM (
@@ -234,7 +267,22 @@ const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chun
 const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
   AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
 
-const toSession = (tenantId: string, row: SessionRow): Session =>
+const originOf = (row: SessionViewRow): unknown =>
+  row.issue_number === null
+    ? { source: "Prompt" }
+    : {
+        source: "Issue",
+        issue: {
+          owner: row.issue_owner,
+          name: row.issue_name,
+          issueNumber: row.issue_number,
+          title: row.issue_title,
+          htmlUrl: row.issue_html_url,
+          branch: row.issue_branch,
+        },
+      };
+
+const toSession = (tenantId: string, row: SessionViewRow): Session =>
   SessionSchema.parse({
     sessionId: row.session_id,
     tenantId,
@@ -247,6 +295,10 @@ const toSession = (tenantId: string, row: SessionRow): Session =>
     harnessVersion: row.harness_version,
     model: row.model,
     state: row.state,
+    origin: originOf(row),
+    lastTurnId: row.last_turn_id,
+    lastTurnState: row.last_turn_state,
+    lastTurnAt: new Date(row.last_turn_at).toISOString(),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -347,6 +399,19 @@ export class TenantSessions extends DurableObject<Env> {
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
     return row ?? null;
+  }
+
+  private sessionView(tenantId: string, sessionId: string): Session | null {
+    const [row] = this.ctx.storage.sql
+      .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
+      .toArray();
+    return row === undefined ? null : toSession(tenantId, row);
+  }
+
+  private presentSession(tenantId: string, sessionId: string): Session {
+    const session = this.sessionView(tenantId, sessionId);
+    if (session === null) throw new Error(`session ${sessionId} vanished while it was read back`);
+    return session;
   }
 
   private turnRow(turnId: string): TurnRow | null {
@@ -751,10 +816,26 @@ export class TenantSessions extends DurableObject<Env> {
         session.created_at,
         session.updated_at,
       );
+      if (input.origin.source === "Issue") {
+        const { issue } = input.origin;
+        this.ctx.storage.sql.exec(
+          "INSERT INTO session_issues (session_id, owner, name, issue_number, title, html_url, branch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          session.session_id,
+          issue.owner,
+          issue.name,
+          issue.issueNumber,
+          issue.title,
+          issue.htmlUrl,
+          issue.branch,
+        );
+      }
       return this.insertTurn(session.session_id, session.host_id, session.box_id, start.prompt, now);
     });
     await this.offer(tenantId, session, turn);
-    return { kind: "Started", started: { session: toSession(tenantId, session), turn: toTurn(tenantId, turn) } };
+    return {
+      kind: "Started",
+      started: { session: this.presentSession(tenantId, session.session_id), turn: toTurn(tenantId, turn) },
+    };
   }
 
   async sendTurn(tenantId: string, sessionId: string, prompt: string, hosts: Host[], now: number): Promise<Sent> {
@@ -807,7 +888,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
     if (session.state === "Stopping" || session.state === "Stopped") {
-      return { kind: "Stopping", session: toSession(tenantId, session) };
+      return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
     }
     const running = this.inFlightTurn(sessionId);
     if (running !== null) return { kind: "InFlight", turnId: running };
@@ -817,7 +898,7 @@ export class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, sessionId, { Snapshot: null });
     const stopping = { ...session, state: "Stopping", updated_at: now };
     await this.snapshotOrTeardown(tenantId, stopping, latest);
-    return { kind: "Stopping", session: toSession(tenantId, stopping) };
+    return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
   }
 
   async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
@@ -861,9 +942,7 @@ export class TenantSessions extends DurableObject<Env> {
       TeardownAnswer: null,
       HostOffline: null,
     });
-    const archived = this.sessionRow(sessionId);
-    if (archived === null) throw new Error(`session ${sessionId} vanished while it was archived`);
-    return { kind: "Archived", session: toSession(tenantId, archived) };
+    return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
   private releaseChunks(tenantId: string, sessionId: string): Promise<void> {
@@ -984,14 +1063,13 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   getSession(tenantId: string, sessionId: string): Session | null {
-    const row = this.sessionRow(sessionId);
-    return row === null ? null : toSession(tenantId, row);
+    return this.sessionView(tenantId, sessionId);
   }
 
   listSessions(tenantId: string, filter: SessionFilter): Session[] {
     return this.ctx.storage.sql
-      .exec<SessionRow>(
-        `${SESSION_SELECT} WHERE (?1 IS NULL OR state = ?1) AND (?2 IS NULL OR host_id = ?2) ORDER BY created_at, session_id`,
+      .exec<SessionViewRow>(
+        `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2) ORDER BY s.created_at, s.session_id`,
         filter.state ?? null,
         filter.hostId ?? null,
       )

@@ -1,15 +1,28 @@
-import { GitHubConnectionSchema, GitHubInstallStartSchema } from "@tumpel/api/schemas";
+import {
+  GitHubConnectionSchema,
+  GitHubInstallStartSchema,
+  GitHubIssueSchema,
+  GitHubRepositoryPathSchema,
+  GitHubRepositorySchema,
+} from "@tumpel/api/schemas";
 import type { z } from "zod";
 import {
   APP_CREATED_PATH,
   APP_INSTALLED_PATH,
   APP_SETUP_PATH,
+  type AppKey,
   appManifest,
   convertManifest,
   type Fetch,
   GITHUB_WEB,
+  type GitHubAnswer,
+  type Installation,
   installUrl,
+  listInstallationRepositories,
+  listOpenIssues,
   manifestAction,
+  mintInstallationToken,
+  mintInstallationWideToken,
   parseJson,
   readState,
   STATE_KEY_PURPOSE,
@@ -28,6 +41,7 @@ import {
   GitHubSetupCallbackSchema,
 } from "./github-schemas.ts";
 import {
+  appKey,
   installationOf,
   linkInstallation,
   oauthClient,
@@ -48,6 +62,8 @@ export type Authenticate = (request: Request, env: Env) => Promise<Caller | Resp
 
 const START_PATH = "/v1/github-connection/start";
 const CONNECTION_PATH = "/v1/github-connection";
+const REPOSITORIES_PATH = "/v1/github-connection/repositories";
+const ISSUES_PATH = /^\/v1\/github-connection\/repositories\/([^/]+)\/([^/]+)\/issues$/;
 const fetcher: Fetch = (url, init) => fetch(url, init);
 const stateKey = (env: Env): Promise<CryptoKey> => keyStoreOf(env).signingKey(STATE_KEY_PURPOSE);
 const expiry = (now: number): string => new Date(now + STATE_TTL_MS).toISOString();
@@ -93,6 +109,64 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state), expiresAt }));
 };
 
+const notConnected = (): Response =>
+  problem(409, {
+    code: "GitHubNotConnected",
+    title: "GitHub not connected",
+    detail: "your tenant has not installed the stage's GitHub App, so no repository is covered",
+    fix: "Install it with tumpel github start and open the URL it prints",
+  });
+
+const unreadable = (detail: string): Response =>
+  problem(409, {
+    code: "RepositoryUnreadable",
+    title: "GitHub refused the listing",
+    detail,
+    fix: "Check the repositories the installation covers on GitHub, then list again; see https://www.githubstatus.com if GitHub keeps failing",
+  });
+
+const listed = <T>(answer: GitHubAnswer<T[]>, schema: z.ZodType<T>): Response =>
+  answer.ok ? json(answer.value.map((item) => schema.parse(item))) : unreadable(answer.detail);
+
+type Access = { ok: true; app: AppKey; installation: Installation } | { ok: false; response: Response };
+
+const installationAccess = async (caller: Caller, url: URL, env: Env): Promise<Access> => {
+  const app = await appKey(env.DB, keyStoreOf(env));
+  if (app === null) return { ok: false, response: appMissing(url.origin) };
+  const installation = await installationOf(env.DB, caller.tenantId);
+  if (installation === null) return { ok: false, response: notConnected() };
+  return { ok: true, app, installation };
+};
+
+const handleRepositories = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
+  const access = await installationAccess(caller, url, env);
+  if (!access.ok) return access.response;
+  const token = await mintInstallationWideToken(fetcher, access.app, access.installation.installationId, Date.now());
+  if (!token.ok) return unreadable(token.detail);
+  return listed(await listInstallationRepositories(fetcher, token.value), GitHubRepositorySchema);
+};
+
+const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, name: string): Promise<Response> => {
+  const path = GitHubRepositoryPathSchema.safeParse({ owner, name });
+  if (!path.success) {
+    return problem(404, {
+      code: "NotFound",
+      title: "No such repository",
+      detail: `${owner}/${name} is not a GitHub repository name: ${issues(path.error)}`,
+      fix: "List the repositories with tumpel github list-repositories and pass an owner and name it prints",
+    });
+  }
+  const access = await installationAccess(caller, url, env);
+  if (!access.ok) return access.response;
+  const target = path.data;
+  const repository = `${GITHUB_WEB}/${target.owner}/${target.name}`;
+  const minted = await mintInstallationToken(fetcher, access.app, access.installation, repository, Date.now());
+  if (minted.kind === "NoToken")
+    throw new Error(`${repository} passed the path schema and is no GitHub repository URL`);
+  if (minted.kind !== "Minted") return unreadable(minted.detail);
+  return listed(await listOpenIssues(fetcher, minted.token, target), GitHubIssueSchema);
+};
+
 export const handleGitHubConnection = async (
   request: Request,
   url: URL,
@@ -101,9 +175,16 @@ export const handleGitHubConnection = async (
 ): Promise<Response | null> => {
   const starting = url.pathname === START_PATH && request.method === "POST";
   const reading = url.pathname === CONNECTION_PATH && request.method === "GET";
-  if (!starting && !reading) return null;
+  const getting = request.method === "GET";
+  const repositories = getting && url.pathname === REPOSITORIES_PATH;
+  const issuesOf = getting ? ISSUES_PATH.exec(url.pathname) : null;
+  if (!starting && !reading && !repositories && issuesOf === null) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
+  if (repositories) return handleRepositories(caller, url, env);
+  if (issuesOf !== null) {
+    return handleIssues(caller, url, env, decodeURIComponent(issuesOf[1] ?? ""), decodeURIComponent(issuesOf[2] ?? ""));
+  }
   return starting ? handleStart(caller, url, env) : handleConnection(caller, url, env);
 };
 

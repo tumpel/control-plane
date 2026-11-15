@@ -644,6 +644,10 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   const start = await sessionStart("Archivable");
   const started = await tool("tumpel_session_start", { ...start, prompt: "stop me" }, StartedSessionSchema);
   const { sessionId } = started.session;
+  assert.deepEqual(started.session.origin, { source: "Prompt" });
+  assert.equal(started.session.lastTurnId, started.turn.turnId);
+  assert.equal(started.session.lastTurnState, "Offered");
+  assert.equal(Date.parse(started.session.lastTurnAt), started.turn.updatedAt);
   const offer = await host.next("TurnOffer");
   assert.equal(offer.sessionId, sessionId);
   const { turnId } = offer;
@@ -664,6 +668,16 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
     (turn) => turn.state === "Completed",
   );
+  const completed = await tool("tumpel_turn_get", { turnId }, TurnSchema);
+  const got = await tool("tumpel_session_get", { sessionId }, SessionSchema);
+  const [listed] = (await tool("tumpel_session_list", {}, SessionSchema.array())).filter(
+    (session) => session.sessionId === sessionId,
+  );
+  for (const session of [got, listed]) {
+    assert.equal(session?.lastTurnId, turnId);
+    assert.equal(session?.lastTurnState, "Completed");
+    assert.equal(session?.lastTurnAt, new Date(completed.updatedAt).toISOString());
+  }
   const notStopped = await refused(`/v1/sessions/${sessionId}/archive`);
   assert.equal(notStopped.code, "SessionNotStopped");
   assert.match(notStopped.detail, /is Idle/);
