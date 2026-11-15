@@ -1,18 +1,12 @@
-import {
-  CircleCIAuthorizationSchema,
-  CircleCIAuthorizationStateSchema,
-  CircleCIOrganizationSchema,
-} from "@tumpel/api/schemas";
+import { CircleCIAuthorizationSchema, CircleCIOrganizationSchema } from "@tumpel/api/schemas";
 import { z } from "zod";
 import { readCollaborations } from "./circleci.ts";
 import {
-  advanceAuthorization,
   authorizeUrl,
   CHOOSE_BUDGET_SECONDS,
   CIRCLECI_REDIRECT_URI,
   type CircleCIAuthorization,
   type CircleCIAuthorizationFailureReason,
-  type CircleCIAuthorizationState,
   type CircleCIOrganization,
   deniedDetail,
   exchangeCode,
@@ -21,6 +15,7 @@ import {
   REDIRECT_BUDGET_SECONDS,
   registerClient,
   stateMismatchDetail,
+  timedOutDetail,
 } from "./circleci-oauth.ts";
 import { base64Url, randomToken, sameSecret } from "./crypto";
 import { seal, unseal } from "./envelope.ts";
@@ -28,25 +23,22 @@ import type { Fetch } from "./github.ts";
 import type { CircleCIAuthorizationDeadline } from "./session-timer";
 import { TenantClaudeSetups } from "./tenant-claude-setups";
 
-type CircleCIAuthorizationRow = {
+type AuthorizationRow = {
   circleci_authorization_id: string;
   principal_id: string;
   client_id: string;
-  redirect_uri: string;
   authorize_url: string;
   oauth_state: string;
+  verifier_sealed: string;
   phase: string;
   phase_due_at: number;
-  token_expires_at: number | null;
-  organizations: string | null;
-  organization_id: string | null;
-  account_label: string | null;
-  reason: string | null;
-  detail: string | null;
-  ended_at: number | null;
   created_at: number;
   updated_at: number;
 };
+
+type TokenRow = { token_sealed: string; expires_at: number; organizations: string };
+type CompletionRow = { organization_id: string; account_label: string; expires_at: number; ended_at: number };
+type FailureRow = { reason: string; detail: string; ended_at: number };
 
 export type CircleCIAuthorizationStarted =
   | { kind: "Started"; authorization: CircleCIAuthorization }
@@ -58,11 +50,8 @@ export type CircleCIAuthorizationStepped =
   | { kind: "NotWaiting"; detail: string }
   | { kind: "Invalid"; detail: string };
 
-const SELECT = `SELECT circleci_authorization_id, principal_id, client_id, redirect_uri, authorize_url, oauth_state, phase,
-  phase_due_at, token_expires_at, organizations, organization_id, account_label, reason, detail, ended_at, created_at,
-  updated_at FROM circleci_authorizations`;
-
-const LIVE_PHASES = "('AwaitingRedirect', 'ChoosingOrganization')";
+const LIVE_PHASES = "('AwaitingRedirect', 'Exchanging', 'ChoosingOrganization')";
+const AUTHORIZE_AGAIN = "connect CircleCI again from the dashboard or with tumpel circleci authorize";
 
 const OrganizationsSchema = z.array(CircleCIOrganizationSchema);
 
@@ -73,59 +62,6 @@ const tokenContext = (circleCIAuthorizationId: string): string =>
 
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
-const required = <T>(value: T | null, column: string, row: CircleCIAuthorizationRow): T => {
-  if (value === null) {
-    throw new Error(`CircleCI authorization ${row.circleci_authorization_id} is ${row.phase} and has no ${column}`);
-  }
-  return value;
-};
-
-const statusOf = (row: CircleCIAuthorizationRow): unknown => {
-  if (row.phase === "AwaitingRedirect") {
-    return {
-      state: "AwaitingRedirect",
-      authorizeUrl: row.authorize_url,
-      redirectUri: row.redirect_uri,
-      redirectDueAt: iso(row.phase_due_at),
-    };
-  }
-  if (row.phase === "ChoosingOrganization") {
-    return {
-      state: "ChoosingOrganization",
-      organizations: OrganizationsSchema.parse(JSON.parse(required(row.organizations, "organizations", row))),
-      chooseDueAt: iso(row.phase_due_at),
-    };
-  }
-  if (row.phase === "Completed") {
-    return {
-      state: "Completed",
-      organizationId: required(row.organization_id, "organization_id", row),
-      accountLabel: required(row.account_label, "account_label", row),
-      expiresAt: iso(required(row.token_expires_at, "token_expires_at", row)),
-      completedAt: iso(required(row.ended_at, "ended_at", row)),
-    };
-  }
-  return {
-    state: "Failed",
-    reason: required(row.reason, "reason", row),
-    detail: required(row.detail, "detail", row),
-    failedAt: iso(required(row.ended_at, "ended_at", row)),
-  };
-};
-
-const toAuthorization = (tenantId: string, row: CircleCIAuthorizationRow): CircleCIAuthorization =>
-  CircleCIAuthorizationSchema.parse({
-    circleCIAuthorizationId: row.circleci_authorization_id,
-    tenantId,
-    principalId: row.principal_id,
-    status: statusOf(row),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  });
-
-const phaseOf = (row: CircleCIAuthorizationRow): CircleCIAuthorizationState =>
-  CircleCIAuthorizationStateSchema.parse(row.phase);
-
 const fetcher: Fetch = (url, init) => fetch(url, init);
 
 const pkcePair = async (): Promise<{ verifier: string; challenge: string }> => {
@@ -134,84 +70,137 @@ const pkcePair = async (): Promise<{ verifier: string; challenge: string }> => {
   return { verifier, challenge: base64Url(digest) };
 };
 
-export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
-  private readonly exchanging = new Set<string>();
+const notWaiting = (circleCIAuthorizationId: string, takes: string): CircleCIAuthorizationStepped => ({
+  kind: "NotWaiting",
+  detail: `CircleCI authorization ${circleCIAuthorizationId} ended, ran out of time or is busy, and takes no ${takes}`,
+});
 
-  private circleCIAuthorizationRow(circleCIAuthorizationId: string): CircleCIAuthorizationRow | null {
-    const [row] = this.ctx.storage.sql
-      .exec<CircleCIAuthorizationRow>(`${SELECT} WHERE circleci_authorization_id = ?`, circleCIAuthorizationId)
-      .toArray();
+export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
+  private one<T extends Record<string, SqlStorageValue>>(query: string, ...bindings: SqlStorageValue[]): T | null {
+    const [row] = this.ctx.storage.sql.exec<T>(query, ...bindings).toArray();
     return row ?? null;
   }
 
-  private presentCircleCIAuthorization(tenantId: string, circleCIAuthorizationId: string): CircleCIAuthorization {
-    const row = this.circleCIAuthorizationRow(circleCIAuthorizationId);
-    if (row === null)
-      throw new Error(`CircleCI authorization ${circleCIAuthorizationId} vanished while it was read back`);
-    return toAuthorization(tenantId, row);
+  private authorizationRow(circleCIAuthorizationId: string): AuthorizationRow | null {
+    return this.one<AuthorizationRow>(
+      "SELECT * FROM circleci_authorizations WHERE circleci_authorization_id = ?",
+      circleCIAuthorizationId,
+    );
   }
 
-  private circleCIAuthorizationTimer(tenantId: string, circleCIAuthorizationId: string, at: number | null) {
+  private statusOf(row: AuthorizationRow): unknown {
+    const id = row.circleci_authorization_id;
+    if (row.phase === "ChoosingOrganization") {
+      const token = this.one<TokenRow>(
+        "SELECT * FROM circleci_authorization_tokens WHERE circleci_authorization_id = ?",
+        id,
+      );
+      if (token === null) throw new Error(`CircleCI authorization ${id} is ChoosingOrganization and holds no token`);
+      return {
+        state: "ChoosingOrganization",
+        organizations: OrganizationsSchema.parse(JSON.parse(token.organizations)),
+        chooseDueAt: iso(row.phase_due_at),
+      };
+    }
+    if (row.phase === "Completed") {
+      const done = this.one<CompletionRow>(
+        "SELECT * FROM circleci_authorization_completions WHERE circleci_authorization_id = ?",
+        id,
+      );
+      if (done === null) throw new Error(`CircleCI authorization ${id} is Completed and has no completion`);
+      return {
+        state: "Completed",
+        organizationId: done.organization_id,
+        accountLabel: done.account_label,
+        expiresAt: iso(done.expires_at),
+        completedAt: iso(done.ended_at),
+      };
+    }
+    if (row.phase === "Failed") {
+      const failure = this.one<FailureRow>(
+        "SELECT * FROM circleci_authorization_failures WHERE circleci_authorization_id = ?",
+        id,
+      );
+      if (failure === null) throw new Error(`CircleCI authorization ${id} is Failed and has no failure`);
+      return { state: "Failed", reason: failure.reason, detail: failure.detail, failedAt: iso(failure.ended_at) };
+    }
+    return {
+      state: "AwaitingRedirect",
+      authorizeUrl: row.authorize_url,
+      redirectUri: CIRCLECI_REDIRECT_URI,
+      redirectDueAt: iso(row.phase_due_at),
+    };
+  }
+
+  private present(tenantId: string, circleCIAuthorizationId: string): CircleCIAuthorizationStepped {
+    const row = this.authorizationRow(circleCIAuthorizationId);
+    if (row === null)
+      throw new Error(`CircleCI authorization ${circleCIAuthorizationId} vanished while it was read back`);
+    const authorization = CircleCIAuthorizationSchema.parse({
+      circleCIAuthorizationId,
+      tenantId,
+      principalId: row.principal_id,
+      status: this.statusOf(row),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
+    return { kind: "Stepped", authorization };
+  }
+
+  private authorizationTimer(tenantId: string, circleCIAuthorizationId: string, at: number | null) {
     return this.env.SESSION_TIMER.getByName(circleCIAuthorizationId).set(tenantId, {
       CircleCIAuthorization: at === null ? null : { circleCIAuthorizationId, at },
     });
   }
 
-  private async failCircleCIAuthorization(
+  private async failAuthorization(
     tenantId: string,
     circleCIAuthorizationId: string,
-    reason: CircleCIAuthorizationFailureReason,
-    detail: string,
-    now: number,
-  ): Promise<void> {
-    const moved = this.ctx.storage.sql.exec(
-      `UPDATE circleci_authorizations SET phase = 'Failed', reason = ?, detail = ?, verifier_sealed = NULL, token_sealed = NULL,
-      ended_at = ?, updated_at = ? WHERE circleci_authorization_id = ? AND phase IN ${LIVE_PHASES}`,
-      reason,
-      detail,
-      now,
-      now,
-      circleCIAuthorizationId,
-    ).rowsWritten;
-    if (moved > 0) await this.circleCIAuthorizationTimer(tenantId, circleCIAuthorizationId, null);
-  }
-
-  private async ownCircleCIAuthorization(
-    tenantId: string,
-    principalId: string,
-    circleCIAuthorizationId: string,
-    now: number,
-  ): Promise<CircleCIAuthorizationRow | null> {
-    const row = this.circleCIAuthorizationRow(circleCIAuthorizationId);
-    if (row === null || row.principal_id !== principalId) return null;
-    if (row.phase_due_at > now) return row;
-    const step = advanceAuthorization(circleCIAuthorizationId, phaseOf(row), { kind: "Deadline" });
-    if (step.kind !== "Fail") return row;
-    await this.failCircleCIAuthorization(tenantId, circleCIAuthorizationId, step.reason, step.detail, now);
-    return this.circleCIAuthorizationRow(circleCIAuthorizationId);
+    from: string,
+    failure: { reason: CircleCIAuthorizationFailureReason; detail: string },
+  ): Promise<boolean> {
+    const now = Date.now();
+    const sql = this.ctx.storage.sql;
+    const moved = this.ctx.storage.transactionSync(() => {
+      const written = sql.exec(
+        `UPDATE circleci_authorizations SET phase = 'Failed', updated_at = ?
+        WHERE circleci_authorization_id = ? AND phase IN ${from}`,
+        now,
+        circleCIAuthorizationId,
+      ).rowsWritten;
+      if (written === 0) return false;
+      sql.exec(
+        "DELETE FROM circleci_authorization_tokens WHERE circleci_authorization_id = ?",
+        circleCIAuthorizationId,
+      );
+      sql.exec(
+        "INSERT INTO circleci_authorization_failures (circleci_authorization_id, reason, detail, ended_at) VALUES (?, ?, ?, ?)",
+        circleCIAuthorizationId,
+        failure.reason,
+        failure.detail,
+        now,
+      );
+      return true;
+    });
+    if (moved) await this.authorizationTimer(tenantId, circleCIAuthorizationId, null);
+    return moved;
   }
 
   private async circleCIClientId(): Promise<
     { kind: "Registered"; clientId: string } | { kind: "Refused"; detail: string }
   > {
-    const [held] = this.ctx.storage.sql
-      .exec<{ client_id: string }>(
-        "SELECT client_id FROM circleci_clients WHERE client_slot = 1 AND redirect_uri = ?",
-        CIRCLECI_REDIRECT_URI,
-      )
-      .toArray();
-    if (held !== undefined) return { kind: "Registered", clientId: held.client_id };
+    const held = this.one<{ client_id: string }>("SELECT client_id FROM circleci_clients WHERE client_slot = 1");
+    if (held !== null) return { kind: "Registered", clientId: held.client_id };
     const registered = await registerClient(fetcher, this.env.CIRCLECI_APP_ORIGIN, CIRCLECI_REDIRECT_URI);
     if (registered.kind === "Refused") return registered;
     this.ctx.storage.sql.exec(
-      `INSERT INTO circleci_clients (client_slot, client_id, redirect_uri, created_at) VALUES (1, ?, ?, ?)
-      ON CONFLICT (client_slot) DO UPDATE SET client_id = excluded.client_id, redirect_uri = excluded.redirect_uri,
-      created_at = excluded.created_at`,
+      "INSERT INTO circleci_clients (client_slot, client_id, created_at) VALUES (1, ?, ?) ON CONFLICT (client_slot) DO NOTHING",
       registered.clientId,
-      CIRCLECI_REDIRECT_URI,
       Date.now(),
     );
-    return registered;
+    const kept = this.one<{ client_id: string }>("SELECT client_id FROM circleci_clients WHERE client_slot = 1");
+    if (kept === null) throw new Error("the CircleCI client was registered and then not found");
+    return { kind: "Registered", clientId: kept.client_id };
   }
 
   async startCircleCIAuthorization(
@@ -233,22 +222,23 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     const sealed = await seal(await this.dataKey(), verifier, verifierContext(circleCIAuthorizationId));
     const dueAt = now + REDIRECT_BUDGET_SECONDS * 1000;
     this.ctx.storage.sql.exec(
-      `INSERT INTO circleci_authorizations (circleci_authorization_id, principal_id, client_id, redirect_uri, authorize_url,
-      oauth_state, phase, phase_due_at, verifier_sealed, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'AwaitingRedirect', ?, ?, ?, ?)`,
+      `INSERT INTO circleci_authorizations (circleci_authorization_id, principal_id, client_id, authorize_url, oauth_state,
+      verifier_sealed, phase, phase_due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'AwaitingRedirect', ?, ?, ?)`,
       circleCIAuthorizationId,
       principalId,
       client.clientId,
-      CIRCLECI_REDIRECT_URI,
       url,
       oauthState,
-      dueAt,
       sealed,
+      dueAt,
       now,
       now,
     );
-    await this.circleCIAuthorizationTimer(tenantId, circleCIAuthorizationId, dueAt);
-    return { kind: "Started", authorization: this.presentCircleCIAuthorization(tenantId, circleCIAuthorizationId) };
+    await this.authorizationTimer(tenantId, circleCIAuthorizationId, dueAt);
+    const presented = this.present(tenantId, circleCIAuthorizationId);
+    if (presented.kind !== "Stepped")
+      throw new Error(`CircleCI authorization ${circleCIAuthorizationId} did not read back`);
+    return { kind: "Started", authorization: presented.authorization };
   }
 
   async completeCircleCIAuthorization(
@@ -258,140 +248,162 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     redirectedUrl: string,
     now: number,
   ): Promise<CircleCIAuthorizationStepped> {
-    const row = await this.ownCircleCIAuthorization(tenantId, principalId, circleCIAuthorizationId, now);
-    if (row === null) return { kind: "NotFound" };
-    const step = advanceAuthorization(circleCIAuthorizationId, phaseOf(row), { kind: "Redirected" });
-    if (step.kind === "Refuse") return { kind: "NotWaiting", detail: step.detail };
-    const redirect = parseRedirect(redirectedUrl, row.redirect_uri);
+    const row = this.authorizationRow(circleCIAuthorizationId);
+    if (row === null || row.principal_id !== principalId) return { kind: "NotFound" };
+    const redirect = parseRedirect(redirectedUrl, CIRCLECI_REDIRECT_URI);
     if (redirect.kind === "Invalid") return { kind: "Invalid", detail: redirect.detail };
-    if (this.exchanging.has(circleCIAuthorizationId)) {
-      return {
-        kind: "NotWaiting",
-        detail: `CircleCI authorization ${circleCIAuthorizationId} is already spending a redirect address`,
-      };
+    if (!sameSecret(redirect.state, row.oauth_state)) {
+      return { kind: "Invalid", detail: stateMismatchDetail(circleCIAuthorizationId) };
     }
-    this.exchanging.add(circleCIAuthorizationId);
-    const settled = await this.redeemCircleCIRedirect(tenantId, row, redirect, now).finally(() =>
-      this.exchanging.delete(circleCIAuthorizationId),
-    );
-    return settled;
+    if (redirect.kind === "Denied") {
+      const failed = await this.failAuthorization(tenantId, circleCIAuthorizationId, "('AwaitingRedirect')", {
+        reason: "AccessDenied",
+        detail: deniedDetail(redirect),
+      });
+      return failed
+        ? this.present(tenantId, circleCIAuthorizationId)
+        : notWaiting(circleCIAuthorizationId, "redirect address");
+    }
+    const claimed = this.ctx.storage.sql.exec(
+      `UPDATE circleci_authorizations SET phase = 'Exchanging', updated_at = ?
+      WHERE circleci_authorization_id = ? AND phase = 'AwaitingRedirect' AND phase_due_at > ?`,
+      now,
+      circleCIAuthorizationId,
+      now,
+    ).rowsWritten;
+    if (claimed === 0) return notWaiting(circleCIAuthorizationId, "redirect address");
+    return this.exchange(tenantId, row, redirect.code, now);
   }
 
-  private async redeemCircleCIRedirect(
+  private async exchange(
     tenantId: string,
-    row: CircleCIAuthorizationRow,
-    redirect: Exclude<ReturnType<typeof parseRedirect>, { kind: "Invalid" }>,
+    row: AuthorizationRow,
+    code: string,
     now: number,
   ): Promise<CircleCIAuthorizationStepped> {
     const id = row.circleci_authorization_id;
-    const fail = async (reason: CircleCIAuthorizationFailureReason, detail: string) => {
-      await this.failCircleCIAuthorization(tenantId, id, reason, detail, Date.now());
-      return { kind: "Stepped", authorization: this.presentCircleCIAuthorization(tenantId, id) } as const;
-    };
-    if (!sameSecret(redirect.state, row.oauth_state)) return fail("StateMismatch", stateMismatchDetail(id));
-    if (redirect.kind === "Denied") return fail("AccessDenied", deniedDetail(redirect));
-    const [sealed] = this.ctx.storage.sql
-      .exec<{ verifier_sealed: string | null }>(
-        "SELECT verifier_sealed FROM circleci_authorizations WHERE circleci_authorization_id = ?",
-        id,
-      )
-      .toArray();
-    if (sealed?.verifier_sealed == null) {
-      return { kind: "NotWaiting", detail: `CircleCI authorization ${id} ended while its redirect address arrived` };
-    }
-    const verifier = await unseal(
-      await this.dataKey(),
-      sealed.verifier_sealed,
-      verifierContext(id),
-      "connect CircleCI again from the dashboard or with tumpel circleci authorize",
-    );
+    const fail = async (reason: CircleCIAuthorizationFailureReason, detail: string) =>
+      (await this.failAuthorization(tenantId, id, "('Exchanging')", { reason, detail }))
+        ? this.present(tenantId, id)
+        : notWaiting(id, "redirect address");
+    const verifier = await unseal(await this.dataKey(), row.verifier_sealed, verifierContext(id), AUTHORIZE_AGAIN);
     const exchanged = await exchangeCode(fetcher, this.env.CIRCLECI_APP_ORIGIN, {
-      code: redirect.code,
+      code,
       clientId: row.client_id,
-      redirectUri: row.redirect_uri,
+      redirectUri: CIRCLECI_REDIRECT_URI,
       verifier,
     });
     if (exchanged.kind === "Refused") return fail("CodeRefused", exchanged.detail);
     if (exchanged.kind === "Failed") return fail("ExchangeFailed", exchanged.detail);
+    const expiresAt = now + exchanged.expiresInSeconds * 1000;
+    const sealedToken = await this.sealCircleCIToken(exchanged.token);
+    const held = this.circleCIConnection();
     const read = await readCollaborations(fetcher, this.env.CIRCLECI_API_ORIGIN, exchanged.token);
-    if (!read.ok) {
-      return fail(
-        "ExchangeFailed",
-        `${read.detail}, reading the organizations of the new token; connect CircleCI again from the dashboard or with tumpel circleci authorize`,
-      );
+    const organizations = read.ok ? organizationsOf(read.value) : [];
+    const renewed =
+      held === null ? undefined : organizations.find((each) => each.organizationId === held.organizationId);
+    if (held !== null && (renewed !== undefined || !read.ok)) {
+      const organization = renewed ?? {
+        organizationId: held.organizationId,
+        name: held.accountLabel,
+        slug: held.organizationId,
+      };
+      return this.connectOrganization(tenantId, id, "('Exchanging')", organization, sealedToken, expiresAt);
     }
-    const organizations = organizationsOf(read.value);
-    if (organizations.length === 0) {
+    if (!read.ok)
+      return fail("ExchangeFailed", `${read.detail}, reading the organizations of the new token; ${AUTHORIZE_AGAIN}`);
+    const [only, ...others] = organizations;
+    if (only === undefined) {
       return fail(
         "NoOrganization",
-        "the new token reads no CircleCI organization; join an organization on CircleCI, or authorize the organization in the SSO section of CircleCI's consent page, then connect CircleCI again",
+        `the new token reads no CircleCI organization; join an organization on CircleCI, or authorize the organization in the SSO section of CircleCI's consent page, then ${AUTHORIZE_AGAIN}`,
       );
     }
-    const expiresAt = now + exchanged.expiresInSeconds * 1000;
-    const [only] = organizations;
-    if (organizations.length === 1 && only !== undefined) {
-      return this.connectChosenOrganization(
-        tenantId,
-        id,
-        only,
-        await this.sealCircleCIToken(exchanged.token),
-        expiresAt,
-      );
-    }
-    const sealedToken = await seal(await this.dataKey(), exchanged.token, tokenContext(id));
-    const dueAt = Date.now() + CHOOSE_BUDGET_SECONDS * 1000;
-    const moved = this.ctx.storage.sql.exec(
-      `UPDATE circleci_authorizations SET phase = 'ChoosingOrganization', verifier_sealed = NULL, token_sealed = ?,
-      token_expires_at = ?, organizations = ?, phase_due_at = ?, updated_at = ?
-      WHERE circleci_authorization_id = ? AND phase = 'AwaitingRedirect'`,
-      sealedToken,
-      expiresAt,
-      JSON.stringify(organizations),
-      dueAt,
-      Date.now(),
-      id,
-    ).rowsWritten;
-    if (moved === 0)
-      return { kind: "NotWaiting", detail: `CircleCI authorization ${id} ended while its code was spent` };
-    await this.circleCIAuthorizationTimer(tenantId, id, dueAt);
-    return { kind: "Stepped", authorization: this.presentCircleCIAuthorization(tenantId, id) };
+    if (others.length === 0)
+      return this.connectOrganization(tenantId, id, "('Exchanging')", only, sealedToken, expiresAt);
+    return this.awaitChoice(tenantId, id, exchanged.token, expiresAt, organizations);
   }
 
-  private async connectChosenOrganization(
+  private async awaitChoice(
     tenantId: string,
     circleCIAuthorizationId: string,
+    token: string,
+    expiresAt: number,
+    organizations: CircleCIOrganization[],
+  ): Promise<CircleCIAuthorizationStepped> {
+    const sealed = await seal(await this.dataKey(), token, tokenContext(circleCIAuthorizationId));
+    const now = Date.now();
+    const dueAt = now + CHOOSE_BUDGET_SECONDS * 1000;
+    const sql = this.ctx.storage.sql;
+    const moved = this.ctx.storage.transactionSync(() => {
+      const written = sql.exec(
+        `UPDATE circleci_authorizations SET phase = 'ChoosingOrganization', phase_due_at = ?, updated_at = ?
+        WHERE circleci_authorization_id = ? AND phase = 'Exchanging'`,
+        dueAt,
+        now,
+        circleCIAuthorizationId,
+      ).rowsWritten;
+      if (written === 0) return false;
+      sql.exec(
+        `INSERT INTO circleci_authorization_tokens (circleci_authorization_id, token_sealed, expires_at, organizations)
+        VALUES (?, ?, ?, ?)`,
+        circleCIAuthorizationId,
+        sealed,
+        expiresAt,
+        JSON.stringify(organizations),
+      );
+      return true;
+    });
+    if (!moved) return notWaiting(circleCIAuthorizationId, "redirect address");
+    await this.authorizationTimer(tenantId, circleCIAuthorizationId, dueAt);
+    return this.present(tenantId, circleCIAuthorizationId);
+  }
+
+  private async connectOrganization(
+    tenantId: string,
+    circleCIAuthorizationId: string,
+    from: string,
     organization: CircleCIOrganization,
     sealedToken: string,
     expiresAt: number,
   ): Promise<CircleCIAuthorizationStepped> {
     const now = Date.now();
+    const sql = this.ctx.storage.sql;
     const completed = this.ctx.storage.transactionSync(() => {
-      const moved = this.ctx.storage.sql.exec(
-        `UPDATE circleci_authorizations SET phase = 'Completed', verifier_sealed = NULL, token_sealed = NULL,
-        token_expires_at = ?, organization_id = ?, account_label = ?, ended_at = ?, updated_at = ?
-        WHERE circleci_authorization_id = ? AND phase IN ${LIVE_PHASES}`,
-        expiresAt,
-        organization.organizationId,
-        organization.name,
-        now,
+      const written = sql.exec(
+        `UPDATE circleci_authorizations SET phase = 'Completed', updated_at = ?
+        WHERE circleci_authorization_id = ? AND phase IN ${from}`,
         now,
         circleCIAuthorizationId,
       ).rowsWritten;
-      if (moved === 0) return false;
+      if (written === 0) return false;
+      sql.exec(
+        "DELETE FROM circleci_authorization_tokens WHERE circleci_authorization_id = ?",
+        circleCIAuthorizationId,
+      );
+      sql.exec(
+        `INSERT INTO circleci_authorization_completions (circleci_authorization_id, organization_id, account_label,
+        expires_at, ended_at) VALUES (?, ?, ?, ?, ?)`,
+        circleCIAuthorizationId,
+        organization.organizationId,
+        organization.name,
+        expiresAt,
+        now,
+      );
       this.writeCircleCIConnectionRows(
-        { accountLabel: organization.name, organizationId: organization.organizationId, sealedToken, expiresAt },
+        {
+          accountLabel: organization.name,
+          organizationId: organization.organizationId,
+          sealedToken,
+          credential: { kind: "Authorized", expiresAt },
+        },
         now,
       );
       return true;
     });
-    if (!completed) {
-      return {
-        kind: "NotWaiting",
-        detail: `CircleCI authorization ${circleCIAuthorizationId} ended before the connection took its token`,
-      };
-    }
-    await this.circleCIAuthorizationTimer(tenantId, circleCIAuthorizationId, null);
-    return { kind: "Stepped", authorization: this.presentCircleCIAuthorization(tenantId, circleCIAuthorizationId) };
+    if (!completed) return notWaiting(circleCIAuthorizationId, "token");
+    await this.authorizationTimer(tenantId, circleCIAuthorizationId, null);
+    return this.present(tenantId, circleCIAuthorizationId);
   }
 
   async chooseCircleCIOrganization(
@@ -401,11 +413,16 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     organizationId: string,
     now: number,
   ): Promise<CircleCIAuthorizationStepped> {
-    const row = await this.ownCircleCIAuthorization(tenantId, principalId, circleCIAuthorizationId, now);
-    if (row === null) return { kind: "NotFound" };
-    const step = advanceAuthorization(circleCIAuthorizationId, phaseOf(row), { kind: "Chosen" });
-    if (step.kind === "Refuse") return { kind: "NotWaiting", detail: step.detail };
-    const organizations = OrganizationsSchema.parse(JSON.parse(required(row.organizations, "organizations", row)));
+    const row = this.authorizationRow(circleCIAuthorizationId);
+    if (row === null || row.principal_id !== principalId) return { kind: "NotFound" };
+    const token = this.one<TokenRow>(
+      `SELECT t.* FROM circleci_authorization_tokens t JOIN circleci_authorizations a USING (circleci_authorization_id)
+      WHERE a.circleci_authorization_id = ? AND a.phase = 'ChoosingOrganization' AND a.phase_due_at > ?`,
+      circleCIAuthorizationId,
+      now,
+    );
+    if (token === null) return notWaiting(circleCIAuthorizationId, "organization choice");
+    const organizations = OrganizationsSchema.parse(JSON.parse(token.organizations));
     const organization = organizations.find((each) => each.organizationId === organizationId);
     if (organization === undefined) {
       return {
@@ -413,40 +430,28 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
         detail: `CircleCI authorization ${circleCIAuthorizationId} lists no organization ${organizationId}; choose one of ${organizations.map((each) => `${each.name} (${each.organizationId})`).join(", ")}`,
       };
     }
-    const [sealed] = this.ctx.storage.sql
-      .exec<{ token_sealed: string | null }>(
-        "SELECT token_sealed FROM circleci_authorizations WHERE circleci_authorization_id = ?",
-        circleCIAuthorizationId,
-      )
-      .toArray();
-    const token = await unseal(
+    const plain = await unseal(
       await this.dataKey(),
-      required(sealed?.token_sealed ?? null, "token_sealed", row),
+      token.token_sealed,
       tokenContext(circleCIAuthorizationId),
-      "connect CircleCI again from the dashboard or with tumpel circleci authorize",
+      AUTHORIZE_AGAIN,
     );
-    return this.connectChosenOrganization(
+    return this.connectOrganization(
       tenantId,
       circleCIAuthorizationId,
+      "('ChoosingOrganization')",
       organization,
-      await this.sealCircleCIToken(token),
-      required(row.token_expires_at, "token_expires_at", row),
+      await this.sealCircleCIToken(plain),
+      token.expires_at,
     );
   }
 
-  async circleCIAuthorizationDeadlineReached(deadline: CircleCIAuthorizationDeadline): Promise<void> {
-    const row = this.circleCIAuthorizationRow(deadline.circleCIAuthorizationId);
+  async circleCIAuthorizationDeadlineReached(tenantId: string, deadline: CircleCIAuthorizationDeadline): Promise<void> {
+    const row = this.authorizationRow(deadline.circleCIAuthorizationId);
     if (row === null || row.phase_due_at !== deadline.at) return;
-    const step = advanceAuthorization(row.circleci_authorization_id, phaseOf(row), { kind: "Deadline" });
-    if (step.kind !== "Fail") return;
-    this.ctx.storage.sql.exec(
-      `UPDATE circleci_authorizations SET phase = 'Failed', reason = ?, detail = ?, verifier_sealed = NULL, token_sealed = NULL,
-      ended_at = ?, updated_at = ? WHERE circleci_authorization_id = ? AND phase IN ${LIVE_PHASES}`,
-      step.reason,
-      step.detail,
-      Date.now(),
-      Date.now(),
-      row.circleci_authorization_id,
-    );
+    await this.failAuthorization(tenantId, row.circleci_authorization_id, LIVE_PHASES, {
+      reason: "AuthorizationTimedOut",
+      detail: timedOutDetail(row.circleci_authorization_id, row.phase),
+    });
   }
 }

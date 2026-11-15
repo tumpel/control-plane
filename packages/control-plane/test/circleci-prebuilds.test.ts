@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CircleCIAuthorizationSchema,
   CircleCIConnectionLinkSchema,
   CircleCIProjectSchema,
   DeviceAuthorizationSchema,
@@ -72,6 +73,7 @@ let runAnswer: (() => { status: number; body: unknown }) | null = null;
 const runs: unknown[] = [];
 const webhooks: Record<string, unknown>[] = [];
 const deletedWebhooks: string[] = [];
+let tokenCalls = 0;
 
 const reply = (response: ServerResponse, status: number, body: unknown) => {
   response.writeHead(status, { "content-type": "application/json" });
@@ -106,6 +108,11 @@ const fakeCircleCI = async (request: IncomingMessage, response: ServerResponse, 
   const body = await bodyOf(request);
   if (request.headers["circle-token"] !== TOKEN) return reply(response, 401, { message: "Invalid token provided." });
   if (path === "/me") return reply(response, 200, { id: "u1", login: "acme-bot" });
+  if (path === "/me/collaborations") {
+    return reply(response, 200, [
+      { id: ORGANIZATION, name: "acme", slug: "gh/acme", "vcs-type": "github", avatar_url: "" },
+    ]);
+  }
   if (path === `/project/${SLUG}`)
     return reply(response, 200, { id: PROJECT, slug: SLUG, organization_id: ORGANIZATION });
   if (path === `/projects/${PROJECT}/pipeline-definitions/${DEFINITION}`) {
@@ -164,6 +171,11 @@ before(async () => {
     if (path.startsWith("/circleci/api/v2/")) {
       return void fakeCircleCI(request, response, path.slice("/circleci/api/v2".length));
     }
+    if (path === "/app/oauth/register") return reply(response, 201, { client_id: "tumpel-client" });
+    if (path === "/app/oauth/token") {
+      tokenCalls += 1;
+      return reply(response, 200, { access_token: TOKEN, token_type: "Bearer", expires_in: 7776000 });
+    }
     if (/^\/oidc\/org\/[0-9a-f-]+\/\.well-known\/jwks-pub\.json$/.test(path)) {
       return reply(response, 200, { keys: [publicJwk(circle.publicKey, CIRCLE_KID)] });
     }
@@ -186,6 +198,7 @@ before(async () => {
           GITHUB_API_ORIGIN: `${fakeOrigin}/api`,
           CIRCLECI_API_ORIGIN: `${fakeOrigin}/circleci`,
           CIRCLECI_OIDC_ORIGIN: `${fakeOrigin}/oidc`,
+          CIRCLECI_APP_ORIGIN: `${fakeOrigin}/app`,
           SECRETS_KEK,
         },
       },
@@ -567,6 +580,34 @@ test("a pipeline that checked out another commit than the start read fails its p
   assert.ok(moved.status.state === "Failed");
   assert.equal(moved.status.phase, "Dispatch");
   assert.match((await failure(prebuild.prebuildId)).detail, /checked out commit d{40}/);
+});
+
+test("a redirect with another state, or replayed after Completed, never reaches the token endpoint", async () => {
+  const started = CircleCIAuthorizationSchema.parse(
+    await (await send("POST", "/v1/circleci-connection/authorize", undefined, bearer)).json(),
+  );
+  assert.equal(started.status.state, "AwaitingRedirect");
+  const state =
+    started.status.state === "AwaitingRedirect" ? new URL(started.status.authorizeUrl).searchParams.get("state") : null;
+  assert.ok(state);
+  const complete = (sent: string) =>
+    send(
+      "POST",
+      "/v1/circleci-connection/complete",
+      {
+        circleCIAuthorizationId: started.circleCIAuthorizationId,
+        redirectedUrl: `http://127.0.0.1:47151/circleci/callback?code=one-time&state=${encodeURIComponent(sent)}`,
+      },
+      bearer,
+    );
+  const before = tokenCalls;
+  assert.equal((await complete("another-state")).status, 422);
+  assert.equal(tokenCalls, before);
+  const completed = CircleCIAuthorizationSchema.parse(await (await complete(state)).json());
+  assert.equal(completed.status.state, "Completed");
+  assert.equal(tokenCalls, before + 1);
+  assert.equal((await complete(state)).status, 409);
+  assert.equal(tokenCalls, before + 1);
 });
 
 test("deleting the connection deletes the webhooks of its bindings at CircleCI", async () => {

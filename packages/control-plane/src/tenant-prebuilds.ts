@@ -18,6 +18,7 @@ import {
   triggerPipeline,
   type WorkflowCompleted,
 } from "./circleci.ts";
+import type { CircleCICredentialRow } from "./circleci-oauth.ts";
 import { seal, unseal } from "./envelope.ts";
 import {
   type GitHubAnswer,
@@ -40,8 +41,6 @@ export type NamespaceConnectionStart = z.infer<typeof NamespaceConnectionStartSc
 export type CircleCIConnectionStart = z.infer<typeof CircleCIConnectionStartSchema>;
 export type CircleCIProject = z.infer<typeof CircleCIProjectSchema>;
 export type CircleCIProjectAdd = z.infer<typeof CircleCIProjectAddSchema>;
-
-export type CircleCICredentialRow = { kind: "Authorized"; expiresAt: number } | { kind: "Pasted" };
 
 export interface CircleCIRow {
   circleCIConnectionId: string;
@@ -797,6 +796,7 @@ export class TenantPrebuilds extends TenantSessions {
       if (provider === "CircleCI") {
         this.ctx.storage.sql.exec("DELETE FROM circleci_projects");
         this.ctx.storage.sql.exec("DELETE FROM circleci_token_expiries");
+        this.ctx.storage.sql.exec("DELETE FROM circleci_clients");
       }
       return this.ctx.storage.sql.exec(`DELETE FROM ${CONNECTION_TABLES[provider]}`).rowsWritten > 0;
     });
@@ -840,7 +840,12 @@ export class TenantPrebuilds extends TenantSessions {
   }
 
   protected writeCircleCIConnectionRows(
-    connection: { accountLabel: string; organizationId: string; sealedToken: string; expiresAt: number | null },
+    connection: {
+      accountLabel: string;
+      organizationId: string;
+      sealedToken: string;
+      credential: CircleCICredentialRow;
+    },
     now: number,
   ): void {
     const sql = this.ctx.storage.sql;
@@ -857,8 +862,11 @@ export class TenantPrebuilds extends TenantSessions {
       now,
     );
     sql.exec("DELETE FROM circleci_token_expiries");
-    if (connection.expiresAt !== null) {
-      sql.exec("INSERT INTO circleci_token_expiries (connection_slot, expires_at) VALUES (1, ?)", connection.expiresAt);
+    if (connection.credential.kind === "Authorized") {
+      sql.exec(
+        "INSERT INTO circleci_token_expiries (connection_slot, expires_at) VALUES (1, ?)",
+        connection.credential.expiresAt,
+      );
     }
   }
 
@@ -867,7 +875,12 @@ export class TenantPrebuilds extends TenantSessions {
     const sealedToken = await this.sealCircleCIToken(start.apiToken);
     this.ctx.storage.transactionSync(() =>
       this.writeCircleCIConnectionRows(
-        { accountLabel: start.accountLabel, organizationId: start.organizationId, sealedToken, expiresAt: null },
+        {
+          accountLabel: start.accountLabel,
+          organizationId: start.organizationId,
+          sealedToken,
+          credential: { kind: "Pasted" },
+        },
         now,
       ),
     );
