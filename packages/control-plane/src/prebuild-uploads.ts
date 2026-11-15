@@ -1,17 +1,21 @@
 import {
+  PrebuildJobInputsSchema,
   PrebuildPathSchema,
   PrebuildUploadCompleteSchema,
   PrebuildUploadGrantSchema,
   PrebuildUploadStartSchema,
 } from "@tumpel/api/schemas";
 import { circleCIRefused } from "./circleci-projects.ts";
-import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAGS } from "./github-actions";
+import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAGS, RUN_EVENTS } from "./github-actions";
+import { tenantOfAccount } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
 import type { Env } from "./index";
 import { type JwtCheck, jwtVerifier, unverifiedIssuer, type VerifiedJwt, type VerifyJwt } from "./jwt";
+import { presignRootfs } from "./prebuilds";
 import { signerOf } from "./presign";
 import { settingsOf } from "./settings";
 import type {
+  CallerWorkflow,
   CircleCIUploadTarget,
   GitHubActionsUploadTarget,
   Prebuild,
@@ -32,7 +36,7 @@ type JobIssuer = { provider: "GitHubActions" } | { provider: "CircleCI"; issuer:
 type JobClaims = { issuer: JobIssuer; claims: Record<string, unknown> };
 
 const UPLOADS_PATH = /^\/v1\/prebuilds\/([^/]+)\/uploads(\/complete)?$/;
-const DISPATCH_EVENT = "workflow_dispatch";
+const INPUTS_PATH = "/v1/prebuild-inputs";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CIRCLECI_CLAIM = "oidc.circleci.com";
 const CIRCLECI_VERIFIER_CAP = 64;
@@ -121,17 +125,20 @@ const isReusableWorkflow = (jobWorkflow: string | null): boolean => {
   return REUSABLE_WORKFLOW_TAGS.test(tag);
 };
 
-const bindClaims = (
-  target: GitHubActionsUploadTarget,
-  claims: Record<string, unknown>,
-  repository: string,
-): Response | null => {
-  const { prebuild, defaultBranch, callerWorkflow, run } = target;
+interface RunTarget {
+  prebuildId: string;
+  defaultBranch: string;
+  callerWorkflow: CallerWorkflow;
+  headSha: string;
+}
+
+const checkRunClaims = (target: RunTarget, claims: Record<string, unknown>, repository: string): Response | null => {
+  const { prebuildId, defaultBranch, callerWorkflow, headSha } = target;
   if (callerWorkflow.kind === "NotConnected") {
     return tokenMismatch(
       "connection",
       "the tenant has no GitHub Actions connection",
-      "Reconnect GitHub Actions with tumpel github-actions start, then start the prebuild again",
+      "Connect GitHub Actions again, then start the prebuild",
     );
   }
   const ref = claimOf(claims, "ref");
@@ -139,16 +146,16 @@ const bindClaims = (
   if (ref !== expectedRef) {
     return tokenMismatch(
       "ref",
-      `the token comes from a run on ${ref ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${expectedRef}`,
-      "Upload only from the run the prebuild dispatched on the repository's default branch",
+      `the token comes from a run on ${ref ?? "(none)"}, and prebuild ${prebuildId} builds ${expectedRef}`,
+      "Run the prebuild only from the caller workflow on the repository's default branch",
     );
   }
   const event = claimOf(claims, "event_name");
-  if (event !== DISPATCH_EVENT) {
+  if (event === null || !RUN_EVENTS.includes(event)) {
     return tokenMismatch(
       "event_name",
-      `the token comes from a run triggered by ${event ?? "(none)"}, and a prebuild runs only on ${DISPATCH_EVENT}`,
-      "Upload only from the run the prebuild dispatched",
+      `the token comes from a run triggered by ${event ?? "(none)"}, and a prebuild runs only on ${RUN_EVENTS.join(" or ")}`,
+      "Run the prebuild only from the run its start began",
     );
   }
   const workflow = claimOf(claims, "workflow_ref");
@@ -157,31 +164,44 @@ const bindClaims = (
     return tokenMismatch(
       "workflow_ref",
       `the token comes from workflow ${workflow ?? "(none)"}, and the tenant's GitHub Actions connection names ${expected}`,
-      "Run the upload from the caller workflow the connection names, or reconnect with tumpel github-actions start --caller-workflow",
+      "Run the prebuild from the caller workflow the connection names, or connect GitHub Actions again with this caller workflow",
     );
   }
   const jobWorkflow = claimOf(claims, "job_workflow_ref");
   if (!isReusableWorkflow(jobWorkflow)) {
     return tokenMismatch(
       "job_workflow_ref",
-      `the token comes from job workflow ${jobWorkflow ?? "(none)"}, and a prebuild uploads only from ${REUSABLE_WORKFLOW}`,
-      `Call ${REUSABLE_WORKFLOW} or a release tag v1.x.y from the caller workflow, as tumpel github-actions get shows, then start the prebuild again; a commit SHA pin is refused because its job_workflow_ref names no release tag`,
+      `the token comes from job workflow ${jobWorkflow ?? "(none)"}, and a prebuild runs only in ${REUSABLE_WORKFLOW}`,
+      `Call ${REUSABLE_WORKFLOW} or a release tag v2.x.y from the caller workflow, as the GitHub Actions connection shows; a commit SHA pin is refused because its job_workflow_ref names no release tag`,
     );
   }
+  const sha = claimOf(claims, "sha");
+  if (sha === headSha) return null;
+  return tokenMismatch(
+    "sha",
+    `the token comes from a run of commit ${sha ?? "(none)"}, and prebuild ${prebuildId} builds ${headSha}`,
+    "Run the prebuild only from the run of the commit its start read",
+  );
+};
+
+const bindClaims = (
+  target: GitHubActionsUploadTarget,
+  claims: Record<string, unknown>,
+  repository: string,
+): Response | null => {
+  const { prebuild, defaultBranch, callerWorkflow, run } = target;
   const runId = claimOf(claims, "run_id");
   if (runId !== String(run.runId)) {
     return tokenMismatch(
       "run_id",
-      `the token comes from run ${runId ?? "(none)"}, and prebuild ${prebuild.prebuildId} dispatched run ${run.runId}`,
-      "Upload only from the run the prebuild dispatched",
+      `the token comes from run ${runId ?? "(none)"}, and prebuild ${prebuild.prebuildId} runs in run ${run.runId}`,
+      "Upload only from the run that read the prebuild's inputs",
     );
   }
-  const sha = claimOf(claims, "sha");
-  if (sha === run.headSha) return null;
-  return tokenMismatch(
-    "sha",
-    `the token comes from a run of commit ${sha ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${run.headSha}`,
-    "Upload only from the run the prebuild dispatched, on the commit it read",
+  return checkRunClaims(
+    { prebuildId: prebuild.prebuildId, defaultBranch, callerWorkflow, headSha: run.headSha },
+    claims,
+    repository,
   );
 };
 
@@ -307,7 +327,7 @@ const boundGitHub = async (
   const mismatch = bindClaims(target, claims, repository);
   if (mismatch !== null) return { ok: false, response: mismatch };
   if (target.prebuild.status.state === "Dispatched") {
-    await env.TENANT.getByName(tenantId).recordPrebuildBuilding(tenantId, prebuildId, target.run, Date.now());
+    await env.TENANT.getByName(tenantId).recordPrebuildBuilding(tenantId, prebuildId, Date.now());
   }
   return { ok: true, tenantId, target, unbound: { kind: "None" } };
 };
@@ -423,4 +443,76 @@ export const handlePrebuildUploads = async (request: Request, url: URL, env: Env
   if (unbound !== null) return unbound;
   const { layerDigest, layerSizeBytes } = body.value;
   return start(env, binding.target, binding.tenantId, { layerDigest, layerSizeBytes });
+};
+
+const noRunPrebuild = (repository: string, sha: string): Response =>
+  problem(404, {
+    code: "NotFound",
+    title: "No prebuild for this run",
+    detail: `no prebuild of ${repository} waits for a run at commit ${sha}`,
+    fix: "Start the prebuild, which begins its run; a run Tumpel did not begin, such as a push of a hand-edited caller workflow, has no prebuild",
+  });
+
+const notRunning = (prebuild: Prebuild): Response =>
+  problem(409, {
+    code: "PrebuildNotUploading",
+    title: "Prebuild not running",
+    detail: `prebuild ${prebuild.prebuildId} is ${prebuild.status.state}, and only a Dispatched or Building prebuild hands its run the inputs`,
+    fix: `Start a new prebuild with rebuild set; read prebuild ${prebuild.prebuildId} to follow this one`,
+  });
+
+export const handlePrebuildInputs = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  if (url.pathname !== INPUTS_PATH || request.method !== "POST") return null;
+  const authorization = request.headers.get("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
+  if (token === "") return tokenRefused("token", "the request carries no Authorization: Bearer token", url.origin);
+  const verified = await verifierFor(env, url.origin)(token);
+  if (!verified.ok) return tokenRefused(verified.check, verified.detail, url.origin);
+  const { claims } = verified;
+  const repository = claimOf(claims, "repository");
+  const sha = claimOf(claims, "sha");
+  const runId = Number(claimOf(claims, "run_id"));
+  if (repository === null || sha === null || !Number.isSafeInteger(runId)) {
+    return tokenMismatch(
+      "repository",
+      "the token names no repository, sha or run_id",
+      "Present a GitHub Actions job token of the caller workflow's run",
+    );
+  }
+  const repositoryUrl = `https://github.com/${repository.toLowerCase()}`;
+  const tenantId = await tenantOfAccount(env.DB, repository.slice(0, repository.indexOf("/")));
+  if (tenantId === null) return noRunPrebuild(repositoryUrl, sha);
+  const tenant = env.TENANT.getByName(tenantId);
+  const target = await tenant.jobInputsTarget(tenantId, repositoryUrl, sha, runId);
+  if (target === null) return noRunPrebuild(repositoryUrl, sha);
+  const { prebuild } = target;
+  const mismatch = checkRunClaims(
+    {
+      prebuildId: prebuild.prebuildId,
+      defaultBranch: target.defaultBranch,
+      callerWorkflow: target.callerWorkflow,
+      headSha: target.headSha,
+    },
+    claims,
+    repository,
+  );
+  if (mismatch !== null) return mismatch;
+  if (prebuild.status.state !== "Dispatched" && prebuild.status.state !== "Building") return notRunning(prebuild);
+  const now = Date.now();
+  const bound = await tenant.bindJobRun(tenantId, prebuild.prebuildId, { runId, headSha: sha }, now);
+  if (bound.kind === "OtherRun") {
+    return tokenMismatch(
+      "run_id",
+      `the token comes from run ${runId}, and prebuild ${prebuild.prebuildId} runs in run ${bound.runId}`,
+      "Run the prebuild only from the run that first read its inputs",
+    );
+  }
+  return json(
+    PrebuildJobInputsSchema.parse({
+      prebuildId: prebuild.prebuildId,
+      tenantId,
+      rootfsUrl: await presignRootfs(env, target.rootfsKey, now),
+      imageDigest: prebuild.guestImageDigest,
+    }),
+  );
 };

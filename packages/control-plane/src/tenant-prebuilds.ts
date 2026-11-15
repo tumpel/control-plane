@@ -20,21 +20,16 @@ import {
 } from "./circleci.ts";
 import type { CircleCICredentialRow } from "./circleci-oauth.ts";
 import { seal, unseal } from "./envelope.ts";
+import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
 import {
-  type GitHubAnswer,
-  type GitHubRepository,
-  type Minted,
-  REPOSITORY_TOKEN,
-  repositoryCredential,
-} from "./github.ts";
-import {
-  type DispatchedRun,
+  type Dispatched,
   dispatchCallerWorkflow,
-  type PrebuildInputs,
   type RunEvent,
+  runPage,
   syncCallerWorkflow,
+  workflowPage,
 } from "./github-actions.ts";
-import type { ConfigSource } from "./prebuild-inputs.ts";
+import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
@@ -118,7 +113,6 @@ export interface PrebuildKey {
   repository: string;
   inputDigest: string;
   guestImageDigest: string;
-  configSource: ConfigSource;
 }
 
 export interface PrebuildRun {
@@ -126,15 +120,38 @@ export interface PrebuildRun {
   headSha: string;
 }
 
-export interface PrebuildDispatch {
+export interface PrebuildCommit {
   prebuildId: string;
   personaId: string;
   key: PrebuildKey;
+  configSource: ConfigSource;
   defaultBranch: string;
-  provider: BuildProvider;
-  run: PrebuildRun;
+  headSha: string;
+  rootfsKey: string;
   logUrl: string;
 }
+
+export interface GitHubActionsStart {
+  prebuildId: string;
+  personaId: string;
+  target: GitHubRepository;
+  repository: string;
+  guestImageDigest: string;
+  rootfsKey: string;
+  callerWorkflow: string;
+  apiOrigin: string;
+  rebuild: boolean;
+}
+
+export type JobInputsTarget = {
+  prebuild: Prebuild;
+  defaultBranch: string;
+  callerWorkflow: CallerWorkflow;
+  headSha: string;
+  rootfsKey: string;
+};
+
+export type JobRunBound = { kind: "Bound"; prebuild: Prebuild } | { kind: "OtherRun"; runId: number };
 
 export type CallerWorkflow = { kind: "Connected"; callerWorkflow: string } | { kind: "NotConnected" };
 
@@ -165,19 +182,22 @@ export interface PrebuildStartRecord {
   prebuildId: string;
   personaId: string;
   key: PrebuildKey;
+  configSource: ConfigSource;
   target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
-  rootfsUrl: string;
-  apiOrigin: string;
 }
 
-export type DispatchedPrebuild =
-  | { kind: "Dispatched"; prebuild: Prebuild }
+export type StartedGitHubActions =
+  | { kind: "Started"; prebuild: Prebuild }
   | { kind: "NoInstallation" }
+  | { kind: "TokenRefused"; detail: string }
+  | { kind: "Unreadable"; detail: string }
   | { kind: "PermissionMissing"; permissions: string[] }
   | { kind: "CallerRefused"; detail: string }
-  | { kind: "Refused"; detail: string };
+  | Exclude<Dispatched, { kind: "Dispatched" }>;
+
+type Recorded = { kind: "Recorded" } | { kind: "Held"; prebuild: Prebuild } | StartedGitHubActions;
 
 type PrebuildFailurePhase = PrebuildFailure["phase"];
 
@@ -346,36 +366,35 @@ export class TenantPrebuilds extends TenantSessions {
     return row === undefined ? null : toPrebuild(tenantId, row);
   }
 
-  async recordDispatchedPrebuild(tenantId: string, dispatch: PrebuildDispatch, now: number): Promise<Prebuild> {
-    this.writeDispatchedPrebuild(dispatch, now);
-    return this.armDispatch(tenantId, dispatch.prebuildId, now);
+  async recordPrebuildCommit(tenantId: string, commit: PrebuildCommit, now: number): Promise<Prebuild> {
+    this.writePrebuildCommit(commit, now);
+    return this.armDispatch(tenantId, commit.prebuildId, now);
   }
 
-  private writeDispatchedPrebuild(dispatch: PrebuildDispatch, now: number): void {
-    const { prebuildId } = dispatch;
+  private writePrebuildCommit(commit: PrebuildCommit, now: number): void {
+    const { prebuildId } = commit;
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
         provider, config_source, state, started_at, log_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, 'GitHubActions', ?, 'Dispatched', ?, ?, ?, ?)`,
         prebuildId,
-        dispatch.personaId,
-        dispatch.key.repository,
-        dispatch.defaultBranch,
-        dispatch.key.inputDigest,
-        dispatch.key.guestImageDigest,
-        dispatch.provider,
-        dispatch.key.configSource,
+        commit.personaId,
+        commit.key.repository,
+        commit.defaultBranch,
+        commit.key.inputDigest,
+        commit.key.guestImageDigest,
+        commit.configSource,
         new Date(now).toISOString(),
-        dispatch.logUrl,
+        commit.logUrl,
         now,
         now,
       );
       this.ctx.storage.sql.exec(
-        "INSERT INTO prebuild_runs (prebuild_id, run_id, head_sha, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO prebuild_commits (prebuild_id, head_sha, rootfs_key, created_at) VALUES (?, ?, ?, ?)",
         prebuildId,
-        dispatch.run.runId,
-        dispatch.run.headSha,
+        commit.headSha,
+        commit.rootfsKey,
         now,
       );
     });
@@ -456,27 +475,8 @@ export class TenantPrebuilds extends TenantSessions {
     return failed;
   }
 
-  async recordPrebuildBuilding(tenantId: string, prebuildId: string, run: PrebuildRun, now: number): Promise<void> {
-    const recorded = this.recordedRun(prebuildId);
-    const prebuild = this.getPrebuild(tenantId, prebuildId);
-    if (recorded.kind === "NoRun" || recorded.run.runId !== run.runId || prebuild?.status.state !== "Dispatched") {
-      return;
-    }
-    if (recorded.run.headSha !== run.headSha) {
-      await this.failPrebuild(
-        tenantId,
-        prebuildId,
-        ["Dispatched"],
-        {
-          phase: "Dispatch",
-          detail: `run ${run.runId} started on commit ${run.headSha}, and the start read the inputs of ${recorded.run.headSha}: the default branch moved between the start and the run`,
-          fix: "Start the prebuild again, so it reads the inputs of the commit the run builds",
-        },
-        prebuild.logUrl,
-        now,
-      );
-      return;
-    }
+  async recordPrebuildBuilding(tenantId: string, prebuildId: string, now: number): Promise<void> {
+    if (this.recordedRun(prebuildId).kind === "NoRun") return;
     const moved = this.ctx.storage.sql.exec(
       "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
       now,
@@ -489,15 +489,108 @@ export class TenantPrebuilds extends TenantSessions {
     });
   }
 
-  async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
+  private callerWorkflowOf(): CallerWorkflow {
+    const connection = this.connectionRow<{ caller_workflow: string }>("GitHubActions");
+    return connection === null
+      ? { kind: "NotConnected" }
+      : { kind: "Connected", callerWorkflow: connection.caller_workflow };
+  }
+
+  private prebuildOfRun(runId: number): string | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ prebuild_id: string }>("SELECT prebuild_id FROM prebuild_runs WHERE run_id = ?", event.runId)
+      .exec<{ prebuild_id: string }>("SELECT prebuild_id FROM prebuild_runs WHERE run_id = ?", runId)
       .toArray();
-    if (row === undefined) return;
-    const prebuildId = row.prebuild_id;
+    return row?.prebuild_id ?? null;
+  }
+
+  private waitingPrebuild(repository: string, headSha: string): string | null {
+    const [row] = this.ctx.storage.sql
+      .exec<{ prebuild_id: string }>(
+        `SELECT prebuilds.prebuild_id FROM prebuilds JOIN prebuild_commits USING (prebuild_id)
+        WHERE prebuilds.repository = ? AND prebuild_commits.head_sha = ? AND prebuilds.state = 'Dispatched'
+        AND NOT EXISTS (SELECT 1 FROM prebuild_runs WHERE prebuild_runs.prebuild_id = prebuilds.prebuild_id)
+        ORDER BY prebuilds.created_at DESC, prebuilds.rowid DESC LIMIT 1`,
+        repository,
+        headSha,
+      )
+      .toArray();
+    return row?.prebuild_id ?? null;
+  }
+
+  private bindRun(prebuildId: string, run: PrebuildRun, logUrl: string, now: number): JobRunBound | null {
+    return this.ctx.storage.transactionSync((): JobRunBound | null => {
+      const [held] = this.ctx.storage.sql
+        .exec<{ run_id: number }>("SELECT run_id FROM prebuild_runs WHERE prebuild_id = ?", prebuildId)
+        .toArray();
+      if (held !== undefined && held.run_id !== run.runId) return { kind: "OtherRun", runId: held.run_id };
+      if (held === undefined) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO prebuild_runs (prebuild_id, run_id, head_sha, created_at) VALUES (?, ?, ?, ?)",
+          prebuildId,
+          run.runId,
+          run.headSha,
+          now,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE prebuilds SET log_url = ?, updated_at = ? WHERE prebuild_id = ?",
+          logUrl,
+          now,
+          prebuildId,
+        );
+      }
+      return null;
+    });
+  }
+
+  private pickUpRun(event: RunEvent, now: number): string | null {
+    const caller = this.callerWorkflowOf();
+    if (caller.kind === "NotConnected" || caller.callerWorkflow !== event.path) return null;
+    const prebuildId = this.waitingPrebuild(`https://github.com/${event.repository.toLowerCase()}`, event.headSha);
+    if (prebuildId === null) return null;
+    this.bindRun(prebuildId, { runId: event.runId, headSha: event.headSha }, event.htmlUrl, now);
+    return prebuildId;
+  }
+
+  jobInputsTarget(tenantId: string, repository: string, headSha: string, runId: number): JobInputsTarget | null {
+    const prebuildId = this.prebuildOfRun(runId) ?? this.waitingPrebuild(repository, headSha);
+    if (prebuildId === null) return null;
+    const [row] = this.ctx.storage.sql
+      .exec<PrebuildRow>(
+        `${PREBUILD_SELECT} WHERE prebuilds.prebuild_id = ? AND repository = ?`,
+        prebuildId,
+        repository,
+      )
+      .toArray();
+    const [commit] = this.ctx.storage.sql
+      .exec<{ head_sha: string; rootfs_key: string }>(
+        "SELECT head_sha, rootfs_key FROM prebuild_commits WHERE prebuild_id = ?",
+        prebuildId,
+      )
+      .toArray();
+    if (row === undefined || commit === undefined) return null;
+    return {
+      prebuild: toPrebuild(tenantId, row),
+      defaultBranch: row.default_branch,
+      callerWorkflow: this.callerWorkflowOf(),
+      headSha: commit.head_sha,
+      rootfsKey: commit.rootfs_key,
+    };
+  }
+
+  async bindJobRun(tenantId: string, prebuildId: string, run: PrebuildRun, now: number): Promise<JobRunBound> {
+    const prebuild = this.prebuildOf(tenantId, prebuildId);
+    const other = this.bindRun(prebuildId, run, runPage(prebuild.repository, run.runId), now);
+    if (other !== null) return other;
+    await this.recordPrebuildBuilding(tenantId, prebuildId, now);
+    return { kind: "Bound", prebuild: this.prebuildOf(tenantId, prebuildId) };
+  }
+
+  async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
+    const prebuildId = this.prebuildOfRun(event.runId) ?? this.pickUpRun(event, now);
+    if (prebuildId === null) return;
     switch (event.action) {
       case "in_progress":
-        await this.recordPrebuildBuilding(tenantId, prebuildId, { runId: event.runId, headSha: event.headSha }, now);
+        await this.recordPrebuildBuilding(tenantId, prebuildId, now);
         return;
       case "completed":
         await this.failPrebuild(
@@ -565,69 +658,60 @@ export class TenantPrebuilds extends TenantSessions {
     );
   }
 
-  async dispatchPrebuild(
+  async startGitHubActionsPrebuild(
     tenantId: string,
-    callerWorkflow: string,
-    start: PrebuildStartRecord,
+    start: GitHubActionsStart,
     now: number,
-  ): Promise<DispatchedPrebuild> {
-    const { prebuildId, target } = start;
+  ): Promise<StartedGitHubActions> {
+    const { target, callerWorkflow } = start;
     const minted: Minted = await this.repositoryToken(tenantId, target, now);
     if (minted.kind === "NoToken") return { kind: "NoInstallation" };
-    if (minted.kind !== "Minted") return { kind: "Refused", detail: minted.detail };
-    const caller = await syncCallerWorkflow(
-      (url, init) => fetch(url, init),
-      this.env.GITHUB_API_ORIGIN,
-      minted,
-      target,
-      {
+    if (minted.kind !== "Minted") return { kind: "TokenRefused", detail: minted.detail };
+    const fetcher = (url: string, init: RequestInit) => fetch(url, init);
+    const api = this.env.GITHUB_API_ORIGIN;
+    const described = await readDefaultBranch(fetcher, api, target, minted.token);
+    if (described.kind === "Unreadable") return described;
+    const { branch } = described;
+    const recorded = await this.ctx.blockConcurrencyWhile(async (): Promise<Recorded> => {
+      const caller = await syncCallerWorkflow(fetcher, api, minted, target, {
         path: callerWorkflow,
-        branch: start.defaultBranch,
-      },
-    );
-    if (caller.kind === "PermissionMissing") return caller;
-    if (caller.kind === "Refused") return { kind: "CallerRefused", detail: caller.detail };
-    if (caller.kind === "Committed" && !caller.parentShas.includes(start.headSha)) {
-      return {
-        kind: "CallerRefused",
-        detail: `${start.key.repository} took a new commit on ${start.defaultBranch} while Tumpel added its prebuild workflow there, so the dependency files the prebuild read may have changed`,
+        apiOrigin: start.apiOrigin,
+        branch,
+      });
+      if (caller.kind === "PermissionMissing") return caller;
+      if (caller.kind === "Refused") return { kind: "CallerRefused", detail: caller.detail };
+      const ref = caller.kind === "Committed" ? caller.commitSha : branch;
+      const inputs = await readInputs(fetcher, api, target, minted.token, { branch, ref });
+      if (inputs.kind === "Unreadable") return inputs;
+      const key = {
+        repository: start.repository,
+        inputDigest: await inputDigest(inputs.files),
+        guestImageDigest: start.guestImageDigest,
       };
-    }
-    const headSha = caller.kind === "Committed" ? caller.commitSha : start.headSha;
-    const inputs: PrebuildInputs = {
-      prebuildId,
-      tenantId,
-      apiOrigin: start.apiOrigin,
-      rootfsUrl: start.rootfsUrl,
-      imageDigest: start.key.guestImageDigest,
-    };
-    const run = await this.ctx.blockConcurrencyWhile(async (): Promise<GitHubAnswer<DispatchedRun>> => {
-      const answer = await dispatchCallerWorkflow(
-        (url, init) => fetch(url, init),
-        this.env.GITHUB_API_ORIGIN,
-        minted.token,
-        target,
-        { callerWorkflow, ref: start.defaultBranch, inputs },
-      );
-      if (!answer.ok) return answer;
-      this.writeDispatchedPrebuild(
+      if (caller.kind === "Current") {
+        const held = start.rebuild ? null : this.heldPrebuild(tenantId, key);
+        if (held !== null) return { kind: "Held", prebuild: held };
+        const dispatched = await dispatchCallerWorkflow(fetcher, api, minted.token, target, { callerWorkflow, ref });
+        if (dispatched.kind !== "Dispatched") return dispatched;
+      }
+      this.writePrebuildCommit(
         {
-          prebuildId,
+          prebuildId: start.prebuildId,
           personaId: start.personaId,
-          key: start.key,
-          defaultBranch: start.defaultBranch,
-          provider: "GitHubActions",
-          run: { runId: answer.value.runId, headSha },
-          logUrl: answer.value.htmlUrl,
+          key,
+          configSource: inputs.configSource,
+          defaultBranch: branch,
+          headSha: inputs.headSha,
+          rootfsKey: start.rootfsKey,
+          logUrl: workflowPage(target, callerWorkflow),
         },
         now,
       );
-      return answer;
+      return { kind: "Recorded" };
     });
-    if (!run.ok) {
-      return { kind: "Refused", detail: `${run.detail}, dispatching ${callerWorkflow} of ${start.key.repository}` };
-    }
-    return { kind: "Dispatched", prebuild: await this.armDispatch(tenantId, prebuildId, now) };
+    if (recorded.kind === "Held") return { kind: "Started", prebuild: recorded.prebuild };
+    if (recorded.kind !== "Recorded") return recorded;
+    return { kind: "Started", prebuild: await this.armDispatch(tenantId, start.prebuildId, now) };
   }
 
   uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {
@@ -646,16 +730,7 @@ export class TenantPrebuilds extends TenantSessions {
     if (row.provider === "GitHubActions") {
       const run = this.recordedRun(prebuildId);
       if (run.kind === "NoRun") return null;
-      const connection = this.connectionRow<{ caller_workflow: string }>("GitHubActions");
-      return {
-        ...common,
-        provider: "GitHubActions",
-        callerWorkflow:
-          connection === null
-            ? { kind: "NotConnected" }
-            : { kind: "Connected", callerWorkflow: connection.caller_workflow },
-        run: run.run,
-      };
+      return { ...common, provider: "GitHubActions", callerWorkflow: this.callerWorkflowOf(), run: run.run };
     }
     if (row.provider !== "CircleCI") return null;
     const circleCI = this.connectionRow<{ organization_id: string }>("CircleCI");
@@ -1020,7 +1095,7 @@ export class TenantPrebuilds extends TenantSessions {
           start.defaultBranch,
           start.key.inputDigest,
           start.key.guestImageDigest,
-          start.key.configSource,
+          start.configSource,
           new Date(now).toISOString(),
           pipelineLogUrl(project.projectSlug, answer.number),
           now,

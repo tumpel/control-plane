@@ -905,15 +905,23 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
       code: "InvalidRequest",
       title: "Not a workflow_run event",
       detail: `the workflow_run delivery does not parse: ${issues(delivery.error)}`,
-      fix: "Send workflow_run events in the shape GitHub documents, with an action, an installation and a workflow_run",
+      fix: "Send workflow_run events in the shape GitHub documents, with an action, an installation, a repository and a workflow_run",
     });
   }
-  const { action, installation, workflow_run: run } = delivery.data;
+  const { action, installation, repository, workflow_run: run } = delivery.data;
   const tenantId = await tenantOfInstallation(env.DB, installation.id);
   if (tenantId === null) return noContent;
   await env.TENANT.getByName(tenantId).workflowRunReported(
     tenantId,
-    { action, runId: run.id, headSha: run.head_sha, htmlUrl: run.html_url, conclusion: run.conclusion },
+    {
+      action,
+      runId: run.id,
+      repository: repository.full_name,
+      path: run.path,
+      headSha: run.head_sha,
+      htmlUrl: run.html_url,
+      conclusion: run.conclusion,
+    },
     Date.now(),
   );
   return noContent;

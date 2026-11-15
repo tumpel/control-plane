@@ -16,7 +16,7 @@ import type { z } from "zod";
 import { CIRCLECI_CONFIG_EXAMPLE, CIRCLECI_ORB, circleCIIssuer, readMe } from "./circleci.ts";
 import { credentialStanding } from "./circleci-oauth.ts";
 import { deleteCircleCIWebhooks } from "./circleci-projects.ts";
-import { CALLER_WORKFLOW_EXAMPLE, REUSABLE_WORKFLOW } from "./github-actions.ts";
+import { callerWorkflowExample, DEFAULT_CALLER_WORKFLOW, REUSABLE_WORKFLOW } from "./github-actions.ts";
 import { installationsOf, storedApp } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
@@ -147,7 +147,7 @@ const circleCILink = (env: Env, tenantId: string, row: CircleCIRow | null): unkn
   });
 };
 
-const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Promise<unknown> => {
+const readLink = async (env: Env, caller: Caller, provider: BuildProvider, apiOrigin: string): Promise<unknown> => {
   const tenant = tenantOf(env, caller);
   const { tenantId } = caller;
   if (provider === "GitHubActions") {
@@ -156,7 +156,10 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Prom
       tenantId,
       link: connection === null ? { state: "NotConnected" } : { state: "Connected", connection },
       reusableWorkflow: REUSABLE_WORKFLOW,
-      callerWorkflowExample: CALLER_WORKFLOW_EXAMPLE,
+      callerWorkflowExample: callerWorkflowExample({
+        path: connection?.callerWorkflow ?? DEFAULT_CALLER_WORKFLOW,
+        apiOrigin,
+      }),
     });
   }
   if (provider === "CircleCI") return circleCILink(env, tenantId, await tenant.circleCIConnection());
@@ -166,14 +169,20 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Prom
   });
 };
 
-const connect = async (request: Request, env: Env, caller: Caller, provider: BuildProvider): Promise<Response> => {
+const connect = async (
+  request: Request,
+  env: Env,
+  caller: Caller,
+  provider: BuildProvider,
+  apiOrigin: string,
+): Promise<Response> => {
   const tenant = tenantOf(env, caller);
   const now = Date.now();
   if (provider === "GitHubActions") {
     const body = await parseBody(request, GitHubActionsConnectionStartSchema, "gitHubActionsConnections.start");
     if (!body.ok) return body.response;
     await tenant.connectGitHubActions(caller.tenantId, body.value, now);
-    return json(await readLink(env, caller, provider));
+    return json(await readLink(env, caller, provider, apiOrigin));
   }
   if (provider === "CircleCI") {
     const body = await parseBody(request, CircleCIConnectionStartSchema, "circleCIConnections.start");
@@ -188,7 +197,7 @@ const connect = async (request: Request, env: Env, caller: Caller, provider: Bui
       });
     }
     await tenant.connectCircleCI(body.value, now);
-    return json(await readLink(env, caller, provider));
+    return json(await readLink(env, caller, provider, apiOrigin));
   }
   const body = await parseBody(request, NamespaceConnectionStartSchema, "namespaceConnections.start");
   if (!body.ok) return body.response;
@@ -196,7 +205,7 @@ const connect = async (request: Request, env: Env, caller: Caller, provider: Bui
     return problem(409, { code: "IssuerMissing", title: "No issuer", ...issuerMissing() });
   }
   await tenant.connectNamespace(body.value, now);
-  return json(await readLink(env, caller, provider));
+  return json(await readLink(env, caller, provider, apiOrigin));
 };
 
 const routeOf = (request: Request, pathname: string): { provider: BuildProvider; action: string } | null => {
@@ -225,7 +234,7 @@ export const handleConnections = async (
   const verb = route.action === "START" ? "start" : "delete";
   const refused = route.action === "GET" ? null : ownerRequired(caller, `${OPERATIONS[route.provider]}.${verb}`);
   if (refused) return refused;
-  if (route.action === "START") return connect(request, env, caller, route.provider);
+  if (route.action === "START") return connect(request, env, caller, route.provider, url.origin);
   if (route.action === "DELETE") {
     const tenant = tenantOf(env, caller);
     const token = route.provider === "CircleCI" ? await tenant.circleCIToken() : null;
@@ -240,5 +249,5 @@ export const handleConnections = async (
     await tenant.deleteBuildConnection(route.provider);
     return noContent();
   }
-  return json(await readLink(env, caller, route.provider));
+  return json(await readLink(env, caller, route.provider, url.origin));
 };
