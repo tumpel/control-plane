@@ -19,6 +19,7 @@ import {
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
+  WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
@@ -96,11 +97,14 @@ const toolDone = async (name: string, args: Record<string, unknown>): Promise<vo
   assert.ok(!answer.isError, `${name}: ${answer.content[0]?.text}`);
 };
 
-const deviceToken = async (): Promise<string> => {
+const deviceToken = async (tenantId: string): Promise<string> => {
   const started = DeviceAuthorizationSchema.parse(
     await (await send("POST", "/v1/device/code", { device_name: "mcp e2e" })).json(),
   );
-  assert.equal((await send("POST", "/v1/device/approve", { userCode: started.user_code }, browser())).status, 200);
+  assert.equal(
+    (await send("POST", "/v1/device/approve", { userCode: started.user_code, tenantId }, browser())).status,
+    200,
+  );
   await new Promise((resolve) => setTimeout(resolve, started.interval * 1000 + 100));
   const granted = await send("POST", "/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -110,7 +114,7 @@ const deviceToken = async (): Promise<string> => {
   return DeviceTokenSchema.parse(await granted.json()).access_token;
 };
 
-const connectorToken = async (): Promise<string> => {
+const connectorToken = async (tenantId: string): Promise<string> => {
   const registered = await send("POST", "/oauth/register", { redirect_uris: [CALLBACK], client_name: "mcp e2e" });
   const client = OAuthClientSchema.parse(await registered.json());
   const verifier = randomBytes(32).toString("base64url");
@@ -134,6 +138,7 @@ const connectorToken = async (): Promise<string> => {
     body: new URLSearchParams({
       request: consentUrl.searchParams.get("request") ?? "",
       csrf,
+      tenant: tenantId,
       action: "approve",
     }).toString(),
   });
@@ -192,9 +197,11 @@ before(async () => {
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
-  assert.equal((await send("POST", "/v1/tenants", { name: "Mcp", ...IDENTITY }, browser())).status, 200);
-  bearer = { authorization: `Bearer ${await deviceToken()}` };
-  connector = await connectorToken();
+  const signedUp = await send("POST", "/v1/tenants", { name: "Mcp", ...IDENTITY }, browser());
+  assert.equal(signedUp.status, 200);
+  const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+  bearer = { authorization: `Bearer ${await deviceToken(tenantId)}` };
+  connector = await connectorToken(tenantId);
 });
 
 after(async () => {

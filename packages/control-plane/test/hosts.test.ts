@@ -15,6 +15,7 @@ import {
   HostSchema,
   MintedEnrolmentTokenSchema,
   ProblemSchema,
+  WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { ControlEnvelopeSchema, HEARTBEAT_DEADLINE_MS, helloBytes } from "../src/channel/protocol.ts";
@@ -152,11 +153,16 @@ before(async () => {
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
 
-  assert.equal((await postJson("/v1/tenants", { name: "Hosts", ...IDENTITY }, browser())).status, 200);
+  const signedUp = await postJson("/v1/tenants", { name: "Hosts", ...IDENTITY }, browser());
+  assert.equal(signedUp.status, 200);
+  const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "hosts e2e" })).json(),
   );
-  assert.equal((await postJson("/v1/device/approve", { userCode: started.user_code }, browser())).status, 200);
+  assert.equal(
+    (await postJson("/v1/device/approve", { userCode: started.user_code, tenantId }, browser())).status,
+    200,
+  );
   await sleep(started.interval * 1000 + 100);
   const granted = await postJson("/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",

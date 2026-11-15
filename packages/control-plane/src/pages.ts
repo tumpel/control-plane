@@ -48,27 +48,49 @@ document.getElementById("signup").addEventListener("submit", async (event) => {
 });</script>`,
   );
 
-export const enterCodePage = (email: string, tenantName: string): Response =>
+export interface TenantChoice {
+  tenantId: string;
+  name: string;
+}
+
+const tenantField = (tenants: TenantChoice[], name: string): string => {
+  const [only, ...others] = tenants;
+  if (only !== undefined && others.length === 0) {
+    return `<input type="hidden" name="${name}" value="${escapeHtml(only.tenantId)}">`;
+  }
+  const options = tenants
+    .map((tenant) => `<option value="${escapeHtml(tenant.tenantId)}">${escapeHtml(tenant.name)}</option>`)
+    .join("");
+  return `<p><label>Tenant <select name="${name}" required>${options}</select></label></p>`;
+};
+
+const tenantPhrase = (tenants: TenantChoice[]): string => {
+  const [only, ...others] = tenants;
+  return only !== undefined && others.length === 0 ? `of ${escapeHtml(only.name)}` : "in the tenant you choose below";
+};
+
+export const enterCodePage = (email: string): Response =>
   page(
     200,
     "Sign in a device",
-    `<p>Signed in as ${escapeHtml(email)} of ${escapeHtml(tenantName)}. Enter the code your terminal shows.</p>
+    `<p>Signed in as ${escapeHtml(email)}. Enter the code your terminal shows.</p>
 <form method="get" action="/device"><input name="code" autocomplete="off" required autofocus><button type="submit">Continue</button></form>`,
   );
 
-export const confirmPage = (email: string, tenantName: string, userCode: string, deviceName: string): Response =>
+export const confirmPage = (email: string, tenants: TenantChoice[], userCode: string, deviceName: string): Response =>
   page(
     200,
     "Sign in a device",
-    `<p>The device <strong>${escapeHtml(deviceName)}</strong> asks to use tumpel as ${escapeHtml(email)} of ${escapeHtml(tenantName)}.</p>
+    `<p>The device <strong>${escapeHtml(deviceName)}</strong> asks to use tumpel as ${escapeHtml(email)} ${tenantPhrase(tenants)}.</p>
 <p>Check that your terminal shows this code:</p><p><code>${escapeHtml(userCode)}</code></p>
-<form id="decide"><button type="submit" value="approve">Approve</button><button type="submit" value="deny">Deny</button></form>
+<form id="decide">${tenantField(tenants, "tenantId")}<button type="submit" value="approve">Approve</button><button type="submit" value="deny">Deny</button></form>
 <p id="result" role="alert"></p>
 <script>${POST_JSON}
 document.getElementById("decide").addEventListener("submit", async (event) => {
   event.preventDefault();
   const action = event.submitter.value;
-  const answer = await post("/v1/device/" + action, { userCode: ${JSON.stringify(userCode)} });
+  const decision = { userCode: ${JSON.stringify(userCode)} };
+  const answer = await post("/v1/device/" + action, action === "approve" ? { ...decision, tenantId: new FormData(event.target).get("tenantId") } : decision);
   if (answer === null) return;
   event.target.remove();
   document.getElementById("result").textContent = action === "approve"
@@ -79,6 +101,7 @@ document.getElementById("decide").addEventListener("submit", async (event) => {
 
 export const grantPage = (
   email: string,
+  tenants: TenantChoice[],
   clientName: string,
   callbackOrigin: string,
   requestId: string,
@@ -87,8 +110,8 @@ export const grantPage = (
   page(
     200,
     "Connect an MCP client",
-    `<p><strong>${escapeHtml(clientName)}</strong> at ${escapeHtml(callbackOrigin)} asks to use tumpel as ${escapeHtml(email)}.</p>
-<form method="post"><input type="hidden" name="request" value="${escapeHtml(requestId)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+    `<p><strong>${escapeHtml(clientName)}</strong> at ${escapeHtml(callbackOrigin)} asks to use tumpel as ${escapeHtml(email)} ${tenantPhrase(tenants)}.</p>
+<form method="post">${tenantField(tenants, "tenant")}<input type="hidden" name="request" value="${escapeHtml(requestId)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
 <button type="submit" name="action" value="approve">Connect</button><button type="submit" name="action" value="deny">Cancel</button></form>`,
     { "set-cookie": `${CONSENT_CSRF_COOKIE}=${csrf}; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Strict` },
   );
@@ -114,3 +137,17 @@ export const appSetupPage = (email: string, manifest: unknown, action: string, o
 
 export const linkPage = (status: number, title: string, text: string, href: string, label: string): Response =>
   page(status, title, `<p>${escapeHtml(text)}</p><p><a href="${escapeHtml(href)}">${escapeHtml(label)}</a></p>`);
+
+export const acceptPage = (email: string, tenantName: string, role: string, token: string, next: string): Response =>
+  page(
+    200,
+    "Join a tenant",
+    `<p>Signed in as ${escapeHtml(email)}, invited to join ${escapeHtml(tenantName)} as ${escapeHtml(role)}.</p>
+<form id="accept"><button type="submit">Join ${escapeHtml(tenantName)}</button></form>
+<p id="result" role="alert"></p>
+<script>${POST_JSON}
+document.getElementById("accept").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (await post("/v1/invitations/accept", { token: ${JSON.stringify(token)} })) location.assign(${JSON.stringify(next)});
+});</script>`,
+  );

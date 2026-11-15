@@ -11,6 +11,9 @@ import {
   HarnessPinCreateSchema,
   HostLabelsSchema,
   HostPathSchema,
+  InvitationCreateSchema,
+  InvitationPathSchema,
+  MemberPathSchema,
   NamespaceConnectionStartSchema,
   PersonaCreateSchema,
   PersonaFileUploadRequestSchema,
@@ -46,7 +49,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -116,6 +119,48 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/devices/{deviceId}",
     DevicePathSchema,
     "Sign a device out; its token stops working at once. Calls DELETE /v1/devices/{deviceId}.",
+  ),
+  rest(
+    "tumpel_tenants",
+    "GET",
+    "/v1/whoami/tenants",
+    NO_ARGUMENTS,
+    "List every tenant you belong to, with your role there. Returns the Membership[] of GET /v1/whoami/tenants: {tenant, role, createdAt}. This connector acts in one of them; to act in another, connect again and choose it on the consent page.",
+  ),
+  rest(
+    "tumpel_member_list",
+    "GET",
+    "/v1/members",
+    NO_ARGUMENTS,
+    "List the people of the tenant. Returns the Member[] of GET /v1/members: principalId, email, role (Owner or Member) and createdAt, when they joined.",
+  ),
+  rest(
+    "tumpel_member_remove",
+    "DELETE",
+    "/v1/members/{principalId}",
+    MemberPathSchema,
+    "Remove a person from the tenant and sign out their devices and tokens there. Owner only; refused LastOwner for the tenant's last Owner. Calls DELETE /v1/members/{principalId}.",
+  ),
+  rest(
+    "tumpel_invitation_create",
+    "POST",
+    "/v1/invitations",
+    InvitationCreateSchema,
+    "Invite an email to the tenant as Owner or Member for seven days. Owner only. Returns the InvitationCreated of POST /v1/invitations: {invitation, acceptUrl}. No email is sent: give acceptUrl to the invitee, who opens it signed in to Cloudflare Access as that email. acceptUrl is shown only now.",
+  ),
+  rest(
+    "tumpel_invitation_list",
+    "GET",
+    "/v1/invitations",
+    NO_ARGUMENTS,
+    "List the tenant's open invitations. Returns the Invitation[] of GET /v1/invitations.",
+  ),
+  rest(
+    "tumpel_invitation_revoke",
+    "DELETE",
+    "/v1/invitations/{invitationId}",
+    InvitationPathSchema,
+    "Revoke an open invitation; its link stops working. Owner only. Calls DELETE /v1/invitations/{invitationId}.",
   ),
   rest(
     "tumpel_host_mint_token",

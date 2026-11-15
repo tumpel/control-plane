@@ -148,7 +148,10 @@ before(async () => {
   const started = DeviceAuthorizationSchema.parse(
     await (await send("POST", "/v1/device/code", { device_name: "uploads e2e" })).json(),
   );
-  assert.equal((await send("POST", "/v1/device/approve", { userCode: started.user_code }, browser)).status, 200);
+  assert.equal(
+    (await send("POST", "/v1/device/approve", { userCode: started.user_code, tenantId }, browser)).status,
+    200,
+  );
   await new Promise((resolve) => setTimeout(resolve, started.interval * 1000 + 100));
   const granted = await send("POST", "/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",

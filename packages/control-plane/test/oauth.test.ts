@@ -100,12 +100,14 @@ const consent = async (url: URL, signer: Record<string, string>): Promise<Harnes
   if (page.status !== 200) return page;
   const cookie = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   assert.ok(cookie.startsWith(`${CSRF_COOKIE}=`));
+  const tenant = /name="tenant" value="([^"]+)"/.exec(await page.text())?.[1] ?? "";
   return call(url.pathname, {
     method: "POST",
     headers: { ...signer, origin, cookie, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       request: url.searchParams.get("request") ?? "",
       csrf: cookie.slice(CSRF_COOKIE.length + 1),
+      tenant,
       action: "approve",
     }).toString(),
   });

@@ -54,6 +54,7 @@ import { json, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
+import { ownerRequired } from "./members";
 import { appSetupPage, linkPage, messagePage } from "./pages";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
@@ -98,6 +99,8 @@ const handleConnection = async (caller: Caller, url: URL, env: Env): Promise<Res
 };
 
 const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
+  const refused = ownerRequired(caller, "gitHubConnections.start");
+  if (refused) return refused;
   const app = await storedApp(env.DB);
   if (app === null) return appMissing(url.origin);
   const expiresAt = expiry(Date.now());

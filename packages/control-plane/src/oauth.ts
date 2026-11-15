@@ -7,7 +7,7 @@ import {
 import type { z } from "zod";
 import { base64Url, randomToken, sameSecret, sha256Hex } from "./crypto";
 import type { OAuthErrorCode } from "./http";
-import type { Caller } from "./identity";
+import type { Caller, Role } from "./identity";
 
 export const MCP_PATH = "/mcp";
 export const AUTHORIZE_PATH = "/oauth/authorize";
@@ -279,7 +279,7 @@ export const forgetAuthorization = async (db: D1Database, requestId: string): Pr
 export const grantCode = async (
   db: D1Database,
   request: AuthorizationRequest,
-  principalId: string,
+  caller: Caller,
   now: number,
 ): Promise<string> => {
   const code = randomToken();
@@ -287,13 +287,14 @@ export const grantCode = async (
     db.prepare("DELETE FROM oauth_codes WHERE expires_at <= ?").bind(now),
     db
       .prepare(
-        `INSERT INTO oauth_codes (code_sha256, client_id, principal_id, redirect_uri, code_challenge, created_at,
-          expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO oauth_codes (code_sha256, client_id, tenant_id, principal_id, redirect_uri, code_challenge,
+          created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         await sha256Hex(code),
         request.clientId,
-        principalId,
+        caller.tenantId,
+        caller.principalId,
         request.redirectUri,
         request.codeChallenge,
         now,
@@ -312,18 +313,28 @@ const pkceMatches = async (verifier: string, challenge: string): Promise<boolean
 interface Grant {
   grantId: string;
   clientId: string;
+  tenantId: string;
   principalId: string;
 }
 
 const issue = async (db: D1Database, grant: Grant, now: number): Promise<OAuthToken> => {
   const accessToken = randomToken();
   const refreshToken = randomToken();
-  const insert =
-    "INSERT INTO oauth_tokens (token_sha256, grant_id, client_id, principal_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
+  const insert = `INSERT INTO oauth_tokens (token_sha256, grant_id, client_id, tenant_id, principal_id, kind, created_at,
+    expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
   const row = async (token: string, kind: string, ttl: number) =>
     db
       .prepare(insert)
-      .bind(await sha256Hex(token), grant.grantId, grant.clientId, grant.principalId, kind, now, now + ttl);
+      .bind(
+        await sha256Hex(token),
+        grant.grantId,
+        grant.clientId,
+        grant.tenantId,
+        grant.principalId,
+        kind,
+        now,
+        now + ttl,
+      );
   await db.batch([
     db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= ?").bind(now),
     await row(accessToken, "access", ACCESS_TTL_MS),
@@ -367,11 +378,12 @@ export const redeemCode = async (
   const codeHash = await sha256Hex(redemption.code);
   const spent = await db
     .prepare(
-      "UPDATE oauth_codes SET spent = 1 WHERE code_sha256 = ? AND spent = 0 RETURNING client_id, principal_id, redirect_uri, code_challenge, expires_at",
+      "UPDATE oauth_codes SET spent = 1 WHERE code_sha256 = ? AND spent = 0 RETURNING client_id, tenant_id, principal_id, redirect_uri, code_challenge, expires_at",
     )
     .bind(codeHash)
     .first<{
       client_id: string;
+      tenant_id: string;
       principal_id: string;
       redirect_uri: string;
       code_challenge: string;
@@ -391,10 +403,13 @@ export const redeemCode = async (
   if (!(await pkceMatches(redemption.codeVerifier, spent.code_challenge))) {
     return refuseGrant("invalid_grant", "code_verifier does not match the code_challenge");
   }
-  return {
-    ok: true,
-    token: await issue(db, { grantId: codeHash, clientId: spent.client_id, principalId: spent.principal_id }, now),
+  const grant = {
+    grantId: codeHash,
+    clientId: spent.client_id,
+    tenantId: spent.tenant_id,
+    principalId: spent.principal_id,
   };
+  return { ok: true, token: await issue(db, grant, now) };
 };
 
 export const refreshGrant = async (
@@ -411,10 +426,10 @@ export const refreshGrant = async (
   const refreshHash = await sha256Hex(refreshToken);
   const spent = await db
     .prepare(
-      "UPDATE oauth_tokens SET spent = 1 WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 0 RETURNING grant_id, client_id, principal_id, expires_at",
+      "UPDATE oauth_tokens SET spent = 1 WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 0 RETURNING grant_id, client_id, tenant_id, principal_id, expires_at",
     )
     .bind(refreshHash)
-    .first<{ grant_id: string; client_id: string; principal_id: string; expires_at: number }>();
+    .first<{ grant_id: string; client_id: string; tenant_id: string; principal_id: string; expires_at: number }>();
   if (spent === null) {
     const reused = await db
       .prepare("SELECT grant_id FROM oauth_tokens WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 1")
@@ -425,14 +440,13 @@ export const refreshGrant = async (
   }
   if (spent.expires_at <= now) return refuseGrant("invalid_grant", "the refresh token expired");
   if (spent.client_id !== clientId) return refuseGrant("invalid_grant", "the refresh token belongs to another client");
-  return {
-    ok: true,
-    token: await issue(
-      db,
-      { grantId: spent.grant_id, clientId: spent.client_id, principalId: spent.principal_id },
-      now,
-    ),
+  const grant = {
+    grantId: spent.grant_id,
+    clientId: spent.client_id,
+    tenantId: spent.tenant_id,
+    principalId: spent.principal_id,
   };
+  return { ok: true, token: await issue(db, grant, now) };
 };
 
 export const revokeToken = async (db: D1Database, token: string, clientId: string): Promise<Refusal | null> => {
@@ -451,10 +465,11 @@ export const revokeToken = async (db: D1Database, token: string, clientId: strin
 export const callerForAccessToken = async (db: D1Database, token: string, now: number): Promise<Caller | null> => {
   const row = await db
     .prepare(
-      `SELECT p.tenant_id, p.principal_id FROM oauth_tokens t JOIN principals p ON p.principal_id = t.principal_id
+      `SELECT m.tenant_id, m.principal_id, m.role FROM oauth_tokens t
+      JOIN memberships m ON m.tenant_id = t.tenant_id AND m.principal_id = t.principal_id
       WHERE t.token_sha256 = ? AND t.kind = 'access' AND t.expires_at > ?`,
     )
     .bind(await sha256Hex(token), now)
-    .first<{ tenant_id: string; principal_id: string }>();
-  return row === null ? null : { tenantId: row.tenant_id, principalId: row.principal_id };
+    .first<{ tenant_id: string; principal_id: string; role: Role }>();
+  return row === null ? null : { tenantId: row.tenant_id, principalId: row.principal_id, role: row.role };
 };

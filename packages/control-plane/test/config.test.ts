@@ -16,6 +16,7 @@ import {
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
+  WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
@@ -136,11 +137,16 @@ before(async () => {
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
 
-  assert.equal((await postJson("/v1/tenants", { name: "Config", ...IDENTITY }, browser())).status, 200);
+  const signedUp = await postJson("/v1/tenants", { name: "Config", ...IDENTITY }, browser());
+  assert.equal(signedUp.status, 200);
+  const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "config e2e" })).json(),
   );
-  assert.equal((await postJson("/v1/device/approve", { userCode: started.user_code }, browser())).status, 200);
+  assert.equal(
+    (await postJson("/v1/device/approve", { userCode: started.user_code, tenantId }, browser())).status,
+    200,
+  );
   await sleep(started.interval * 1000 + 100);
   const granted = await postJson("/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
