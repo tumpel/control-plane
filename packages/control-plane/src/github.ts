@@ -43,7 +43,7 @@ export const STATE_KEY_PURPOSE = "tumpel-github-state-v1";
 export const STATE_TTL_MS = 3_600_000;
 export const GITHUB_TIMEOUT_MS = 10_000;
 const API_VERSION = "2022-11-28";
-const API_MEDIA_TYPE = "application/vnd.github+json";
+export const API_MEDIA_TYPE = "application/vnd.github+json";
 const JSON_MEDIA_TYPE = "application/json";
 const APP_NAME_LIMIT = 34;
 
@@ -138,8 +138,11 @@ export const dashboardReturn = (returnUrl: string | null, dashboardOrigin: strin
   return { ok: true, returnUrl: parsed.href };
 };
 
-export const installUrl = (slug: string, state: string): string =>
-  `${GITHUB_WEB}/apps/${encodeURIComponent(slug)}/installations/new?state=${encodeURIComponent(state)}`;
+export const installUrl = (slug: string, state: string, gitHubAccountId: number | null): string => {
+  const app = `${GITHUB_WEB}/apps/${encodeURIComponent(slug)}/installations/new`;
+  if (gitHubAccountId === null) return `${app}?state=${encodeURIComponent(state)}`;
+  return `${app}/permissions?${new URLSearchParams({ target_id: String(gitHubAccountId), state })}`;
+};
 
 export const authorizeUrl = (web: string, clientId: string, redirectUri: string, state: string): string =>
   `${web}/login/oauth/authorize?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, state })}`;
@@ -487,7 +490,7 @@ export type InstallationAccess =
   | { kind: "NotInstaller"; detail: string }
   | { kind: "Failed"; detail: string };
 
-const personDetail = (answer: { status: number; detail: string }, asked: string): string =>
+export const personDetail = (answer: { status: number; detail: string }, asked: string): string =>
   answer.status >= 200 && answer.status < 300
     ? `GitHub answered ${asked} in a form tumpel does not read`
     : answer.detail;
@@ -518,14 +521,12 @@ export const installedBy = (
   };
 };
 
-export const verifyInstaller = async (
+export const exchangeUserCode = async (
   fetcher: Fetch,
-  origins: { api: string; web: string },
+  web: string,
   client: OAuthClient,
   code: string,
-  installationId: number,
-): Promise<InstallationAccess> => {
-  const { api, web } = origins;
+): Promise<GitHubAnswer<string>> => {
   const exchanged = await callGitHub(
     fetcher,
     {
@@ -538,14 +539,28 @@ export const verifyInstaller = async (
     GitHubUserTokenSchema,
     "GitHubUserToken",
   );
-  if (!exchanged.ok) return { kind: "Failed", detail: personDetail(exchanged, "the sign-in code") };
+  if (!exchanged.ok) return { ...exchanged, detail: personDetail(exchanged, "the sign-in code") };
   if ("error" in exchanged.value) {
     return {
-      kind: "Failed",
+      ok: false,
+      status: 200,
       detail: `GitHub refused the authorization code with ${exchanged.value.error}: ${exchanged.value.error_description}`,
     };
   }
-  const token = exchanged.value.access_token;
+  return { ok: true, value: exchanged.value.access_token };
+};
+
+export const verifyInstaller = async (
+  fetcher: Fetch,
+  origins: { api: string; web: string },
+  client: OAuthClient,
+  code: string,
+  installationId: number,
+): Promise<InstallationAccess> => {
+  const { api, web } = origins;
+  const exchanged = await exchangeUserCode(fetcher, web, client, code);
+  if (!exchanged.ok) return { kind: "Failed", detail: exchanged.detail };
+  const token = exchanged.value;
   const listed = await callGitHub(
     fetcher,
     {
