@@ -32,7 +32,12 @@ export const GitHubSetupCallbackSchema = z.object({
   code: z.string().min(1),
   installation_id: z.string().regex(/^[1-9][0-9]{0,15}$/),
   setup_action: z.enum(["install", "update"]),
-  state: z.string().min(1),
+  state: z.string().min(1).optional(),
+});
+
+export const GitHubInstallationChoiceQuerySchema = z.object({
+  choice: z.string().min(1),
+  tenant: TenantIdSchema,
 });
 
 const GitHubAppPermissionsSchema = z.object({
@@ -77,7 +82,15 @@ export const GitHubAppConversionSchema = z.object({
 
 export const GitHubInstallationRecordSchema = z.object({
   id: GitHubIdSchema,
-  account: GitHubAccountSchema,
+  account: z.object({ login: GitHubLoginSchema, type: z.enum(["User", "Organization"]) }),
+  repository_selection: z.enum(["all", "selected"]),
+});
+
+export const GitHubInstallationChoiceStateSchema = z.object({
+  purpose: z.literal("InstallationChoice"),
+  email: z.string().min(3).max(320),
+  installation: GitHubInstallationRecordSchema,
+  expiresAt: OffsetDateTimeSchema,
 });
 
 export const GitHubBotUserSchema = z.object({
@@ -90,7 +103,7 @@ export const GitHubUserSchema = z.object({
 });
 
 export const GitHubUserInstallationsSchema = z.object({
-  installations: z.array(GitHubInstallationRecordSchema),
+  installations: z.array(z.object({ id: GitHubIdSchema }).loose()),
 });
 
 export const GitHubInstallationTokenSchema = z.object({
@@ -110,6 +123,12 @@ export const GitHubErrorSchema = z.object({
 export const GitHubInstallationEventSchema = z.object({
   action: z.string(),
   installation: GitHubInstallationRecordSchema,
+});
+
+export const GitHubInstallationRepositoriesEventSchema = z.object({
+  action: z.string(),
+  installation: GitHubInstallationRecordSchema,
+  repository_selection: z.enum(["all", "selected"]),
 });
 
 export const GitHubInstallationRepositoriesSchema = z.object({

@@ -8,6 +8,7 @@ import {
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
   GitHubActionsConnectionLinkSchema,
+  GitHubInstallationSchema,
   PersonaSchema,
   PrebuildFailureSchema,
   PrebuildSchema,
@@ -17,6 +18,7 @@ import {
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
+import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
 
 const ACCESS_AUD = "tumpel-prebuild-uploads-e2e";
@@ -199,9 +201,10 @@ before(async () => {
     )
     .run();
   await env.DB.prepare(
-    "INSERT INTO github_installations (installation_id, tenant_id, account_login, created_at) VALUES (?, ?, ?, ?)",
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, repository_selection,
+    status, created_at, updated_at) VALUES (?, ?, ?, 'Organization', 'Selected', 'Active', ?, ?)`,
   )
-    .bind(INSTALLATION_ID, tenantId, "acme", Date.now())
+    .bind(INSTALLATION_ID, tenantId, "acme", Date.now(), Date.now())
     .run();
 });
 
@@ -342,6 +345,84 @@ const dispatchedRun = async () => {
   );
   return { prebuild, runId: nextRun };
 };
+
+const signedDelivery = async (event: string, payload: unknown) => {
+  const body = JSON.stringify(payload);
+  const signature = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex")}`;
+  const response = await server.fetch(`${origin}/github/webhook`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-github-event": event, "x-hub-signature-256": signature },
+    body,
+  });
+  assert.equal(response.status, 204, await response.text());
+};
+
+const installations = async () =>
+  GitHubInstallationSchema.array().parse(
+    await (await send("GET", "/v1/github-connection/installations", undefined, bearer)).json(),
+  );
+
+test("a tenant holds an installation per account, a repositories change updates only that one, and an uninstall drops only that one", async () => {
+  const env = await server.getWorker<Bindings>().getEnv();
+  await env.DB.prepare(
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, repository_selection,
+    status, created_at, updated_at) VALUES (?, ?, ?, 'User', 'Selected', 'Active', ?, ?)`,
+  )
+    .bind(INSTALLATION_ID + 1, tenantId, "octo", Date.now(), Date.now())
+    .run();
+  const octo = { id: INSTALLATION_ID + 1, account: { login: "octo", type: "User" }, repository_selection: "all" };
+
+  await signedDelivery("installation_repositories", {
+    action: "added",
+    installation: octo,
+    repository_selection: "all",
+    repositories_added: [],
+    repositories_removed: [],
+  });
+  assert.deepEqual(
+    (await installations()).map(({ accountLogin, repositorySelection }) => [accountLogin, repositorySelection]),
+    [
+      ["acme", "Selected"],
+      ["octo", "All"],
+    ],
+  );
+
+  await signedDelivery("installation", { action: "deleted", installation: octo });
+  assert.deepEqual(
+    (await installations()).map((installation) => installation.accountLogin),
+    ["acme"],
+  );
+});
+
+test("connecting another account from Tumpel adds its installation and keeps the one the tenant held", async () => {
+  const db = (await server.getWorker<{ DB: Parameters<typeof linkInstallation>[0] }>().getEnv()).DB;
+  const kattebak = {
+    id: 91,
+    account: { login: "kattebak", type: "User" as const },
+    repository_selection: "all" as const,
+  };
+  const tumpel = {
+    id: 92,
+    account: { login: "tumpel", type: "Organization" as const },
+    repository_selection: "selected" as const,
+  };
+  assert.equal((await linkInstallation(db, tenantId, kattebak, Date.now())).kind, "Linked");
+  assert.equal((await linkInstallation(db, tenantId, tumpel, Date.now())).kind, "Linked");
+  assert.equal((await linkInstallation(db, tenantId, kattebak, Date.now())).kind, "Linked");
+  const held = (await installations()).map(({ installationId, accountType, repositorySelection }) => [
+    installationId,
+    accountType,
+    repositorySelection,
+  ]);
+  assert.deepEqual(
+    held.filter(([installationId]) => installationId === 91 || installationId === 92),
+    [
+      [91, "User", "All"],
+      [92, "Organization", "Selected"],
+    ],
+  );
+  assert.equal((await linkInstallation(db, "another-tenant", tumpel, Date.now())).kind, "OtherTenant");
+});
 
 const deliver = async (runId: number, action: string, conclusion: string | null, headSha = HEAD_SHA) => {
   const body = JSON.stringify({

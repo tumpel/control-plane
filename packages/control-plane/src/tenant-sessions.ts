@@ -46,7 +46,7 @@ import {
   type RepositoryCredentialSource,
   repositoryCredential,
 } from "./github.ts";
-import { appKey, installationOf, storeBotUserId, storedApp } from "./github-store.ts";
+import { appKey, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import { type Host, hostOf } from "./hosts";
 import type { Env } from "./index";
@@ -496,19 +496,19 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   protected async repositoryToken(tenantId: string, repository: GitHubRepository, now: number): Promise<Minted> {
-    const installation = await installationOf(this.env.DB, tenantId);
-    if (installation === null) return { kind: "NoToken" };
+    const installations = await installationsOf(this.env.DB, tenantId);
+    if (installations.length === 0) return { kind: "NoToken" };
     const app = await appKey(this.env.DB, keyStoreOf(this.env));
     if (app === null) {
       throw new Error(
-        `tenant ${tenantId} is linked to GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
+        `tenant ${tenantId} holds GitHub installations ${installations.map((installation) => installation.installationId).join(", ")}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
       );
     }
     return mintInstallationToken(
       (url, init) => fetch(url, init),
       this.env.GITHUB_API_ORIGIN,
       app,
-      installation,
+      installations,
       repository,
       now,
     );

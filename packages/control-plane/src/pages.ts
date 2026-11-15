@@ -264,3 +264,18 @@ document.getElementById("accept").addEventListener("submit", async (event) => {
   if (await post("/v1/invitations/accept", { token: ${JSON.stringify(token)} })) location.assign(${JSON.stringify(next)});
 });</script>`,
   );
+
+export const connectAgainPage = (status: number, title: string, text: string, connectUrl: string): Response =>
+  linkPage(status, title, text, connectUrl, "Connect from Tumpel");
+
+export const installationTenantPage = (
+  email: string,
+  accountLogin: string,
+  tenants: { name: string; href: string }[],
+): Response =>
+  page(
+    200,
+    "Choose a tenant",
+    `<p>Signed in as ${escapeHtml(email)}, an Owner of several tenants. Choose the tenant that gets the GitHub App installation on ${escapeHtml(accountLogin)}.</p>
+<ul>${tenants.map((tenant) => `<li><a href="${escapeHtml(tenant.href)}">${escapeHtml(tenant.name)}</a></li>`).join("")}</ul>`,
+  );

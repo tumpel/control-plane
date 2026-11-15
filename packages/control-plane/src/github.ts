@@ -6,7 +6,8 @@ import {
   type GitHubAppManifestSchema,
   GitHubBotUserSchema,
   GitHubErrorSchema,
-  type GitHubInstallationRecordSchema,
+  type GitHubInstallationChoiceStateSchema,
+  GitHubInstallationRecordSchema,
   GitHubInstallationRepositoriesSchema,
   GitHubInstallationTokenSchema,
   type GitHubInstallStateSchema,
@@ -25,7 +26,10 @@ export type RepositoryCredentialSource = z.infer<typeof RepositoryCredentialSour
 export type GitHubRepositorySummary = z.infer<typeof GitHubRepositorySchema>;
 export type GitHubIssueSummary = z.infer<typeof GitHubIssueSchema>;
 export type GitHubIssueRecord = z.infer<typeof GitHubIssueRecordSchema>;
-export type GitHubState = z.infer<typeof GitHubManifestStateSchema> | z.infer<typeof GitHubInstallStateSchema>;
+export type GitHubState =
+  | z.infer<typeof GitHubManifestStateSchema>
+  | z.infer<typeof GitHubInstallStateSchema>
+  | z.infer<typeof GitHubInstallationChoiceStateSchema>;
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export const GITHUB_WEB = "https://github.com";
@@ -248,6 +252,8 @@ export interface AppKey {
 export interface Installation {
   installationId: number;
   accountLogin: string;
+  repositorySelection: "All" | "Selected";
+  status: "Active" | "Suspended";
 }
 
 export interface GitHubRepository {
@@ -274,21 +280,42 @@ const installationSettings = (installationId: number): string =>
 
 const OUTSIDE_STATUSES = [404, 422];
 
+const ownedBy = (installation: Installation, target: GitHubRepository): boolean =>
+  installation.accountLogin.toLowerCase() === target.owner.toLowerCase();
+
+export const coveringInstallation = <T extends Installation>(installations: T[], target: GitHubRepository): T | null =>
+  installations
+    .filter((installation) => installation.status === "Active" && ownedBy(installation, target))
+    .sort((a, b) => Number(a.repositorySelection === "Selected") - Number(b.repositorySelection === "Selected"))[0] ??
+  null;
+
+const outsideAll = (installations: Installation[], target: GitHubRepository): Minted => {
+  const suspended = installations.find((installation) => ownedBy(installation, target));
+  if (suspended !== undefined) {
+    return {
+      kind: "Outside",
+      detail: `the tenant's GitHub App installation on ${suspended.accountLogin} is suspended; unsuspend it at ${installationSettings(suspended.installationId)}, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
+    };
+  }
+  const accounts = installations.map((installation) => installation.accountLogin).join(", ");
+  return {
+    kind: "Outside",
+    detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installations cover repositories of ${accounts} only; start the session on a repository of one of them, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
+  };
+};
+
 export const mintInstallationToken = async (
   fetcher: Fetch,
   api: string,
   app: AppKey,
-  installation: Installation,
+  installations: Installation[],
   target: GitHubRepository,
   now: number,
-): Promise<Exclude<Minted, { kind: "NoToken" }>> => {
-  const { installationId, accountLogin } = installation;
-  if (target.owner.toLowerCase() !== accountLogin.toLowerCase()) {
-    return {
-      kind: "Outside",
-      detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installation covers repositories of ${accountLogin} only; start the session on a repository of ${accountLogin}, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
-    };
-  }
+): Promise<Minted> => {
+  if (installations.length === 0) return { kind: "NoToken" };
+  const installation = coveringInstallation(installations, target);
+  if (installation === null) return outsideAll(installations, target);
+  const { installationId } = installation;
   const answer = await callGitHub(
     fetcher,
     {
@@ -442,6 +469,11 @@ export type Installer =
   | { kind: "NotInstaller"; detail: string }
   | { kind: "Failed"; detail: string };
 
+const personDetail = (answer: { status: number; detail: string }, asked: string): string =>
+  answer.status >= 200 && answer.status < 300
+    ? `GitHub answered ${asked} in a form tumpel does not read`
+    : answer.detail;
+
 export const verifyInstaller = async (
   fetcher: Fetch,
   api: string,
@@ -461,7 +493,7 @@ export const verifyInstaller = async (
     GitHubUserTokenSchema,
     "GitHubUserToken",
   );
-  if (!exchanged.ok) return { kind: "Failed", detail: exchanged.detail };
+  if (!exchanged.ok) return { kind: "Failed", detail: personDetail(exchanged, "the sign-in code") };
   if ("error" in exchanged.value) {
     return {
       kind: "Failed",
@@ -480,15 +512,22 @@ export const verifyInstaller = async (
     GitHubUserInstallationsSchema,
     "GitHubUserInstallations",
   );
-  if (!listed.ok) return { kind: "Failed", detail: listed.detail };
-  const installation = listed.value.installations.find((candidate) => candidate.id === installationId);
-  if (installation === undefined) {
+  if (!listed.ok) return { kind: "Failed", detail: personDetail(listed, "the installations you can access") };
+  const found = listed.value.installations.find((candidate) => candidate.id === installationId);
+  if (found === undefined) {
     return {
       kind: "NotInstaller",
       detail: `installation ${installationId} is not among the installations of this stage's GitHub App that the GitHub account you authorized can access`,
     };
   }
-  return { kind: "Installer", installation };
+  const installation = GitHubInstallationRecordSchema.safeParse(found);
+  if (!installation.success) {
+    return {
+      kind: "Failed",
+      detail: `installation ${installationId} is on an account tumpel cannot link, such as an enterprise; install the App on a user or organization account`,
+    };
+  }
+  return { kind: "Installer", installation: installation.data };
 };
 
 export const convertManifest = async (

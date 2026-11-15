@@ -1,3 +1,4 @@
+import type { D1Database } from "@cloudflare/workers-types/index.ts";
 import type { GitHubInstallationSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
@@ -134,24 +135,49 @@ export const storeBotUserId = async (db: D1Database, botUserId: number): Promise
   await db.prepare("UPDATE github_apps SET bot_user_id = ? WHERE github_app_slot = 1").bind(botUserId).run();
 };
 
-type InstallationRow = { installation_id: number; tenant_id: string; account_login: string; created_at: number };
+type InstallationRow = {
+  installation_id: number;
+  tenant_id: string;
+  account_login: string;
+  account_type: GitHubInstallation["accountType"];
+  repository_selection: GitHubInstallation["repositorySelection"];
+  status: GitHubInstallation["status"];
+  created_at: number;
+  updated_at: number;
+};
+
+const INSTALLATION_COLUMNS =
+  "installation_id, tenant_id, account_login, account_type, repository_selection, status, created_at, updated_at";
 
 const toInstallation = (row: InstallationRow): GitHubInstallation => ({
   installationId: row.installation_id,
   tenantId: row.tenant_id,
   accountLogin: row.account_login,
+  accountType: row.account_type,
+  repositorySelection: row.repository_selection,
+  status: row.status,
   createdAt: row.created_at,
+  updatedAt: row.updated_at,
 });
 
-export const installationOf = async (db: D1Database, tenantId: string): Promise<GitHubInstallation | null> => {
-  const row = await db
+export const repositorySelectionOf = (selection: "all" | "selected"): GitHubInstallation["repositorySelection"] =>
+  selection === "all" ? "All" : "Selected";
+
+export const installationsOf = async (db: D1Database, tenantId: string): Promise<GitHubInstallation[]> => {
+  const { results } = await db
     .prepare(
-      "SELECT installation_id, tenant_id, account_login, created_at FROM github_installations WHERE tenant_id = ?",
+      `SELECT ${INSTALLATION_COLUMNS} FROM github_installations WHERE tenant_id = ? ORDER BY created_at, installation_id`,
     )
     .bind(tenantId)
-    .first<InstallationRow>();
-  return row === null ? null : toInstallation(row);
+    .all<InstallationRow>();
+  return results.map(toInstallation);
 };
+
+const installationRow = (db: D1Database, installationId: number): Promise<InstallationRow | null> =>
+  db
+    .prepare(`SELECT ${INSTALLATION_COLUMNS} FROM github_installations WHERE installation_id = ?`)
+    .bind(installationId)
+    .first<InstallationRow>();
 
 export type Linked = { kind: "Linked"; installation: GitHubInstallation } | { kind: "OtherTenant" };
 
@@ -161,35 +187,60 @@ export const linkInstallation = async (
   record: GitHubInstallationRecord,
   now: number,
 ): Promise<Linked> => {
-  const owner = await db
-    .prepare("SELECT tenant_id FROM github_installations WHERE installation_id = ?")
-    .bind(record.id)
-    .first<{ tenant_id: string }>();
-  if (owner !== null && owner.tenant_id !== tenantId) return { kind: "OtherTenant" };
-  await db.batch([
-    db
-      .prepare("DELETE FROM github_installations WHERE tenant_id = ? AND installation_id != ?")
-      .bind(tenantId, record.id),
-    db
-      .prepare(
-        `INSERT INTO github_installations (installation_id, tenant_id, account_login, created_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT (installation_id) DO UPDATE SET account_login = excluded.account_login
-        WHERE github_installations.tenant_id = excluded.tenant_id`,
-      )
-      .bind(record.id, tenantId, record.account.login, now),
-  ]);
-  const linked = await installationOf(db, tenantId);
-  return linked === null || linked.installationId !== record.id
+  await db
+    .prepare(
+      `INSERT INTO github_installations (${INSTALLATION_COLUMNS}) VALUES (?, ?, ?, ?, ?, 'Active', ?, ?)
+      ON CONFLICT (installation_id) DO UPDATE SET account_login = excluded.account_login,
+        account_type = excluded.account_type, repository_selection = excluded.repository_selection,
+        updated_at = excluded.updated_at
+      WHERE github_installations.tenant_id = excluded.tenant_id`,
+    )
+    .bind(
+      record.id,
+      tenantId,
+      record.account.login,
+      record.account.type,
+      repositorySelectionOf(record.repository_selection),
+      now,
+      now,
+    )
+    .run();
+  const row = await installationRow(db, record.id);
+  return row === null || row.tenant_id !== tenantId
     ? { kind: "OtherTenant" }
-    : { kind: "Linked", installation: linked };
+    : { kind: "Linked", installation: toInstallation(row) };
 };
 
-export const unlinkTenant = async (db: D1Database, tenantId: string): Promise<void> => {
-  await db.prepare("DELETE FROM github_installations WHERE tenant_id = ?").bind(tenantId).run();
+export const unlinkTenantInstallation = async (
+  db: D1Database,
+  tenantId: string,
+  installationId: number,
+): Promise<boolean> => {
+  const result = await db
+    .prepare("DELETE FROM github_installations WHERE tenant_id = ? AND installation_id = ?")
+    .bind(tenantId, installationId)
+    .run();
+  return result.meta.changes === 1;
 };
 
 export const unlinkInstallation = async (db: D1Database, installationId: number): Promise<void> => {
   await db.prepare("DELETE FROM github_installations WHERE installation_id = ?").bind(installationId).run();
+};
+
+export const refreshInstallation = async (
+  db: D1Database,
+  record: GitHubInstallationRecord,
+  repositorySelection: "all" | "selected",
+  status: GitHubInstallation["status"] | null,
+  now: number,
+): Promise<void> => {
+  await db
+    .prepare(
+      `UPDATE github_installations SET account_login = ?, account_type = ?, repository_selection = ?,
+        status = COALESCE(?, status), updated_at = ? WHERE installation_id = ?`,
+    )
+    .bind(record.account.login, record.account.type, repositorySelectionOf(repositorySelection), status, now, record.id)
+    .run();
 };
 
 export const tenantOfInstallation = async (db: D1Database, installationId: number): Promise<string | null> => {
