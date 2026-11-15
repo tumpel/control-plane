@@ -252,7 +252,7 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   assert.deepEqual(await rest(EffectiveHarnessVersionSchema.array(), "GET", "/v1/harnesses/pins"), [
     { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION, pinned: false },
     { harness: "Codex", harnessVersion: "0.50.0", pinned: false },
-    { harness: "OpenCode", harnessVersion: "1.0.0", pinned: false },
+    { harness: "OpenCode", harnessVersion: "1.19.5", pinned: false },
     { harness: "PiDev", harnessVersion: "1.5.2", pinned: false },
   ]);
 
