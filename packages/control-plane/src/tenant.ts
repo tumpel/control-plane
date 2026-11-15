@@ -12,7 +12,8 @@ import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
-import { memberRows, sealContext, TenantSessions, toKey } from "./tenant-sessions";
+import { TenantPrebuilds } from "./tenant-prebuilds";
+import { memberRows, sealContext, toKey } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
 export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId" | "gitAuthorName" | "gitAuthorEmail"> & {
@@ -108,7 +109,7 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
-export class Tenant extends TenantSessions {
+export class Tenant extends TenantPrebuilds {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {

@@ -6,8 +6,8 @@ fails when an operation lacks a tool or a command, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, IssuerTokens `issuer`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`.
-`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure`,
+Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, IssuerTokens `issuer`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`.
+`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in
 principal reads it too. The CLI's `transcript read` takes a turnId and reads that turn's lines of its
@@ -41,6 +41,10 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Personas_list`                    | `tumpel_persona_list`          | `tumpel persona list`          |
 | `Personas_update`                  | `tumpel_persona_update`        | `tumpel persona update`        |
 | `Personas_uploadFile`              | `tumpel_persona_upload_file`   | `tumpel persona upload-file`   |
+| `Prebuilds_get`                    | `tumpel_prebuild_get`          | `tumpel prebuild get`          |
+| `Prebuilds_getFailure`             | `tumpel_prebuild_failure`      | `tumpel prebuild failure`      |
+| `Prebuilds_list`                   | `tumpel_prebuild_list`         | `tumpel prebuild list`         |
+| `Prebuilds_start`                  | `tumpel_prebuild_start`        | `tumpel prebuild start`        |
 | `Releases_current`                 | `tumpel_release_current`       | `tumpel release current`       |
 | `SecretSets_create`                | `tumpel_secret_set_create`     | `tumpel secret-set create`     |
 | `SecretSets_delete`                | `tumpel_secret_set_delete`     | `tumpel secret-set delete`     |

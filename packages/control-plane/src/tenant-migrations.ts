@@ -14,6 +14,7 @@ import tenant0013 from "../migrations/tenant/0013_snapshot_chunks.sql";
 import tenant0014 from "../migrations/tenant/0014_host_usage.sql";
 import tenant0015 from "../migrations/tenant/0015_snapshot_packs.sql";
 import tenant0016 from "../migrations/tenant/0016_turn_host.sql";
+import tenant0017 from "../migrations/tenant/0017_prebuilds.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -33,4 +34,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0014_host_usage", sql: tenant0014 },
   { name: "0015_snapshot_packs", sql: tenant0015 },
   { name: "0016_turn_host", sql: tenant0016 },
+  { name: "0017_prebuilds", sql: tenant0017 },
 ];

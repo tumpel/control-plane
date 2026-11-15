@@ -25,12 +25,14 @@ const NOUNS = {
   Turns: "turn",
   Transcripts: "transcript",
   Snapshots: "snapshot",
+  Prebuilds: "prebuild",
 };
 const VERBS = {
   EnrolmentTokens_mint: "mint-token",
   Turns_getFailure: "failure",
   Sessions_listCredentialHandovers: "handovers",
   Sessions_listStopFailures: "stop-failures",
+  Prebuilds_getFailure: "failure",
 };
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
@@ -117,7 +119,7 @@ const render = (rows, excluded) =>
     `${Object.entries(NOUNS)
       .map(([group, noun]) => `${group} \`${noun || "(none)"}\``)
       .join(", ")}.`,
-    "`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure`,",
+    "`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,",
     "`Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb",
     "`stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in",
     "principal reads it too. The CLI's `transcript read` takes a turnId and reads that turn's lines of its",

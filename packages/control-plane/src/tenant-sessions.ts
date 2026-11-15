@@ -385,7 +385,9 @@ export class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  private personaRow(personaId: string): { secretSetId: string; gitAuthorName: string; gitAuthorEmail: string } | null {
+  protected personaRow(
+    personaId: string,
+  ): { secretSetId: string; gitAuthorName: string; gitAuthorEmail: string } | null {
     const [row] = this.ctx.storage.sql
       .exec<{ secret_set_id: string; git_author_name: string; git_author_email: string }>(
         "SELECT secret_set_id, git_author_name, git_author_email FROM personas WHERE persona_id = ?",
