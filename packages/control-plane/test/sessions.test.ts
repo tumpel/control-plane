@@ -679,15 +679,8 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   const last = await tool("tumpel_transcript_read", { sessionId, after: 2 }, TranscriptPageSchema);
   assert.equal(last.cursor, 3);
   assert.equal(last.finished, true);
-  const pastDropped = await tool(
-    "tumpel_transcript_read",
-    { sessionId, compact: true, limit: 1 },
-    TranscriptPageSchema,
-  );
-  assert.deepEqual(
-    pastDropped.lines.map(({ lineSeq, text }) => ({ lineSeq, text })),
-    [{ lineSeq: 2, text: "on it" }],
-  );
+  const pastDropped = await tool("tumpel_transcript_read", { sessionId, compact: true, limit: 1 }, CompactPageSchema);
+  assert.deepEqual(pastDropped.turns, [{ turnId, lines: [{ lineSeq: 2, text: "on it" }] }]);
   assert.equal(pastDropped.cursor, 2);
 
   const request = await host.next("SnapshotRequest");
