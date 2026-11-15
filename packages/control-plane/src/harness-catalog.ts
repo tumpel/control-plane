@@ -18,6 +18,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "ClaudeCode",
     harnessVersion: CLAUDE_CODE_VERSION,
+    credentialChoice: "CatalogOrder",
     credentials: [
       { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [] },
       { provider: "Anthropic", kind: "SubscriptionToken", variable: "CLAUDE_CODE_OAUTH_TOKEN", fixed: [] },
@@ -34,6 +35,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "Codex",
     harnessVersion: CODEX_VERSION,
+    credentialChoice: "CatalogOrder",
     credentials: [
       { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [] },
       {
@@ -49,6 +51,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "OpenCode",
     harnessVersion: OPENCODE_VERSION,
+    credentialChoice: "ModelProvider",
     credentials: [
       { provider: "OpenRouter", kind: "ApiKey", variable: "OPENROUTER_API_KEY", fixed: [] },
       { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [] },
@@ -67,6 +70,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "PiDev",
     harnessVersion: PI_VERSION,
+    credentialChoice: "ModelProvider",
     credentials: [
       { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [] },
       { provider: "Anthropic", kind: "SubscriptionToken", variable: "ANTHROPIC_OAUTH_TOKEN", fixed: [] },

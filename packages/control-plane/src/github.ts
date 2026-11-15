@@ -1,6 +1,6 @@
+import type { DispatchVariable } from "@tumpel/api/credentials";
 import type { GitHubIssueSchema, GitHubRepositorySchema, RepositoryCredentialSourceSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import type { DispatchVariable } from "./dispatch-variables.ts";
 import {
   type GitHubAccountsRefreshStateSchema,
   GitHubAppConversionSchema,
