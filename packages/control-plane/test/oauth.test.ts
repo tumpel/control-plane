@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   OAuthClientSchema,
   OAuthErrorSchema,
+  OAuthGrantSchema,
   OAuthTokenSchema,
   ProblemSchema,
   ProtectedResourceMetadataSchema,
@@ -45,6 +46,15 @@ const serviceToken = (commonName: string): Record<string, string> => {
   const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
   const header = encode({ alg: "RS256", kid: KID, typ: "JWT" });
   const payload = encode({ iss: issuer, aud: [AUDIENCE], common_name: commonName, iat: now, nbf: now, exp: now + 600 });
+  const signature = sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url");
+  return { "cf-access-jwt-assertion": `${header}.${payload}.${signature}` };
+};
+
+const person = (email: string): Record<string, string> => {
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const header = encode({ alg: "RS256", kid: KID, typ: "JWT" });
+  const payload = encode({ iss: issuer, aud: [AUDIENCE], email, iat: now, nbf: now, exp: now + 600 });
   const signature = sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url");
   return { "cf-access-jwt-assertion": `${header}.${payload}.${signature}` };
 };
@@ -288,24 +298,26 @@ test("redeeming a spent authorization code again revokes the tokens it issued", 
   assert.equal((await mcp(issued.access_token, 2, "tools/list")).status, 401);
 });
 
-const dashboardSignIn = async (): Promise<z.infer<typeof OAuthTokenSchema>> => {
-  const pair = pkce();
+const dashboardConsent = async (challenge: string): Promise<URL> => {
   const ask = new URLSearchParams({
     response_type: "code",
     client_id: DASHBOARD_CLIENT,
     redirect_uri: DASHBOARD_CALLBACK,
     state: "dashboard-state",
-    code_challenge: pair.challenge,
+    code_challenge: challenge,
     code_challenge_method: "S256",
   });
   const redirected = await call(`/oauth/authorize?${ask}`);
   assert.equal(redirected.status, 303);
   const consentAt = new URL(redirected.headers.get("location") ?? "");
   assert.equal(consentAt.pathname, "/oauth/consent");
+  return consentAt;
+};
 
-  assert.equal((await call(consentAt.toString())).status, 401);
-
-  const granted = await call(consentAt.toString(), { headers: serviceToken(PROOF_COMMON_NAME) });
+const dashboardToken = async (
+  granted: HarnessResponse,
+  verifier: string,
+): Promise<z.infer<typeof OAuthTokenSchema>> => {
   assert.equal(granted.status, 303);
   const callback = new URL(granted.headers.get("location") ?? "");
   assert.equal(`${callback.origin}${callback.pathname}`, DASHBOARD_CALLBACK);
@@ -315,12 +327,55 @@ const dashboardSignIn = async (): Promise<z.infer<typeof OAuthTokenSchema>> => {
     grant_type: "authorization_code",
     client_id: DASHBOARD_CLIENT,
     code: callback.searchParams.get("code") ?? "",
-    code_verifier: pair.verifier,
+    code_verifier: verifier,
     redirect_uri: DASHBOARD_CALLBACK,
   });
   assert.equal(issued.status, 200);
   return OAuthTokenSchema.parse(await issued.json());
 };
+
+const dashboardSignIn = async (): Promise<z.infer<typeof OAuthTokenSchema>> => {
+  const pair = pkce();
+  const consentAt = await dashboardConsent(pair.challenge);
+  assert.equal((await call(consentAt.toString())).status, 401);
+  return dashboardToken(await call(consentAt.toString(), { headers: serviceToken(PROOF_COMMON_NAME) }), pair.verifier);
+};
+
+test("an Access email with no tenant signs up on the dashboard's consent page and finishes the same sign-in", async () => {
+  const email = "first-run@example.test";
+  const pair = pkce();
+  const consentAt = await dashboardConsent(pair.challenge);
+  const form = await call(consentAt.toString(), { headers: person(email) });
+  assert.equal(form.status, 200);
+  assert.match(await form.text(), /Create your tenant/);
+
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { ...person(email), origin, "content-type": "application/json" },
+    body: JSON.stringify({ name: "First run", gitAuthorName: "First Run", gitAuthorEmail: "first-run@example.test" }),
+  });
+  assert.equal(created.status, 200);
+
+  const signedIn = await dashboardToken(await call(consentAt.toString(), { headers: person(email) }), pair.verifier);
+  const bearer = { authorization: `Bearer ${signedIn.access_token}` };
+  const whoami = WhoamiSchema.parse(await (await call("/v1/whoami", { headers: bearer })).json());
+  assert.deepEqual([whoami.tenant.name, whoami.principal.email, whoami.principal.role], ["First run", email, "Owner"]);
+
+  const grants = OAuthGrantSchema.array().parse(await (await call("/v1/oauth-grants", { headers: bearer })).json());
+  assert.deepEqual(
+    grants.map((grant) => [grant.clientId, grant.redirectOrigin]),
+    [[DASHBOARD_CLIENT, DASHBOARD]],
+  );
+});
+
+test("a connector's consent for an Access email with no tenant still refuses: sign-up is the dashboard's step", async () => {
+  const client = OAuthClientSchema.parse(await (await register({ redirect_uris: [CALLBACK] })).json());
+  const refused = await call((await consentUrl(client.client_id, pkce().challenge)).toString(), {
+    headers: person("no-tenant@example.test"),
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(ProblemSchema.parse(await refused.json()).title, "No tenant");
+});
 
 test("the dashboard client skips the approval step but not Access, and its access token reaches a REST route", async () => {
   const signedIn = await dashboardSignIn();

@@ -206,7 +206,7 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   assert.equal(planned.code, 0, planned.stderr);
   assert.equal(planned.stdout.trim(), "no changes; the tenant matches the file");
 
-  const rotated = await tumpel(["config", "apply", file, "--rewrite-secrets", "prod"], {
+  const rotated = await tumpel(["config", "apply", file], {
     TUMPEL_E2E_ANTHROPIC_KEY: `${SECRET}-rotated`,
   });
   assert.equal(rotated.code, 0, rotated.stderr);

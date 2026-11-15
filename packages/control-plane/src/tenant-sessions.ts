@@ -469,7 +469,7 @@ export class TenantSessions extends DurableObject<Env> {
 
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
     const name = this.secretSetName(session);
-    return `${hostDetail}. The credential comes from secret set ${name}; replace its value with tumpel config apply --rewrite-secrets ${name}, then send the turn again`;
+    return `${hostDetail}. The credential comes from secret set ${name}; replace its value with tumpel config apply, then send the turn again`;
   }
 
   private refusedCredential(session: SessionRow, now: number): CredentialRefusal | null {
@@ -1243,7 +1243,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "CredentialExpired",
-        `subscription token ${dispatch.name} of secret set ${secretSetId} expired at ${dispatch.expiresAt}; write a fresh token and its expiresAt with tumpel config apply --rewrite-secrets, then send the turn again`,
+        `subscription token ${dispatch.name} of secret set ${secretSetId} expired at ${dispatch.expiresAt}; write a fresh token and its expiresAt with tumpel config apply, then send the turn again`,
         iso(now),
       );
       return { kind: "Withdrawn" };

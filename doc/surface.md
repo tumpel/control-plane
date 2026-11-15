@@ -6,7 +6,7 @@ fails when an operation lacks a tool or a command, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`.
 `EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in
@@ -49,6 +49,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `NamespaceConnections_delete`        | `tumpel_namespace_delete`         | `tumpel namespace delete`         |
 | `NamespaceConnections_get`           | `tumpel_namespace_get`            | `tumpel namespace get`            |
 | `NamespaceConnections_start`         | `tumpel_namespace_start`          | `tumpel namespace start`          |
+| `OAuthGrants_list`                   | `tumpel_oauth_grant_list`         | `tumpel oauth-grant list`         |
 | `Personas_create`                    | `tumpel_persona_create`           | `tumpel persona create`           |
 | `Personas_delete`                    | `tumpel_persona_delete`           | `tumpel persona delete`           |
 | `Personas_get`                       | `tumpel_persona_get`              | `tumpel persona get`              |
@@ -76,6 +77,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Sessions_stop`                      | `tumpel_session_stop`             | `tumpel session stop`             |
 | `Snapshots_get`                      | `tumpel_snapshot_get`             | `tumpel snapshot get`             |
 | `Snapshots_list`                     | `tumpel_snapshot_list`            | `tumpel snapshot list`            |
+| `TenantConfigs_apply`                | `tumpel_config_apply`             | `tumpel config apply`             |
+| `TenantConfigs_plan`                 | `tumpel_config_plan`              | `tumpel config plan`              |
 | `Transcripts_read`                   | `tumpel_transcript_read`          | `tumpel transcript read`          |
 | `Turns_get`                          | `tumpel_turn_get`                 | `tumpel turn get`                 |
 | `Turns_getFailure`                   | `tumpel_turn_failure`             | `tumpel turn failure`             |
