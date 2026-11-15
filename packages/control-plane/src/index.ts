@@ -15,7 +15,6 @@ import {
   HostEnrolSchema,
   HostLabelsSchema,
   IssuerJwksSchema,
-  IssuerKeyRotationSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
@@ -1033,32 +1032,6 @@ const handleDeviceDeny = async (request: Request, url: URL, env: Env): Promise<R
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
-const notTheOperator = (): Response =>
-  problem(403, {
-    code: "Forbidden",
-    title: "Only the operator tooling rotates",
-    detail: "the issuer key rotates for the proof service token of this stage only, not for a person",
-    fix: "Run npm run issuer:rotate, which signs in with the stage's proof service token",
-  });
-
-const handleIssuerRotate = async (request: Request, url: URL, env: Env): Promise<Response> => {
-  const signed = await assertedSigner(request, env);
-  if (!signed.ok) return browserSignedOut(url, signed.reason);
-  const refused = sameOriginJson(request, url);
-  if (refused) return refused;
-  if (signed.kind !== "ServiceToken") return notTheOperator();
-  const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
-  if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheOperator();
-  const rotation = await issuerOf(env).rotate();
-  return json(
-    IssuerKeyRotationSchema.parse({
-      signingKid: rotation.signingKid,
-      kid: rotation.kid,
-      signsFrom: new Date(rotation.signsFrom).toISOString(),
-    }),
-  );
-};
-
 const handleIssuerHost = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const issuer = issuerOf(env);
   if (request.method === "GET" && url.pathname === OPENID_CONFIGURATION_PATH) {
@@ -1389,7 +1362,6 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
   "GET /v1/enrolment-tokens": handleListEnrolmentTokens,
-  "POST /v1/issuer-keys/rotate": handleIssuerRotate,
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,
