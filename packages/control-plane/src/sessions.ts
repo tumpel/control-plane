@@ -30,11 +30,12 @@ import type {
   StartedSession,
   StartedSessionFromIssue,
   StopFailure,
+  TranscriptCursor,
   Turn,
   TurnFailure,
 } from "./tenant-sessions";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
-import { compactorOf, DEFAULT_PAGE_BYTES, decodeLines, pageOf } from "./transcript";
+import { compactorOf, DEFAULT_PAGE_BYTES, decodeLines, pageOf, type TranscriptLine } from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
@@ -463,23 +464,31 @@ export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): 
   });
 };
 
+const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLine[]> => {
+  if (cursor.kind === "Lines") return cursor.lines;
+  const object = await env.STORE.get(cursor.storageKey, { range: cursor.range });
+  if (object === null) throw new Error(`transcript chunk ${cursor.storageKey} is indexed but missing from the store`);
+  return decodeLines(await object.text());
+};
+
 export const readTranscript = async (
   env: Env,
   caller: Caller,
   sessionId: string,
   query: TranscriptQuery,
 ): Promise<Outcome<TranscriptPage>> => {
-  const after = query.after ?? 0;
   const compact = query.compact ?? false;
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
-  const cursor = await tenantOf(env, caller).transcriptCursor(
-    caller.tenantId,
-    sessionId,
-    after,
-    query.turnId ?? null,
-    query.limit ?? settingsOf(env).transcriptChunkLines,
-    compact ? null : maxBytes,
-  );
+  const readAfter = (after: number) =>
+    tenantOf(env, caller).transcriptCursor(
+      caller.tenantId,
+      sessionId,
+      after,
+      query.turnId ?? null,
+      query.limit ?? settingsOf(env).transcriptChunkLines,
+      compact ? null : maxBytes,
+    );
+  const cursor = await readAfter(query.after ?? 0);
   if (cursor === null) return sessionNotFound(sessionId);
   const compactor = compact ? compactorOf(cursor.harness) : null;
   if (compact && compactor === null) {
@@ -490,25 +499,25 @@ export const readTranscript = async (
       fix: "Read the transcript without compact",
     });
   }
-  const lines =
-    cursor.kind === "Lines"
-      ? cursor.lines
-      : await (async () => {
-          const object = await env.STORE.get(cursor.storageKey, { range: cursor.range });
-          if (object === null) {
-            throw new Error(`transcript chunk ${cursor.storageKey} is indexed but missing from the store`);
-          }
-          return decodeLines(await object.text());
-        })();
-  const page = pageOf(lines, after, compactor, maxBytes);
-  return ok(
-    TranscriptPageSchema.parse({
-      sessionState: cursor.sessionState,
-      lines: page.lines,
-      cursor: page.cursor,
-      finished: !cursor.inFlight && page.cursor >= cursor.lastLineSeq,
-    }),
-  );
+  let after = query.after ?? 0;
+  let read = cursor;
+  for (;;) {
+    const page = pageOf(await linesOf(env, read), after, compactor, maxBytes);
+    if (page.lines.length > 0 || page.cursor === after || page.cursor >= read.lastLineSeq) {
+      return ok(
+        TranscriptPageSchema.parse({
+          sessionState: read.sessionState,
+          lines: page.lines,
+          cursor: page.cursor,
+          finished: !read.inFlight && page.cursor >= read.lastLineSeq,
+        }),
+      );
+    }
+    const next = await readAfter(page.cursor);
+    if (next === null) return sessionNotFound(sessionId);
+    after = page.cursor;
+    read = next;
+  }
 };
 
 export const listStopFailures = async (
