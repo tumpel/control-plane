@@ -1,4 +1,9 @@
-import { type ClaudeSetupFailureReasonSchema, ClaudeSetupSchema, ClaudeSetupStateSchema } from "@tumpel/api/schemas";
+import {
+  type ClaudeSetupFailureReasonSchema,
+  ClaudeSetupMemberSchema,
+  ClaudeSetupSchema,
+  ClaudeSetupStateSchema,
+} from "@tumpel/api/schemas";
 import type { z } from "zod";
 import type { ClaudeSetupBoxOffer, GuestImageDownload } from "./channel/protocol.ts";
 import type { Settings } from "./settings.ts";
@@ -6,7 +11,9 @@ import type { Settings } from "./settings.ts";
 export type ClaudeSetup = z.infer<typeof ClaudeSetupSchema>;
 export type ClaudeSetupFailureReason = z.infer<typeof ClaudeSetupFailureReasonSchema>;
 
-export const CLAUDE_SETUP_MEMBER = "CLAUDE_CODE_OAUTH_TOKEN";
+export const CLAUDE_SETUP_MEMBER = ClaudeSetupMemberSchema.enum.CLAUDE_CODE_OAUTH_TOKEN;
+
+export const TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
 
 export type ClaudeSetupState = ClaudeSetup["status"]["state"];
 
@@ -115,6 +122,15 @@ export const stateOf = (row: ClaudeSetupRow): ClaudeSetupState => ClaudeSetupSta
 
 const iso = (at: number): string => new Date(at).toISOString();
 
+const endedAt = (row: ClaudeSetupRow): string => {
+  if (row.ended_at === null) {
+    throw new Error(
+      `Claude setup ${row.claude_setup_id} is ${row.state} and has no ended_at; the row was written without one`,
+    );
+  }
+  return iso(row.ended_at);
+};
+
 export const boxEndsAt = (createdAt: number, budgets: ClaudeSetupBudgets): number =>
   createdAt +
   (budgets.claudeSetupUrlBudgetSeconds + budgets.claudeSetupCodeBudgetSeconds + budgets.claudeSetupMintBudgetSeconds) *
@@ -129,11 +145,11 @@ const statusOf = (row: ClaudeSetupRow): Record<string, unknown> => {
       state: row.state,
       memberName: CLAUDE_SETUP_MEMBER,
       expiresAt: row.expires_at,
-      completedAt: iso(row.ended_at ?? row.updated_at),
+      completedAt: endedAt(row),
     };
   }
   if (row.state === "Failed") {
-    return { state: row.state, reason: row.reason, detail: row.detail, failedAt: iso(row.ended_at ?? row.updated_at) };
+    return { state: row.state, reason: row.reason, detail: row.detail, failedAt: endedAt(row) };
   }
   return { state: row.state };
 };

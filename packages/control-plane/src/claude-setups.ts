@@ -104,14 +104,14 @@ const writeToken = async (request: Request, env: Env, claudeSetupId: string): Pr
   if (credential === "") return boxTokenRefused("the request carries no Authorization: Bearer token");
   const body = await parseBody(request, ClaudeSetupTokenWriteSchema, "claudeSetupBoxes.writeToken");
   if (!body.ok) return body.response;
-  const { tenantId, value, expiresAt } = body.value;
+  const { tenantId, value } = body.value;
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
   if (tenant === null) return boxTokenRefused(`no Claude setup ${claudeSetupId} takes this token`);
   const stored = await env.TENANT.getByName(tenantId).writeClaudeSetupToken(
     tenantId,
     claudeSetupId,
     credential,
-    { value, expiresAt },
+    value,
     Date.now(),
   );
   if (stored.kind === "Stored") return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });

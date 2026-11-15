@@ -14,6 +14,7 @@ import {
   type ClaudeSetupRow,
   setupOffer,
   stateOf,
+  TOKEN_LIFETIME_MS,
   toClaudeSetup,
 } from "./claude-setup.ts";
 import { base64Url, sameSecret } from "./crypto";
@@ -185,7 +186,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     tenantId: string,
     claudeSetupId: string,
     credential: string,
-    token: { value: string; expiresAt: string },
+    token: string,
     now: number,
   ): Promise<ClaudeSetupStored> {
     const row = this.claudeSetupRow(claudeSetupId);
@@ -200,7 +201,8 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       };
     }
     const { secret_set_id: secretSetId } = row;
-    const sealed = await seal(await this.dataKey(), token.value, sealContext(secretSetId, CLAUDE_SETUP_MEMBER));
+    const sealed = await seal(await this.dataKey(), token, sealContext(secretSetId, CLAUDE_SETUP_MEMBER));
+    const expiresAt = new Date(now + TOKEN_LIFETIME_MS).toISOString();
     const sql = this.ctx.storage.sql;
     const written = this.ctx.storage.transactionSync((): TokenWritten => {
       const [set] = sql.exec("SELECT 1 FROM secret_sets WHERE secret_set_id = ?", secretSetId).toArray();
@@ -220,7 +222,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       const completed = sql.exec(
         `UPDATE claude_setups SET state = 'Completed', expires_at = ?, sealed_code = NULL, ended_at = ?, updated_at = ?
         WHERE claude_setup_id = ? AND state = 'Minting'`,
-        token.expiresAt,
+        expiresAt,
         now,
         now,
         claudeSetupId,
@@ -251,7 +253,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         "INSERT INTO secret_expiries (secret_set_id, name, expires_at) VALUES (?, ?, ?)",
         secretSetId,
         CLAUDE_SETUP_MEMBER,
-        token.expiresAt,
+        expiresAt,
       );
       sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
       return { kind: "Written" };

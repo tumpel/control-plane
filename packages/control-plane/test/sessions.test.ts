@@ -737,7 +737,7 @@ test("a setup box token writes its own setup's member once, only while the setup
   const write = (claudeSetupId: string, credential: string, tenantId = first.tenantId) =>
     postJson(
       `/v1/claude-setups/${claudeSetupId}/token`,
-      { tenantId, value: token, expiresAt: "2027-11-15T17:09:00+00:00" },
+      { tenantId, value: token },
       { authorization: `Bearer ${credential}` },
     );
   const status = (claudeSetupId: string) => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);

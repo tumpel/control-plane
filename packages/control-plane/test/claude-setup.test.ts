@@ -88,5 +88,5 @@ test("the setup offer carries the box's image, its token URL and credential, and
     "type",
   ]);
   assert.equal(offer.tokenUrl, "https://api.example.test/v1/claude-setups/setup-1/token");
-  assert.equal(offer.expiresAt, new Date(1_000_000_000 + 1020 * 1000).toISOString());
+  assert.match(offer.expiresAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/);
 });

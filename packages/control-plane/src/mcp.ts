@@ -545,7 +545,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/claude-setups/{claudeSetupId}",
     ClaudeSetupPathSchema,
-    "Read one Claude setup. Returns the ClaudeSetup of GET /v1/claude-setups/{claudeSetupId}; status.state is Starting, AwaitingCode with signInUrl and codeDueAt, Minting, Completed with the member CLAUDE_CODE_OAUTH_TOKEN and its expiresAt, or Failed with reason SetupUrlMissing, CodeRejected, SetupTimedOut or TokenNotStored and a detail naming the fix. It never carries the token.",
+    "Read one Claude setup. Returns the ClaudeSetup of GET /v1/claude-setups/{claudeSetupId}; status.state is Starting, AwaitingCode with signInUrl and codeDueAt, Minting, Completed with the member CLAUDE_CODE_OAUTH_TOKEN and its expiresAt, or Failed with reason SetupUrlMissing, CodeRejected, SetupTimedOut, TokenNotStored or NoHostOnline and a detail naming the fix. It never carries the token.",
   ),
   rest(
     "tumpel_prebuild_get",
