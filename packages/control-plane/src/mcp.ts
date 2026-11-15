@@ -443,7 +443,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/connections",
     NO_ARGUMENTS,
-    "List one row per connection kind: GitHub, GitHubActions, CircleCI, Namespace and OpenRouter, each NotConfigured, NotConnected or Connected with the account it bills. Returns the ConnectionSummary[] of GET /v1/connections.",
+    "List one row per connection kind: GitHub, GitHubActions, CircleCI, Namespace and OpenRouter, each NotConfigured, NotConnected or Connected with what it is connected as: GitHub logins, a build provider's account label, or the secret sets that hold an OpenRouter key. Returns the ConnectionSummary[] of GET /v1/connections.",
   ),
   rest(
     "tumpel_github_actions_get",
@@ -591,14 +591,14 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/openrouter-connection/authorize",
     OpenRouterAuthorizationStartSchema,
-    "Start minting an OpenRouter API key into a secret set through OpenRouter's PKCE flow, so the person copies no key. Takes {secretSetId, returnUrl?}: returnUrl is a dashboard page to land on afterwards, by default the secret set's page. Returns the OpenRouterAuthorization of POST /v1/openrouter-connection/authorize, AwaitingCallback with authorizeUrl and callbackDueAt, 10 minutes out. Give the person authorizeUrl; OpenRouter sends their browser back to the control plane, which spends the code and stores the key as OPENROUTER_API_KEY for OpenRouter. The code and the key never pass through MCP. Read the outcome with tumpel_openrouter_get_authorization.",
+    "Start minting an OpenRouter API key into a secret set through OpenRouter's PKCE flow, so the person copies no key. Takes {secretSetId}; the browser lands on the secret set's page afterwards. Returns the OpenRouterAuthorization of POST /v1/openrouter-connection/authorize, AwaitingCallback with authorizeUrl and callbackDueAt, 10 minutes out. Give the person authorizeUrl; OpenRouter sends their browser back to the control plane, which spends the code and stores the key as OPENROUTER_API_KEY for OpenRouter. The code and the key never pass through MCP. Read the outcome with tumpel_openrouter_get_authorization.",
   ),
   rest(
     "tumpel_openrouter_get_authorization",
     "GET",
     "/v1/openrouter-connection/authorizations/{openRouterAuthorizationId}",
     OpenRouterAuthorizationPathSchema,
-    "Read one OpenRouter authorization you started; one read past its callbackDueAt reads Failed. Returns the OpenRouterAuthorization of GET /v1/openrouter-connection/authorizations/{openRouterAuthorizationId}; status.state is AwaitingCallback with authorizeUrl, Completed with the member OPENROUTER_API_KEY and the keyLabel it carries on OpenRouter, or Failed with reason AuthorizationTimedOut, NotConnected, CodeRefused, ExchangeFailed or KeyNotStored and a detail naming the fix. It never carries the key.",
+    "Read one OpenRouter authorization you started. Returns the OpenRouterAuthorization of GET /v1/openrouter-connection/authorizations/{openRouterAuthorizationId}; status.state is AwaitingCallback with authorizeUrl, Exchanging while the control plane spends the code, Completed with the keyLabel the key OPENROUTER_API_KEY carries on OpenRouter, or Failed with reason AuthorizationTimedOut, NotConnected, CodeRefused, ExchangeFailed or KeyNotStored and a detail naming the fix. It never carries the key.",
   ),
   rest(
     "tumpel_prebuild_get",

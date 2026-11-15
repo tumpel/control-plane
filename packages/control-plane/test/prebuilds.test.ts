@@ -12,9 +12,11 @@ import {
   DeviceTokenSchema,
   GitHubActionsConnectionLinkSchema,
   NamespaceConnectionLinkSchema,
+  OpenRouterAuthorizationSchema,
   PersonaSchema,
   PrebuildSchema,
   ProblemSchema,
+  SecretSetSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -23,6 +25,9 @@ import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
 type TenantStub = { recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown> };
+type OpenRouterTenant = {
+  openRouterAuthorizationDeadlineReached(deadline: { openRouterAuthorizationId: string; at: number }): Promise<void>;
+};
 
 const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
@@ -34,6 +39,9 @@ const CIRCLECI_PROJECT = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const CIRCLECI_DEFINITION = "11111111-2222-4333-8444-555555555555";
 const FOREIGN_DEFINITION = "99999999-2222-4333-8444-555555555555";
 const PROJECT_SLUG = `circleci/${CIRCLECI_ORGANIZATION}/${CIRCLECI_PROJECT}`;
+const OPENROUTER_CODE = "openrouter-approved-code";
+const OPENROUTER_KEY = "openrouter-minted-key";
+const keyExchanges: { code: string; code_verifier: string }[] = [];
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
@@ -119,6 +127,20 @@ const fakeCircleCI = (path: string, token: unknown): { status: number; body: unk
 before(async () => {
   certs = createServer((request, response) => {
     const path = request.url ?? "";
+    if (request.method === "POST" && path === "/openrouter/api/v1/auth/keys") {
+      let body = "";
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        const grant = JSON.parse(body);
+        keyExchanges.push(grant);
+        const approved = grant.code === OPENROUTER_CODE;
+        response.writeHead(approved ? 200 : 403, { "content-type": "application/json" });
+        response.end(JSON.stringify(approved ? { key: OPENROUTER_KEY } : { error: { message: "Invalid code" } }));
+      });
+      return;
+    }
     if (!path.startsWith("/circleci/api/v2/")) {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ keys: [jwk] }));
@@ -141,6 +163,7 @@ before(async () => {
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
           CIRCLECI_API_ORIGIN: `${issuer}/circleci`,
+          OPENROUTER_ORIGIN: `${issuer}/openrouter`,
         },
       },
     ],
@@ -332,4 +355,76 @@ test("CircleCI connects only with a token CircleCI accepts, binds a repository t
     (await refused("DELETE", `/v1/circleci-projects/${bound.circleCIProjectId}`, undefined, 404)).code,
     "NotFound",
   );
+});
+
+test("Connect OpenRouter spends one code into the secret set, fails on its deadline, and refuses a forged state and a second OpenRouter credential", async () => {
+  const authorize = "/v1/openrouter-connection/authorize";
+  const read = (openRouterAuthorizationId: string) =>
+    rest(OpenRouterAuthorizationSchema, "GET", `/v1/openrouter-connection/authorizations/${openRouterAuthorizationId}`);
+  const callbackOf = (authorizeUrl: string): string =>
+    new URL(new URL(authorizeUrl).searchParams.get("callback_url") ?? "").pathname;
+  const set = await rest(SecretSetSchema, "POST", "/v1/secret-sets", { name: "openrouter", secrets: [] });
+
+  const started = await rest(OpenRouterAuthorizationSchema, "POST", authorize, { secretSetId: set.secretSetId });
+  assert.ok(started.status.state === "AwaitingCallback");
+  assert.equal(new URL(started.status.authorizeUrl).searchParams.get("code_challenge_method"), "S256");
+  const callback = callbackOf(started.status.authorizeUrl);
+  const landed = await send("GET", `${callback}?code=${OPENROUTER_CODE}`, undefined);
+  assert.equal(landed.status, 303);
+  const back = new URL(landed.headers.get("location") ?? "");
+  assert.equal(back.pathname, `/t/${set.tenantId}/secrets/${set.secretSetId}`);
+  assert.equal(back.searchParams.get("openRouterAuthorizationId"), started.openRouterAuthorizationId);
+  assert.equal(keyExchanges.length, 1);
+  assert.equal(keyExchanges[0]?.code, OPENROUTER_CODE);
+
+  const stored = await rest(SecretSetSchema, "GET", `/v1/secret-sets/${set.secretSetId}`);
+  assert.deepEqual(
+    stored.keys.map((key) => (key.kind === "ApiKey" ? [key.name, key.provider] : [key.name])),
+    [["OPENROUTER_API_KEY", "OpenRouter"]],
+  );
+  const completed = await read(started.openRouterAuthorizationId);
+  assert.equal(completed.status.state, "Completed");
+  assert.doesNotMatch(JSON.stringify([stored, completed]), new RegExp(OPENROUTER_KEY));
+  assert.deepEqual(
+    (await rest(ConnectionRows, "GET", "/v1/connections")).find((row) => row.kind === "OpenRouter"),
+    { kind: "OpenRouter", state: "Connected", account: "openrouter" },
+  );
+
+  assert.equal((await send("GET", `${callback}?code=${OPENROUTER_CODE}`, undefined)).status, 303);
+  assert.equal(keyExchanges.length, 1);
+
+  const [body, signature] = callback.slice("/openrouter/callback/".length).split(".");
+  const claims = JSON.parse(Buffer.from(body ?? "", "base64url").toString());
+  const forged = Buffer.from(JSON.stringify({ ...claims, tenantId: "tnt_other" })).toString("base64url");
+  const refusedState = await send(
+    "GET",
+    `/openrouter/callback/${forged}.${signature}?code=${OPENROUTER_CODE}`,
+    undefined,
+  );
+  assert.equal(refusedState.status, 400);
+  assert.equal(keyExchanges.length, 1);
+
+  const late = await rest(OpenRouterAuthorizationSchema, "POST", authorize, { secretSetId: set.secretSetId });
+  assert.ok(late.status.state === "AwaitingCallback");
+  const tenant = (
+    await server.getWorker<{ TENANT: { getByName(name: string): OpenRouterTenant } }>().getEnv()
+  ).TENANT.getByName(set.tenantId);
+  await tenant.openRouterAuthorizationDeadlineReached({
+    openRouterAuthorizationId: late.openRouterAuthorizationId,
+    at: Date.parse(late.status.callbackDueAt),
+  });
+  const timedOut = await read(late.openRouterAuthorizationId);
+  assert.ok(timedOut.status.state === "Failed");
+  assert.equal(timedOut.status.reason, "AuthorizationTimedOut");
+  assert.equal(
+    (await send("GET", `${callbackOf(late.status.authorizeUrl)}?code=${OPENROUTER_CODE}`, undefined)).status,
+    303,
+  );
+  assert.equal(keyExchanges.length, 1);
+
+  const other = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {
+    name: "pasted openrouter",
+    secrets: [{ kind: "ApiKey", name: "OTHER_OPENROUTER_KEY", provider: "OpenRouter", value: "pasted-openrouter-key" }],
+  });
+  assert.equal((await refused("POST", authorize, { secretSetId: other.secretSetId }, 409)).code, "Conflict");
 });

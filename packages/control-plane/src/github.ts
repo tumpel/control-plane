@@ -638,7 +638,7 @@ export const verifyWebhookSignature = async (
   return crypto.subtle.verify("HMAC", key, hexBytes(hex), body);
 };
 
-export const signState = async (key: CryptoKey, claims: GitHubState): Promise<string> => {
+export const signState = async <T>(key: CryptoKey, claims: T): Promise<string> => {
   const body = base64UrlJson(claims);
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
   return `${body}.${base64Url(new Uint8Array(signature))}`;
@@ -646,11 +646,10 @@ export const signState = async (key: CryptoKey, claims: GitHubState): Promise<st
 
 export type StateCheck<T> = { ok: true; claims: T } | { ok: false; reason: string };
 
-export const readState = async <T extends GitHubState>(
+export const readSignedState = async <T>(
   key: CryptoKey,
   state: string,
   schema: z.ZodType<T>,
-  now: number,
 ): Promise<StateCheck<T>> => {
   const [body, signature, extra] = state.split(".");
   const signatureBytes = signature === undefined ? null : fromBase64Url(signature);
@@ -662,11 +661,22 @@ export const readState = async <T extends GitHubState>(
     return { ok: false, reason: "the state is not one this control plane signed" };
   }
   const parsed = schema.safeParse(parseJson(decoder.decode(bodyBytes)));
-  if (!parsed.success) return { ok: false, reason: "the state was signed for another step of the GitHub setup" };
-  if (Date.parse(parsed.data.expiresAt) <= now) {
-    return { ok: false, reason: `the state expired at ${parsed.data.expiresAt}` };
-  }
+  if (!parsed.success) return { ok: false, reason: "the state was signed for another step or another flow" };
   return { ok: true, claims: parsed.data };
+};
+
+export const readState = async <T extends GitHubState>(
+  key: CryptoKey,
+  state: string,
+  schema: z.ZodType<T>,
+  now: number,
+): Promise<StateCheck<T>> => {
+  const read = await readSignedState(key, state, schema);
+  if (!read.ok) return read;
+  if (Date.parse(read.claims.expiresAt) <= now) {
+    return { ok: false, reason: `the state expired at ${read.claims.expiresAt}` };
+  }
+  return read;
 };
 
 export interface CommitIdentity {

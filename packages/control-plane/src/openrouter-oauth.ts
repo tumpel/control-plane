@@ -1,20 +1,15 @@
-import type {
-  OpenRouterAuthorizationFailureReasonSchema,
-  OpenRouterAuthorizationSchema,
-  OpenRouterAuthorizationStateSchema,
-} from "@tumpel/api/schemas";
+import type { OpenRouterAuthorizationFailureReasonSchema, OpenRouterAuthorizationSchema } from "@tumpel/api/schemas";
 import { z } from "zod";
-import type { Fetch } from "./github.ts";
+import { type Fetch, parseJson } from "./github.ts";
 
 export type OpenRouterAuthorization = z.infer<typeof OpenRouterAuthorizationSchema>;
 export type OpenRouterAuthorizationFailureReason = z.infer<typeof OpenRouterAuthorizationFailureReasonSchema>;
-export type OpenRouterAuthorizationState = z.infer<typeof OpenRouterAuthorizationStateSchema>;
 
-export const OPENROUTER_ORIGIN = "https://openrouter.ai";
 export const OPENROUTER_MEMBER = "OPENROUTER_API_KEY";
 export const OPENROUTER_PROVIDER = "OpenRouter";
 export const CALLBACK_PATH = "/openrouter/callback/";
 export const CALLBACK_BUDGET_SECONDS = 600;
+export const EXCHANGE_BUDGET_SECONDS = 60;
 export const STATE_PURPOSE = "tumpel-openrouter-state-v1";
 
 const EXCHANGE_TIMEOUT_MS = 15_000;
@@ -22,59 +17,13 @@ const KEY_LABEL_LIMIT = 100;
 export const CONNECT_AGAIN =
   "choose Connect OpenRouter again on the secret set's page in the dashboard, or run tumpel openrouter authorize";
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
-const StateClaimsSchema = z.object({
+export const StateClaimsSchema = z.object({
   purpose: z.literal("OpenRouterAuthorization"),
   tenantId: z.string().min(1),
   openRouterAuthorizationId: z.string().min(1),
 });
 
 export type StateClaims = z.infer<typeof StateClaimsSchema>;
-
-const base64Url = (bytes: Uint8Array): string => {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-};
-
-const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> | null => {
-  if (!/^[A-Za-z0-9_-]+$/.test(text) || text.length % 4 === 1) return null;
-  return Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (char) => char.charCodeAt(0));
-};
-
-const parseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-};
-
-export const signState = async (key: CryptoKey, claims: StateClaims): Promise<string> => {
-  const body = base64Url(encoder.encode(JSON.stringify(claims)));
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
-  return `${body}.${base64Url(new Uint8Array(signature))}`;
-};
-
-export type StateCheck = { ok: true; claims: StateClaims } | { ok: false; reason: string };
-
-export const readState = async (key: CryptoKey, state: string): Promise<StateCheck> => {
-  const refused = {
-    ok: false,
-    reason: "the callback address carries a state this control plane did not sign",
-  } as const;
-  const [body, signature, extra] = state.split(".");
-  if (body === undefined || signature === undefined || extra !== undefined) return refused;
-  const bodyBytes = fromBase64Url(body);
-  const signatureBytes = fromBase64Url(signature);
-  if (bodyBytes === null || signatureBytes === null) return refused;
-  if (!(await crypto.subtle.verify("HMAC", key, signatureBytes, encoder.encode(body)))) return refused;
-  const claims = StateClaimsSchema.safeParse(parseJson(decoder.decode(bodyBytes)));
-  if (!claims.success) return { ok: false, reason: "the callback address carries a state signed for another flow" };
-  return { ok: true, claims: claims.data };
-};
 
 export const callbackUrl = (controlPlaneOrigin: string, state: string): string =>
   new URL(`${CALLBACK_PATH}${state}`, controlPlaneOrigin).toString();
@@ -85,8 +34,11 @@ export const stateOfPath = (pathname: string): string | null => {
   return state === "" || state.includes("/") ? null : state;
 };
 
-export const authorizeUrl = (request: { callbackUrl: string; challenge: string; keyLabel: string }): string => {
-  const url = new URL("/auth", OPENROUTER_ORIGIN);
+export const authorizeUrl = (
+  openRouterOrigin: string,
+  request: { callbackUrl: string; challenge: string; keyLabel: string },
+): string => {
+  const url = new URL(`${openRouterOrigin}/auth`);
   url.search = new URLSearchParams({
     callback_url: request.callbackUrl,
     code_challenge: request.challenge,
@@ -116,35 +68,11 @@ export const parseCallback = (search: URLSearchParams): OpenRouterCallback => {
   return { kind: "Code", code };
 };
 
-export type OpenRouterAuthorizationEvent = { kind: "Callback"; now: number; dueAt: number } | { kind: "Deadline" };
+export const timedOutDetail = (openRouterAuthorizationId: string): string =>
+  `no callback with a code reached OpenRouter authorization ${openRouterAuthorizationId} within ${CALLBACK_BUDGET_SECONDS / 60} minutes, the lifetime OpenRouter gives a code; ${CONNECT_AGAIN} and approve on OpenRouter within that time`;
 
-export type OpenRouterAuthorizationStep =
-  | { kind: "Proceed" }
-  | { kind: "Fail"; reason: OpenRouterAuthorizationFailureReason; detail: string }
-  | { kind: "Refuse"; detail: string }
-  | { kind: "Ignore" };
-
-const timedOut = (openRouterAuthorizationId: string): OpenRouterAuthorizationStep => ({
-  kind: "Fail",
-  reason: "AuthorizationTimedOut",
-  detail: `no callback with a code reached OpenRouter authorization ${openRouterAuthorizationId} within ${CALLBACK_BUDGET_SECONDS / 60} minutes, the lifetime OpenRouter gives a code; ${CONNECT_AGAIN} and approve on OpenRouter within that time`,
-});
-
-export const advanceAuthorization = (
-  openRouterAuthorizationId: string,
-  state: OpenRouterAuthorizationState,
-  event: OpenRouterAuthorizationEvent,
-): OpenRouterAuthorizationStep => {
-  if (state !== "AwaitingCallback") {
-    if (event.kind === "Deadline") return { kind: "Ignore" };
-    return {
-      kind: "Refuse",
-      detail: `OpenRouter authorization ${openRouterAuthorizationId} is ${state} and takes no callback`,
-    };
-  }
-  if (event.kind === "Deadline" || event.now >= event.dueAt) return timedOut(openRouterAuthorizationId);
-  return { kind: "Proceed" };
-};
+export const exchangeStoppedDetail = (openRouterAuthorizationId: string, keyLabel: string): string =>
+  `OpenRouter authorization ${openRouterAuthorizationId} stopped spending its code before it stored a key; if https://openrouter.ai/settings/keys lists a key labelled ${keyLabel}, delete it, then ${CONNECT_AGAIN}`;
 
 export const notConnectedDetail = (): string =>
   `OpenRouter sent the browser back without a code, as it does when the authorization is declined; ${CONNECT_AGAIN} and choose Authorize on OpenRouter's page`;
@@ -171,8 +99,12 @@ export type KeyExchange =
   | { kind: "Refused"; detail: string }
   | { kind: "Failed"; detail: string };
 
-export const exchangeCode = async (fetcher: Fetch, grant: { code: string; verifier: string }): Promise<KeyExchange> => {
-  const response = await fetcher(new URL("/api/v1/auth/keys", OPENROUTER_ORIGIN).toString(), {
+export const exchangeCode = async (
+  fetcher: Fetch,
+  openRouterOrigin: string,
+  grant: { code: string; verifier: string },
+): Promise<KeyExchange> => {
+  const response = await fetcher(`${openRouterOrigin}/api/v1/auth/keys`, {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json", "user-agent": "tumpel" },
     body: JSON.stringify({ code: grant.code, code_verifier: grant.verifier, code_challenge_method: "S256" }),
