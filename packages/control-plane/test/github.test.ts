@@ -190,7 +190,11 @@ test("an installation token is minted for the session's repository, by the insta
   const now = Date.parse("2026-11-15T10:00:00Z");
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs1Pem)) };
   const installation = { installationId: 7, accountLogin: "Octo", status: "Active" as const };
-  const { fetcher, calls } = spiedFetch(201, { token: "ghs_minted", expires_at: "2026-11-15T11:00:00Z" });
+  const { fetcher, calls } = spiedFetch(201, {
+    token: "ghs_minted",
+    expires_at: "2026-11-15T11:00:00Z",
+    permissions: { contents: "write" },
+  });
 
   const minted = await mintInstallationToken(
     fetcher,
@@ -200,7 +204,12 @@ test("an installation token is minted for the session's repository, by the insta
     { owner: "octo", name: "widgets" },
     now,
   );
-  assert.deepEqual(minted, { kind: "Minted", token: "ghs_minted", expiresAt: "2026-11-15T11:00:00Z" });
+  assert.deepEqual(minted, {
+    kind: "Minted",
+    token: "ghs_minted",
+    expiresAt: "2026-11-15T11:00:00Z",
+    permissions: { contents: "write" },
+  });
   assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
   assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { repositories: ["widgets"] });
 
@@ -382,7 +391,11 @@ const gitHubIssue = (number: number, pullRequest: boolean) => ({
 
 test("an installation-wide token is minted without naming repositories", async () => {
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
-  const { fetcher, calls } = spiedFetch(201, { token: "ghs_wide", expires_at: "2026-11-15T11:00:00Z" });
+  const { fetcher, calls } = spiedFetch(201, {
+    token: "ghs_wide",
+    expires_at: "2026-11-15T11:00:00Z",
+    permissions: {},
+  });
   assert.deepEqual(
     await mintInstallationWideToken(fetcher, "https://api.github.com", app, 7, Date.parse("2026-11-15T10:00:00Z")),
     {

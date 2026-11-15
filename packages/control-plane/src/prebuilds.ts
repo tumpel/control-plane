@@ -83,7 +83,26 @@ const dispatchRefused = (detail: string): Refused =>
     code: "DispatchRefused",
     title: "GitHub refused the dispatch",
     detail,
-    fix: "Commit the caller workflow the GitHub Actions connection names to the default branch with on: workflow_dispatch, accept the GitHub App's actions write permission, then start the prebuild again",
+    fix: "Start the prebuild again; if GitHub keeps refusing, check https://www.githubstatus.com",
+  });
+
+const listed = (names: string[]): string =>
+  names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+
+const appPermissionMissing = (target: GitHubRepository, permissions: string[]): Refused =>
+  refuse(409, {
+    code: "GitHubAppPermissionMissing",
+    title: "GitHub App needs more access",
+    detail: `the Tumpel app on GitHub needs Read and write access to ${listed(permissions)} to add its prebuild workflow to ${target.owner}/${target.name} and start it, and ${target.owner} has not granted that yet`,
+    fix: `On GitHub, open the settings of ${target.owner}, go to GitHub Apps, choose Configure next to the Tumpel app, then Review request and Accept new permissions; then start the prebuild again`,
+  });
+
+const callerWorkflowRefused = (detail: string): Refused =>
+  refuse(409, {
+    code: "CallerWorkflowRefused",
+    title: "Prebuild workflow not added",
+    detail: `Tumpel could not add its prebuild workflow to the repository: ${detail}`,
+    fix: "Start the prebuild again; if the default branch is protected, allow the Tumpel app to push to it first",
   });
 
 const pipelineRefused = (detail: string): Refused =>
@@ -145,6 +164,8 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
       fix: "Install it with tumpel github start on the repository's owner, then start the prebuild again",
     });
   }
+  if (dispatched.kind === "PermissionMissing") return appPermissionMissing(target, dispatched.permissions);
+  if (dispatched.kind === "CallerRefused") return callerWorkflowRefused(dispatched.detail);
   if (dispatched.kind === "Refused") return dispatchRefused(dispatched.detail);
   return ok(dispatched.prebuild);
 };

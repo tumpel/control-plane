@@ -172,6 +172,17 @@ export const GitHubReadingSchema = z.object({
 export const GitHubInstallationTokenSchema = z.object({
   token: z.string(),
   expires_at: OffsetDateTimeSchema,
+  permissions: z.record(z.string(), z.string()),
+});
+
+export const GitHubFileSchema = z.object({
+  sha: z.string().min(1),
+  encoding: z.literal("base64"),
+  content: z.string(),
+});
+
+export const GitHubFileCommitSchema = z.object({
+  commit: z.object({ sha: z.string().min(1), parents: z.array(z.object({ sha: z.string().min(1) })) }),
 });
 
 export const GitHubUserTokenSchema = z.union([

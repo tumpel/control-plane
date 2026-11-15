@@ -27,7 +27,13 @@ import {
   REPOSITORY_TOKEN,
   repositoryCredential,
 } from "./github.ts";
-import { type DispatchedRun, dispatchCallerWorkflow, type PrebuildInputs, type RunEvent } from "./github-actions.ts";
+import {
+  type DispatchedRun,
+  dispatchCallerWorkflow,
+  type PrebuildInputs,
+  type RunEvent,
+  syncCallerWorkflow,
+} from "./github-actions.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
@@ -167,6 +173,8 @@ export interface PrebuildStartRecord {
 export type DispatchedPrebuild =
   | { kind: "Dispatched"; prebuild: Prebuild }
   | { kind: "NoInstallation" }
+  | { kind: "PermissionMissing"; permissions: string[] }
+  | { kind: "CallerRefused"; detail: string }
   | { kind: "Refused"; detail: string };
 
 type PrebuildFailurePhase = PrebuildFailure["phase"];
@@ -561,6 +569,25 @@ export class TenantPrebuilds extends TenantSessions {
     const minted: Minted = await this.repositoryToken(tenantId, target, now);
     if (minted.kind === "NoToken") return { kind: "NoInstallation" };
     if (minted.kind !== "Minted") return { kind: "Refused", detail: minted.detail };
+    const caller = await syncCallerWorkflow(
+      (url, init) => fetch(url, init),
+      this.env.GITHUB_API_ORIGIN,
+      minted,
+      target,
+      {
+        path: callerWorkflow,
+        branch: start.defaultBranch,
+      },
+    );
+    if (caller.kind === "PermissionMissing") return caller;
+    if (caller.kind === "Refused") return { kind: "CallerRefused", detail: caller.detail };
+    if (caller.kind === "Committed" && !caller.parentShas.includes(start.headSha)) {
+      return {
+        kind: "CallerRefused",
+        detail: `${start.key.repository} took a new commit on ${start.defaultBranch} while Tumpel added its prebuild workflow there, so the dependency files the prebuild read may have changed`,
+      };
+    }
+    const headSha = caller.kind === "Committed" ? caller.commitSha : start.headSha;
     const inputs: PrebuildInputs = {
       prebuildId,
       tenantId,
@@ -584,7 +611,7 @@ export class TenantPrebuilds extends TenantSessions {
           key: start.key,
           defaultBranch: start.defaultBranch,
           provider: "GitHubActions",
-          run: { runId: answer.value.runId, headSha: start.headSha },
+          run: { runId: answer.value.runId, headSha },
           logUrl: answer.value.htmlUrl,
         },
         now,
