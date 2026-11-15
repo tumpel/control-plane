@@ -1,3 +1,4 @@
+import { type CredentialRefusal, checkModelCredential, credentialProblem } from "@tumpel/api/credentials";
 import {
   SessionListQuerySchema,
   SessionPathSchema,
@@ -9,7 +10,6 @@ import {
   TurnSendSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
@@ -85,35 +85,8 @@ const turnNotFound = (turnId: string): Refused =>
     fix: "List the session's turns and use one of their ids",
   });
 
-export const credentialRefused = (
-  refusal: CredentialRefusal,
-  owner: string,
-  harness: string,
-  retry: string,
-): Refused => {
-  if (refusal.kind === "NoCredential") {
-    return refuse(422, {
-      code: "NoCredential",
-      title: "No provider credential",
-      detail: `${owner} holds no credential ${harness} reads: ${refusal.accepted.map(({ kind, provider }) => `a ${kind} for ${provider}`).join(", or ")}`,
-      fix: `Add one of those to that secret set, then ${retry}`,
-    });
-  }
-  if (refusal.kind === "Unsupported") {
-    return refuse(422, {
-      code: "CredentialKindUnsupported",
-      title: "Credential kind not accepted by the harness",
-      detail: `${owner} holds ${refusal.name}, a ${refusal.credentialKind}, and ${harness} accepts only ${refusal.supported.join(", ")}`,
-      fix: `Replace ${refusal.name} with a ${refusal.supported.join(" or ")} in that secret set, then ${retry}`,
-    });
-  }
-  return refuse(422, {
-    code: "CredentialExpired",
-    title: "Subscription token expired",
-    detail: `subscription token ${refusal.name} of ${owner} expired at ${refusal.expiresAt}`,
-    fix: `Write a fresh token and its expiresAt to that secret set, then ${retry}`,
-  });
-};
+export const credentialRefused = (refusal: CredentialRefusal, owner: string, harness: string, retry: string): Refused =>
+  refuse(422, credentialProblem(refusal, owner, harness, retry));
 
 export const why = (refused: Unplaceable): string => {
   const named = `${refused.host.name} (${refused.host.hostId})`;
@@ -220,7 +193,7 @@ const prepareStart = async (
   }
   if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet("sessions.start", read));
   const { secretSet } = read;
-  const credential = checkCredential(entry, secretSet.keys, now);
+  const credential = checkModelCredential(entry, secretSet.keys, start.model, now);
   if (credential.kind !== "Usable") {
     return credentialRefused(
       credential,

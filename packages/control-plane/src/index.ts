@@ -1,3 +1,4 @@
+import { checkCredential } from "@tumpel/api/credentials";
 import {
   DeviceApprovalSchema,
   DeviceAuthorizationSchema,
@@ -82,7 +83,6 @@ import {
   revokeDevice,
   startDeviceCode,
 } from "./device";
-import { checkCredential } from "./dispatch-variables.ts";
 import { type GitHubUser, REPOSITORY_TOKEN, tokenUser } from "./github.ts";
 import { handleGitHubConnection, handleGitHubPage, handleGitHubWebhook } from "./github-handlers.ts";
 import { effectiveVersions, HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";

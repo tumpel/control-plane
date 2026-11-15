@@ -1,5 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  type CredentialRefusal,
+  checkModelCredential,
+  credentialProblem,
+  dispatchVariables,
+  type SecretMember,
+} from "@tumpel/api/credentials";
+import {
   CredentialHandoverSchema,
   type SessionIssueSchema,
   SessionSchema,
@@ -23,7 +30,6 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
-import { type CredentialRefusal, checkCredential, dispatchVariables, type SecretMember } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
 import {
   botLogin,
@@ -440,7 +446,7 @@ export class TenantSessions extends DurableObject<Env> {
         `member ${stored.name} of secret set ${persona.secretSetId} no longer matches its kind (${stored.detail}); write it again, then send the turn again`,
       );
     }
-    const checked = checkCredential(entry, stored.keys, now);
+    const checked = checkModelCredential(entry, stored.keys, session.model, now);
     return checked.kind === "Usable" ? null : checked;
   }
 
@@ -1253,25 +1259,11 @@ export class TenantSessions extends DurableObject<Env> {
       );
     }
     const { secretSetId } = persona;
-    const dispatch = dispatchVariables(entry, await this.members(secretSetId), now);
-    if (dispatch.kind === "NoCredential") {
-      throw new Error(
-        `secret set ${secretSetId} holds no credential ${session.harness} accepts for turn ${turnId}; add ${dispatch.accepted.map(({ kind, provider }) => `a ${kind} for ${provider}`).join(", or ")} to the secret set`,
-      );
-    }
-    if (dispatch.kind === "Unsupported") {
-      throw new Error(
-        `secret set ${secretSetId} holds ${dispatch.name}, a ${dispatch.credentialKind}, which ${session.harness} does not accept for turn ${turnId}; it accepts ${dispatch.supported.join(", ")}`,
-      );
-    }
-    if (dispatch.kind === "Expired") {
-      await this.failTurn(
-        tenantId,
-        turnId,
-        "CredentialExpired",
-        `subscription token ${dispatch.name} of secret set ${secretSetId} expired at ${dispatch.expiresAt}; write a fresh token and its expiresAt to the secret set, then send the turn again`,
-        iso(now),
-      );
+    const dispatch = dispatchVariables(entry, await this.members(secretSetId), session.model, now);
+    if (dispatch.kind !== "Ready") {
+      const refused = credentialProblem(dispatch, `secret set ${secretSetId}`, session.harness, "send the turn again");
+      if (dispatch.kind !== "Expired") throw new Error(`turn ${turnId}: ${refused.detail}; ${refused.fix}`);
+      await this.failTurn(tenantId, turnId, "CredentialExpired", `${refused.detail}; ${refused.fix}`, iso(now));
       return { kind: "Withdrawn" };
     }
     const settings = settingsOf(this.env);
