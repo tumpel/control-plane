@@ -24,7 +24,7 @@ const PREBUILD_ARCHITECTURE = "Amd64";
 
 const CONNECT_COMMANDS: Record<BuildProvider, string> = {
   GitHubActions: "tumpel github-actions start",
-  CircleCI: "tumpel circleci start --token-stdin",
+  CircleCI: "tumpel circleci authorize",
   Namespace: "tumpel namespace start",
 };
 

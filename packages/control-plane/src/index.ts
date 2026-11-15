@@ -58,6 +58,7 @@ import {
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
+import { handleCircleCIAuthorizations } from "./circleci-authorizations.ts";
 import { handleCircleCIEvents } from "./circleci-events.ts";
 import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
@@ -201,6 +202,7 @@ export interface Env extends SignerEnv {
   GITHUB_WEB_ORIGIN: string;
   CIRCLECI_API_ORIGIN: string;
   CIRCLECI_OIDC_ORIGIN: string;
+  CIRCLECI_APP_ORIGIN: string;
 }
 
 let verifier: { key: string; verify: Verify } | undefined;
@@ -1422,6 +1424,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (claudeSetups) return claudeSetups;
   const connections =
     (await handleConnections(request, url, env, deviceCaller)) ??
+    (await handleCircleCIAuthorizations(request, url, env, deviceCaller)) ??
     (await handleCircleCIProjects(request, url, env, deviceCaller));
   if (connections) return connections;
   const members = await handleMembers(request, url, env, {

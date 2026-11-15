@@ -104,6 +104,8 @@ const ALLOWLIST = {
 const CLI_ONLY = {
   ClaudeSetups_submitCode:
     "takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it",
+  CircleCIConnections_complete:
+    "takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it",
 };
 
 const tools = () => new Set([...readFileSync(MCP, "utf8").matchAll(/"(tumpel_[a-z_]+)"/g)].map((match) => match[1]));

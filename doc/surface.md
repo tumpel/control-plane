@@ -23,6 +23,9 @@ nothing: the server cannot read your environment, so they return the config entr
 
 | Operation                            | MCP tool                          | CLI command                       |
 | ------------------------------------ | --------------------------------- | --------------------------------- |
+| `CircleCIConnections_authorize`      | `tumpel_circleci_authorize`       | `tumpel circleci authorize`       |
+| `CircleCIConnections_choose`         | `tumpel_circleci_choose`          | `tumpel circleci choose`          |
+| `CircleCIConnections_complete`       | `(none)`                          | `tumpel circleci complete`        |
 | `CircleCIConnections_delete`         | `tumpel_circleci_delete`          | `tumpel circleci delete`          |
 | `CircleCIConnections_get`            | `tumpel_circleci_get`             | `tumpel circleci get`             |
 | `CircleCIConnections_start`          | `tumpel_circleci_start`           | `tumpel circleci start`           |
@@ -109,6 +112,7 @@ nothing: the server cannot read your environment, so they return the config entr
 CLI only: tenant operations with a CLI command and no MCP tool:
 
 - `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
+- `CircleCIConnections_complete`: takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it.
 
 Allowlist: operations that are not tenant operations, with no tool or command:
 

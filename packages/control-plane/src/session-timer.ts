@@ -12,7 +12,8 @@ export type DeadlineName =
   | "TeardownAnswer"
   | "HostOffline"
   | PrebuildDeadlineName
-  | "ClaudeSetup";
+  | "ClaudeSetup"
+  | "CircleCIAuthorization";
 
 export type PrebuildDeadlineName = "PrebuildDispatch" | "PrebuildBuild";
 
@@ -30,6 +31,11 @@ export interface ClaudeSetupDeadline {
   at: number;
 }
 
+export interface CircleCIAuthorizationDeadline {
+  circleCIAuthorizationId: string;
+  at: number;
+}
+
 export interface PrebuildDeadline {
   prebuildId: string;
   at: number;
@@ -41,11 +47,16 @@ type DeadlineOf<N extends DeadlineName> = N extends "ImageFetch"
     ? PrebuildDeadline
     : N extends "ClaudeSetup"
       ? ClaudeSetupDeadline
-      : Deadline;
+      : N extends "CircleCIAuthorization"
+        ? CircleCIAuthorizationDeadline
+        : Deadline;
 
 export type DueDeadline = { [N in DeadlineName]: { name: N; deadline: DeadlineOf<N> } }[DeadlineName];
 
-export type SessionDueDeadline = Exclude<DueDeadline, { name: PrebuildDeadlineName | "ClaudeSetup" }>;
+export type SessionDueDeadline = Exclude<
+  DueDeadline,
+  { name: PrebuildDeadlineName | "ClaudeSetup" | "CircleCIAuthorization" }
+>;
 
 export type PrebuildDueDeadline = Extract<DueDeadline, { name: PrebuildDeadlineName }>;
 
@@ -85,6 +96,8 @@ export class SessionTimer extends DurableObject<Env> {
     const tenant = this.env.TENANT.getByName(timers.tenantId);
     for (const reached of due) {
       if (reached.name === "ClaudeSetup") await tenant.claudeSetupDeadlineReached(timers.tenantId, reached.deadline);
+      else if (reached.name === "CircleCIAuthorization")
+        await tenant.circleCIAuthorizationDeadlineReached(reached.deadline);
       else if (isPrebuildDeadline(reached)) await tenant.prebuildDeadlineReached(timers.tenantId, reached);
       else await tenant.deadlineReached(timers.tenantId, reached);
     }

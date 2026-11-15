@@ -3,15 +3,18 @@ import {
   CircleCIConnectionStartSchema,
   ConnectedConnectionSchema,
   type ConnectionSummarySchema,
+  ExpiringConnectionSchema,
   GitHubActionsConnectionLinkSchema,
   GitHubActionsConnectionStartSchema,
   NamespaceConnectionLinkSchema,
   NamespaceConnectionStartSchema,
   NotConfiguredConnectionSchema,
   NotConnectedConnectionSchema,
+  ReconnectConnectionSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { CIRCLECI_CONFIG_EXAMPLE, CIRCLECI_ORB, circleCIIssuer, readMe } from "./circleci.ts";
+import { credentialStanding } from "./circleci-oauth.ts";
 import { deleteCircleCIWebhooks } from "./circleci-projects.ts";
 import { CALLER_WORKFLOW_EXAMPLE, REUSABLE_WORKFLOW } from "./github-actions.ts";
 import { installationsOf, storedApp } from "./github-store.ts";
@@ -59,15 +62,32 @@ const summary = (kind: string, account: string | null, configured: boolean): Con
   return ConnectedConnectionSchema.parse({ kind, state: "Connected", account });
 };
 
+const expiresAtOf = (row: CircleCIRow): number | null =>
+  row.credential.kind === "Authorized" ? row.credential.expiresAt : null;
+
+const circleCISummary = (row: CircleCIRow | null, now: number): ConnectionSummary => {
+  if (row === null) return summary("CircleCI", null, true);
+  const standing = credentialStanding(expiresAtOf(row), now);
+  const account = row.accountLabel;
+  if (standing.state === "Expiring") {
+    return ExpiringConnectionSchema.parse({ kind: "CircleCI", account, ...standing });
+  }
+  if (standing.state === "Reconnect") {
+    return ReconnectConnectionSchema.parse({ kind: "CircleCI", account, ...standing });
+  }
+  return summary("CircleCI", account, true);
+};
+
 export const listConnections = async (env: Env, caller: Caller): Promise<ConnectionSummary[]> => {
   const app = await storedApp(env.DB);
   const installations = app === null ? [] : await installationsOf(env.DB, caller.tenantId);
   const logins = installations.map((installation) => installation.accountLogin).join(", ");
-  const accounts = await tenantOf(env, caller).connectedAccounts();
+  const tenant = tenantOf(env, caller);
+  const accounts = await tenant.connectedAccounts();
   return [
     summary("GitHub", logins === "" ? null : logins, app !== null),
     summary("GitHubActions", accounts.GitHubActions, true),
-    summary("CircleCI", accounts.CircleCI, true),
+    circleCISummary(await tenant.circleCIConnection(), Date.now()),
     summary("Namespace", accounts.Namespace, stageIssuer(env.ISSUER_HOSTNAME) !== null),
   ];
 };
@@ -98,21 +118,27 @@ const namespaceLink = (tenantId: string, issuer: string | null, row: NamespaceRo
   };
 };
 
+const circleCIConnectionOf = (env: Env, tenantId: string, row: CircleCIRow): unknown => ({
+  circleCIConnectionId: row.circleCIConnectionId,
+  tenantId,
+  accountLabel: row.accountLabel,
+  organizationId: row.organizationId,
+  issuer: circleCIIssuer(env.CIRCLECI_OIDC_ORIGIN, row.organizationId),
+  credential:
+    row.credential.kind === "Authorized"
+      ? { kind: "Authorized", expiresAt: new Date(row.credential.expiresAt).toISOString() }
+      : { kind: "Pasted" },
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
+
 const circleCILink = (env: Env, tenantId: string, row: CircleCIRow | null): unknown => {
   const link =
     row === null
       ? { state: "NotConnected" }
       : {
-          state: "Connected",
-          connection: {
-            circleCIConnectionId: row.circleCIConnectionId,
-            tenantId,
-            accountLabel: row.accountLabel,
-            organizationId: row.organizationId,
-            issuer: circleCIIssuer(env.CIRCLECI_OIDC_ORIGIN, row.organizationId),
-            createdAt: row.createdAt,
-            updatedAt: row.updatedAt,
-          },
+          state: credentialStanding(expiresAtOf(row), Date.now()).state === "Reconnect" ? "Reconnect" : "Connected",
+          connection: circleCIConnectionOf(env, tenantId, row),
         };
   return CircleCIConnectionLinkSchema.parse({
     tenantId,

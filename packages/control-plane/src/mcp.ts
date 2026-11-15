@@ -1,5 +1,6 @@
 import {
   ApiKeyMemberSchema,
+  CircleCIAuthorizationChooseSchema,
   CircleCIConnectionStartSchema,
   CircleCIProjectAddSchema,
   CircleCIProjectPathSchema,
@@ -485,6 +486,20 @@ export const TOOLS: ToolDefinition[] = [
     request: null,
     answer: "circleCIStartCommand",
   },
+  rest(
+    "tumpel_circleci_authorize",
+    "POST",
+    "/v1/circleci-connection/authorize",
+    NO_ARGUMENTS,
+    "Start connecting the tenant's CircleCI organization through CircleCI's OAuth consent page, the way that needs no token from the user. Returns the CircleCIAuthorization of POST /v1/circleci-connection/authorize, AwaitingRedirect with authorizeUrl and redirectDueAt. Give the person authorizeUrl; after they choose Allow the browser lands on a 127.0.0.1 address whose code never passes through MCP, so they run tumpel circleci authorize on their machine instead, which listens there, or paste that address into tumpel circleci complete --stdin. With several organizations the authorization turns ChoosingOrganization; pick one with tumpel_circleci_choose.",
+  ),
+  rest(
+    "tumpel_circleci_choose",
+    "POST",
+    "/v1/circleci-connection/choose",
+    CircleCIAuthorizationChooseSchema,
+    "Connect the organization a ChoosingOrganization CircleCI authorization lists. Takes {circleCIAuthorizationId, organizationId}. Returns the CircleCIAuthorization of POST /v1/circleci-connection/choose, Completed with the organization and the token's expiresAt.",
+  ),
   rest(
     "tumpel_circleci_delete",
     "DELETE",

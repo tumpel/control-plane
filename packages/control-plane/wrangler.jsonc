@@ -24,6 +24,7 @@
     "GITHUB_WEB_ORIGIN": "https://github.com",
     "CIRCLECI_API_ORIGIN": "https://circleci.com",
     "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
+    "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -76,6 +77,7 @@
         "GITHUB_WEB_ORIGIN": "https://github.com",
         "CIRCLECI_API_ORIGIN": "https://circleci.com",
         "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
+        "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,
