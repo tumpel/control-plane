@@ -134,6 +134,7 @@ export interface Dispatch {
   personaId: string;
   key: PrebuildKey;
   configSource: ConfigSource;
+  defaultCommands: string[];
   target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
@@ -225,6 +226,7 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
       personaId: dispatch.personaId,
       key,
       configSource: dispatch.configSource,
+      defaultCommands: dispatch.defaultCommands,
       target: dispatch.target,
       defaultBranch: dispatch.defaultBranch,
       headSha: dispatch.headSha,
@@ -340,6 +342,7 @@ export const startPrebuild = async (
       personaId: start.personaId,
       key,
       configSource: inputs.configSource,
+      defaultCommands: inputs.defaultCommands,
       target,
       defaultBranch: inputs.defaultBranch,
       headSha: inputs.headSha,
