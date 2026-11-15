@@ -30,7 +30,7 @@ export interface InputFile {
 }
 
 export type Inputs =
-  | { kind: "Read"; files: InputFile[] }
+  | { kind: "Read"; files: InputFile[]; defaultBranch: string }
   | { kind: "Empty"; detail: string }
   | { kind: "Unreadable"; detail: string };
 
@@ -99,5 +99,5 @@ export const readInputs = async (fetcher: Fetch, target: GitHubRepository, token
       detail: `${repository} holds no file under .devcontainer/, no .devcontainer.json and none of ${LOCKFILES.join(", ")} at its root on ${branch}, so a prebuild has nothing to install`,
     };
   }
-  return { kind: "Read", files };
+  return { kind: "Read", files, defaultBranch: branch };
 };

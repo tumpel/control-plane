@@ -57,10 +57,7 @@ const SETTINGS = {
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
   prebuildUploadBudgetSeconds: 60,
-  buildProviderIssuers: {
-    gitHubActions: "https://token.actions.githubusercontent.com",
-    namespaceBuilds: "https://federation.namespaceapis.com",
-  },
+  gitHubActionsIssuer: "https://token.actions.githubusercontent.com",
 };
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });

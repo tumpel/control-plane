@@ -71,6 +71,7 @@ test("the inputs are the root lockfiles and every blob under .devcontainer, read
       { path: ".devcontainer/Dockerfile", blobSha: "b1" },
       { path: ".devcontainer/scripts/setup.sh", blobSha: "b5" },
     ],
+    defaultBranch: "trunk",
   });
   assert.deepEqual(
     calls.map((call) => call.url),

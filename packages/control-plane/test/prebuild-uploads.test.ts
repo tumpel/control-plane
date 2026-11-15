@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, mock, test } from "node:test";
+import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DeviceAuthorizationSchema,
@@ -15,7 +15,6 @@ import {
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import { verifyJobToken } from "../src/job-token.ts";
 
 const ACCESS_AUD = "tumpel-prebuild-uploads-e2e";
 const ACCESS_KID = "access-key";
@@ -26,7 +25,6 @@ const CALLER_WORKFLOW = ".github/workflows/tumpel-prebuild.yml";
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = rsa();
 const job = rsa();
-const stranger = rsa();
 const publicJwk = (key: KeyObject, kid: string) => ({
   ...key.export({ format: "jwk" }),
   kid,
@@ -38,61 +36,10 @@ const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).to
 
 const signed = (header: Record<string, unknown>, claims: Record<string, unknown>, key: KeyObject): string => {
   const body = `${encode(header)}.${encode(claims)}`;
-  const signature =
-    header.alg === "ES256"
-      ? sign("SHA256", Buffer.from(body), { key, dsaEncoding: "ieee-p1363" })
-      : sign("RSA-SHA256", Buffer.from(body), key);
-  return `${body}.${signature.toString("base64url")}`;
+  return `${body}.${sign("RSA-SHA256", Buffer.from(body), key).toString("base64url")}`;
 };
 
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
-
-test("a job token is accepted when its issuer signed it for this audience, and refused naming the failed check", async () => {
-  const issuer = "https://jobs.example.test";
-  const ec = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const keys = [publicJwk(job.publicKey, "rsa-key"), { ...ec.publicKey.export({ format: "jwk" }), kid: "ec-key" }];
-  const fetched: string[] = [];
-  const fetchSpy = mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
-    const url = String(input);
-    fetched.push(url);
-    if (url === `${issuer}/.well-known/openid-configuration`) {
-      return Response.json({ issuer, jwks_uri: `${issuer}/keys` });
-    }
-    if (url === `${issuer}/keys`) return Response.json({ keys: [...keys, { kty: "OKP", kid: "skipped" }] });
-    return new Response("not found", { status: 404 });
-  });
-  const audience = "https://api.example.test";
-  const claims = { iss: issuer, aud: audience, exp: nowSeconds() + 300, repository: "acme/app" };
-  const rs256 = (overrides: Record<string, unknown>, kid = "rsa-key", key = job.privateKey) =>
-    signed({ alg: "RS256", kid, typ: "JWT" }, { ...claims, ...overrides }, key);
-
-  const accepted = await verifyJobToken(rs256({}), issuer, audience, Date.now());
-  assert.ok(accepted.ok);
-  assert.equal(accepted.claims.repository, "acme/app");
-  assert.deepEqual(fetched, [`${issuer}/.well-known/openid-configuration`, `${issuer}/keys`]);
-
-  const es256 = signed({ alg: "ES256", kid: "ec-key" }, { ...claims, aud: [audience, "other"] }, ec.privateKey);
-  assert.ok((await verifyJobToken(es256, issuer, audience, Date.now())).ok);
-  assert.equal(fetched.length, 2);
-
-  const refusals: [string, string][] = [
-    [rs256({ aud: "https://github.com/acme" }), "aud"],
-    [rs256({ exp: nowSeconds() - 120 }), "exp"],
-    [rs256({ iss: "https://other.example.test" }), "iss"],
-    [rs256({}, "unknown-key"), "kid"],
-    [rs256({}, "rsa-key", stranger.privateKey), "signature"],
-    [signed({ alg: "ES256", kid: "rsa-key" }, claims, ec.privateKey), "signature"],
-    [signed({ alg: "HS256", kid: "rsa-key" }, claims, job.privateKey), "token"],
-    ["not-a-jwt", "token"],
-  ];
-  for (const [token, check] of refusals) {
-    const refused = await verifyJobToken(token, issuer, audience, Date.now());
-    assert.ok(!refused.ok, check);
-    assert.equal(refused.check, check);
-  }
-  assert.equal(fetched.length, 2, "an unknown kid inside the refresh floor fetches no keys again");
-  fetchSpy.mock.restore();
-});
 
 let keys: Server;
 let server: TestHarness;
@@ -104,7 +51,10 @@ let tenantId: string;
 let personaId: string;
 
 type Store = { put(key: string, value: Uint8Array): Promise<unknown> };
-type TenantStub = { recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown> };
+type TenantStub = {
+  recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown>;
+  recordPrebuildBuilding(prebuildId: string, now: number): Promise<boolean>;
+};
 type Bindings = { STORE: Store; TENANT: { getByName(name: string): TenantStub } };
 
 const assertion = (): string => {
@@ -124,15 +74,17 @@ const send = (method: string, path: string, body: unknown, headers: Record<strin
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 
-const jobToken = (overrides: Record<string, unknown> = {}, kid = JOB_KID): string =>
+const jobToken = (overrides: Record<string, unknown> = {}): string =>
   signed(
-    { alg: "RS256", kid, typ: "JWT" },
+    { alg: "RS256", kid: JOB_KID, typ: "JWT" },
     {
       iss: githubIssuer,
       aud: origin,
       exp: nowSeconds() + 300,
       repository: "Acme/App",
       workflow_ref: `Acme/App/${CALLER_WORKFLOW}@refs/heads/main`,
+      ref: "refs/heads/main",
+      event_name: "workflow_dispatch",
       job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/tags/v1",
       run_id: "42",
       ...overrides,
@@ -146,8 +98,7 @@ before(async () => {
   keys = createServer((request, response) => {
     const routes: Record<string, unknown> = {
       "/cdn-cgi/access/certs": { keys: [publicJwk(access.publicKey, ACCESS_KID)] },
-      "/github/.well-known/openid-configuration": { issuer: githubIssuer, jwks_uri: `${githubIssuer}/jwks` },
-      "/github/jwks": { keys: [publicJwk(job.publicKey, JOB_KID)] },
+      "/github/.well-known/jwks": { keys: [publicJwk(job.publicKey, JOB_KID)] },
     };
     const body = routes[request.url ?? ""];
     response.writeHead(body === undefined ? 404 : 200, { "content-type": "application/json" });
@@ -177,10 +128,7 @@ before(async () => {
             turnTotalBudgetSeconds: 3600,
             transcriptChunkLines: 64,
             prebuildUploadBudgetSeconds: 900,
-            buildProviderIssuers: {
-              gitHubActions: githubIssuer,
-              namespaceBuilds: "https://federation.namespaceapis.com",
-            },
+            gitHubActionsIssuer: githubIssuer,
           },
         },
       },
@@ -235,6 +183,7 @@ const dispatched = async (owner: string) => {
       {
         personaId,
         key: { repository: "https://github.com/acme/app", inputDigest: digest, guestImageDigest: digest },
+        defaultBranch: "main",
         provider: "GitHubActions",
         logUrl: "https://github.com/acme/app/actions/runs/42",
       },
@@ -249,73 +198,69 @@ const refusal = async (path: string, body: unknown, token: string | null, status
   return ProblemSchema.parse(await response.json());
 };
 
-test("a build job exchanges its GitHub token for checked upload URLs, and completing the upload moves the prebuild to Converting", async () => {
+test("a build job exchanges its GitHub token for one checked layer upload, and completing it moves the prebuild to Converting", async () => {
   const prebuild = await dispatched(tenantId);
   assert.equal(prebuild.status.state, "Dispatched");
   const layer = new TextEncoder().encode("layer bytes");
-  const config = new TextEncoder().encode("{}");
-  const manifest = new TextEncoder().encode('{"layers":[]}');
   const uploadsPath = `/v1/prebuilds/${prebuild.prebuildId}/uploads`;
-  const exchange = {
-    tenantId,
-    blobs: [
-      { digest: sha256(layer), sizeBytes: layer.length },
-      { digest: sha256(config), sizeBytes: config.length },
-    ],
-    manifest: { digest: sha256(manifest), sizeBytes: manifest.length },
-  };
+  const exchange = { tenantId, layerDigest: sha256(layer), layerSizeBytes: layer.length };
+  const completion = { tenantId };
 
-  const answered = await send("POST", uploadsPath, exchange, asJob(jobToken()));
-  assert.equal(answered.status, 200, await answered.clone().text());
-  const uploads = PrebuildUploadGrantSchema.parse(await answered.json());
-  assert.equal(uploads.prebuildId, prebuild.prebuildId);
-  assert.match(
-    uploads.blobs[0]?.uploadUrl ?? "",
-    new RegExp(`/${tenantId}/prebuilds/${prebuild.prebuildId}/blobs/${sha256(layer)}\\?`),
-  );
-  assert.match(uploads.blobs[0]?.uploadUrl ?? "", /X-Tumpel-Checksum=/);
-  assert.match(
-    uploads.manifest.uploadUrl,
-    new RegExp(`/${tenantId}/prebuilds/${prebuild.prebuildId}/manifest\\.json\\?`),
-  );
-  const lifetime = Date.parse(uploads.uploadExpiresAt) - Date.now();
-  assert.ok(lifetime > 890_000 && lifetime <= 900_000, `the URLs live the upload budget, not ${lifetime} ms`);
+  assert.equal((await refusal(uploadsPath, exchange, jobToken(), 409)).code, "PrebuildNotUploading");
+  const env = await server.getWorker<Bindings>().getEnv();
+  assert.ok(await env.TENANT.getByName(tenantId).recordPrebuildBuilding(prebuild.prebuildId, Date.now()));
 
-  const checks: [string | null, number, string][] = [
-    [null, 401, "token"],
-    [jobToken({ aud: "https://github.com/Acme" }), 401, "aud"],
-    [jobToken({ exp: nowSeconds() - 120 }), 401, "exp"],
-    [jobToken({}, "unknown-key"), 401, "kid"],
-    [jobToken({ repository: "acme/other" }), 403, "repository"],
-    [jobToken({ workflow_ref: "Acme/App/.github/workflows/ci.yml@refs/heads/main" }), 403, "workflow_ref"],
+  const unknown = await refusal(uploadsPath, exchange, null, 401);
+  assert.equal(unknown.code, "JobTokenRefused");
+  assert.equal(unknown.title, "Job token refused: token");
+
+  const notFound = await refusal(uploadsPath, exchange, jobToken({ repository: "acme/other" }), 404);
+  assert.equal(notFound.code, "NotFound");
+  const missingTenant = { ...exchange, tenantId: crypto.randomUUID() };
+  assert.deepEqual(await refusal(uploadsPath, missingTenant, jobToken(), 404), notFound);
+  const missingPrebuild = `/v1/prebuilds/${crypto.randomUUID()}/uploads`;
+  assert.deepEqual(await refusal(missingPrebuild, exchange, jobToken(), 404), notFound);
+  assert.deepEqual(
+    await refusal(`${uploadsPath}/complete`, completion, jobToken({ repository: "acme/other" }), 404),
+    notFound,
+  );
+
+  const mismatches: [Record<string, unknown>, string][] = [
+    [{ workflow_ref: "Acme/App/.github/workflows/ci.yml@refs/heads/main" }, "workflow_ref"],
+    [{ ref: "refs/heads/feature", workflow_ref: `Acme/App/${CALLER_WORKFLOW}@refs/heads/feature` }, "ref"],
+    [{ event_name: "push" }, "event_name"],
   ];
-  for (const [token, status, check] of checks) {
-    const problem = await refusal(uploadsPath, exchange, token, status);
-    assert.equal(problem.code, status === 401 ? "JobTokenRefused" : "JobTokenMismatch");
+  for (const [claims, check] of mismatches) {
+    const problem = await refusal(uploadsPath, exchange, jobToken(claims), 403);
+    assert.equal(problem.code, "JobTokenMismatch");
     assert.equal(problem.title, `Job token refused: ${check}`);
   }
 
-  const elsewhere = await dispatched(crypto.randomUUID());
-  const foreign = await refusal(`/v1/prebuilds/${elsewhere.prebuildId}/uploads`, exchange, jobToken(), 404);
-  assert.equal(foreign.code, "NotFound");
-
-  const completion = { tenantId, layerDigest: sha256(layer), layerSizeBytes: layer.length };
-  const early = await refusal(`${uploadsPath}/complete`, completion, jobToken(), 409);
-  assert.equal(early.code, "LayerNotUploaded");
-  assert.equal(
-    (await refusal(`${uploadsPath}/complete`, completion, jobToken({ repository: "acme/other" }), 403)).code,
-    "JobTokenMismatch",
+  const answered = await send("POST", uploadsPath, exchange, asJob(jobToken()));
+  assert.equal(answered.status, 200, await answered.clone().text());
+  const grant = PrebuildUploadGrantSchema.parse(await answered.json());
+  assert.equal(grant.prebuildId, prebuild.prebuildId);
+  assert.equal(grant.sha256, sha256(layer));
+  const url = new URL(grant.url);
+  assert.ok(
+    url.pathname.endsWith(`/${tenantId}/prebuilds/${prebuild.prebuildId}/layers/${sha256(layer)}`),
+    url.pathname,
   );
+  assert.equal(url.searchParams.get("X-Tumpel-Method"), "PUT");
+  assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(sha256(layer), "hex").toString("base64"));
+  assert.equal(url.searchParams.get("X-Tumpel-Length"), String(layer.length));
+  const lifetime = Date.parse(grant.uploadExpiresAt) - Date.now();
+  assert.ok(lifetime > 890_000 && lifetime <= 900_000, `the URL lives the upload budget, not ${lifetime} ms`);
 
-  const env = await server.getWorker<Bindings>().getEnv();
-  await env.STORE.put(`${tenantId}/prebuilds/${prebuild.prebuildId}/blobs/${sha256(layer)}`, layer);
+  assert.equal((await refusal(`${uploadsPath}/complete`, completion, jobToken(), 409)).code, "LayerNotUploaded");
+  await env.STORE.put(`${tenantId}/prebuilds/${prebuild.prebuildId}/layers/${sha256(layer)}`, layer);
   const completed = await send("POST", `${uploadsPath}/complete`, completion, asJob(jobToken()));
   assert.equal(completed.status, 200, await completed.clone().text());
   const converting = PrebuildSchema.parse(await completed.json());
-  assert.equal(converting.status.state, "Converting");
   assert.ok(converting.status.state === "Converting");
   assert.equal(converting.status.layerDigest, sha256(layer));
   assert.equal(converting.status.layerSizeBytes, layer.length);
+  assert.equal(converting.status.uploadedAt, new Date(converting.updatedAt).toISOString());
 
   const read = await send("GET", `/v1/prebuilds/${prebuild.prebuildId}`, undefined, bearer);
   assert.deepEqual(PrebuildSchema.parse(await read.json()).status, converting.status);

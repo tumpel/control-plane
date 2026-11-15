@@ -30,10 +30,7 @@
       "turnTotalBudgetSeconds": 3600,
       "transcriptChunkLines": 64,
       "prebuildUploadBudgetSeconds": 3600,
-      "buildProviderIssuers": {
-        "gitHubActions": "https://token.actions.githubusercontent.com",
-        "namespaceBuilds": "https://federation.namespaceapis.com"
-      }
+      "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
     }
   },
   "durable_objects": {
@@ -76,10 +73,7 @@
           "turnTotalBudgetSeconds": 3600,
           "transcriptChunkLines": 64,
           "prebuildUploadBudgetSeconds": 3600,
-          "buildProviderIssuers": {
-            "gitHubActions": "https://token.actions.githubusercontent.com",
-            "namespaceBuilds": "https://federation.namespaceapis.com"
-          }
+          "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
         }
       },
       "durable_objects": {
