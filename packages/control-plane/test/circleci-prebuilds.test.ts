@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
@@ -37,6 +37,10 @@ const SLUG = `circleci/${ORGANIZATION}/${PROJECT}`;
 
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = rsa();
+const circle = rsa();
+const stranger = rsa();
+const CIRCLE_KID = "circleci-job-key";
+const revisions = new Map<string, string>();
 const app = rsa();
 
 const publicJwk = (key: KeyObject, kid: string) => ({
@@ -112,6 +116,10 @@ const fakeCircleCI = async (request: IncomingMessage, response: ServerResponse, 
       checkout_source: { provider: "github_app", repo },
     });
   }
+  if (request.method === "GET" && path.startsWith("/pipeline/")) {
+    const pipelineId = path.slice("/pipeline/".length);
+    return reply(response, 200, { id: pipelineId, vcs: { revision: revisions.get(pipelineId) ?? HEAD_SHA } });
+  }
   if (request.method === "POST" && path === "/webhook") {
     webhooks.push(body);
     return reply(response, 201, { id: `webhook-${webhooks.length}` });
@@ -156,6 +164,9 @@ before(async () => {
     if (path.startsWith("/circleci/api/v2/")) {
       return void fakeCircleCI(request, response, path.slice("/circleci/api/v2".length));
     }
+    if (/^\/oidc\/org\/[0-9a-f-]+\/\.well-known\/jwks-pub\.json$/.test(path)) {
+      return reply(response, 200, { keys: [publicJwk(circle.publicKey, CIRCLE_KID)] });
+    }
     if (path === "/cdn-cgi/access/certs")
       return reply(response, 200, { keys: [publicJwk(access.publicKey, ACCESS_KID)] });
     return reply(response, 404, {});
@@ -174,6 +185,7 @@ before(async () => {
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
           GITHUB_API_ORIGIN: `${fakeOrigin}/api`,
           CIRCLECI_API_ORIGIN: `${fakeOrigin}/circleci`,
+          CIRCLECI_OIDC_ORIGIN: `${fakeOrigin}/oidc`,
           SECRETS_KEK,
         },
       },
@@ -395,4 +407,127 @@ test("deleting a binding deletes its webhook at CircleCI", async () => {
   );
   assert.deepEqual(deletedWebhooks, [`webhook-${webhooks.length}`]);
   await addBinding();
+});
+
+const OTHER_ORGANIZATION = "99999999-1111-4222-8333-444444444444";
+const LAYER = Buffer.from("circleci layer");
+const DIGEST = createHash("sha256").update(LAYER).digest("hex");
+
+const jobToken = (
+  pipelineId: string,
+  jobId: string,
+  claims: Record<string, unknown> = {},
+  organization = ORGANIZATION,
+  key: KeyObject = circle.privateKey,
+): string => {
+  const now = nowSeconds();
+  return signed(
+    { alg: "RS256", kid: CIRCLE_KID, typ: "JWT" },
+    {
+      iss: `${fakeOrigin}/oidc/org/${organization}`,
+      aud: origin,
+      sub: `org/${organization}/project/${PROJECT}/user/u1`,
+      iat: now,
+      nbf: now,
+      exp: now + 300,
+      "oidc.circleci.com/project-id": PROJECT,
+      "oidc.circleci.com/pipeline-id": pipelineId,
+      "oidc.circleci.com/job-id": jobId,
+      "oidc.circleci.com/vcs-origin": "github.com/acme/app",
+      "oidc.circleci.com/vcs-ref": "refs/heads/main",
+      "oidc.circleci.com/ssh-rerun": false,
+      ...claims,
+    },
+    key,
+  );
+};
+
+const uploadStart = (prebuildId: string, token: string) =>
+  send(
+    "POST",
+    `/v1/prebuilds/${prebuildId}/uploads`,
+    { tenantId, layerDigest: DIGEST, layerSizeBytes: LAYER.length },
+    { authorization: `Bearer ${token}` },
+  );
+
+const uploadComplete = (prebuildId: string, token: string) =>
+  send("POST", `/v1/prebuilds/${prebuildId}/uploads/complete`, { tenantId }, { authorization: `Bearer ${token}` });
+
+const refusal = async (response: { status: number; json(): Promise<unknown> }) => {
+  const problem = ProblemSchema.parse(await response.json());
+  return `${response.status} ${problem.code} ${problem.title}`;
+};
+
+test("a CircleCI job token takes the upload of its own pipeline from one job, and complete moves it to Converting", async () => {
+  const prebuild = await started();
+  const pipelineId = `pipeline-${pipelines}`;
+  const first = await uploadStart(prebuild.prebuildId, jobToken(pipelineId, "job-upload"));
+  assert.equal(first.status, 200, await first.clone().text());
+  assert.equal((await uploadStart(prebuild.prebuildId, jobToken(pipelineId, "job-upload"))).status, 200);
+  assert.equal(
+    await refusal(await uploadStart(prebuild.prebuildId, jobToken(pipelineId, "job-build"))),
+    "403 JobTokenMismatch Job token refused: job-id",
+  );
+  const env = await server.getWorker<Bindings>().getEnv();
+  await env.STORE.put(`${tenantId}/prebuilds/${prebuild.prebuildId}/layers/${DIGEST}`, LAYER);
+  assert.equal(
+    await refusal(await uploadComplete(prebuild.prebuildId, jobToken(pipelineId, "job-build"))),
+    "403 JobTokenMismatch Job token refused: job-id",
+  );
+  const completed = await uploadComplete(prebuild.prebuildId, jobToken(pipelineId, "job-upload"));
+  assert.equal(completed.status, 200, await completed.clone().text());
+  assert.equal(PrebuildSchema.parse(await completed.json()).status.state, "Converting");
+});
+
+test("the upload exchange refuses a CircleCI token of another organization, repository, project, pipeline, ref or an SSH rerun", async () => {
+  const prebuild = await started();
+  const pipelineId = `pipeline-${pipelines}`;
+  const attempt = async (token: string) => refusal(await uploadStart(prebuild.prebuildId, token));
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", {}, ORGANIZATION, stranger.privateKey)),
+    "401 JobTokenRefused Job token refused: signature",
+  );
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", { aud: "https://elsewhere.test" })),
+    "401 JobTokenRefused Job token refused: aud",
+  );
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", {}, OTHER_ORGANIZATION)),
+    "404 NotFound No such prebuild",
+  );
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", { "oidc.circleci.com/vcs-origin": "github.com/acme/other" })),
+    "404 NotFound No such prebuild",
+  );
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", { "oidc.circleci.com/project-id": OTHER_ORGANIZATION })),
+    "403 JobTokenMismatch Job token refused: project-id",
+  );
+  assert.equal(
+    await attempt(jobToken("pipeline-elsewhere", "job-upload")),
+    "403 JobTokenMismatch Job token refused: pipeline-id",
+  );
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", { "oidc.circleci.com/vcs-ref": "refs/heads/feature" })),
+    "403 JobTokenMismatch Job token refused: vcs-ref",
+  );
+  assert.equal(
+    await attempt(jobToken(pipelineId, "job-upload", { "oidc.circleci.com/ssh-rerun": true })),
+    "403 JobTokenMismatch Job token refused: ssh-rerun",
+  );
+  assert.equal((await readPrebuild(prebuild.prebuildId)).status.state, "Building");
+});
+
+test("a pipeline that checked out another commit than the start read fails its prebuild in phase Dispatch", async () => {
+  const prebuild = await started();
+  const pipelineId = `pipeline-${pipelines}`;
+  revisions.set(pipelineId, "d".repeat(40));
+  assert.equal(
+    await refusal(await uploadStart(prebuild.prebuildId, jobToken(pipelineId, "job-upload"))),
+    "409 PrebuildNotUploading Prebuild not uploading",
+  );
+  const moved = await readPrebuild(prebuild.prebuildId);
+  assert.ok(moved.status.state === "Failed");
+  assert.equal(moved.status.phase, "Dispatch");
+  assert.match((await failure(prebuild.prebuildId)).detail, /checked out commit d{40}/);
 });

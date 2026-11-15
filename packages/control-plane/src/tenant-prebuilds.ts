@@ -14,6 +14,7 @@ import {
   CIRCLECI_WORKFLOW,
   type PipelineRun,
   pipelineLogUrl,
+  readPipelineRevision,
   triggerPipeline,
   type WorkflowCompleted,
 } from "./circleci.ts";
@@ -133,6 +134,20 @@ export type CallerWorkflow = { kind: "Connected"; callerWorkflow: string } | { k
 
 export type RecordedRun = { kind: "Run"; run: PrebuildRun } | { kind: "NoRun" };
 
+export type CircleCIOrganization = { kind: "Connected"; organizationId: string } | { kind: "NotConnected" };
+
+export type UploadJob = { kind: "Job"; jobId: string } | { kind: "NoJob" };
+
+export type RecordedPipeline =
+  | { kind: "Pipeline"; pipelineId: string; projectId: string; headSha: string; job: UploadJob }
+  | { kind: "NoPipeline" };
+
+export type CircleCIJobBound =
+  | { kind: "Bound" }
+  | { kind: "OtherJob"; jobId: string }
+  | { kind: "RevisionMoved"; prebuild: Prebuild }
+  | { kind: "Refused"; status: number; detail: string };
+
 export interface PrebuildStartRecord {
   prebuildId: string;
   personaId: string;
@@ -167,6 +182,8 @@ export interface UploadTarget {
   defaultBranch: string;
   callerWorkflow: CallerWorkflow;
   run: RecordedRun;
+  circleCIOrganization: CircleCIOrganization;
+  pipeline: RecordedPipeline;
   upload: PrebuildLayerUpload | null;
 }
 
@@ -352,6 +369,25 @@ export class TenantPrebuilds extends TenantSessions {
       )
       .toArray();
     return row === undefined ? { kind: "NoRun" } : { kind: "Run", run: { runId: row.run_id, headSha: row.head_sha } };
+  }
+
+  private recordedPipeline(prebuildId: string): RecordedPipeline {
+    const [row] = this.ctx.storage.sql
+      .exec<{ pipeline_id: string; project_id: string; head_sha: string; job_id: string | null }>(
+        `SELECT prebuild_pipelines.pipeline_id, circleci_projects.project_id, prebuild_pipelines.head_sha,
+        prebuild_upload_jobs.job_id FROM prebuild_pipelines JOIN circleci_projects USING (circleci_project_id)
+        LEFT JOIN prebuild_upload_jobs USING (prebuild_id) WHERE prebuild_pipelines.prebuild_id = ?`,
+        prebuildId,
+      )
+      .toArray();
+    if (row === undefined) return { kind: "NoPipeline" };
+    return {
+      kind: "Pipeline",
+      pipelineId: row.pipeline_id,
+      projectId: row.project_id,
+      headSha: row.head_sha,
+      job: row.job_id === null ? { kind: "NoJob" } : { kind: "Job", jobId: row.job_id },
+    };
   }
 
   private prebuildTimers(tenantId: string, prebuildId: string, changes: DeadlineChanges): Promise<void> {
@@ -553,6 +589,7 @@ export class TenantPrebuilds extends TenantSessions {
       .toArray();
     if (row === undefined) return null;
     const connection = this.connectionRow<{ caller_workflow: string }>("GitHubActions");
+    const circleCI = this.connectionRow<{ organization_id: string }>("CircleCI");
     return {
       prebuild: toPrebuild(tenantId, row),
       defaultBranch: row.default_branch,
@@ -561,11 +598,77 @@ export class TenantPrebuilds extends TenantSessions {
           ? { kind: "NotConnected" }
           : { kind: "Connected", callerWorkflow: connection.caller_workflow },
       run: this.recordedRun(prebuildId),
+      circleCIOrganization:
+        circleCI === null ? { kind: "NotConnected" } : { kind: "Connected", organizationId: circleCI.organization_id },
+      pipeline: this.recordedPipeline(prebuildId),
       upload:
         row.upload_layer_digest === null || row.upload_layer_size_bytes === null
           ? null
           : { layerDigest: row.upload_layer_digest, layerSizeBytes: row.upload_layer_size_bytes },
     };
+  }
+
+  async bindCircleCIUploadJob(
+    tenantId: string,
+    prebuildId: string,
+    jobId: string,
+    now: number,
+  ): Promise<CircleCIJobBound> {
+    const pipeline = this.recordedPipeline(prebuildId);
+    if (pipeline.kind === "NoPipeline") {
+      throw new Error(`prebuild ${prebuildId} recorded no CircleCI pipeline; the upload checked it a moment ago`);
+    }
+    if (pipeline.job.kind === "NoJob") {
+      const token = await this.circleCIToken();
+      if (token === null)
+        throw new Error(`the CircleCI connection went away while prebuild ${prebuildId} took its upload`);
+      const revision = await readPipelineRevision(
+        (url, init) => fetch(url, init),
+        this.env.CIRCLECI_API_ORIGIN,
+        token,
+        pipeline.pipelineId,
+      );
+      if (!revision.ok) return { kind: "Refused", status: revision.status, detail: revision.detail };
+      if (revision.value !== pipeline.headSha)
+        return this.failMovedRevision(tenantId, prebuildId, pipeline, revision.value, now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO prebuild_upload_jobs (prebuild_id, job_id, created_at) VALUES (?, ?, ?) ON CONFLICT (prebuild_id) DO NOTHING",
+        prebuildId,
+        jobId,
+        now,
+      );
+    }
+    const [held] = this.ctx.storage.sql
+      .exec<{ job_id: string }>("SELECT job_id FROM prebuild_upload_jobs WHERE prebuild_id = ?", prebuildId)
+      .toArray();
+    if (held === undefined) throw new Error(`prebuild ${prebuildId} recorded its upload job and then lost it`);
+    return held.job_id === jobId ? { kind: "Bound" } : { kind: "OtherJob", jobId: held.job_id };
+  }
+
+  private async failMovedRevision(
+    tenantId: string,
+    prebuildId: string,
+    pipeline: { pipelineId: string; headSha: string },
+    revision: string,
+    now: number,
+  ): Promise<CircleCIJobBound> {
+    const prebuild = this.getPrebuild(tenantId, prebuildId);
+    if (prebuild === null) throw new Error(`prebuild ${prebuildId} is gone; the upload checked it a moment ago`);
+    await this.failPrebuild(
+      tenantId,
+      prebuildId,
+      ["Dispatched", "Building"],
+      {
+        phase: "Dispatch",
+        detail: `pipeline ${pipeline.pipelineId} checked out commit ${revision}, and the start read the inputs of ${pipeline.headSha}: the default branch moved between the start and the pipeline`,
+        fix: "Start the prebuild again, so it reads the inputs of the commit the pipeline builds",
+      },
+      prebuild.logUrl,
+      now,
+    );
+    const failed = this.getPrebuild(tenantId, prebuildId);
+    if (failed === null) throw new Error(`prebuild ${prebuildId} is gone; it failed a moment ago`);
+    return { kind: "RevisionMoved", prebuild: failed };
   }
 
   startPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {

@@ -38,7 +38,7 @@ const definitionMismatch = (detail: string): Response =>
     fix: "Pass the id of a pipeline definition of this project that checks out the repository, from Project Settings > Project Setup, then add the binding again",
   });
 
-const circleCIRefused = (answer: { status: number; detail: string }, doing: string): Response => {
+export const circleCIRefused = (answer: { status: number; detail: string }, doing: string): Response => {
   if (answer.status === 401 || answer.status === 403) {
     return problem(422, {
       code: "CircleCITokenRefused",
