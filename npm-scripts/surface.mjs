@@ -98,6 +98,7 @@ const ALLOWLIST = {
   Releases_supervisor: RELEASE_DOWNLOAD,
   PrebuildUploads_start: BUILD_JOB,
   PrebuildUploads_complete: BUILD_JOB,
+  CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
   ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
 };
 

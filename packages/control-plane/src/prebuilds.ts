@@ -1,5 +1,6 @@
 import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import { CIRCLECI_PARAMETER_LIMIT, circleCIParameters, overLongParameter } from "./circleci.ts";
 import { type GitHubRepository, githubRepository, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import type { Outcome, Refused } from "./hosts";
@@ -85,6 +86,24 @@ const dispatchRefused = (detail: string): Refused =>
     fix: "Commit the caller workflow the GitHub Actions connection names to the default branch with on: workflow_dispatch, accept the GitHub App's actions write permission, then start the prebuild again",
   });
 
+const pipelineRefused = (detail: string): Refused =>
+  refuse(409, {
+    code: "DispatchRefused",
+    title: "CircleCI refused the pipeline",
+    detail,
+    fix: "Commit the config that imports the orb tumpel/prebuild and declares the five tumpel_* parameters at the path the pipeline definition names, on the default branch, then start the prebuild again",
+  });
+
+const rootfsUrlOf = (env: Env, image: ReleaseImage, now: number): Promise<string> => {
+  const settings = settingsOf(env);
+  return signerOf(env, env.RELEASES_BUCKET_NAME, env.RELEASES_ACCESS_KEY_ID, env.RELEASES_SECRET_ACCESS_KEY).presign(
+    "GET",
+    rootfsKey(image),
+    settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
+    new Date(now),
+  );
+};
+
 export interface Dispatch {
   prebuildId: string;
   tenantId: string;
@@ -102,18 +121,7 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
   const tenant = env.TENANT.getByName(tenantId);
   const connection = await tenant.gitHubActionsConnection(tenantId);
   if (connection === null) return noBuildProvider("GitHubActions", key.repository);
-  const settings = settingsOf(env);
-  const rootfsUrl = await signerOf(
-    env,
-    env.RELEASES_BUCKET_NAME,
-    env.RELEASES_ACCESS_KEY_ID,
-    env.RELEASES_SECRET_ACCESS_KEY,
-  ).presign(
-    "GET",
-    rootfsKey(image),
-    settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
-    new Date(now),
-  );
+  const rootfsUrl = await rootfsUrlOf(env, image, now);
   const dispatched = await tenant.dispatchPrebuild(
     tenantId,
     connection.callerWorkflow,
@@ -138,6 +146,49 @@ const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number):
     });
   }
   if (dispatched.kind === "Refused") return dispatchRefused(dispatched.detail);
+  return ok(dispatched.prebuild);
+};
+
+const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Promise<Outcome<Prebuild>> => {
+  const { prebuildId, tenantId, key, image } = dispatch;
+  const tenant = env.TENANT.getByName(tenantId);
+  const project = await tenant.circleCIProjectOf(tenantId, key.repository);
+  if (project === null) return circleCIProjectMissing(key.repository);
+  const rootfsUrl = await rootfsUrlOf(env, image, now);
+  const parameters = circleCIParameters({
+    prebuildId,
+    tenantId,
+    apiOrigin: dispatch.apiOrigin,
+    rootfsUrl,
+    imageDigest: image.imageDigest,
+  });
+  const overLong = overLongParameter(parameters);
+  if (overLong !== null) {
+    return refuse(409, {
+      code: "DispatchRefused",
+      title: "Pipeline parameter too long",
+      detail: `pipeline parameter ${overLong.name} is ${overLong.length} characters, and CircleCI takes at most ${CIRCLECI_PARAMETER_LIMIT}; no pipeline was triggered`,
+      fix: "Ask the operator to serve the releases bucket under a shorter presigned URL, then start the prebuild again",
+    });
+  }
+  const dispatched = await tenant.dispatchCircleCIPrebuild(
+    tenantId,
+    {
+      prebuildId,
+      personaId: dispatch.personaId,
+      key,
+      target: dispatch.target,
+      defaultBranch: dispatch.defaultBranch,
+      headSha: dispatch.headSha,
+      rootfsUrl,
+      apiOrigin: dispatch.apiOrigin,
+    },
+    project,
+    parameters,
+    now,
+  );
+  if (dispatched.kind === "NotConnected") return noBuildProvider("CircleCI", key.repository);
+  if (dispatched.kind === "Refused") return pipelineRefused(dispatched.detail);
   return ok(dispatched.prebuild);
 };
 
@@ -217,11 +268,8 @@ export const startPrebuild = async (
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
   }
-  if (start.provider === "CircleCI" && (await tenant.circleCIProjectOf(caller.tenantId, repository)) === null) {
-    return circleCIProjectMissing(repository);
-  }
-  if (start.provider !== "GitHubActions") return buildProviderUnavailable(start.provider, repository);
-  return dispatchGitHubActions(
+  if (start.provider === "Namespace") return buildProviderUnavailable(start.provider, repository);
+  return (start.provider === "CircleCI" ? dispatchCircleCI : dispatchGitHubActions)(
     env,
     {
       prebuildId: crypto.randomUUID(),
