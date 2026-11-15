@@ -50,8 +50,8 @@ const notGitHub = (repository: string): Refused =>
   refuse(422, {
     code: "InvalidRequest",
     title: "Not a GitHub repository",
-    detail: `${repository} is not a GitHub repository URL; prebuilds read their inputs from GitHub`,
-    fix: "Pass a repository like https://github.com/acme/app.git",
+    detail: `${repository} is not a GitHub repository; prebuilds read their inputs from GitHub`,
+    fix: "Pass a repository like https://github.com/acme/app.git or acme/app",
   });
 
 export const noBuildProvider = (provider: BuildProvider, repository: string): Refused =>

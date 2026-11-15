@@ -24,6 +24,7 @@ import {
   convertManifest,
   dashboardReturn,
   type Fetch,
+  githubRepository,
   importAppKey,
   installedBy,
   listInstallationRepositories,
@@ -843,4 +844,14 @@ test("an organization install connects only for the GitHub account its installat
 
   assert.equal((await installed(VICTIM, "victim-code", 88, victims)).status, 200);
   assert.equal(await linkedTenant(88), victimTenant);
+});
+
+test("a repository is read from owner/name as from its GitHub URL, and anything else is no GitHub repository", () => {
+  const app = { owner: "acme", name: "app" };
+  for (const form of ["acme/app", "https://github.com/acme/app", "https://github.com/acme/app.git", " acme/app/ "]) {
+    assert.deepEqual(githubRepository(form), app, form);
+  }
+  for (const form of ["acme", "acme/app/tree/main", "https://gitlab.com/acme/app", "github.com:acme/app"]) {
+    assert.equal(githubRepository(form), null, form);
+  }
 });
