@@ -68,7 +68,7 @@ export const appManifest = (origin: string): GitHubAppManifest => ({
   callback_urls: [`${origin}${APP_INSTALLED_PATH}`],
   setup_url: `${origin}${APP_INSTALLED_PATH}`,
   setup_on_update: true,
-  public: false,
+  public: true,
   request_oauth_on_install: true,
   default_permissions: {
     contents: "write",

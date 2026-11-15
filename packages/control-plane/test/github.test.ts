@@ -81,6 +81,7 @@ test("the manifest returns installs and deliveries to the control plane and asks
   assert.equal(manifest.request_oauth_on_install, true);
   assert.equal(manifest.setup_on_update, true);
   assert.equal(manifest.redirect_url, "https://tumpel-control-plane-dev.example.workers.dev/github/app/created");
+  assert.equal(manifest.public, true);
   assert.equal(manifest.hook_attributes.url, "https://tumpel-control-plane-dev.example.workers.dev/github/webhook");
   assert.ok(manifest.name.length <= 34);
   for (const permission of ["administration", "members", "organization_administration", "secrets"]) {
