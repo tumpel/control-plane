@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -52,18 +52,31 @@ before(async () => {
 
 after(() => server.close());
 
-const install = (dir: string) =>
-  spawnSync("sh", ["-c", SCRIPT.replaceAll("@TUMPEL_ORIGIN@", origin)], {
-    env: { ...process.env, TUMPEL_INSTALL_DIR: dir, PATH: process.env.PATH ?? "" },
-    encoding: "utf8",
+type Run = { status: number | null; stdout: string; stderr: string };
+
+const install = (dir: string): Promise<Run> =>
+  new Promise((resolve, reject) => {
+    const child = spawn("sh", ["-c", SCRIPT.replaceAll("@TUMPEL_ORIGIN@", origin)], {
+      env: { ...process.env, TUMPEL_INSTALL_DIR: dir },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 
 const scratch = (): string => mkdtempSync(join(tmpdir(), "tumpel-install-"));
 
-test("the install script installs the CLI the release publishes and prints the login command", () => {
+test("the install script installs the CLI the release publishes and prints the login command", async () => {
   published = CLI_SHA;
   const dir = scratch();
-  const run = install(join(dir, "bin"));
+  const run = await install(join(dir, "bin"));
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, new RegExp(`tumpel login --endpoint ${origin}\\n$`));
   assert.match(run.stdout, /to your PATH/);
@@ -73,10 +86,10 @@ test("the install script installs the CLI the release publishes and prints the l
   rmSync(dir, { recursive: true });
 });
 
-test("the install script refuses a CLI whose sha256 differs from the release and installs nothing", () => {
+test("the install script refuses a CLI whose sha256 differs from the release and installs nothing", async () => {
   published = "0".repeat(64);
   const dir = scratch();
-  const run = install(dir);
+  const run = await install(dir);
   assert.equal(run.status, 1);
   assert.match(run.stderr, /does not match the checksum the release publishes/);
   assert.equal(existsSync(join(dir, "tumpel")), false);
