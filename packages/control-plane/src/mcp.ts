@@ -1,10 +1,12 @@
 import {
+  CiDispatchConnectionStartSchema,
   ConfigApiKeySchema,
   ConfigSecretSetSchema,
   ConfigSecretVariableSchema,
   ConfigSubscriptionTokenSchema,
   DevicePathSchema,
   EnrolmentTokenMintSchema,
+  EphemeralVmConnectionStartSchema,
   HarnessPathSchema,
   HarnessPinCreateSchema,
   HostLabelsSchema,
@@ -18,6 +20,7 @@ import {
   PrebuildPathSchema,
   PrebuildStartSchema,
   ProblemSchema,
+  RemoteBuildKitConnectionStartSchema,
   SecretSetPathSchema,
   SessionListQuerySchema,
   SessionPathSchema,
@@ -43,7 +46,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_ci_dispatch_*, tumpel_remote_buildkit_* and tumpel_ephemeral_vm_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -260,6 +263,76 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/github-connection/start",
     NO_ARGUMENTS,
     "Get the URL where a person installs the stage's GitHub App for the tenant. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of the installed account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
+  ),
+  rest(
+    "tumpel_connection_list",
+    "GET",
+    "/v1/connections",
+    NO_ARGUMENTS,
+    "List one row per connection kind: GitHub, CiDispatch, RemoteBuildKit and EphemeralVm, each NotConfigured, NotConnected or Connected with the account it bills. Returns the ConnectionSummary[] of GET /v1/connections.",
+  ),
+  rest(
+    "tumpel_ci_dispatch_get",
+    "GET",
+    "/v1/ci-dispatch-connection",
+    NO_ARGUMENTS,
+    "Read the tenant's CI dispatch build provider connection. Returns the CiDispatchConnectionLink of GET /v1/ci-dispatch-connection.",
+  ),
+  rest(
+    "tumpel_ci_dispatch_start",
+    "POST",
+    "/v1/ci-dispatch-connection/start",
+    CiDispatchConnectionStartSchema,
+    "Connect the tenant's own CI dispatch build provider account, replacing an earlier one. Takes {accountLabel, callerWorkflow}: callerWorkflow is the workflow file each repository holds, such as .github/workflows/tumpel-prebuild.yml, which calls Tumpel's reusable prebuild workflow. Returns the CiDispatchConnectionLink of POST /v1/ci-dispatch-connection/start.",
+  ),
+  rest(
+    "tumpel_ci_dispatch_delete",
+    "DELETE",
+    "/v1/ci-dispatch-connection",
+    NO_ARGUMENTS,
+    "Disconnect the tenant's CI dispatch build provider account. Calls DELETE /v1/ci-dispatch-connection.",
+  ),
+  rest(
+    "tumpel_remote_buildkit_get",
+    "GET",
+    "/v1/remote-buildkit-connection",
+    NO_ARGUMENTS,
+    "Read the tenant's remote BuildKit build provider connection. Returns the RemoteBuildKitConnectionLink of GET /v1/remote-buildkit-connection.",
+  ),
+  rest(
+    "tumpel_remote_buildkit_start",
+    "POST",
+    "/v1/remote-buildkit-connection/start",
+    RemoteBuildKitConnectionStartSchema,
+    "Connect the tenant's own remote BuildKit build provider account, replacing an earlier one. Takes {accountLabel, audience}: audience is the aud the provider requires, such as federation.namespaceapis.com; register the issuer and subject pattern tumpel_remote_buildkit_get answers at the provider first. Returns the RemoteBuildKitConnectionLink of POST /v1/remote-buildkit-connection/start.",
+  ),
+  rest(
+    "tumpel_remote_buildkit_delete",
+    "DELETE",
+    "/v1/remote-buildkit-connection",
+    NO_ARGUMENTS,
+    "Disconnect the tenant's remote BuildKit build provider account. Calls DELETE /v1/remote-buildkit-connection.",
+  ),
+  rest(
+    "tumpel_ephemeral_vm_get",
+    "GET",
+    "/v1/ephemeral-vm-connection",
+    NO_ARGUMENTS,
+    "Read the tenant's ephemeral VM build provider connection. Returns the EphemeralVmConnectionLink of GET /v1/ephemeral-vm-connection.",
+  ),
+  rest(
+    "tumpel_ephemeral_vm_start",
+    "POST",
+    "/v1/ephemeral-vm-connection/start",
+    EphemeralVmConnectionStartSchema,
+    "Connect the tenant's own ephemeral VM build provider account, replacing an earlier one. Takes {accountLabel, hostLabel}: hostLabel is the label of the tenant hosts with the builder role, such as builder. Returns the EphemeralVmConnectionLink of POST /v1/ephemeral-vm-connection/start.",
+  ),
+  rest(
+    "tumpel_ephemeral_vm_delete",
+    "DELETE",
+    "/v1/ephemeral-vm-connection",
+    NO_ARGUMENTS,
+    "Disconnect the tenant's ephemeral VM build provider account. Calls DELETE /v1/ephemeral-vm-connection.",
   ),
   rest(
     "tumpel_prebuild_start",
