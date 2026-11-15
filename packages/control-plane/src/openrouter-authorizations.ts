@@ -35,14 +35,14 @@ const authorize = async (request: Request, url: URL, env: Env, caller: Caller): 
       code: "NotFound",
       title: "No such secret set",
       detail: `your tenant holds no secret set ${secretSetId}`,
-      fix: "List the secret sets with tumpel secret-set list and pass a secretSetId it prints",
+      fix: "List your secret sets and pass the secretSetId of one",
     });
   }
   return problem(409, {
     code: "Conflict",
     title: "Secret set holds another OpenRouter credential",
     detail: `secret set ${secretSetId} holds the OpenRouter credential ${started.name}, and a set holds one credential per provider`,
-    fix: `Remove ${started.name} with tumpel secret-set remove-member, then connect OpenRouter again`,
+    fix: `Remove member ${started.name} from the secret set, then connect OpenRouter again`,
   });
 };
 
@@ -57,7 +57,7 @@ const readAuthorization = async (env: Env, caller: Caller, openRouterAuthorizati
     code: "NotFound",
     title: "No such OpenRouter authorization",
     detail: `you started no OpenRouter authorization ${openRouterAuthorizationId} in this tenant`,
-    fix: "Start one with tumpel openrouter authorize or Connect OpenRouter on a secret set's page",
+    fix: "Connect OpenRouter for a secret set and use the id it answers",
   });
 };
 

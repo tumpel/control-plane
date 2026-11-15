@@ -508,12 +508,12 @@ export class TenantPrebuilds extends TenantSessions {
             ? {
                 phase: "Upload",
                 detail: `run ${event.runId} succeeded and never completed the layer upload; its log is at ${event.htmlUrl}`,
-                fix: "Call the reusable workflow from the caller workflow unchanged, so its upload job runs, then start the prebuild again with tumpel prebuild start --rebuild",
+                fix: "Call the reusable workflow from the caller workflow unchanged, so its upload job runs, then start the prebuild again with rebuild set",
               }
             : {
                 phase: "Build",
                 detail: `run ${event.runId} ended ${event.conclusion ?? "without a conclusion"} before the layer upload completed; its log is at ${event.htmlUrl}`,
-                fix: "Fix what the run's log names in the devcontainer or its lifecycle commands, then start the prebuild again with tumpel prebuild start --rebuild",
+                fix: "Fix what the run's log names in the devcontainer or its lifecycle commands, then start the prebuild again with rebuild set",
               },
           event.htmlUrl,
           now,
@@ -535,7 +535,7 @@ export class TenantPrebuilds extends TenantSessions {
         {
           phase: "Dispatch",
           detail: `the run GitHub Actions accepted for prebuild ${prebuildId} did not start within prebuildDispatchBudgetSeconds ${settings.prebuildDispatchBudgetSeconds}; see ${prebuild.logUrl}`,
-          fix: "Check that the repository's Actions are enabled and a runner is free, and that the GitHub App delivers workflow_run events, then start the prebuild again with tumpel prebuild start --rebuild",
+          fix: "Check that the repository's Actions are enabled and a runner is free, and that the GitHub App delivers workflow_run events, then start the prebuild again with rebuild set",
         },
         prebuild.logUrl,
         now,
@@ -553,12 +553,12 @@ export class TenantPrebuilds extends TenantSessions {
         ? {
             phase: "Build",
             detail: `prebuild ${prebuildId} built for prebuildBuildBudgetSeconds ${settings.prebuildBuildBudgetSeconds} without starting its layer upload; see ${prebuild.logUrl}`,
-            fix: "Make the devcontainer's lifecycle commands finish sooner, then start the prebuild again with tumpel prebuild start --rebuild",
+            fix: "Make the devcontainer's lifecycle commands finish sooner, then start the prebuild again with rebuild set",
           }
         : {
             phase: "Upload",
             detail: `prebuild ${prebuildId} started its layer upload and did not complete it within prebuildBuildBudgetSeconds ${settings.prebuildBuildBudgetSeconds}; see ${prebuild.logUrl}`,
-            fix: "Keep the layer smaller or check the runner's bandwidth, then start the prebuild again with tumpel prebuild start --rebuild",
+            fix: "Keep the layer smaller or check the runner's bandwidth, then start the prebuild again with rebuild set",
           },
       prebuild.logUrl,
       now,
@@ -1074,12 +1074,12 @@ export class TenantPrebuilds extends TenantSessions {
         ? {
             phase: "Upload",
             detail: `workflow ${CIRCLECI_WORKFLOW} of pipeline ${event.pipeline.id} succeeded and never completed the layer upload; its log is at ${url}`,
-            fix: "Keep the orb's upload job in the workflow, requiring the build job, then start the prebuild again with tumpel prebuild start --rebuild",
+            fix: "Keep the orb's upload job in the workflow, requiring the build job, then start the prebuild again with rebuild set",
           }
         : {
             phase: "Build",
             detail: `workflow ${CIRCLECI_WORKFLOW} of pipeline ${event.pipeline.id} ended ${status} before the layer upload completed; its log is at ${url}`,
-            fix: "Fix what the workflow's log names in the devcontainer, its lifecycle commands or the CircleCI config, then start the prebuild again with tumpel prebuild start --rebuild",
+            fix: "Fix what the workflow's log names in the devcontainer, its lifecycle commands or the CircleCI config, then start the prebuild again with rebuild set",
           },
       url,
       now,
@@ -1179,7 +1179,7 @@ export class TenantPrebuilds extends TenantSessions {
     if (token === undefined) {
       return {
         kind: "Refused",
-        detail: `no token reads ${repository.owner}/${repository.name}: the tenant has no GitHub App installation for it and the persona's secret set holds no ${REPOSITORY_TOKEN}; install the GitHub App on ${repository.owner} with tumpel github start, or add a ${REPOSITORY_TOKEN} that reads the repository to the persona's secret set`,
+        detail: `no token reads ${repository.owner}/${repository.name}: the tenant has no GitHub App installation for it and the persona's secret set holds no ${REPOSITORY_TOKEN}; connect GitHub for ${repository.owner}, or add a ${REPOSITORY_TOKEN} that reads the repository to the persona's secret set`,
       };
     }
     return { kind: "Token", token };

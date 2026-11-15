@@ -41,7 +41,7 @@ test("an inline file at the cap is accepted with its digest, and one byte more i
   );
   assert.ok(!over.ok);
   assert.equal(over.problem.title, "Persona file too large to send inline");
-  assert.match(over.problem.fix, /\/v1\/personas\/file-uploads/);
+  assert.match(over.problem.fix, /Upload a file larger than 65536 bytes first/);
 });
 
 test("files that together pass the persona cap are refused, even when each fits", async () => {

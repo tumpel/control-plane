@@ -422,7 +422,7 @@ export class TenantSessions extends DurableObject<Env> {
 
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
     const name = this.secretSetName(session);
-    return `${hostDetail}. The credential comes from secret set ${name}; replace its value with tumpel config apply, then send the turn again`;
+    return `${hostDetail}. The credential comes from secret set ${name}; replace its value, then send the turn again`;
   }
 
   private refusedCredential(session: SessionRow, now: number): CredentialRefusal | null {
@@ -435,7 +435,7 @@ export class TenantSessions extends DurableObject<Env> {
     const stored = storedKeys(memberRows(this.ctx.storage.sql, persona.secretSetId));
     if (stored.kind === "Unreadable") {
       throw new Error(
-        `member ${stored.name} of secret set ${persona.secretSetId} no longer matches its kind (${stored.detail}); write it again with tumpel secret-set set-member, then send the turn again`,
+        `member ${stored.name} of secret set ${persona.secretSetId} no longer matches its kind (${stored.detail}); write it again, then send the turn again`,
       );
     }
     const checked = checkCredential(entry, stored.keys, now);
@@ -485,7 +485,7 @@ export class TenantSessions extends DurableObject<Env> {
     const app = await appKey(this.env.DB, keyStoreOf(this.env));
     if (app === null) {
       throw new Error(
-        `tenant ${tenantId} holds GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
+        `tenant ${tenantId} holds GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again and connect GitHub`,
       );
     }
     return mintInstallationToken(
@@ -504,7 +504,7 @@ export class TenantSessions extends DurableObject<Env> {
       return {
         kind: "Refused",
         detail:
-          "the stage's GitHub App was removed after it minted the repository token; create it again at /github/app/setup, install it with tumpel github start, then send the turn again",
+          "the stage's GitHub App was removed after it minted the repository token; create it again, connect GitHub, then send the turn again",
       };
     }
     const login = botLogin(app.slug);
@@ -532,7 +532,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (source === "None") {
       return {
         kind: "Refused",
-        detail: `turn ${turnId} has no GitHub credential to clone, commit and push with: no GitHub App installation of the tenant covers its repository and secret set ${secretSetId} holds no ${REPOSITORY_TOKEN}; install the GitHub App with tumpel github start, or add a Variable member ${REPOSITORY_TOKEN} with tumpel config apply, then send the turn again`,
+        detail: `turn ${turnId} has no GitHub credential to clone, commit and push with: no GitHub App installation of the tenant covers its repository and secret set ${secretSetId} holds no ${REPOSITORY_TOKEN}; connect GitHub, or add a Variable member ${REPOSITORY_TOKEN} to the secret set, then send the turn again`,
       };
     }
     const [user] = this.ctx.storage.sql
@@ -544,7 +544,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (user === undefined) {
       return {
         kind: "Refused",
-        detail: `secret set ${secretSetId} holds a ${REPOSITORY_TOKEN} written before the control plane read its GitHub user; write it again with tumpel config apply, then send the turn again`,
+        detail: `secret set ${secretSetId} holds a ${REPOSITORY_TOKEN} written before the control plane read its GitHub user; write it again, then send the turn again`,
       };
     }
     return { kind: "Identity", identity: commitIdentity({ githubUserId: user.github_user_id, login: user.login }) };
@@ -738,7 +738,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (image === undefined) {
       return {
         kind: "NotReleased",
-        detail: `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a version tumpel release current lists for ${host.architecture} with tumpel harness pin, then send the turn again`,
+        detail: `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries for ${host.architecture}, then send the turn again`,
       };
     }
     const signer = signerOf(
@@ -1253,7 +1253,7 @@ export class TenantSessions extends DurableObject<Env> {
     const dispatch = dispatchVariables(entry, await this.members(secretSetId), now);
     if (dispatch.kind === "NoCredential") {
       throw new Error(
-        `secret set ${secretSetId} holds no credential ${session.harness} accepts for turn ${turnId}; add ${dispatch.accepted.map(({ kind, provider }) => `a ${kind} for ${provider}`).join(", or ")} with tumpel config apply`,
+        `secret set ${secretSetId} holds no credential ${session.harness} accepts for turn ${turnId}; add ${dispatch.accepted.map(({ kind, provider }) => `a ${kind} for ${provider}`).join(", or ")} to the secret set`,
       );
     }
     if (dispatch.kind === "Unsupported") {
@@ -1266,7 +1266,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "CredentialExpired",
-        `subscription token ${dispatch.name} of secret set ${secretSetId} expired at ${dispatch.expiresAt}; write a fresh token and its expiresAt with tumpel config apply, then send the turn again`,
+        `subscription token ${dispatch.name} of secret set ${secretSetId} expired at ${dispatch.expiresAt}; write a fresh token and its expiresAt to the secret set, then send the turn again`,
         iso(now),
       );
       return { kind: "Withdrawn" };
@@ -1733,7 +1733,7 @@ export class TenantSessions extends DurableObject<Env> {
       this.recordStopFailure(
         sessionId,
         "NotAnswered",
-        `host ${session.host_id} did not answer the teardown of box ${session.box_id} within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs with tumpel host list, then stop the session again`,
+        `host ${session.host_id} did not answer the teardown of box ${session.box_id} within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs, then stop the session again`,
         failedAt,
       );
       return this.returnToIdle(sessionId);
@@ -1743,7 +1743,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "HostOffline",
-        `host ${session.host_id} went offline during turn ${turnId} and did not reconnect within ${HEARTBEAT_DEADLINE_MS / 1000} seconds; check that its supervisor runs with tumpel host list, then send the turn again`,
+        `host ${session.host_id} went offline during turn ${turnId} and did not reconnect within ${HEARTBEAT_DEADLINE_MS / 1000} seconds; check that its supervisor runs, then send the turn again`,
         failedAt,
       );
     }
@@ -1752,7 +1752,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NotClaimed",
-        `host ${session.host_id} did not claim turn ${turnId} within ${settings.turnClaimBudgetSeconds} seconds; check that its supervisor runs with tumpel host list, then send the turn again`,
+        `host ${session.host_id} did not claim turn ${turnId} within ${settings.turnClaimBudgetSeconds} seconds; check that its supervisor runs, then send the turn again`,
         failedAt,
       );
     }
@@ -1969,7 +1969,7 @@ export class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(
         request,
         "NotAnswered",
-        `host ${session.host_id} did not answer snapshot ${request.snapshot_id} within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs with tumpel host list`,
+        `host ${session.host_id} did not answer snapshot ${request.snapshot_id} within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs`,
         failedAt,
       );
     }

@@ -54,7 +54,7 @@ const sessionNotFound = (sessionId: string): Refused =>
     code: "NotFound",
     title: "No such session",
     detail: `your tenant has no session ${sessionId}`,
-    fix: "List your sessions with tumpel session list",
+    fix: "List your sessions and use one of their ids",
   });
 
 const sessionArchived = (sessionId: string, refused: string): Refused =>
@@ -62,7 +62,7 @@ const sessionArchived = (sessionId: string, refused: string): Refused =>
     code: "SessionArchived",
     title: "Session archived",
     detail: `session ${sessionId} is archived and takes no ${refused}`,
-    fix: "Start a new session with tumpel session start; the archived session's transcript stays readable",
+    fix: "Start a new session; the archived session's transcript stays readable",
   });
 
 const hostOffline = async (env: Env, caller: Caller, session: Session, retry: string): Promise<Refused | null> => {
@@ -81,7 +81,7 @@ const turnNotFound = (turnId: string): Refused =>
     code: "NotFound",
     title: "No such turn",
     detail: `your tenant has no turn ${turnId}`,
-    fix: "List a session's turns with tumpel turn list <sessionId>",
+    fix: "List the session's turns and use one of their ids",
   });
 
 export const credentialRefused = (
@@ -95,7 +95,7 @@ export const credentialRefused = (
       code: "NoCredential",
       title: "No provider credential",
       detail: `${owner} holds no credential ${harness} reads: ${refusal.accepted.map(({ kind, provider }) => `a ${kind} for ${provider}`).join(", or ")}`,
-      fix: `Add one of those to that secret set with tumpel config apply, then ${retry}`,
+      fix: `Add one of those to that secret set, then ${retry}`,
     });
   }
   if (refusal.kind === "Unsupported") {
@@ -103,14 +103,14 @@ export const credentialRefused = (
       code: "CredentialKindUnsupported",
       title: "Credential kind not accepted by the harness",
       detail: `${owner} holds ${refusal.name}, a ${refusal.credentialKind}, and ${harness} accepts only ${refusal.supported.join(", ")}`,
-      fix: `Replace ${refusal.name} with a ${refusal.supported.join(" or ")} with tumpel config apply, then ${retry}`,
+      fix: `Replace ${refusal.name} with a ${refusal.supported.join(" or ")} in that secret set, then ${retry}`,
     });
   }
   return refuse(422, {
     code: "CredentialExpired",
     title: "Subscription token expired",
     detail: `subscription token ${refusal.name} of ${owner} expired at ${refusal.expiresAt}`,
-    fix: `Write a fresh token and its expiresAt with tumpel config apply, then ${retry}`,
+    fix: `Write a fresh token and its expiresAt to that secret set, then ${retry}`,
   });
 };
 
@@ -131,13 +131,13 @@ export const why = (refused: Unplaceable): string => {
 export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
   if (lacking === undefined) {
-    return `Start tumpel-supervisor run on a host, or enrol one with tumpel host mint-token, then ${retry}`;
+    return `Start the supervisor on a host, or enrol a new host, then ${retry}`;
   }
   const { harness, harnessVersion, architectures } = lacking;
   if (architectures.length === 0) {
-    return `Pin a version tumpel release current lists with tumpel harness pin, or ask the operator, who publishes releases, for one that carries a ${harness} ${harnessVersion} guest image, then ${retry}`;
+    return `Pin a harness version the current release carries, or ask the operator, who publishes releases, for one that carries a ${harness} ${harnessVersion} guest image, then ${retry}`;
   }
-  return `Start tumpel-supervisor run on an ${architectures.join(" or ")} host, or enrol one with tumpel host mint-token, then ${retry}`;
+  return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
 };
 
 const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
@@ -146,7 +146,7 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
       code: "NoHostAvailable",
       title: "No host online",
       detail: "your tenant has no hosts",
-      fix: `Enrol a host with tumpel host mint-token and start tumpel-supervisor run on it, then ${retry}`,
+      fix: `Enrol a host and start the supervisor on it, then ${retry}`,
     });
   }
   const detail = hosts.map(why).join(", ");
@@ -155,7 +155,7 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
       code: "PoolExhausted",
       title: "Every box slot is running a turn",
       detail: `no host of your tenant has a free box slot: ${detail}`,
-      fix: `Wait for a running turn to finish, raise boxCapacity in runtime.json and rerun tumpel-supervisor install, or enrol another host with tumpel host mint-token, then ${retry}`,
+      fix: `Wait for a running turn to finish, raise boxCapacity in runtime.json and rerun tumpel-supervisor install, or enrol another host, then ${retry}`,
     });
   }
   return refuse(409, {
@@ -177,7 +177,7 @@ const stranded = (session: Session, hosts: Host[], missingTurnIds: string[]): Re
     detail: `session ${session.sessionId} runs on host ${host.name} (${host.hostId}), which is ${host.state}, and its snapshots miss completed turns ${missingTurnIds.join(", ")}, so it cannot move to another host`,
     fix:
       host.state === "Revoked"
-        ? "The host was revoked and cannot snapshot those turns; enrol a host with tumpel host mint-token"
+        ? "The host was revoked and cannot snapshot those turns; enrol a new host"
         : "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
   });
 };
@@ -189,7 +189,7 @@ const personaNotFound = (personaId: string): Refused =>
     code: "NotFound",
     title: "No such persona",
     detail: `your tenant owns no persona ${personaId}`,
-    fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
+    fix: "List your personas and start with one of their ids",
   });
 
 const normalisedRepository = (repository: string): string => {
@@ -213,7 +213,7 @@ const prepareStart = async (
       code: "HarnessNotInCatalog",
       title: "Harness not in the catalog",
       detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
-      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists, with tumpel config apply",
+      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
     });
   }
   const read = await tenant.getSecretSet(caller.tenantId, persona.secretSetId);
@@ -288,7 +288,7 @@ export const startSessionFromIssue = async (
       code: "IssueNotFound",
       title: "No such issue",
       detail: `${issueUrl} does not exist or was deleted: ${read.detail}`,
-      fix: `List the open issues with tumpel github list-issues ${target.owner} ${target.name} and start from one of them`,
+      fix: `List the open issues of ${target.owner}/${target.name} and start from one of them`,
     });
   }
   if (!read.ok) {
@@ -305,7 +305,7 @@ export const startSessionFromIssue = async (
       code: "IssueNotOpen",
       title: "Issue not open",
       detail: `${issue.html_url} is ${issue.pull_request === undefined ? `a ${issue.state} issue` : "a pull request"}, and a session starts from an open issue only`,
-      fix: `List the open issues with tumpel github list-issues ${target.owner} ${target.name} and start from one of them`,
+      fix: `List the open issues of ${target.owner}/${target.name} and start from one of them`,
     });
   }
   const branch = ticketBranch(issue);
@@ -368,7 +368,7 @@ export const sendTurn = async (
       code: "SessionStopping",
       title: "Session stopping",
       detail: `session ${sessionId} is stopping: its host is snapshotting it and tearing its box down`,
-      fix: `Wait until tumpel session get ${sessionId} reads Stopped or Idle, then send again`,
+      fix: `Wait until session ${sessionId} reads Stopped or Idle, then send again`,
     });
   }
   if (sent.kind === "InFlight") {
@@ -376,7 +376,7 @@ export const sendTurn = async (
       code: "TurnInFlight",
       title: "A turn is running",
       detail: `session ${sessionId} is still running turn ${sent.turnId}`,
-      fix: `Wait for turn ${sent.turnId} to finish (tumpel transcript read ${sent.turnId} --follow), then send again`,
+      fix: `Wait for turn ${sent.turnId} to finish, then send again`,
     });
   }
   return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
@@ -404,7 +404,7 @@ export const stopSession = async (
     code: "TurnInFlight",
     title: "A turn is running",
     detail: `session ${sessionId} is still running turn ${stopped.turnId}, and a stop waits for no turn`,
-    fix: `Wait for turn ${stopped.turnId} to finish (tumpel transcript read ${stopped.turnId} --follow), then stop again`,
+    fix: `Wait for turn ${stopped.turnId} to finish, then stop again`,
   });
 };
 
@@ -421,7 +421,7 @@ export const archiveSession = async (
     code: "SessionNotStopped",
     title: "Session not stopped",
     detail: `session ${sessionId} is ${archived.state}, and only a Stopped session can be archived`,
-    fix: `Stop it with tumpel session stop ${sessionId}, wait until tumpel session get ${sessionId} reads Stopped, then archive again`,
+    fix: `Stop session ${sessionId}, wait until it reads Stopped, then archive again`,
   });
 };
 
@@ -445,7 +445,7 @@ export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): 
     code: "NotFound",
     title: "Turn did not fail",
     detail: `turn ${turnId} is ${turn.state}, and only a Failed turn has a failure`,
-    fix: `Read the turn with tumpel turn get ${turnId}`,
+    fix: `Read turn ${turnId}`,
   });
 };
 
@@ -527,7 +527,7 @@ export const getSnapshot = async (env: Env, caller: Caller, snapshotId: string):
     code: "NotFound",
     title: "No such snapshot",
     detail: `your tenant has no stored snapshot ${snapshotId}`,
-    fix: "List a session's snapshots with tumpel snapshot list <sessionId>",
+    fix: "List the session's snapshots and use one of their ids",
   });
 };
 

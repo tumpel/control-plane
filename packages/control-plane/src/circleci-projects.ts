@@ -150,7 +150,7 @@ const alreadyBound = (repository: string, projectSlug: string, circleCIProjectId
     code: "Conflict",
     title: "Repository already bound",
     detail: `${repository} is bound to CircleCI project ${projectSlug} as ${circleCIProjectId}`,
-    fix: `Delete that binding with tumpel circleci project delete ${circleCIProjectId}, then add it again`,
+    fix: `Delete binding ${circleCIProjectId}, then add it again`,
   });
 
 const projectAlreadyBound = (projectSlug: string, repository: string, circleCIProjectId: string): Response =>
@@ -158,7 +158,7 @@ const projectAlreadyBound = (projectSlug: string, repository: string, circleCIPr
     code: "Conflict",
     title: "Project already bound",
     detail: `CircleCI project ${projectSlug} is bound to ${repository} as ${circleCIProjectId}`,
-    fix: `Delete that binding with tumpel circleci project delete ${circleCIProjectId}, then add it again`,
+    fix: `Delete binding ${circleCIProjectId}, then add it again`,
   });
 
 const deleteProject = async (env: Env, caller: Caller, raw: string): Promise<Response> => {
@@ -173,7 +173,7 @@ const deleteProject = async (env: Env, caller: Caller, raw: string): Promise<Res
       code: "NotFound",
       title: "No such CircleCI project binding",
       detail: `your tenant has no CircleCI project binding ${raw}`,
-      fix: "List the bindings with tumpel circleci project list",
+      fix: "List your CircleCI project bindings and use one of their ids",
     });
   }
   const refused = await deleteCircleCIWebhooks(env, token, [webhook.webhookId]);

@@ -25,8 +25,7 @@ export type Checked = { ok: true; files: CheckedFile[] } | { ok: false; problem:
 
 export const UPLOAD_TTL_SECONDS = 900;
 
-export const UPLOAD_FIX =
-  "Upload a file larger than PersonaFileLimit.InlineFileBytes with POST /v1/personas/file-uploads (tumpel persona upload-file), then name it as a Stored file by digest; tumpel config apply does this for you";
+export const UPLOAD_FIX = `Upload a file larger than ${PersonaFileLimit.InlineFileBytes} bytes first, then name it as a Stored file by digest`;
 
 export const personaFileKey = (tenantId: string, digest: string): string => `${tenantId}/persona-files/${digest}`;
 

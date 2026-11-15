@@ -36,7 +36,7 @@ const SAMPLE = [
   }),
   assistant(
     { type: "text", text: "Now the build." },
-    { type: "tool_use", id: "t2", name: "Bash", input: { command: `npm run build\n${"x".repeat(300)}` } },
+    { type: "tool_use", id: "t2", name: "Bash", input: { command: `npm run build\n${"x".repeat(600)}` } },
   ),
   JSON.stringify({ type: "result", result: "done" }),
 ];
@@ -47,7 +47,7 @@ test("compact keeps assistant text, shortens a tool call to its name and first a
     "Reading the config.",
     "[Read] /work/app/tumpel.json",
     null,
-    `Now the build.\n[Bash] npm run build ${"x".repeat(120 - "npm run build ".length)}…`,
+    `Now the build.\n[Bash] npm run build ${"x".repeat(400 - "npm run build ".length)}…`,
     null,
   ]);
 });

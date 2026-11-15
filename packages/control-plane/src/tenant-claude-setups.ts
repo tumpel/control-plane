@@ -412,7 +412,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       (each) => each.architecture === host.architecture,
     );
     if (image === undefined) {
-      return `the current release carries no ${HARNESS} ${row.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a version tumpel release current lists with tumpel harness pin, then start the Claude setup again`;
+      return `the current release carries no ${HARNESS} ${row.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries, then start the Claude setup again`;
     }
     const signer = signerOf(
       this.env,

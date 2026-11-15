@@ -316,7 +316,7 @@ export const uncovered = (accounts: string[], target: GitHubRepository): Minted 
   if (accounts.length === 0) return { kind: "NoToken" };
   return {
     kind: "Outside",
-    detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installations cover repositories of ${accounts.join(", ")} only; start the session on a repository of one of them, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
+    detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installations cover repositories of ${accounts.join(", ")} only; start the session on a repository of one of them, connect GitHub for ${target.owner}, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
   };
 };
 
@@ -358,7 +358,7 @@ export const mintInstallationToken = async (
   if (OUTSIDE_STATUSES.includes(answer.status)) {
     return {
       kind: "Outside",
-      detail: `${answer.detail}; add ${target.owner}/${target.name} to the installation at ${installationSettings(installationId)}, install the App again with tumpel github start, or add a GITHUB_TOKEN to the persona's secret set, then send the turn again`,
+      detail: `${answer.detail}; add ${target.owner}/${target.name} to the installation at ${installationSettings(installationId)}, connect GitHub again, or add a GITHUB_TOKEN to the persona's secret set, then send the turn again`,
     };
   }
   return {

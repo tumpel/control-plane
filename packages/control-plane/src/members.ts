@@ -292,7 +292,7 @@ const memberNotFound = (principalId: string): Response =>
     code: "NotFound",
     title: "No such member",
     detail: `principal ${principalId} is no member of your tenant`,
-    fix: "List the members with tumpel member list and remove one of the principalIds it prints",
+    fix: "List the members and remove one of their principalIds",
   });
 
 const handleRemove = async (env: Env, caller: Caller, raw: string): Promise<Response> => {
@@ -322,7 +322,7 @@ const handleCreate = async (request: Request, url: URL, env: Env, caller: Caller
       code: "Conflict",
       title: "Already a member",
       detail: `${created.member} is already a member of your tenant`,
-      fix: "List the members with tumpel member list; invite an email that is not one of them",
+      fix: "List the members; invite an email that is not one of them",
     });
   }
   return json(
@@ -342,7 +342,7 @@ const handleRevoke = async (env: Env, caller: Caller, raw: string): Promise<Resp
     code: "NotFound",
     title: "No such invitation",
     detail: `your tenant has no open invitation ${raw}`,
-    fix: "List the open invitations with tumpel invitation list and revoke one of the ids it prints",
+    fix: "List the open invitations and revoke one of their ids",
   });
 };
 

@@ -71,7 +71,7 @@ export const decodeLines = (text: string): TranscriptLine[] =>
     .map((line) => TranscriptLineSchema.parse(JSON.parse(line)));
 
 export const DEFAULT_PAGE_BYTES = 32768;
-const TOOL_ARGUMENT_CHARS = 120;
+const TOOL_ARGUMENT_CHARS = 400;
 
 type Harness = z.infer<typeof HarnessSchema>;
 

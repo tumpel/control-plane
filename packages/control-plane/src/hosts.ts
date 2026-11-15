@@ -55,7 +55,7 @@ const toHost = (row: HostRow): Host =>
     updatedAt: row.updated_at,
   });
 
-const mintFix = "Mint a new token with tumpel host mint-token and enrol with it";
+const mintFix = "Mint a new enrolment token and enrol with it";
 
 export const mintEnrolmentToken = async (
   db: D1Database,
@@ -140,7 +140,7 @@ export const revokeEnrolmentToken = async (
     code: "NotFound",
     title: "No such enrolment token",
     detail: `your tenant has no unused, unexpired enrolment token ${enrolmentTokenId}`,
-    fix: "List them with tumpel host list-tokens and revoke one of the ids it prints",
+    fix: "List your enrolment tokens and revoke one of their ids",
   });
 };
 
@@ -234,7 +234,7 @@ export const hostNotFound = (hostId: string): Refused =>
     code: "NotFound",
     title: "Host not found",
     detail: `your tenant has no host ${hostId}`,
-    fix: "List your hosts with tumpel host list",
+    fix: "List your hosts and use one of their ids",
   });
 
 export const revokeHost = async (env: Env, tenantId: string, hostId: string, now: number): Promise<Outcome<Host>> => {
