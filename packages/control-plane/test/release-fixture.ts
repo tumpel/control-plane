@@ -14,6 +14,7 @@ export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
       imageDigest: "b".repeat(64),
       kernelDigest: "c".repeat(64),
       manifestDigest: "d".repeat(64),
+      ociDigest: "e".repeat(64),
     },
   ],
 };
