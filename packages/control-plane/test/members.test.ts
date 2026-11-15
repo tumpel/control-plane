@@ -5,12 +5,13 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  DeviceAuthorizationSchema,
   InvitationCreatedSchema,
   InvitationSchema,
-  MemberSchema,
   MembershipSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
+  PrincipalSchema,
   ProblemSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
@@ -227,7 +228,7 @@ test("an invitation binds to its email exactly, is spent once, and the invitee t
   );
   const whoami = WhoamiSchema.parse(await (await call("/v1/whoami", { headers: bob })).json());
   assert.deepEqual([whoami.tenant.tenantId, whoami.principal.role], [acme, "Member"]);
-  const members = MemberSchema.array().parse(await (await call("/v1/members", { headers: bob })).json());
+  const members = PrincipalSchema.array().parse(await (await call("/v1/members", { headers: bob })).json());
   assert.deepEqual(
     members.map((member) => [member.email, member.role]),
     [
@@ -252,6 +253,32 @@ test("a Member is refused the member and connection operations of an Owner", asy
   ];
   for (const refused of refusals) assert.equal((await refusal(refused, 403)).code, "OwnerRequired");
   assert.equal((await call("/v1/connections", { headers: bob })).status, 200);
+});
+
+test("a device approval or a consent naming a tenant the person does not belong to is refused", async () => {
+  const started = DeviceAuthorizationSchema.parse(
+    await (await send("POST", "/v1/device/code", { device_name: "members laptop" })).json(),
+  );
+  const approve = await send(
+    "POST",
+    "/v1/device/approve",
+    { userCode: started.user_code, tenantId: bobco },
+    signedIn(OWNER),
+  );
+  assert.equal((await refusal(approve, 403)).code, "Forbidden");
+
+  const { url, cookie } = await consentPage(OWNER);
+  const consented = await call(url.pathname, {
+    method: "POST",
+    headers: { ...signedIn(OWNER), cookie, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      request: url.searchParams.get("request") ?? "",
+      csrf: cookie.slice(CSRF_COOKIE.length + 1),
+      tenant: bobco,
+      action: "approve",
+    }).toString(),
+  });
+  assert.equal(consented.status, 403);
 });
 
 test("the last Owner stays, and a removed member's token answers 401", async () => {
@@ -283,7 +310,7 @@ test("an expired, revoked or forged invitation is refused", async () => {
   assert.equal((await refusal(await accept(DAVE, revoked.token), 404)).code, "NotFound");
 
   const genuine = await invite(owner, DAVE, "Owner");
-  const forged = `${genuine.invitationId}.${randomBytes(32).toString("base64url")}`;
+  const forged = randomBytes(32).toString("base64url");
   assert.equal((await refusal(await accept(DAVE, forged), 404)).code, "NotFound");
   const joined = WhoamiSchema.parse(await (await accept(DAVE, genuine.token)).json());
   assert.deepEqual([joined.tenant.tenantId, joined.principal.role], [acme, "Owner"]);

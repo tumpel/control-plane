@@ -86,8 +86,6 @@ export const listTenants = async (db: D1Database, caller: Caller): Promise<Membe
 
 export const signUp = async (db: D1Database, email: string, name: string, now: number): Promise<Whoami> => {
   const tenantId = crypto.randomUUID();
-  const memberOfNone = `NOT EXISTS (SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
-    WHERE p.email = ?)`;
   await db.batch([
     db
       .prepare(
@@ -95,19 +93,21 @@ export const signUp = async (db: D1Database, email: string, name: string, now: n
       )
       .bind(crypto.randomUUID(), email, now, now),
     db
-      .prepare(`INSERT INTO tenants (tenant_id, name, created_at, updated_at) SELECT ?, ?, ?, ? WHERE ${memberOfNone}`)
-      .bind(tenantId, name, now, now, email),
+      .prepare("INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      .bind(tenantId, name, now, now),
     db
       .prepare(
         `INSERT INTO memberships (tenant_id, principal_id, role, created_at)
-        SELECT t.tenant_id, p.principal_id, 'Owner', ? FROM tenants t JOIN principals p ON p.email = ?
-        WHERE t.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.principal_id = p.principal_id)`,
+        SELECT ?, principal_id, 'Owner', ? FROM principals WHERE email = ?`,
       )
-      .bind(now, email, tenantId),
+      .bind(tenantId, now, email),
   ]);
-  const [whoami] = await membershipsOfEmail(db, email);
-  if (whoami === undefined) throw new Error(`sign-up for ${email} wrote no membership`);
-  return whoami;
+  const row = await db
+    .prepare(`${WHOAMI_SELECT} WHERE p.email = ? AND m.tenant_id = ?`)
+    .bind(email, tenantId)
+    .first<WhoamiRow>();
+  if (row === null) throw new Error(`sign-up for ${email} wrote no membership of tenant ${tenantId}`);
+  return toWhoami(row);
 };
 
 export const callerForDeviceToken = async (db: D1Database, token: string, now: number): Promise<Caller | null> => {
