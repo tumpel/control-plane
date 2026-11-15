@@ -911,7 +911,7 @@ const handleDevicePage = async (request: Request, url: URL, env: Env): Promise<R
 const allowedOrigins = (env: Env): string[] => {
   if (!env.DASHBOARD_ORIGIN) {
     throw new Error(
-      "DASHBOARD_ORIGIN is not set; deploy with npm run deploy, which sets it to https:// plus the tofu output app_hostname, or pass --var DASHBOARD_ORIGIN:https://<app hostname> to wrangler",
+      "DASHBOARD_ORIGIN is not set; deploy with npm run deploy, which sets it to https:// plus the tofu output dashboard_hostname, or pass --var DASHBOARD_ORIGIN:https://<dashboard hostname> to wrangler",
     );
   }
   return [...CONNECTOR_ORIGINS, env.DASHBOARD_ORIGIN];
