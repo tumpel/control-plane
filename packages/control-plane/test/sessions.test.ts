@@ -467,6 +467,9 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     (turn) => turn.lineCount === 3,
   );
   assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
+  const running = await tool("tumpel_transcript_read", { sessionId, compact: true, limit: 10 }, TranscriptPageSchema);
+  assert.equal(running.nextCursor, 3);
+  assert.equal(running.finished, false);
 
   host.send({ type: "TurnComplete", turnId, lastLineSeq: 3, completedAt: new Date().toISOString() });
   const completed = await eventually(
@@ -477,6 +480,12 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(completed.lineCount, 3);
   assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
   assert.deepEqual(await readAll(sessionId, turnId, 1), expected);
+  const first = await tool("tumpel_transcript_read", { sessionId, limit: 1 }, TranscriptPageSchema);
+  assert.equal(first.nextCursor, 1);
+  assert.equal(first.finished, false);
+  const last = await tool("tumpel_transcript_read", { sessionId, after: 2 }, TranscriptPageSchema);
+  assert.equal(last.nextCursor, 3);
+  assert.equal(last.finished, true);
 
   const request = await host.next("SnapshotRequest");
   assert.equal(request.sessionId, sessionId);
