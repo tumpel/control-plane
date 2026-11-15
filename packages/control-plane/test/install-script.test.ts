@@ -18,21 +18,6 @@ let origin: string;
 
 before(async () => {
   server = createServer((request, response) => {
-    if (request.url === "/v1/releases/current") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          releaseVersion: "0.2.0",
-          supervisors: [{ architecture: "Amd64", sha256: "a".repeat(64), sizeBytes: 4096 }],
-          clis: [
-            { architecture: "Amd64", sha256: published, sizeBytes: CLI.length },
-            { sizeBytes: CLI.length, sha256: published, architecture: "Arm64" },
-          ],
-          images: [],
-        }),
-      );
-      return;
-    }
     if (request.url === "/v1/releases/cli/Amd64" || request.url === "/v1/releases/cli/Arm64") {
       response.writeHead(302, { location: "/presigned/cli" });
       response.end();
@@ -52,11 +37,16 @@ before(async () => {
 
 after(() => server.close());
 
+const rendered = (): string =>
+  SCRIPT.replaceAll("@TUMPEL_ORIGIN@", origin)
+    .replaceAll("@TUMPEL_CLI_SHA256_AMD64@", published)
+    .replaceAll("@TUMPEL_CLI_SHA256_ARM64@", published);
+
 type Run = { status: number | null; stdout: string; stderr: string };
 
 const install = (dir: string): Promise<Run> =>
   new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-c", SCRIPT.replaceAll("@TUMPEL_ORIGIN@", origin)], {
+    const child = spawn("sh", ["-c", rendered()], {
       env: { ...process.env, TUMPEL_INSTALL_DIR: dir },
     });
     let stdout = "";
