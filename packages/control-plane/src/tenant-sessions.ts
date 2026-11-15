@@ -1249,7 +1249,7 @@ export class TenantSessions extends DurableObject<Env> {
     const dispatch = dispatchVariables(entry, await this.members(secretSetId), now);
     if (dispatch.kind === "NoCredential") {
       throw new Error(
-        `secret set ${secretSetId} holds no ${dispatch.provider} credential for turn ${turnId}; add one with tumpel config apply`,
+        `secret set ${secretSetId} holds no credential ${session.harness} accepts for turn ${turnId}; add ${dispatch.accepted.map(({ kind, provider }) => `a ${kind} for ${provider}`).join(", or ")} with tumpel config apply`,
       );
     }
     if (dispatch.kind === "Unsupported") {
