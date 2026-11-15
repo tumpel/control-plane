@@ -1,5 +1,5 @@
 import { ChannelProtocol, type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
-import { z } from "zod";
+import type { z } from "zod";
 import { issues } from "./http.ts";
 
 export type ReleaseManifest = z.infer<typeof ReleaseManifestSchema>;
@@ -33,37 +33,7 @@ export const imageKey = (image: ReleaseImage): string => `${imagePrefix(image)}/
 
 export const manifestKey = (image: ReleaseImage): string => `${imagePrefix(image)}/${image.manifestDigest}`;
 
-const ociKey = (image: ReleaseImage, digest: string): string =>
-  `oci/${image.harness}/${image.harnessVersion}/${arch(image.architecture)}/${digest}`;
-
-const OciManifestSchema = z.object({ config: z.object({ digest: z.string().regex(/^sha256:[0-9a-f]{64}$/) }) });
-const OciConfigSchema = z.object({
-  rootfs: z.object({ diff_ids: z.array(z.string().regex(/^sha256:[0-9a-f]{64}$/)) }),
-});
-
-export type RootfsRead = { kind: "Rootfs"; key: string } | { kind: "Missing"; detail: string };
-
-const readJson = async <T>(bucket: ReleaseBucket, key: string, schema: z.ZodType<T>): Promise<T | string> => {
-  const object = await bucket.get(key);
-  if (object === null) return `the release bucket holds no ${key}`;
-  const parsed = schema.safeParse(JSON.parse(await object.text()));
-  return parsed.success ? parsed.data : `${key} in the release bucket does not parse: ${issues(parsed.error)}`;
-};
-
-export const rootfsKey = async (bucket: ReleaseBucket, image: ReleaseImage): Promise<RootfsRead> => {
-  const manifest = await readJson(bucket, ociKey(image, image.ociDigest), OciManifestSchema);
-  if (typeof manifest === "string") return { kind: "Missing", detail: manifest };
-  const config = await readJson(bucket, ociKey(image, manifest.config.digest.slice("sha256:".length)), OciConfigSchema);
-  if (typeof config === "string") return { kind: "Missing", detail: config };
-  const [layer, ...rest] = config.rootfs.diff_ids;
-  if (layer === undefined || rest.length > 0) {
-    return {
-      kind: "Missing",
-      detail: `the OCI image ${image.ociDigest} names ${config.rootfs.diff_ids.length} layers, not one`,
-    };
-  }
-  return { kind: "Rootfs", key: `${imagePrefix(image)}/rootfs/${layer.slice("sha256:".length)}` };
-};
+export const rootfsKey = (image: ReleaseImage): string => `${imagePrefix(image)}/rootfs/${image.rootfsDigest}`;
 
 export const kernelKey = (image: ReleaseImage): string => `kernels/${arch(image.architecture)}/${image.kernelDigest}`;
 

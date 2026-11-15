@@ -91,6 +91,7 @@ const RELEASE = {
       kernelDigest: KERNEL_DIGEST,
       manifestDigest: MANIFEST_DIGEST,
       ociDigest: "e".repeat(64),
+      rootfsDigest: "9".repeat(64),
     },
   ],
 };

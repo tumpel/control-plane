@@ -27,6 +27,7 @@ const RELEASE: ReleaseManifest = {
       kernelDigest: KERNEL,
       manifestDigest: MANIFEST,
       ociDigest: "e".repeat(64),
+      rootfsDigest: "9".repeat(64),
     },
   ],
 };
