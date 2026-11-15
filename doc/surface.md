@@ -115,7 +115,6 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `DeviceFlow_approve`: browser-only page behind the identity-aware proxy, signed in by its assertion.
 - `DeviceFlow_deny`: browser-only page behind the identity-aware proxy, signed in by its assertion.
 - `Invitations_accept`: browser-only page behind the identity-aware proxy, signed in by its assertion.
-- `IssuerKeys_rotate`: operator page behind the identity-aware proxy that rotates the stage's issuer keys.
 - `Tenants_signUp`: browser-only page behind the identity-aware proxy, signed in by its assertion.
 - `WellKnown_jwks`: OAuth and OpenID discovery document a client reads before it signs in.
 - `WellKnown_authorizationServer`: OAuth and OpenID discovery document a client reads before it signs in.

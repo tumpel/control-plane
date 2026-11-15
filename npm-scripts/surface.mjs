@@ -78,7 +78,6 @@ const ALLOWLIST = {
   DeviceFlow_approve: BROWSER_ONLY,
   DeviceFlow_deny: BROWSER_ONLY,
   Invitations_accept: BROWSER_ONLY,
-  IssuerKeys_rotate: "operator page behind the identity-aware proxy that rotates the stage's issuer keys",
   Tenants_signUp: BROWSER_ONLY,
   WellKnown_jwks: DISCOVERY,
   WellKnown_authorizationServer: DISCOVERY,
