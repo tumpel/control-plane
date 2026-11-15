@@ -341,7 +341,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona that no session completed a turn on; one with a completed or running turn is refused.",
+    "Delete a persona; refused while any session of the persona is not Failed.",
   ),
   {
     name: "tumpel_secret_set_create",

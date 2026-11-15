@@ -38,9 +38,10 @@ before(async () => {
 after(() => server.close());
 
 const rendered = (): string =>
-  SCRIPT.replaceAll("@TUMPEL_ORIGIN@", origin)
-    .replaceAll("@TUMPEL_CLI_SHA256_AMD64@", published)
-    .replaceAll("@TUMPEL_CLI_SHA256_ARM64@", published);
+  SCRIPT.replaceAll("@TUMPEL_ORIGIN@", origin).replaceAll(
+    "@TUMPEL_CLI_SHA256S@",
+    `Amd64 ${published}\nArm64 ${published}`,
+  );
 
 type Run = { status: number | null; stdout: string; stderr: string };
 
