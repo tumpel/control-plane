@@ -1,8 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   CredentialHandoverSchema,
-  SecretSetCreateSchema,
-  SecretSetSchema,
   type SessionIssueSchema,
   SessionSchema,
   type SessionStartSchema,
@@ -25,13 +23,7 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
-import {
-  type CredentialRefusal,
-  checkCredential,
-  dispatchVariables,
-  type SecretKey,
-  type SecretMember,
-} from "./dispatch-variables.ts";
+import { type CredentialRefusal, checkCredential, dispatchVariables, type SecretMember } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
 import {
   botLogin,
@@ -56,6 +48,7 @@ import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
+import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
@@ -338,15 +331,6 @@ const toLine = (tenantId: string, row: PendingRow): TranscriptLine =>
 
 const iso = (at: number): string => new Date(at).toISOString();
 
-export type MemberRow = {
-  name: string;
-  kind: string;
-  sealed: string;
-  updated_at: number;
-  provider: string | null;
-  expires_at: string | null;
-};
-
 export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
   sql
     .exec<MemberRow>(
@@ -359,19 +343,6 @@ export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
       secretSetId,
     )
     .toArray();
-
-const memberShape = (row: MemberRow): Record<string, unknown> =>
-  row.kind === "Variable"
-    ? { kind: row.kind, name: row.name }
-    : row.kind === "ApiKey"
-      ? { kind: row.kind, name: row.name, provider: row.provider }
-      : { kind: row.kind, name: row.name, provider: row.provider, expiresAt: row.expires_at };
-
-export const toKey = (row: MemberRow): SecretKey =>
-  SecretSetSchema.shape.keys.element.parse({ ...memberShape(row), updatedAt: row.updated_at });
-
-const toMember = (row: MemberRow, value: string): SecretMember =>
-  SecretSetCreateSchema.shape.secrets.element.parse({ ...memberShape(row), value });
 
 export const sealContext = (secretSetId: string, name: string): string => `${secretSetId}/${name}`;
 
@@ -459,7 +430,13 @@ export class TenantSessions extends DurableObject<Env> {
     if (persona === null) {
       throw new Error(`session ${session.session_id} runs on persona ${session.persona_id}, which is gone`);
     }
-    const checked = checkCredential(entry, memberRows(this.ctx.storage.sql, persona.secretSetId).map(toKey), now);
+    const stored = storedKeys(memberRows(this.ctx.storage.sql, persona.secretSetId));
+    if (stored.kind === "Unreadable") {
+      throw new Error(
+        `member ${stored.name} of secret set ${persona.secretSetId} no longer matches its kind (${stored.detail}); write it again with tumpel secret-set set-member, then send the turn again`,
+      );
+    }
+    const checked = checkCredential(entry, stored.keys, now);
     return checked.kind === "Usable" ? null : checked;
   }
 
