@@ -428,7 +428,7 @@ export const planOf = (desired: Desired, live: Live): Planned => {
       problems,
       `in secret set ${JSON.stringify(secretSet.name)} the credential for provider`,
       secretSet.secrets.flatMap((secret) => (secret.kind === "Variable" ? [] : [secret.provider])),
-      "keep one ApiKey or SubscriptionToken per provider",
+      "keep one API key or subscription token per provider",
     );
   }
   for (const persona of config.personas) {

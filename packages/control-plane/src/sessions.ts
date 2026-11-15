@@ -472,7 +472,7 @@ export const readTranscript = async (
     return refuse(422, {
       code: "InvalidRequest",
       title: "No compact form for the harness",
-      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; only ClaudeCode has one`,
+      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; only Claude Code has one`,
       fix: "Read the transcript without compact",
     });
   }
