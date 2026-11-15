@@ -471,8 +471,15 @@ export const handlePrebuildInputs = async (request: Request, url: URL, env: Env)
   const { claims } = verified;
   const repository = claimOf(claims, "repository");
   const sha = claimOf(claims, "sha");
-  const runId = Number(claimOf(claims, "run_id"));
-  if (repository === null || sha === null || !Number.isSafeInteger(runId)) {
+  const runClaim = claimOf(claims, "run_id");
+  const runId = Number(runClaim);
+  if (
+    repository === null ||
+    sha === null ||
+    runClaim === null ||
+    !/^\d+$/.test(runClaim) ||
+    !Number.isSafeInteger(runId)
+  ) {
     return tokenMismatch(
       "repository",
       "the token names no repository, sha or run_id",

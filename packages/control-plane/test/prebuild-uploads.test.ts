@@ -352,6 +352,10 @@ test("the run at the recorded commit reads its inputs with its job token, which 
   );
   assert.equal((await readPrebuild(prebuild.prebuildId)).status.state, "Dispatched");
 
+  const runless = await refusal("/v1/prebuild-inputs", undefined, jobToken({ run_id: undefined }), 403);
+  assert.equal(runless.code, "JobTokenMismatch");
+  assert.equal((await readPrebuild(prebuild.prebuildId)).status.state, "Dispatched");
+
   const answered = await send("POST", "/v1/prebuild-inputs", undefined, asJob(jobToken({ event_name: "push" })));
   assert.equal(answered.status, 200, await answered.clone().text());
   const inputs = PrebuildJobInputsSchema.parse(await answered.json());
