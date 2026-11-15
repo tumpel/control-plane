@@ -29,7 +29,7 @@ import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./r
 import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
-import { type ChunkReply, sealContext } from "./tenant-sessions";
+import { type HostReply, sealContext } from "./tenant-sessions";
 
 const HARNESS = "ClaudeCode";
 const PROVIDER = "Anthropic";
@@ -422,13 +422,20 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     });
   }
 
-  private async claudeSetupPrinted(tenantId: string, row: ClaudeSetupRow, lines: string[], now: number): Promise<void> {
-    if (row.state !== "Minting" || !this.claudeSetupAsked(row.claude_setup_id)) return;
+  private async claudeSetupPrinted(
+    tenantId: string,
+    row: ClaudeSetupRow,
+    lines: string[],
+    now: number,
+  ): Promise<HostReply | null> {
+    if (row.state !== "Minting" || !this.claudeSetupAsked(row.claude_setup_id)) return null;
     const detail = `${mintTimedOut(row.claude_setup_id, settingsOf(this.env))}. ${printedAfterCode(lines)}`;
-    await this.failClaudeSetup(tenantId, row, "SetupTimedOut", detail, now, true);
+    if (!this.markClaudeSetupFailed(row, "SetupTimedOut", detail, now)) return null;
+    await this.claudeSetupTimer(tenantId, row.claude_setup_id, null);
+    return { type: "ClaudeSetupBoxDiscard", claudeSetupId: row.claude_setup_id, boxId: row.box_id };
   }
 
-  override async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<ChunkReply | null> {
+  override async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<HostReply | null> {
     if (!isClaudeSetupMessage(message)) return super.hostMessage(tenantId, hostId, message);
     const row = this.claudeSetupRow(message.claudeSetupId);
     if (row === null || row.host_id !== hostId) {
@@ -437,8 +444,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       );
     }
     if (message.type === "ClaudeSetupBoxPrinted") {
-      await this.claudeSetupPrinted(tenantId, row, message.lines, Date.now());
-      return null;
+      return this.claudeSetupPrinted(tenantId, row, message.lines, Date.now());
     }
     const event: ClaudeSetupEvent =
       message.type === "ClaudeSetupBoxUrl"

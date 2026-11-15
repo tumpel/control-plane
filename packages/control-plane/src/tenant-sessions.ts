@@ -247,6 +247,7 @@ export type SessionHostMessage = Exclude<
 >;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type HostEvent = Exclude<SessionHostMessage, ChunkAsk>;
+export type HostReply = ChunkReply | Extract<StoredControlMessage, { type: "ClaudeSetupBoxDiscard" }>;
 export type ChunkReply = Extract<
   StoredControlMessage,
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
@@ -1415,7 +1416,7 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.state === "Offline";
   }
 
-  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<ChunkReply | null> {
+  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<HostReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
