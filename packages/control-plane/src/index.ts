@@ -29,10 +29,12 @@ import {
   PersonaUpdateSchema,
   ReleaseCliPathSchema,
   ReleaseSupervisorPathSchema,
+  SecretMemberPathSchema,
   SecretSetCreateSchema,
   SecretSetPathSchema,
   SecretSetSchema,
   SecretSetUpdateSchema,
+  SecretValueSchema,
   SignUpSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
@@ -596,6 +598,45 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
   }
   const secretSet = await tenant.getSecretSet(caller.tenantId, secretSetId);
   return secretSet === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(secretSet));
+};
+
+const SECRET_MEMBERS_PATH = /^\/v1\/secret-sets\/([^/]+)\/members(?:\/([^/]+))?$/;
+
+const handleSecretMember = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const matched = SECRET_MEMBERS_PATH.exec(url.pathname);
+  if (matched === null) return null;
+  const [, rawSet = "", rawName] = matched;
+  const setting = request.method === "PUT" && rawName === undefined;
+  const removing = request.method === "DELETE" && rawName !== undefined;
+  if (!setting && !removing) return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const secretSetPath = SecretSetPathSchema.safeParse({ secretSetId: decodeURIComponent(rawSet) });
+  if (!secretSetPath.success) return secretSetNotFound(decodeURIComponent(rawSet));
+  const { secretSetId } = secretSetPath.data;
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  if (setting) {
+    const body = await parseBody(request, SecretValueSchema, "secretSets.setMember");
+    if (!body.ok) return body.response;
+    const githubUser = await repositoryTokenUser(env, [body.value], "secretSets.setMember");
+    if (!githubUser.ok) return githubUser.response;
+    const written = await tenant.setSecretMember(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
+    if (!written.ok) return conflict("secretSets.setMember", secretSetId, written.constraint);
+    return written.value === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(written.value));
+  }
+  const name = decodeURIComponent(rawName ?? "");
+  const memberPath = SecretMemberPathSchema.safeParse({ secretSetId, name });
+  const removed = memberPath.success
+    ? await tenant.removeSecretMember(caller.tenantId, secretSetId, memberPath.data.name, Date.now())
+    : { kind: "MemberNotFound" as const };
+  if (removed.kind === "Removed") return json(SecretSetSchema.parse(removed.secretSet));
+  if (removed.kind === "SetNotFound") return secretSetNotFound(secretSetId);
+  return problem(404, {
+    code: "NotFound",
+    title: "No such member",
+    detail: `secret set ${secretSetId} has no member ${name}`,
+    fix: "List the members with GET /v1/secret-sets/{secretSetId} and name one of them",
+  });
 };
 
 const handleHarnessCatalog = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -1345,6 +1386,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const resource =
     (await handlePersona(request, url, env)) ??
     (await handleSecretSet(request, url, env)) ??
+    (await handleSecretMember(request, url, env)) ??
     (await handleUnpin(request, url, env));
   if (resource) return resource;
   const sessions = await handleSessions(request, url, env, deviceCaller);

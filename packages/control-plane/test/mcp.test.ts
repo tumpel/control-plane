@@ -313,6 +313,19 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   assert.ok(withValue.isError);
   assert.ok(!JSON.stringify(withValue).includes(SECRET));
   assert.deepEqual(await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"), [defaultSet, secretSet]);
+  const drafted = await tool("tumpel_secret_set_set_member", {
+    secretSetId: secretSet.secretSetId,
+    member: { kind: "Variable", name: "GITHUB_TOKEN" },
+  });
+  assert.equal(
+    drafted.content[0]?.text.split(": ")[1],
+    `tumpel secret-set set-member ${secretSet.secretSetId} --kind Variable --name GITHUB_TOKEN --stdin`,
+  );
+  const removed = await toolJson(SecretSetSchema, "tumpel_secret_set_remove_member", {
+    secretSetId: secretSet.secretSetId,
+    name: "ANTHROPIC_API_KEY",
+  });
+  assert.deepEqual(removed.keys, []);
   await toolDone("tumpel_secret_set_delete", { secretSetId: secretSet.secretSetId });
   assert.deepEqual(await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets"), [defaultSet]);
 

@@ -8,7 +8,7 @@ import {
 import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal } from "./envelope.ts";
-import type { GitHubUser } from "./github.ts";
+import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
@@ -29,6 +29,11 @@ export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
 export type SecretSetDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; personas: string[] };
+
+export type SecretMemberRemoved =
+  | { kind: "Removed"; secretSet: SecretSet }
+  | { kind: "SetNotFound" }
+  | { kind: "MemberNotFound" };
 
 export type PersonaDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; sessions: string[] };
 
@@ -324,48 +329,54 @@ export class Tenant extends TenantPrebuilds {
     return sealed;
   }
 
+  private writeGitHubUser(secretSetId: string, githubUser: GitHubUser | null, now: number): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM secret_set_github_users WHERE secret_set_id = ?", secretSetId);
+    if (githubUser === null) return;
+    sql.exec(
+      "INSERT INTO secret_set_github_users (secret_set_id, github_user_id, login, created_at) VALUES (?, ?, ?, ?)",
+      secretSetId,
+      githubUser.githubUserId,
+      githubUser.login,
+      now,
+    );
+  }
+
+  private writeMember(secretSetId: string, { member, sealed }: SealedMember, now: number): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
+      secretSetId,
+      member.name,
+      member.kind,
+      sealed,
+      now,
+    );
+    if (member.kind === "Variable") return;
+    sql.exec(
+      "INSERT INTO secret_credentials (secret_set_id, name, provider) VALUES (?, ?, ?)",
+      secretSetId,
+      member.name,
+      member.provider,
+    );
+    if (member.kind === "ApiKey") return;
+    sql.exec(
+      "INSERT INTO secret_expiries (secret_set_id, name, expires_at) VALUES (?, ?, ?)",
+      secretSetId,
+      member.name,
+      member.expiresAt,
+    );
+  }
+
   private writeSecrets(
     secretSetId: string,
     secrets: readonly SealedMember[],
     githubUser: GitHubUser | null,
     now: number,
   ): void {
-    const sql = this.ctx.storage.sql;
-    sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
-    sql.exec("DELETE FROM secret_set_github_users WHERE secret_set_id = ?", secretSetId);
-    if (githubUser !== null) {
-      sql.exec(
-        "INSERT INTO secret_set_github_users (secret_set_id, github_user_id, login, created_at) VALUES (?, ?, ?, ?)",
-        secretSetId,
-        githubUser.githubUserId,
-        githubUser.login,
-        now,
-      );
-    }
-    for (const { member, sealed } of secrets) {
-      sql.exec(
-        "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
-        secretSetId,
-        member.name,
-        member.kind,
-        sealed,
-        now,
-      );
-      if (member.kind === "Variable") continue;
-      sql.exec(
-        "INSERT INTO secret_credentials (secret_set_id, name, provider) VALUES (?, ?, ?)",
-        secretSetId,
-        member.name,
-        member.provider,
-      );
-      if (member.kind === "ApiKey") continue;
-      sql.exec(
-        "INSERT INTO secret_expiries (secret_set_id, name, expires_at) VALUES (?, ?, ?)",
-        secretSetId,
-        member.name,
-        member.expiresAt,
-      );
-    }
+    this.ctx.storage.sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
+    this.writeGitHubUser(secretSetId, githubUser, now);
+    for (const member of secrets) this.writeMember(secretSetId, member, now);
   }
 
   async createSecretSet(
@@ -417,6 +428,43 @@ export class Tenant extends TenantPrebuilds {
     );
     if (!written.ok) return written;
     return { ok: true, value: written.value ? this.getSecretSet(tenantId, secretSetId) : null };
+  }
+
+  async setSecretMember(
+    tenantId: string,
+    secretSetId: string,
+    member: SecretMember,
+    githubUser: GitHubUser | null,
+    now: number,
+  ): Promise<Written<SecretSet | null>> {
+    if (!this.hasSecretSet(secretSetId)) return { ok: true, value: null };
+    const sealed = await this.sealMembers(secretSetId, [member]);
+    const written = uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
+        sql.exec("DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?", secretSetId, member.name);
+        for (const each of sealed) this.writeMember(secretSetId, each, now);
+        if (member.name === REPOSITORY_TOKEN) this.writeGitHubUser(secretSetId, githubUser, now);
+        sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
+      }),
+    );
+    if (!written.ok) return written;
+    return { ok: true, value: this.getSecretSet(tenantId, secretSetId) };
+  }
+
+  removeSecretMember(tenantId: string, secretSetId: string, name: string, now: number): SecretMemberRemoved {
+    if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
+    const sql = this.ctx.storage.sql;
+    const removed = this.ctx.storage.transactionSync(() => {
+      const deleted = sql.exec("DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?", secretSetId, name);
+      if (deleted.rowsWritten === 0) return false;
+      if (name === REPOSITORY_TOKEN) this.writeGitHubUser(secretSetId, null, now);
+      sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
+      return true;
+    });
+    const secretSet = this.getSecretSet(tenantId, secretSetId);
+    if (secretSet === null) throw new Error(`secret set ${secretSetId} vanished while a member was removed`);
+    return removed ? { kind: "Removed", secretSet } : { kind: "MemberNotFound" };
   }
 
   deleteSecretSet(secretSetId: string): SecretSetDeleted {
