@@ -115,9 +115,11 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   assert.equal(owner.principal.email, EMAIL);
   assert.equal(owner.principal.role, "Owner");
 
-  const again = WhoamiSchema.parse(await (await postJson("/v1/tenants", { name: "Other" }, browser())).json());
-  assert.equal(again.principal.principalId, owner.principal.principalId);
+  const again = WhoamiSchema.parse(await (await postJson("/v1/tenants", { name: "Acme" }, browser())).json());
   assert.equal(again.tenant.tenantId, owner.tenant.tenantId);
+  const other = WhoamiSchema.parse(await (await postJson("/v1/tenants", { name: "Other" }, browser())).json());
+  assert.equal(other.principal.principalId, owner.principal.principalId);
+  assert.notEqual(other.tenant.tenantId, owner.tenant.tenantId);
 
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "e2e laptop" })).json(),
