@@ -515,8 +515,8 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     return problem(409, {
       code: "Conflict",
       title: "Persona in use",
-      detail: `persona ${personaId} is the persona of session ${deleted.sessions.join(", ")}`,
-      fix: "A persona that sessions ran on stays; point new work at another persona instead",
+      detail: `persona ${personaId} is the persona of session ${deleted.sessions.join(", ")}, which completed a turn or is running one`,
+      fix: "A persona that completed a turn stays; point new work at another persona instead, or wait for the running turn to end and delete it again",
     });
   }
   if (request.method === "PUT") {

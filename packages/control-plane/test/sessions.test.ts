@@ -426,7 +426,7 @@ const readAll = async (sessionId: string, turnId: string, limit: number) => {
 const sessionStart = async (name = "Default") => {
   const personas = await getJson("/v1/personas", PersonaSchema.array());
   return {
-    repository: "https://git.example.test/app.git",
+    repository: "https://github.com/acme/app.git",
     model: "claude-sonnet-test",
     personaId: personas.find((persona) => persona.name === name)?.personaId,
   };
@@ -979,7 +979,9 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   assert.equal(inUse.status, 409);
   assert.match(
     ProblemSchema.parse(await inUse.json()).detail,
-    new RegExp(`persona ${start.personaId} is the persona of session ${sessionId}$`),
+    new RegExp(
+      `persona ${start.personaId} is the persona of session ${sessionId}, which completed a turn or is running one$`,
+    ),
   );
 
   const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
@@ -1390,10 +1392,35 @@ test("a turn without a GitHub credential fails RepositoryTokenRefused before an 
   assert.match(failure.detail, /holds no GITHUB_TOKEN/);
 });
 
-test("a clone failure names the persona's secret set", async () => {
+test("a start refuses a repository in no accepted form and stores the accepted forms as the GitHub URL", async () => {
+  const start = { ...(await sessionStart()), prompt: "which repository" };
+  for (const repository of ["acme", "github.com:acme/app", "https://gitlab.com/acme/app", "acme/app/tree/main"]) {
+    const refusal = await postJson("/v1/sessions", { ...start, repository }, bearer);
+    assert.equal(refusal.status, 422, repository);
+    const problem = ProblemSchema.parse(await refusal.json());
+    assert.equal(problem.title, "Not a GitHub repository");
+    assert.equal(problem.fix, "Pass https://github.com/owner/name");
+  }
+  const started = await tool(
+    "tumpel_session_start",
+    { ...start, repository: "github.com/Acme/App.git" },
+    StartedSessionSchema,
+  );
+  assert.equal(started.session.repository, "https://github.com/acme/app");
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.repository, "https://github.com/acme/app");
+});
+
+test("a clone failure fails the session, which takes no more turns and archives, and its persona can be deleted", async () => {
+  await createPersona("Unclonable", [
+    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
+  ]);
+  const start = await sessionStart("Unclonable");
   for (const cause of ["Refused", "TimedOut", "DirectoryNotEmpty", "Other"] as const) {
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "clone fails" }, bearer);
+    const response = await postJson("/v1/sessions", { ...start, prompt: "clone fails" }, bearer);
     assert.equal(response.status, 200);
+    const { sessionId } = StartedSessionSchema.parse(await response.json()).session;
     const offer = await host.next("TurnOffer");
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
     host.send({
@@ -1410,8 +1437,20 @@ test("a clone failure names the persona's secret set", async () => {
     );
     const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
     assert.equal(failure.reason, "RepositoryCloneFailed");
-    assert.match(failure.detail, /The persona runs on secret set Default secrets$/);
+    assert.match(
+      failure.detail,
+      /GITHUB_TOKEN of secret set Unclonable secrets can read it, then start a new session$/,
+    );
+    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Failed");
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
+    const send = await refused(`/v1/sessions/${sessionId}/turns`, {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "try again" }),
+    });
+    assert.equal(send.code, "SessionFailed");
+    assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
   }
+  assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
 });
 
 test("a session whose subscription token has expired is refused CredentialExpired at start, and no offer reaches the host", async () => {

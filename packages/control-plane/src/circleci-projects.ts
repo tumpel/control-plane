@@ -1,6 +1,6 @@
 import { CircleCIProjectAddSchema, CircleCIProjectPathSchema } from "@tumpel/api/schemas";
 import { createWebhook, deleteWebhook, readPipelineDefinition, readProject } from "./circleci.ts";
-import { type Fetch, githubRepository, repositoryUrl } from "./github.ts";
+import { type Fetch, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -74,12 +74,7 @@ export const deleteCircleCIWebhooks = async (
 const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, apiOrigin: string): Promise<Response> => {
   const target = githubRepository(add.repository);
   if (target === null) {
-    return problem(422, {
-      code: "InvalidRequest",
-      title: "Not a GitHub repository",
-      detail: `${add.repository} is not a GitHub repository URL; CircleCI prebuilds read their inputs from GitHub`,
-      fix: "Pass a repository like https://github.com/acme/app.git",
-    });
+    return problem(422, notARepository(add.repository));
   }
   const repository = repositoryUrl(target);
   const tenant = tenantOf(env, caller);

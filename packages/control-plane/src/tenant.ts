@@ -310,7 +310,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     const sql = this.ctx.storage.sql;
     const sessions = sql
       .exec<{ session_id: string }>(
-        "SELECT session_id FROM sessions WHERE persona_id = ? ORDER BY created_at, session_id",
+        "SELECT session_id FROM sessions WHERE persona_id = ? AND EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.session_id AND turns.state IN ('Completed', 'Offered', 'Running')) ORDER BY created_at, session_id",
         personaId,
       )
       .toArray()

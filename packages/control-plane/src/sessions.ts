@@ -10,7 +10,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
-import { githubRepository, readIssue, repositoryUrl } from "./github.ts";
+import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -192,11 +192,6 @@ const personaNotFound = (personaId: string): Refused =>
     fix: "List your personas and start with one of their ids",
   });
 
-const normalisedRepository = (repository: string): string => {
-  const target = githubRepository(repository);
-  return target === null ? repository : repositoryUrl(target);
-};
-
 const prepareStart = async (
   env: Env,
   caller: Caller,
@@ -204,6 +199,8 @@ const prepareStart = async (
   endpoint: string,
   now: number,
 ): Promise<Outcome<NewSession>> => {
+  const target = githubRepository(start.repository);
+  if (target === null) return refuse(422, notARepository(start.repository));
   const tenant = tenantOf(env, caller);
   const persona = await tenant.getPersona(caller.tenantId, start.personaId);
   if (persona === null) return personaNotFound(start.personaId);
@@ -237,7 +234,7 @@ const prepareStart = async (
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
-    start: { ...start, repository: normalisedRepository(start.repository) },
+    start: { ...start, repository: repositoryUrl(target) },
   });
 };
 
@@ -263,7 +260,8 @@ export const startSessionFromIssue = async (
   endpoint: string,
   now: number,
 ): Promise<Outcome<StartedSessionFromIssue>> => {
-  const target = { owner: start.owner, name: start.name };
+  const target = githubRepository(`${start.owner}/${start.name}`);
+  if (target === null) return refuse(422, notARepository(`${start.owner}/${start.name}`));
   const issueUrl = `${repositoryUrl(target)}/issues/${start.issueNumber}`;
   const tenant = tenantOf(env, caller);
   if ((await tenant.getPersona(caller.tenantId, start.personaId)) === null) return personaNotFound(start.personaId);
@@ -379,6 +377,22 @@ export const sendTurn = async (
       fix: `Wait for turn ${sent.turnId} to finish, then send again`,
     });
   }
+  if (sent.kind === "Failed") {
+    return refuse(409, {
+      code: "SessionFailed",
+      title: "Session failed",
+      detail: `session ${sessionId} could not clone ${session.repository} and takes no more turns; turn ${session.lastTurnId} failed RepositoryCloneFailed`,
+      fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
+    });
+  }
+  if (sent.kind === "PersonaGone") {
+    return refuse(409, {
+      code: "Conflict",
+      title: "Persona deleted",
+      detail: `session ${sessionId} ran on persona ${sent.personaId}, which was deleted, so it takes no more turns`,
+      fix: "Start a new session with another persona",
+    });
+  }
   return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
 };
 
@@ -392,7 +406,7 @@ export const stopSession = async (
   const session = await tenant.getSession(caller.tenantId, sessionId);
   if (session === null) return sessionNotFound(sessionId);
   if (session.state === "Archived") return sessionArchived(sessionId, "stop");
-  if (session.state !== "Stopped" && session.state !== "Stopping") {
+  if (session.state !== "Stopped" && session.state !== "Stopping" && session.state !== "Failed") {
     const offline = await hostOffline(env, caller, session, "stop the session again");
     if (offline !== null) return offline;
   }
@@ -420,7 +434,7 @@ export const archiveSession = async (
   return refuse(409, {
     code: "SessionNotStopped",
     title: "Session not stopped",
-    detail: `session ${sessionId} is ${archived.state}, and only a Stopped session can be archived`,
+    detail: `session ${sessionId} is ${archived.state}, and only a Stopped or Failed session can be archived`,
     fix: `Stop session ${sessionId}, wait until it reads Stopped, then archive again`,
   });
 };

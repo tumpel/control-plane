@@ -93,6 +93,8 @@ export type Sent =
   | { kind: "InFlight"; turnId: string }
   | { kind: "Stopping" }
   | { kind: "Archived" }
+  | { kind: "Failed" }
+  | { kind: "PersonaGone"; personaId: string }
   | { kind: "CredentialRefused"; personaId: string; refusal: CredentialRefusal };
 
 export type Stop =
@@ -417,7 +419,7 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   private cloneFailureDetail(session: SessionRow, hostDetail: string): string {
-    return `${hostDetail}. The persona runs on secret set ${this.secretSetName(session)}`;
+    return `${hostDetail}. Check that ${session.repository} exists and that the GitHub App installation or the GITHUB_TOKEN of secret set ${this.secretSetName(session)} can read it, then start a new session`;
   }
 
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
@@ -851,8 +853,10 @@ export class TenantSessions extends DurableObject<Env> {
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
     if (session.state === "Stopping") return { kind: "Stopping" };
+    if (session.state === "Failed") return { kind: "Failed" };
     const running = this.inFlightTurn(sessionId);
     if (running !== null) return { kind: "InFlight", turnId: running };
+    if (this.personaRow(session.persona_id) === null) return { kind: "PersonaGone", personaId: session.persona_id };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
     if (hosts.some((host) => host.hostId === session.host_id && host.state === "Online")) {
@@ -895,7 +899,7 @@ export class TenantSessions extends DurableObject<Env> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
-    if (session.state === "Stopping" || session.state === "Stopped") {
+    if (session.state === "Stopping" || session.state === "Stopped" || session.state === "Failed") {
       return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
     }
     const running = this.inFlightTurn(sessionId);
@@ -912,11 +916,11 @@ export class TenantSessions extends DurableObject<Env> {
   async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
-    if (session.state !== "Stopped" && session.state !== "Archived") {
+    if (session.state !== "Stopped" && session.state !== "Failed" && session.state !== "Archived") {
       return { kind: "NotStopped", state: SessionSchema.shape.state.parse(session.state) };
     }
     const sql = this.ctx.storage.sql;
-    if (session.state === "Stopped") this.setSessionState(sessionId, "Archived", now);
+    if (session.state !== "Archived") this.setSessionState(sessionId, "Archived", now);
     const keys = sql
       .exec<{ storage_key: string }>(
         "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
@@ -1680,8 +1684,14 @@ export class TenantSessions extends DurableObject<Env> {
       });
     }
     if (message.type === "TurnRepositoryCloneFailed") {
+      if (!IN_FLIGHT.includes(turn.state)) return;
       const detail = this.cloneFailureDetail(session, message.detail);
-      return this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt);
+      await this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt, "Failed");
+      return this.host(session.host_id).send({
+        type: "BoxDiscard",
+        sessionId: session.session_id,
+        boxId: session.box_id,
+      });
     }
     if (message.type === "TurnFailed") {
       const detail =
@@ -1881,6 +1891,7 @@ export class TenantSessions extends DurableObject<Env> {
     reason: TurnFailureReason,
     detail: string,
     failedAt: string,
+    sessionState: "Idle" | "Failed" = "Idle",
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
@@ -1889,7 +1900,12 @@ export class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
-      sql.exec("UPDATE sessions SET state = 'Idle', updated_at = ? WHERE session_id = ?", now, turn.session_id);
+      sql.exec(
+        "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
+        sessionState,
+        now,
+        turn.session_id,
+      );
       sql.exec(
         "INSERT INTO turn_failures (turn_id, session_id, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         turnId,

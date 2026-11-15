@@ -112,7 +112,8 @@ const DONE: Record<string, string> = {
   tumpel_secret_set_delete: "Secret set deleted",
 };
 
-const REPOSITORY_FORMAT = "The GitHub repository, as https://github.com/owner/name.";
+const REPOSITORY_FORMAT =
+  "The GitHub repository, as https://github.com/owner/name; owner/name and github.com/owner/name are accepted too.";
 
 const NO_ARGUMENTS = z.object({});
 
@@ -336,7 +337,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona no session ran on; one that sessions ran on is refused.",
+    "Delete a persona that no session completed a turn on; one with a completed or running turn is refused.",
   ),
   {
     name: "tumpel_secret_set_create",
@@ -674,7 +675,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions/{sessionId}",
     SessionPathSchema,
-    "Read one session; state is Starting, Idle, Running, Stopping, Stopped or Archived.",
+    "Read one session; state is Starting, Idle, Running, Stopping, Stopped, Failed or Archived. A Failed session could not clone its repository and takes no more turns.",
   ),
   rest(
     "tumpel_session_stop",
@@ -688,7 +689,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions/{sessionId}/archive",
     SessionPathSchema,
-    "Archive a Stopped session: delete its snapshots, keep its transcript readable and refuse every later send. Final. Returns the archived session.",
+    "Archive a Stopped or Failed session: delete its snapshots, keep its transcript readable and refuse every later send. Final. Returns the archived session.",
   ),
   rest(
     "tumpel_session_stop_failures",

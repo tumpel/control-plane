@@ -1,7 +1,7 @@
 import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { CIRCLECI_PARAMETER_LIMIT, circleCIParameters, overLongParameter } from "./circleci.ts";
-import { type GitHubRepository, githubRepository, repositoryUrl } from "./github.ts";
+import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import type { Outcome, Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -40,13 +40,7 @@ const prebuildNotFound = (prebuildId: string): Refused =>
     fix: "List the repository's prebuilds and use one of their ids",
   });
 
-const notGitHub = (repository: string): Refused =>
-  refuse(422, {
-    code: "InvalidRequest",
-    title: "Not a GitHub repository",
-    detail: `${repository} is not a GitHub repository; prebuilds read their inputs from GitHub`,
-    fix: "Pass a repository like https://github.com/acme/app.git or acme/app",
-  });
+const notGitHub = (repository: string): Refused => refuse(422, notARepository(repository));
 
 export const noBuildProvider = (provider: BuildProvider, repository: string): Refused =>
   refuse(409, {
