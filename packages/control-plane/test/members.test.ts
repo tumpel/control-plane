@@ -26,9 +26,12 @@ const OWNER = "owner@example.test";
 const BOB = "bob@example.test";
 const CAROL = "carol@example.test";
 const DAVE = "dave@example.test";
+const ERIN = "erin@example.test";
 
 interface Database {
-  prepare(query: string): { bind(...values: unknown[]): { run(): Promise<unknown>; first(): Promise<unknown> } };
+  prepare(query: string): {
+    bind(...values: unknown[]): { run(): Promise<unknown>; first<T>(): Promise<T | null> };
+  };
 }
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -327,4 +330,18 @@ test("an expired, revoked or forged invitation is refused", async () => {
   assert.equal((await refusal(await accept(DAVE, forged), 404)).code, "NotFound");
   const joined = WhoamiSchema.parse(await (await accept(DAVE, genuine.token)).json());
   assert.deepEqual([joined.tenant.tenantId, joined.principal.role], [acme, "Owner"]);
+});
+
+test("signing up twice, also at once, answers the one tenant the person owns", async () => {
+  const [first, second] = await Promise.all([signUp(ERIN, "Erin"), signUp(ERIN, "Erin again")]);
+  assert.equal(second, first);
+  assert.equal(await signUp(ERIN, "Erin later"), first);
+  const env = await server.getWorker<{ DB: Database }>().getEnv();
+  const owned = await env.DB.prepare(
+    `SELECT COUNT(*) AS tenants FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
+    WHERE p.email = ?`,
+  )
+    .bind(ERIN)
+    .first<{ tenants: number }>();
+  assert.deepEqual(owned, { tenants: 1 });
 });

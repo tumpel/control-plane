@@ -83,30 +83,42 @@ export const listTenants = async (db: D1Database, caller: Caller): Promise<Membe
   );
 };
 
-export const signUp = async (db: D1Database, email: string, name: string, now: number): Promise<Whoami> => {
+const OWNED_BY_EMAIL = `SELECT 1 FROM memberships m JOIN principals p ON p.principal_id = m.principal_id
+  WHERE p.email = ? AND m.role = 'Owner'`;
+
+export const signUp = async (
+  db: D1Database,
+  email: string,
+  name: string,
+  now: number,
+): Promise<{ whoami: Whoami; created: boolean }> => {
   const tenantId = crypto.randomUUID();
-  await db.batch([
+  const [, tenant] = await db.batch([
     db
       .prepare(
         "INSERT INTO principals (principal_id, email, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
       )
       .bind(crypto.randomUUID(), email, now, now),
     db
-      .prepare("INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
-      .bind(tenantId, name, now, now),
+      .prepare(
+        `INSERT INTO tenants (tenant_id, name, created_at, updated_at)
+        SELECT ?, ?, ?, ? WHERE NOT EXISTS (${OWNED_BY_EMAIL}) RETURNING tenant_id`,
+      )
+      .bind(tenantId, name, now, now, email),
     db
       .prepare(
         `INSERT INTO memberships (tenant_id, principal_id, role, created_at)
-        SELECT ?, principal_id, 'Owner', ? FROM principals WHERE email = ?`,
+        SELECT ?, principal_id, 'Owner', ? FROM principals
+        WHERE email = ? AND EXISTS (SELECT 1 FROM tenants WHERE tenant_id = ?) AND NOT EXISTS (${OWNED_BY_EMAIL})`,
       )
-      .bind(tenantId, now, email),
+      .bind(tenantId, now, email, tenantId, email),
   ]);
   const row = await db
-    .prepare(`${WHOAMI_SELECT} WHERE p.email = ? AND m.tenant_id = ?`)
-    .bind(email, tenantId)
+    .prepare(`${WHOAMI_SELECT} WHERE p.email = ? AND m.role = 'Owner' ORDER BY m.created_at, m.tenant_id LIMIT 1`)
+    .bind(email)
     .first<WhoamiRow>();
-  if (row === null) throw new Error(`sign-up for ${email} wrote no membership of tenant ${tenantId}`);
-  return toWhoami(row);
+  if (row === null) throw new Error(`sign-up for ${email} left no tenant it owns`);
+  return { whoami: toWhoami(row), created: tenant?.results.length === 1 };
 };
 
 export const callerForDeviceToken = async (db: D1Database, token: string, now: number): Promise<Caller | null> => {
