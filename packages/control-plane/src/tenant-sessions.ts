@@ -241,7 +241,10 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const STORE_DELETE_BATCH = 1000;
 
-export type SessionHostMessage = Exclude<HostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
+export type SessionHostMessage = Exclude<
+  HostMessage,
+  { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" | "ClaudeSetupBoxPrinted" }
+>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type HostEvent = Exclude<SessionHostMessage, ChunkAsk>;
 export type ChunkReply = Extract<

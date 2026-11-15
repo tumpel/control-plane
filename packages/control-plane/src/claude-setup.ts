@@ -21,7 +21,10 @@ export type LivePhase = "Starting" | "AwaitingCode" | "Minting";
 
 export type ClaudeSetupBudgets = Pick<
   Settings,
-  "claudeSetupUrlBudgetSeconds" | "claudeSetupCodeBudgetSeconds" | "claudeSetupMintBudgetSeconds"
+  | "claudeSetupUrlBudgetSeconds"
+  | "claudeSetupCodeBudgetSeconds"
+  | "claudeSetupMintBudgetSeconds"
+  | "claudeSetupReportBudgetSeconds"
 >;
 
 export type ClaudeSetupEvent =
@@ -43,6 +46,9 @@ const isLive = (state: ClaudeSetupState): state is LivePhase =>
 
 const START_AGAIN = "start the Claude setup again";
 
+export const mintTimedOut = (claudeSetupId: string, budgets: ClaudeSetupBudgets): string =>
+  `Claude Code minted no token for Claude setup ${claudeSetupId} within claudeSetupMintBudgetSeconds ${budgets.claudeSetupMintBudgetSeconds} of the code; ${START_AGAIN}`;
+
 const timedOut = (claudeSetupId: string, phase: LivePhase, budgets: ClaudeSetupBudgets): ClaudeSetupStep => {
   if (phase === "Starting") {
     return {
@@ -58,11 +64,7 @@ const timedOut = (claudeSetupId: string, phase: LivePhase, budgets: ClaudeSetupB
       detail: `no code reached Claude setup ${claudeSetupId} within claudeSetupCodeBudgetSeconds ${budgets.claudeSetupCodeBudgetSeconds} of its sign-in URL; ${START_AGAIN}, sign in at the new URL and submit the code the page shows`,
     };
   }
-  return {
-    kind: "Fail",
-    reason: "SetupTimedOut",
-    detail: `Claude Code minted no token for Claude setup ${claudeSetupId} within claudeSetupMintBudgetSeconds ${budgets.claudeSetupMintBudgetSeconds} of the code; ${START_AGAIN}`,
-  };
+  return { kind: "Fail", reason: "SetupTimedOut", detail: mintTimedOut(claudeSetupId, budgets) };
 };
 
 export const advance = (
@@ -133,7 +135,10 @@ const endedAt = (row: ClaudeSetupRow): string => {
 
 export const boxEndsAt = (createdAt: number, budgets: ClaudeSetupBudgets): number =>
   createdAt +
-  (budgets.claudeSetupUrlBudgetSeconds + budgets.claudeSetupCodeBudgetSeconds + budgets.claudeSetupMintBudgetSeconds) *
+  (budgets.claudeSetupUrlBudgetSeconds +
+    budgets.claudeSetupCodeBudgetSeconds +
+    budgets.claudeSetupMintBudgetSeconds +
+    budgets.claudeSetupReportBudgetSeconds) *
     1000;
 
 const statusOf = (row: ClaudeSetupRow): Record<string, unknown> => {
