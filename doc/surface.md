@@ -79,4 +79,4 @@ nothing: the server cannot read your environment, so they return the config entr
 Excluded by rule:
 
 - browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `IssuerKeys_rotate`, `Tenants_signUp`.
-- OAuth, device-flow, enrolment and host download wire: no principal: `WellKnown_jwks`, `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `WellKnown_openIdConfiguration`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`, `Releases_supervisor`.
+- OAuth, device-flow, enrolment and host download wire: no principal: `WellKnown_jwks`, `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `WellKnown_openIdConfiguration`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_revoke`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`, `Releases_supervisor`.

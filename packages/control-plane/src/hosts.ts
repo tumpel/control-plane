@@ -13,8 +13,6 @@ export type HostEnrol = z.infer<typeof HostEnrolSchema>;
 export type Refused = { ok: false; status: ProblemStatus; problem: Problem };
 export type Outcome<T> = { ok: true; value: T } | Refused;
 
-export const TOKEN_FILE = "tumpel-enrolment-token";
-
 interface HostRow {
   host_id: string;
   tenant_id: string;
@@ -81,7 +79,11 @@ export const mintEnrolmentToken = async (
       updatedAt: now,
     },
     token,
-    installCommand: `tumpel-supervisor enrol --endpoint ${origin} --token-file ${TOKEN_FILE}`,
+    installCommand: [
+      `curl -fL ${origin}/v1/releases/supervisor/Amd64 -o tumpel-supervisor`,
+      "chmod +x tumpel-supervisor",
+      `printf '%s' '${token}' | ./tumpel-supervisor install --endpoint ${origin} --token-file -`,
+    ].join(" && "),
   });
 };
 

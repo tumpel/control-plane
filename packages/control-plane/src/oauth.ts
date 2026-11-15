@@ -14,6 +14,9 @@ export const AUTHORIZE_PATH = "/oauth/authorize";
 export const CONSENT_PATH = "/oauth/consent";
 export const TOKEN_PATH = "/oauth/token";
 export const REGISTER_PATH = "/oauth/register";
+export const REVOKE_PATH = "/oauth/revoke";
+export const DASHBOARD_CLIENT_ID = "tumpel-dashboard";
+export const DASHBOARD_CALLBACK_PATH = "/auth/callback";
 export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
 export const AUTHORIZATION_SERVER_PATH = "/.well-known/oauth-authorization-server";
 export const SCOPE = "tumpel";
@@ -50,6 +53,7 @@ export const authorizationServerMetadata = (origin: string): unknown =>
     issuer: origin,
     authorization_endpoint: `${origin}${AUTHORIZE_PATH}`,
     token_endpoint: `${origin}${TOKEN_PATH}`,
+    revocation_endpoint: `${origin}${REVOKE_PATH}`,
     registration_endpoint: `${origin}${REGISTER_PATH}`,
     scopes_supported: [SCOPE],
     response_types_supported: ["code"],
@@ -101,10 +105,11 @@ export const registerClient = async (
     db
       .prepare(
         `DELETE FROM oauth_clients WHERE created_at <= ?
+          AND client_id <> ?
           AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id AND t.expires_at > ?)
           AND NOT EXISTS (SELECT 1 FROM oauth_requests r WHERE r.client_id = oauth_clients.client_id AND r.expires_at > ?)`,
       )
-      .bind(now - CLIENT_TTL_MS, now, now),
+      .bind(now - CLIENT_TTL_MS, DASHBOARD_CLIENT_ID, now, now),
     db
       .prepare("INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)")
       .bind(clientId, name, JSON.stringify(redirectUris), now),
@@ -125,9 +130,23 @@ export interface RegisteredClient {
   clientId: string;
   clientName: string;
   redirectUris: string[];
+  firstParty: boolean;
 }
 
-export const clientFor = async (db: D1Database, clientId: string): Promise<RegisteredClient | null> => {
+export const clientFor = async (
+  db: D1Database,
+  clientId: string,
+  dashboardOrigin: string | undefined,
+): Promise<RegisteredClient | null> => {
+  if (clientId === DASHBOARD_CLIENT_ID) {
+    if (dashboardOrigin === undefined || dashboardOrigin === "") return null;
+    return {
+      clientId,
+      clientName: "the tumpel dashboard",
+      redirectUris: [`${dashboardOrigin}${DASHBOARD_CALLBACK_PATH}`],
+      firstParty: true,
+    };
+  }
   const row = await db
     .prepare("SELECT client_id, client_name, redirect_uris FROM oauth_clients WHERE client_id = ?")
     .bind(clientId)
@@ -135,7 +154,7 @@ export const clientFor = async (db: D1Database, clientId: string): Promise<Regis
   if (row === null) return null;
   const parsed: unknown = JSON.parse(row.redirect_uris);
   const redirectUris = Array.isArray(parsed) ? parsed.filter((uri): uri is string => typeof uri === "string") : [];
-  return { clientId: row.client_id, clientName: row.client_name, redirectUris };
+  return { clientId: row.client_id, clientName: row.client_name, redirectUris, firstParty: false };
 };
 
 export interface AuthorizeAsk {
@@ -415,6 +434,19 @@ export const refreshGrant = async (
   if (spent.expires_at <= now) return refuseGrant("invalid_grant", "the refresh token expired");
   if (spent.client_id !== clientId) return refuseGrant("invalid_grant", "the refresh token belongs to another client");
   return { ok: true, token: await issue(db, spent.client_id, spent.principal_id, now) };
+};
+
+export const revokeToken = async (db: D1Database, token: string, clientId: string): Promise<Refusal | null> => {
+  const row = await db
+    .prepare("SELECT client_id, principal_id FROM oauth_tokens WHERE token_sha256 = ?")
+    .bind(await sha256Hex(token))
+    .first<{ client_id: string; principal_id: string }>();
+  if (row === null) return null;
+  if (row.client_id !== clientId) {
+    return { error: "invalid_client", description: "the token was issued to another client" };
+  }
+  await revokeGrants(db, row.client_id, row.principal_id);
+  return null;
 };
 
 export const callerForAccessToken = async (db: D1Database, token: string, now: number): Promise<Caller | null> => {
