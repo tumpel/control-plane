@@ -11,7 +11,6 @@ import {
   HarnessPinCreateSchema,
   HostLabelsSchema,
   HostPathSchema,
-  IssuerTokenMintSchema,
   PersonaCreateSchema,
   PersonaFileUploadRequestSchema,
   PersonaPathSchema,
@@ -193,13 +192,6 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/releases/current",
     NO_ARGUMENTS,
     "Read the current release: releaseVersion, commit, channelProtocolVersion, the supervisor binary of each architecture and the guest image of each harness version and architecture. Returns the ReleaseManifest of GET /v1/releases/current; a session is placed only on a host whose architecture has an image of its harness version here.",
-  ),
-  rest(
-    "tumpel_issuer_mint",
-    "POST",
-    "/v1/issuer-tokens",
-    IssuerTokenMintSchema,
-    "Mint a 300 s token of the stage's OIDC issuer for one of the tenant's personas and one audience, such as federation.namespaceapis.com. Returns the IssuerToken of POST /v1/issuer-tokens: {token, kid, subject, audience, expiresAt}; subject is tenant:<tenantId>:persona:<persona name>:job:prebuild, and the token verifies against the issuer's /.well-known/jwks.json.",
   ),
   rest(
     "tumpel_persona_create",

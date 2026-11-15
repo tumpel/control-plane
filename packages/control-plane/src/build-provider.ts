@@ -45,4 +45,8 @@ export const noAdapter = (kind: BuildProviderKind): { detail: string; fix: strin
 export const stageIssuer = (issuerHostname: string | undefined): string | null =>
   issuerHostname ? `https://${issuerHostname}` : null;
 
-export const subjectPattern = (tenantId: string): string => issuerSubject(tenantId, "<personaName>");
+export const subjectPattern = (tenantId: string): string => {
+  const pattern = issuerSubject(tenantId, "<personaName>");
+  if (!pattern.ok) throw new Error(`the subject pattern of tenant ${tenantId} is refused: ${pattern.detail}`);
+  return pattern.subject;
+};

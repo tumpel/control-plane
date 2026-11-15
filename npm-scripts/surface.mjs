@@ -20,7 +20,6 @@ const NOUNS = {
   Personas: "persona",
   SecretSets: "secret-set",
   GitHubConnections: "github",
-  IssuerTokens: "issuer",
   Sessions: "session",
   Turns: "turn",
   Transcripts: "transcript",
