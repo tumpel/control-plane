@@ -31,6 +31,7 @@ const NOUNS = {
   NamespaceConnections: "namespace",
   TenantConfigs: "config",
   OAuthGrants: "oauth-grant",
+  ClaudeSetups: "claude-setup",
 };
 const VERBS = {
   Identity_listTenants: "tenants",
@@ -95,6 +96,12 @@ const ALLOWLIST = {
   Releases_supervisor: RELEASE_DOWNLOAD,
   PrebuildUploads_start: BUILD_JOB,
   PrebuildUploads_complete: BUILD_JOB,
+  ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
+};
+
+const CLI_ONLY = {
+  ClaudeSetups_submitCode:
+    "takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it",
 };
 
 const tools = () => new Set([...readFileSync(MCP, "utf8").matchAll(/"(tumpel_[a-z_]+)"/g)].map((match) => match[1]));
@@ -162,8 +169,14 @@ const render = (rows) =>
     "",
     ...table([
       ["Operation", "MCP tool", "CLI command"],
-      ...rows.map((row) => [row.operationId, row.tool, row.command].map((cell) => `\`${cell}\``)),
+      ...rows.map((row) =>
+        [row.operationId, row.operationId in CLI_ONLY ? "(none)" : row.tool, row.command].map((cell) => `\`${cell}\``),
+      ),
     ]),
+    "",
+    "CLI only: tenant operations with a CLI command and no MCP tool:",
+    "",
+    ...Object.entries(CLI_ONLY).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
     "",
     "Allowlist: operations that are not tenant operations, with no tool or command:",
     "",
@@ -186,7 +199,17 @@ const failures = [
   ...Object.keys(ALLOWLIST)
     .filter((operationId) => toolNames.has(namesFor(operationId).tool))
     .map((operationId) => `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the allowlist`),
-  ...rows.filter((row) => !toolNames.has(row.tool)).map((row) => `${row.operationId} has no MCP tool ${row.tool}`),
+  ...Object.keys(CLI_ONLY)
+    .filter((operationId) => !all.some((op) => op.operationId === operationId))
+    .map((operationId) => `the CLI-only list names ${operationId}, which is no operation`),
+  ...Object.keys(CLI_ONLY)
+    .filter((operationId) => toolNames.has(namesFor(operationId).tool))
+    .map(
+      (operationId) => `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the CLI-only list`,
+    ),
+  ...rows
+    .filter((row) => !(row.operationId in CLI_ONLY) && !toolNames.has(row.tool))
+    .map((row) => `${row.operationId} has no MCP tool ${row.tool}`),
   ...rows
     .filter((row) => !commandNames.has(row.command))
     .map((row) => `${row.operationId} has no CLI command ${row.command}`),
@@ -205,5 +228,5 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log(
-  `surface: ${rows.length} operations each have an MCP tool and a CLI command; ${Object.keys(ALLOWLIST).length} allowlisted`,
+  `surface: ${rows.length} operations each have a CLI command and all but ${Object.keys(CLI_ONLY).length} an MCP tool; ${Object.keys(ALLOWLIST).length} allowlisted`,
 );

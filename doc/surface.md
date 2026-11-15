@@ -7,7 +7,7 @@ names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, Connections `connection`, GitHubActionsConnections `github-actions`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
 `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
@@ -32,6 +32,9 @@ gh auth token | tumpel secret-set set-member <secretSetId> --kind Variable --nam
 
 | Operation                            | MCP tool                          | CLI command                       |
 | ------------------------------------ | --------------------------------- | --------------------------------- |
+| `ClaudeSetups_get`                   | `tumpel_claude_setup_get`         | `tumpel claude-setup get`         |
+| `ClaudeSetups_start`                 | `tumpel_claude_setup_start`       | `tumpel claude-setup start`       |
+| `ClaudeSetups_submitCode`            | `(none)`                          | `tumpel claude-setup submit-code` |
 | `Connections_list`                   | `tumpel_connection_list`          | `tumpel connection list`          |
 | `Devices_list`                       | `tumpel_devices_list`             | `tumpel devices list`             |
 | `Devices_revoke`                     | `tumpel_devices_revoke`           | `tumpel devices revoke`           |
@@ -105,6 +108,10 @@ gh auth token | tumpel secret-set set-member <secretSetId> --kind Variable --nam
 | `Turns_list`                         | `tumpel_turn_list`                | `tumpel turn list`                |
 | `Turns_send`                         | `tumpel_turn_send`                | `tumpel turn send`                |
 
+CLI only: tenant operations with a CLI command and no MCP tool:
+
+- `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
+
 Allowlist: operations that are not tenant operations, with no tool or command:
 
 - `DeviceFlow_approve`: browser-only page behind the identity-aware proxy, signed in by its assertion.
@@ -130,3 +137,4 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `Releases_supervisor`: release download the installer and the supervisor fetch without sign-in.
 - `PrebuildUploads_start`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `PrebuildUploads_complete`: build job wire, signed by the provider's OIDC job token, never by a principal.
+- `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.

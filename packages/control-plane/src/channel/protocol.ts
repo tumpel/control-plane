@@ -33,8 +33,19 @@ export type OfferParts = Pick<
 export type PersonaFileDownload = TurnOffer["personaFiles"][number];
 export type GuestImageDownload = TurnOffer["image"];
 export type StoredOffer = Omit<TurnOffer, keyof OfferParts>;
-export type StoredControlMessage = Exclude<ControlMessage, { type: "TurnOffer" | "TurnWithdrawn" }> | StoredOffer;
+export type ClaudeSetupBoxOffer = Extract<ControlMessage, { type: "ClaudeSetupBoxOffer" }>;
+export type ClaudeSetupBoxCode = Extract<ControlMessage, { type: "ClaudeSetupBoxCode" }>;
+export type StoredClaudeSetupOffer = Pick<ClaudeSetupBoxOffer, "type" | "claudeSetupId" | "boxId">;
+export type StoredClaudeSetupCode = Pick<ClaudeSetupBoxCode, "type" | "claudeSetupId" | "boxId">;
+export type StoredControlMessage =
+  | Exclude<ControlMessage, { type: "TurnOffer" | "TurnWithdrawn" | "ClaudeSetupBoxOffer" | "ClaudeSetupBoxCode" }>
+  | StoredOffer
+  | StoredClaudeSetupOffer
+  | StoredClaudeSetupCode;
 export type PreparedOffer = ({ kind: "Ready" } & OfferParts) | { kind: "Withdrawn" };
+export type PreparedClaudeSetup =
+  | { kind: "Ready"; message: ClaudeSetupBoxOffer | ClaudeSetupBoxCode }
+  | { kind: "Withdrawn"; message: Extract<ControlMessage, { type: "ClaudeSetupBoxDiscard" }> };
 
 export interface Port<Out> {
   send(envelope: Out): void;

@@ -121,6 +121,10 @@ const setup = (revoked = false) => {
         host: peer,
         ledger,
         prepareOffer,
+        prepareClaudeSetup: async (stored) => ({
+          kind: "Withdrawn",
+          message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
+        }),
         now: () => new Date("2026-11-14T10:00:00+00:00"),
       } satisfies control.ControlContext,
       deliver: async (envelope: HostEnvelope) => {

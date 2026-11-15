@@ -247,9 +247,10 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const STORE_DELETE_BATCH = 1000;
 
-type ChunkAsk = Extract<HostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
-type HostEvent = Exclude<HostMessage, ChunkAsk>;
-type ChunkReply = Extract<
+export type SessionHostMessage = Exclude<HostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
+type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
+type HostEvent = Exclude<SessionHostMessage, ChunkAsk>;
+export type ChunkReply = Extract<
   StoredControlMessage,
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
 >;
@@ -570,7 +571,7 @@ export class TenantSessions extends DurableObject<Env> {
     return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, sessionId, changes);
   }
 
-  private host(hostId: string) {
+  protected host(hostId: string) {
     return this.env.HOST.get(this.env.HOST.idFromName(hostId));
   }
 
@@ -1430,7 +1431,7 @@ export class TenantSessions extends DurableObject<Env> {
     return row?.state === "Offline";
   }
 
-  async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<ChunkReply | null> {
+  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<ChunkReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);

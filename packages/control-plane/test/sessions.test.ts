@@ -62,6 +62,9 @@ const SETTINGS = {
   prebuildUploadBudgetSeconds: 60,
   prebuildDispatchBudgetSeconds: 600,
   prebuildBuildBudgetSeconds: 3600,
+  claudeSetupUrlBudgetSeconds: 300,
+  claudeSetupCodeBudgetSeconds: 600,
+  claudeSetupMintBudgetSeconds: 120,
   gitHubActionsIssuer: "https://token.actions.githubusercontent.com",
 };
 
