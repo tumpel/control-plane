@@ -58,6 +58,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Prebuilds_get`                      | `tumpel_prebuild_get`             | `tumpel prebuild get`             |
 | `Prebuilds_getFailure`               | `tumpel_prebuild_failure`         | `tumpel prebuild failure`         |
 | `Prebuilds_list`                     | `tumpel_prebuild_list`            | `tumpel prebuild list`            |
+| `Prebuilds_listLatest`               | `tumpel_prebuild_list_latest`     | `tumpel prebuild list-latest`     |
 | `Prebuilds_start`                    | `tumpel_prebuild_start`           | `tumpel prebuild start`           |
 | `Releases_current`                   | `tumpel_release_current`          | `tumpel release current`          |
 | `SecretSets_create`                  | `tumpel_secret_set_create`        | `tumpel secret-set create`        |

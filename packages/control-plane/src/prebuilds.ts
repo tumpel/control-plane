@@ -15,6 +15,7 @@ export type PrebuildStart = z.infer<typeof PrebuildStartSchema>;
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
 const PREBUILDS_PATH = "/v1/prebuilds";
+const LATEST_PATH = "/v1/prebuilds/latest";
 const PREBUILD_PATH = /^\/v1\/prebuilds\/([^/]+)(\/failure)?$/;
 const PREBUILD_ARCHITECTURE = "Amd64";
 
@@ -160,6 +161,9 @@ export const listPrebuilds = async (env: Env, caller: Caller, repository: string
   return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, prebuildRepository(target)));
 };
 
+export const listLatestPrebuilds = async (env: Env, caller: Caller): Promise<Prebuild[]> =>
+  tenantOf(env, caller).listLatestPrebuilds(caller.tenantId);
+
 export const getPrebuild = async (env: Env, caller: Caller, prebuildId: string): Promise<Outcome<Prebuild>> => {
   const prebuild = await tenantOf(env, caller).getPrebuild(caller.tenantId, prebuildId);
   return prebuild === null ? prebuildNotFound(prebuildId) : ok(prebuild);
@@ -193,11 +197,13 @@ export const handlePrebuilds = async (
   authenticate: Authenticate,
 ): Promise<Response | null> => {
   const { pathname } = url;
-  const one = PREBUILD_PATH.exec(pathname);
+  const latest = pathname === LATEST_PATH && request.method === "GET";
+  const one = latest ? null : PREBUILD_PATH.exec(pathname);
   const collection = pathname === PREBUILDS_PATH && (request.method === "POST" || request.method === "GET");
-  if (!collection && !(one !== null && request.method === "GET")) return null;
+  if (!latest && !collection && !(one !== null && request.method === "GET")) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
+  if (latest) return json(await listLatestPrebuilds(env, caller));
   if (collection && request.method === "POST") {
     const body = await parseBody(request, PrebuildStartSchema, "prebuilds.start");
     if (!body.ok) return body.response;

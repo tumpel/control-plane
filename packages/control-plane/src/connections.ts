@@ -1,5 +1,6 @@
 import {
   ConnectedConnectionSchema,
+  type ConnectionSummarySchema,
   GitHubActionsConnectionLinkSchema,
   GitHubActionsConnectionStartSchema,
   NamespaceConnectionLinkSchema,
@@ -16,10 +17,7 @@ import { issuerSubject } from "./issuer.ts";
 import { ownerRequired } from "./members";
 import type { BuildProvider, NamespaceRow } from "./tenant-prebuilds";
 
-export type ConnectionSummary =
-  | z.infer<typeof ConnectedConnectionSchema>
-  | z.infer<typeof NotConnectedConnectionSchema>
-  | z.infer<typeof NotConfiguredConnectionSchema>;
+export type ConnectionSummary = z.infer<typeof ConnectionSummarySchema>;
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
@@ -33,6 +31,7 @@ const OPERATIONS: Record<BuildProvider, string> = {
   Namespace: "namespaceConnections",
 };
 const BUILD_PROVIDERS: readonly BuildProvider[] = ["GitHubActions", "Namespace"];
+const NAMESPACE_AUDIENCE = "federation.namespaceapis.com";
 
 const stageIssuer = (issuerHostname: string | undefined): string | null =>
   issuerHostname ? `https://${issuerHostname}` : null;
@@ -72,8 +71,8 @@ const issuerMissing = () => ({
 const namespaceLink = (tenantId: string, issuer: string | null, row: NamespaceRow | null): unknown => {
   if (issuer === null) return { state: "NotConfigured", ...issuerMissing() };
   const subject = subjectPattern(tenantId);
-  if (row === null) return { state: "NotConnected", issuer, subjectPattern: subject };
-  const { namespaceConnectionId, accountLabel, workspaceId, audience, createdAt, updatedAt } = row;
+  if (row === null) return { state: "NotConnected", issuer, subjectPattern: subject, audience: NAMESPACE_AUDIENCE };
+  const { namespaceConnectionId, accountLabel, workspaceId, createdAt, updatedAt } = row;
   return {
     state: "Connected",
     connection: {
@@ -83,7 +82,7 @@ const namespaceLink = (tenantId: string, issuer: string | null, row: NamespaceRo
       workspaceId,
       issuer,
       subjectPattern: subject,
-      audience,
+      audience: NAMESPACE_AUDIENCE,
       createdAt,
       updatedAt,
     },

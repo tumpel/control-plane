@@ -20,6 +20,7 @@ import tenant0019 from "../migrations/tenant/0019_prebuild_key_and_providers.sql
 import tenant0020 from "../migrations/tenant/0020_prebuild_uploads.sql";
 import tenant0021 from "../migrations/tenant/0021_session_issues.sql";
 import tenant0022 from "../migrations/tenant/0022_prebuild_default_branch.sql";
+import tenant0023 from "../migrations/tenant/0023_namespace_audience_defined.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -45,4 +46,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0020_prebuild_uploads", sql: tenant0020 },
   { name: "0021_session_issues", sql: tenant0021 },
   { name: "0022_prebuild_default_branch", sql: tenant0022 },
+  { name: "0023_namespace_audience_defined", sql: tenant0023 },
 ];
