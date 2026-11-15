@@ -174,7 +174,7 @@ test("a prebuild start refuses before it stores anything: an unconnected provide
   assert.match(problem.fix, /tumpel github-actions start/);
   const circleCI = await refused("POST", "/v1/prebuilds", { ...start, provider: "CircleCI" }, 409);
   assert.equal(circleCI.code, "NoBuildProvider");
-  assert.match(circleCI.fix, /tumpel circleci start --token-stdin/);
+  assert.match(circleCI.fix, /tumpel circleci authorize/);
   const namespace = await refused("POST", "/v1/prebuilds", { ...start, provider: "Namespace", rebuild: true }, 409);
   assert.equal(namespace.code, "NoBuildProvider");
   assert.match(namespace.fix, /tumpel namespace start/);

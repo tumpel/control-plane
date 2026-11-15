@@ -19,7 +19,7 @@ const notConnected = (repository: string): Response =>
     code: "NoBuildProvider",
     title: "Build provider not connected",
     detail: `your tenant has not connected CircleCI, so ${repository} cannot be bound to a CircleCI project`,
-    fix: "Connect your CircleCI organization with tumpel circleci start --token-stdin, then add the binding again",
+    fix: "Connect your CircleCI organization from the dashboard or with tumpel circleci authorize, then add the binding again",
   });
 
 const projectMissing = (detail: string): Response =>
@@ -44,7 +44,7 @@ export const circleCIRefused = (answer: { status: number; detail: string }, doin
       code: "CircleCITokenRefused",
       title: "CircleCI refused the token",
       detail: `${answer.detail}, ${doing}`,
-      fix: "Connect CircleCI again with tumpel circleci start --token-stdin with a personal API token of a member who administers the project, then try again",
+      fix: "Connect CircleCI again from the dashboard or with tumpel circleci authorize as a member who administers the project, choosing Write or Admin, then try again",
     });
   }
   return problem(409, {
@@ -93,7 +93,7 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
       code: "CircleCITokenRefused",
       title: "CircleCI refused the token",
       detail: `${project.detail}; the connection's token no longer reads CircleCI`,
-      fix: "Connect CircleCI again with tumpel circleci start --token-stdin, then add the binding again",
+      fix: "Connect CircleCI again from the dashboard or with tumpel circleci authorize, then add the binding again",
     });
   }
   if (!project.ok) return projectMissing(`${project.detail}, reading project ${add.projectSlug}`);

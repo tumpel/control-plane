@@ -13,7 +13,7 @@ import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
 import { storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
-import { TenantClaudeSetups } from "./tenant-claude-setups";
+import { TenantCircleCIAuthorizations } from "./tenant-circleci-authorizations";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 
@@ -122,7 +122,7 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
-export class Tenant extends TenantClaudeSetups {
+export class Tenant extends TenantCircleCIAuthorizations {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {

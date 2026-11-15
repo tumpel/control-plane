@@ -41,10 +41,13 @@ export type CircleCIConnectionStart = z.infer<typeof CircleCIConnectionStartSche
 export type CircleCIProject = z.infer<typeof CircleCIProjectSchema>;
 export type CircleCIProjectAdd = z.infer<typeof CircleCIProjectAddSchema>;
 
+export type CircleCICredentialRow = { kind: "Authorized"; expiresAt: number } | { kind: "Pasted" };
+
 export interface CircleCIRow {
   circleCIConnectionId: string;
   accountLabel: string;
   organizationId: string;
+  credential: CircleCICredentialRow;
   createdAt: number;
   updatedAt: number;
 }
@@ -791,7 +794,10 @@ export class TenantPrebuilds extends TenantSessions {
 
   deleteBuildConnection(provider: BuildProvider): boolean {
     return this.ctx.storage.transactionSync(() => {
-      if (provider === "CircleCI") this.ctx.storage.sql.exec("DELETE FROM circleci_projects");
+      if (provider === "CircleCI") {
+        this.ctx.storage.sql.exec("DELETE FROM circleci_projects");
+        this.ctx.storage.sql.exec("DELETE FROM circleci_token_expiries");
+      }
       return this.ctx.storage.sql.exec(`DELETE FROM ${CONNECTION_TABLES[provider]}`).rowsWritten > 0;
     });
   }
@@ -805,10 +811,14 @@ export class TenantPrebuilds extends TenantSessions {
       updated_at: number;
     }>("CircleCI");
     if (row === null) return null;
+    const [expiry] = this.ctx.storage.sql
+      .exec<{ expires_at: number }>("SELECT expires_at FROM circleci_token_expiries WHERE connection_slot = 1")
+      .toArray();
     return {
       circleCIConnectionId: row.circleci_connection_id,
       accountLabel: row.account_label,
       organizationId: row.organization_id,
+      credential: expiry === undefined ? { kind: "Pasted" } : { kind: "Authorized", expiresAt: expiry.expires_at },
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -821,28 +831,49 @@ export class TenantPrebuilds extends TenantSessions {
       await this.dataKey(),
       row.api_token_sealed,
       CIRCLECI_TOKEN_CONTEXT,
-      "connect CircleCI again with tumpel circleci start --token-stdin",
+      "connect CircleCI again from the dashboard or with tumpel circleci authorize",
     );
+  }
+
+  protected sealCircleCIToken(token: string): Promise<string> {
+    return this.dataKey().then((key) => seal(key, token, CIRCLECI_TOKEN_CONTEXT));
+  }
+
+  protected writeCircleCIConnectionRows(
+    connection: { accountLabel: string; organizationId: string; sealedToken: string; expiresAt: number | null },
+    now: number,
+  ): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      `INSERT INTO circleci_connections (connection_slot, circleci_connection_id, account_label, organization_id, api_token_sealed,
+        created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET
+        account_label = excluded.account_label, organization_id = excluded.organization_id,
+        api_token_sealed = excluded.api_token_sealed, updated_at = excluded.updated_at`,
+      crypto.randomUUID(),
+      connection.accountLabel,
+      connection.organizationId,
+      connection.sealedToken,
+      now,
+      now,
+    );
+    sql.exec("DELETE FROM circleci_token_expiries");
+    if (connection.expiresAt !== null) {
+      sql.exec("INSERT INTO circleci_token_expiries (connection_slot, expires_at) VALUES (1, ?)", connection.expiresAt);
+    }
   }
 
   async connectCircleCI(start: CircleCIConnectionStart, now: number): Promise<CircleCIRow> {
     await this.holdDataKey();
-    const sealed = await seal(await this.dataKey(), start.apiToken, CIRCLECI_TOKEN_CONTEXT);
-    this.ctx.storage.sql.exec(
-      `INSERT INTO circleci_connections (connection_slot, circleci_connection_id, account_label, organization_id, api_token_sealed,
-      created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET
-      account_label = excluded.account_label, organization_id = excluded.organization_id,
-      api_token_sealed = excluded.api_token_sealed, updated_at = excluded.updated_at`,
-      crypto.randomUUID(),
-      start.accountLabel,
-      start.organizationId,
-      sealed,
-      now,
-      now,
+    const sealedToken = await this.sealCircleCIToken(start.apiToken);
+    this.ctx.storage.transactionSync(() =>
+      this.writeCircleCIConnectionRows(
+        { accountLabel: start.accountLabel, organizationId: start.organizationId, sealedToken, expiresAt: null },
+        now,
+      ),
     );
-    const connection = this.circleCIConnection();
-    if (connection === null) throw new Error("the CircleCI connection was written and then not found");
-    return connection;
+    const written = this.circleCIConnection();
+    if (written === null) throw new Error("the CircleCI connection was written and then not found");
+    return written;
   }
 
   listCircleCIProjects(tenantId: string): CircleCIProject[] {
@@ -962,7 +993,7 @@ export class TenantPrebuilds extends TenantSessions {
     if (run.kind === "Refused") {
       const reconnect =
         run.status === 401 || run.status === 403
-          ? "; the token is expired or revoked, so connect again with tumpel circleci start --token-stdin"
+          ? "; the token is expired or revoked, so connect again from the dashboard or with tumpel circleci authorize"
           : "";
       return {
         kind: "Refused",
