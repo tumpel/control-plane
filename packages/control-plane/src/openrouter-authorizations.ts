@@ -1,12 +1,12 @@
 import { OpenRouterAuthorizationStartSchema } from "@tumpel/api/schemas";
 import { openRouterNotConnectedPage } from "@tumpel/pages";
-import { dashboardReturn } from "./github.ts";
+import { readSignedState } from "./github.ts";
 import { json, parseBody, problem, seeOther } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
-import { parseCallback, readState, returnTo, STATE_PURPOSE, stateOfPath } from "./openrouter-oauth.ts";
+import { parseCallback, returnTo, STATE_PURPOSE, StateClaimsSchema, stateOfPath } from "./openrouter-oauth.ts";
 import { dashboardOrigin, htmlPage } from "./pages";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -22,24 +22,11 @@ const authorize = async (request: Request, url: URL, env: Env, caller: Caller): 
   if (refused) return refused;
   const body = await parseBody(request, OpenRouterAuthorizationStartSchema, "openRouterConnections.authorize");
   if (!body.ok) return body.response;
-  const { secretSetId, returnUrl } = body.value;
-  const back = dashboardReturn(returnUrl ?? null, env.DASHBOARD_ORIGIN);
-  if (!back.ok) {
-    return problem(400, {
-      code: "InvalidRequest",
-      title: "Return URL refused",
-      detail: `openRouterConnections.authorize refused the return URL: ${back.detail}`,
-      fix: `Leave returnUrl out, or name a page on ${env.DASHBOARD_ORIGIN || "the dashboard"}`,
-    });
-  }
+  const { secretSetId } = body.value;
   const started = await env.TENANT.getByName(caller.tenantId).startOpenRouterAuthorization(
     caller.tenantId,
     caller.principalId,
-    {
-      secretSetId,
-      returnUrl: back.returnUrl ?? secretSetPage(env, caller.tenantId, secretSetId),
-      controlPlaneOrigin: url.origin,
-    },
+    { secretSetId, controlPlaneOrigin: url.origin },
     Date.now(),
   );
   if (started.kind === "Started") return json(started.authorization);
@@ -64,7 +51,6 @@ const readAuthorization = async (env: Env, caller: Caller, openRouterAuthorizati
     caller.tenantId,
     caller.principalId,
     openRouterAuthorizationId,
-    Date.now(),
   );
   if (read.kind === "Found") return json(read.authorization);
   return problem(404, {
@@ -96,8 +82,10 @@ export const handleOpenRouterCallback = async (request: Request, url: URL, env: 
   if (state === null) return null;
   const refuse = (detail: string) =>
     htmlPage(env, new URL(url.origin), 400, (links) => openRouterNotConnectedPage(links, detail));
-  const checked = await readState(await keyStoreOf(env).signingKey(STATE_PURPOSE), state);
-  if (!checked.ok) return refuse(`${checked.reason}, so no authorization of this control plane started it`);
+  const checked = await readSignedState(await keyStoreOf(env).signingKey(STATE_PURPOSE), state, StateClaimsSchema);
+  if (!checked.ok) {
+    return refuse(`${checked.reason}, so no OpenRouter authorization of this control plane sent this callback`);
+  }
   const callback = parseCallback(url.searchParams);
   if (callback.kind === "Invalid") return refuse(callback.detail);
   const { tenantId, openRouterAuthorizationId } = checked.claims;
@@ -110,5 +98,5 @@ export const handleOpenRouterCallback = async (request: Request, url: URL, env: 
   if (settled.kind === "NotFound") {
     return refuse(`tenant ${tenantId} holds no OpenRouter authorization ${openRouterAuthorizationId}`);
   }
-  return seeOther(returnTo(settled.returnUrl, openRouterAuthorizationId));
+  return seeOther(returnTo(secretSetPage(env, tenantId, settled.secretSetId), openRouterAuthorizationId));
 };

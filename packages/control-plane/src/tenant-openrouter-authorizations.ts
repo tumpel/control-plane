@@ -1,15 +1,16 @@
 import { OpenRouterAuthorizationSchema } from "@tumpel/api/schemas";
 import { base64Url } from "./crypto";
 import { seal, unseal } from "./envelope.ts";
-import type { Fetch } from "./github.ts";
+import { type Fetch, signState } from "./github.ts";
 import { keyStoreOf } from "./key-store.ts";
 import {
-  advanceAuthorization,
   authorizeUrl,
   CALLBACK_BUDGET_SECONDS,
   CONNECT_AGAIN,
   callbackUrl,
+  EXCHANGE_BUDGET_SECONDS,
   exchangeCode,
+  exchangeStoppedDetail,
   keyLabelOf,
   notConnectedDetail,
   OPENROUTER_MEMBER,
@@ -18,7 +19,7 @@ import {
   type OpenRouterAuthorizationFailureReason,
   type OpenRouterCallback,
   STATE_PURPOSE,
-  signState,
+  timedOutDetail,
 } from "./openrouter-oauth.ts";
 import type { OpenRouterAuthorizationDeadline } from "./session-timer";
 import { TenantCircleCIAuthorizations } from "./tenant-circleci-authorizations";
@@ -28,24 +29,29 @@ type AuthorizationRow = {
   openrouter_authorization_id: string;
   principal_id: string;
   secret_set_id: string;
-  return_url: string;
   key_label: string;
   created_at: number;
   updated_at: number;
 };
 
 type WaitRow = { authorize_url: string; verifier_sealed: string; callback_due_at: number };
+type ExchangeRow = { exchange_due_at: number };
 type CompletionRow = { completed_at: number };
 type FailureRow = { reason: string; detail: string; failed_at: number };
 
+type LivePhaseTable = "openrouter_authorization_waits" | "openrouter_authorization_exchanges";
+
+const WAITS = "openrouter_authorization_waits";
+const EXCHANGES = "openrouter_authorization_exchanges";
+
 type Phase =
   | { state: "AwaitingCallback"; wait: WaitRow }
+  | { state: "Exchanging"; exchange: ExchangeRow }
   | { state: "Completed"; completion: CompletionRow }
   | { state: "Failed"; failure: FailureRow };
 
 export type NewOpenRouterAuthorization = {
   secretSetId: string;
-  returnUrl: string;
   controlPlaneOrigin: string;
 };
 
@@ -58,9 +64,9 @@ export type OpenRouterAuthorizationRead =
   | { kind: "Found"; authorization: OpenRouterAuthorization }
   | { kind: "NotFound" };
 
-export type OpenRouterCallbackSettled = { kind: "Returned"; returnUrl: string } | { kind: "NotFound" };
+export type OpenRouterCallbackSettled = { kind: "Returned"; secretSetId: string } | { kind: "NotFound" };
 
-const SELECT = `SELECT openrouter_authorization_id, principal_id, secret_set_id, return_url, key_label, created_at, updated_at
+const SELECT = `SELECT openrouter_authorization_id, principal_id, secret_set_id, key_label, created_at, updated_at
   FROM openrouter_authorizations`;
 
 const verifierContext = (openRouterAuthorizationId: string): string =>
@@ -84,10 +90,12 @@ const statusOf = (phase: Phase, keyLabel: string): unknown => {
       callbackDueAt: iso(phase.wait.callback_due_at),
     };
   }
+  if (phase.state === "Exchanging") {
+    return { state: "Exchanging", exchangeDueAt: iso(phase.exchange.exchange_due_at) };
+  }
   if (phase.state === "Completed") {
     return {
       state: "Completed",
-      memberName: OPENROUTER_MEMBER,
       keyLabel,
       completedAt: iso(phase.completion.completed_at),
     };
@@ -101,8 +109,6 @@ const statusOf = (phase: Phase, keyLabel: string): unknown => {
 };
 
 export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations {
-  private readonly spending = new Set<string>();
-
   private openRouterRow(openRouterAuthorizationId: string): AuthorizationRow | null {
     const [row] = this.ctx.storage.sql
       .exec<AuthorizationRow>(`${SELECT} WHERE openrouter_authorization_id = ?`, openRouterAuthorizationId)
@@ -119,6 +125,13 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
       )
       .toArray();
     if (wait !== undefined) return { state: "AwaitingCallback", wait };
+    const [exchange] = sql
+      .exec<ExchangeRow>(
+        "SELECT exchange_due_at FROM openrouter_authorization_exchanges WHERE openrouter_authorization_id = ?",
+        openRouterAuthorizationId,
+      )
+      .toArray();
+    if (exchange !== undefined) return { state: "Exchanging", exchange };
     const [completion] = sql
       .exec<CompletionRow>(
         "SELECT completed_at FROM openrouter_authorization_completions WHERE openrouter_authorization_id = ?",
@@ -142,7 +155,6 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
       tenantId,
       principalId: row.principal_id,
       secretSetId: row.secret_set_id,
-      returnUrl: row.return_url,
       status: statusOf(this.openRouterPhase(row.openrouter_authorization_id), row.key_label),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -155,10 +167,10 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     });
   }
 
-  private endWait(openRouterAuthorizationId: string, now: number): boolean {
+  private endPhase(openRouterAuthorizationId: string, from: LivePhaseTable, now: number): boolean {
     const sql = this.ctx.storage.sql;
     const ended = sql.exec(
-      "DELETE FROM openrouter_authorization_waits WHERE openrouter_authorization_id = ?",
+      `DELETE FROM ${from} WHERE openrouter_authorization_id = ?`,
       openRouterAuthorizationId,
     ).rowsWritten;
     if (ended === 0) return false;
@@ -172,12 +184,13 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
 
   private failOpenRouterAuthorization(
     openRouterAuthorizationId: string,
+    from: LivePhaseTable,
     reason: OpenRouterAuthorizationFailureReason,
     detail: string,
     now: number,
   ): boolean {
     return this.ctx.storage.transactionSync(() => {
-      if (!this.endWait(openRouterAuthorizationId, now)) return false;
+      if (!this.endPhase(openRouterAuthorizationId, from, now)) return false;
       this.ctx.storage.sql.exec(
         "INSERT INTO openrouter_authorization_failures (openrouter_authorization_id, reason, detail, failed_at) VALUES (?, ?, ?, ?)",
         openRouterAuthorizationId,
@@ -222,17 +235,20 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
       openRouterAuthorizationId,
     });
     const keyLabel = keyLabelOf(set.name);
-    const url = authorizeUrl({ callbackUrl: callbackUrl(input.controlPlaneOrigin, state), challenge, keyLabel });
+    const url = authorizeUrl(this.env.OPENROUTER_ORIGIN, {
+      callbackUrl: callbackUrl(input.controlPlaneOrigin, state),
+      challenge,
+      keyLabel,
+    });
     const sealed = await seal(await this.dataKey(), verifier, verifierContext(openRouterAuthorizationId));
     const dueAt = now + CALLBACK_BUDGET_SECONDS * 1000;
     this.ctx.storage.transactionSync(() => {
       sql.exec(
-        `INSERT INTO openrouter_authorizations (openrouter_authorization_id, principal_id, secret_set_id, return_url,
-        key_label, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO openrouter_authorizations (openrouter_authorization_id, principal_id, secret_set_id, key_label,
+        created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
         openRouterAuthorizationId,
         principalId,
         input.secretSetId,
-        input.returnUrl,
         keyLabel,
         now,
         now,
@@ -252,25 +268,13 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     return { kind: "Started", authorization: this.presentOpenRouterAuthorization(tenantId, row) };
   }
 
-  private async settleDeadline(tenantId: string, row: AuthorizationRow, now: number): Promise<void> {
-    const id = row.openrouter_authorization_id;
-    const phase = this.openRouterPhase(id);
-    if (phase.state !== "AwaitingCallback") return;
-    const step = advanceAuthorization(id, phase.state, { kind: "Callback", now, dueAt: phase.wait.callback_due_at });
-    if (step.kind !== "Fail") return;
-    if (this.failOpenRouterAuthorization(id, step.reason, step.detail, now))
-      await this.openRouterTimer(tenantId, id, null);
-  }
-
-  async getOpenRouterAuthorization(
+  getOpenRouterAuthorization(
     tenantId: string,
     principalId: string,
     openRouterAuthorizationId: string,
-    now: number,
-  ): Promise<OpenRouterAuthorizationRead> {
+  ): OpenRouterAuthorizationRead {
     const row = this.openRouterRow(openRouterAuthorizationId);
     if (row === null || row.principal_id !== principalId) return { kind: "NotFound" };
-    await this.settleDeadline(tenantId, row, now);
     return { kind: "Found", authorization: this.presentOpenRouterAuthorization(tenantId, row) };
   }
 
@@ -282,32 +286,35 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
   ): Promise<OpenRouterCallbackSettled> {
     const row = this.openRouterRow(openRouterAuthorizationId);
     if (row === null) return { kind: "NotFound" };
-    const returned = { kind: "Returned", returnUrl: row.return_url } as const;
+    const returned = { kind: "Returned", secretSetId: row.secret_set_id } as const;
     const phase = this.openRouterPhase(openRouterAuthorizationId);
-    if (phase.state !== "AwaitingCallback" || this.spending.has(openRouterAuthorizationId)) return returned;
-    const step = advanceAuthorization(openRouterAuthorizationId, phase.state, {
-      kind: "Callback",
-      now,
-      dueAt: phase.wait.callback_due_at,
-    });
-    const fail = async (reason: OpenRouterAuthorizationFailureReason, detail: string) => {
-      if (this.failOpenRouterAuthorization(openRouterAuthorizationId, reason, detail, Date.now())) {
+    if (phase.state !== "AwaitingCallback") return returned;
+    const fail = async (from: LivePhaseTable, reason: OpenRouterAuthorizationFailureReason, detail: string) => {
+      if (this.failOpenRouterAuthorization(openRouterAuthorizationId, from, reason, detail, Date.now())) {
         await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
       }
       return returned;
     };
-    if (step.kind === "Fail") return fail(step.reason, step.detail);
-    if (step.kind !== "Proceed") return returned;
-    if (callback.kind === "NoCode") return fail("NotConnected", notConnectedDetail());
-    this.spending.add(openRouterAuthorizationId);
-    const exchanged = await this.spendOpenRouterCode(row, phase.wait.verifier_sealed, callback.code).finally(() =>
-      this.spending.delete(openRouterAuthorizationId),
-    );
-    if (exchanged.kind === "Refused") return fail("CodeRefused", exchanged.detail);
-    if (exchanged.kind === "Failed") return fail("ExchangeFailed", exchanged.detail);
+    if (now >= phase.wait.callback_due_at) {
+      return fail(WAITS, "AuthorizationTimedOut", timedOutDetail(openRouterAuthorizationId));
+    }
+    if (callback.kind === "NoCode") return fail(WAITS, "NotConnected", notConnectedDetail());
+    const exchangeDueAt = now + EXCHANGE_BUDGET_SECONDS * 1000;
+    this.ctx.storage.transactionSync(() => {
+      this.endPhase(openRouterAuthorizationId, WAITS, now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO openrouter_authorization_exchanges (openrouter_authorization_id, exchange_due_at) VALUES (?, ?)",
+        openRouterAuthorizationId,
+        exchangeDueAt,
+      );
+    });
+    await this.openRouterTimer(tenantId, openRouterAuthorizationId, exchangeDueAt);
+    const exchanged = await this.spendOpenRouterCode(row, phase.wait.verifier_sealed, callback.code);
+    if (exchanged.kind === "Refused") return fail(EXCHANGES, "CodeRefused", exchanged.detail);
+    if (exchanged.kind === "Failed") return fail(EXCHANGES, "ExchangeFailed", exchanged.detail);
     const stored = await this.storeOpenRouterKey(row, exchanged.key);
-    if (stored.kind === "NotStored") return fail("KeyNotStored", stored.detail);
-    if (stored.kind === "Stored") await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
+    if (stored.kind === "NotStored") return fail(EXCHANGES, "KeyNotStored", stored.detail);
+    await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
     return returned;
   }
 
@@ -318,13 +325,13 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
       verifierContext(row.openrouter_authorization_id),
       CONNECT_AGAIN,
     );
-    return exchangeCode(fetcher, { code, verifier });
+    return exchangeCode(fetcher, this.env.OPENROUTER_ORIGIN, { code, verifier });
   }
 
   private async storeOpenRouterKey(
     row: AuthorizationRow,
     key: string,
-  ): Promise<{ kind: "Stored" } | { kind: "Ended" } | { kind: "NotStored"; detail: string }> {
+  ): Promise<{ kind: "Stored" } | { kind: "NotStored"; detail: string }> {
     const id = row.openrouter_authorization_id;
     const secretSetId = row.secret_set_id;
     const sealed = await seal(await this.dataKey(), key, sealContext(secretSetId, OPENROUTER_MEMBER));
@@ -346,7 +353,11 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
           detail: `secret set ${secretSetId} took the OpenRouter credential ${other} while OpenRouter authorization ${id} ran. ${discarded}, then remove ${other} and ${CONNECT_AGAIN}`,
         } as const;
       }
-      if (!this.endWait(id, now)) return { kind: "Ended" } as const;
+      if (!this.endPhase(id, EXCHANGES, now)) {
+        throw new Error(
+          `OpenRouter authorization ${id} ran past its ${EXCHANGE_BUDGET_SECONDS} s exchange limit and failed before it stored the key. ${discarded}, then ${CONNECT_AGAIN}`,
+        );
+      }
       sql.exec(
         "INSERT INTO openrouter_authorization_completions (openrouter_authorization_id, completed_at) VALUES (?, ?)",
         id,
@@ -371,13 +382,18 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     });
   }
 
-  async openRouterAuthorizationDeadlineReached(deadline: OpenRouterAuthorizationDeadline): Promise<void> {
+  openRouterAuthorizationDeadlineReached(deadline: OpenRouterAuthorizationDeadline): void {
     const id = deadline.openRouterAuthorizationId;
-    const phase = this.openRouterRow(id) === null ? null : this.openRouterPhase(id);
-    if (phase === null || phase.state !== "AwaitingCallback" || phase.wait.callback_due_at !== deadline.at) return;
-    const step = advanceAuthorization(id, phase.state, { kind: "Deadline" });
-    if (step.kind !== "Fail") return;
-    this.failOpenRouterAuthorization(id, step.reason, step.detail, Date.now());
+    const row = this.openRouterRow(id);
+    if (row === null) return;
+    const phase = this.openRouterPhase(id);
+    const now = Date.now();
+    if (phase.state === "AwaitingCallback" && phase.wait.callback_due_at === deadline.at) {
+      this.failOpenRouterAuthorization(id, WAITS, "AuthorizationTimedOut", timedOutDetail(id), now);
+    }
+    if (phase.state === "Exchanging" && phase.exchange.exchange_due_at === deadline.at) {
+      this.failOpenRouterAuthorization(id, EXCHANGES, "ExchangeFailed", exchangeStoppedDetail(id, row.key_label), now);
+    }
   }
 
   openRouterSecretSets(): string[] {

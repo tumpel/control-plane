@@ -204,6 +204,7 @@ export interface Env extends SignerEnv {
   CIRCLECI_API_ORIGIN: string;
   CIRCLECI_OIDC_ORIGIN: string;
   CIRCLECI_APP_ORIGIN: string;
+  OPENROUTER_ORIGIN: string;
 }
 
 let verifier: { key: string; verify: Verify } | undefined;

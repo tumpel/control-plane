@@ -25,6 +25,7 @@
     "CIRCLECI_API_ORIGIN": "https://circleci.com",
     "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
     "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
+    "OPENROUTER_ORIGIN": "https://openrouter.ai",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -79,6 +80,7 @@
         "CIRCLECI_API_ORIGIN": "https://circleci.com",
         "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
         "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
+        "OPENROUTER_ORIGIN": "https://openrouter.ai",
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,
