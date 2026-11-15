@@ -109,9 +109,8 @@ before(async () => {
     "current.json",
     JSON.stringify(CLAUDE_CODE_AMD64_RELEASE),
   );
-  const identity = { gitAuthorName: "Prebuilds", gitAuthorEmail: EMAIL };
   const browser = { "cf-access-jwt-assertion": assertion(), origin };
-  const signedUp = await send("POST", "/v1/tenants", { name: "Prebuilds", ...identity }, browser);
+  const signedUp = await send("POST", "/v1/tenants", { name: "Prebuilds" }, browser);
   assert.equal(signedUp.status, 200);
   const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
   bearer = { authorization: `Bearer ${await deviceToken(tenantId)}` };

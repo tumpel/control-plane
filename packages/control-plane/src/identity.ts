@@ -1,7 +1,6 @@
 import { MembershipSchema, type PrincipalRoleSchema, WhoamiSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
-import type { GitIdentity } from "./tenant";
 
 export type Whoami = z.infer<typeof WhoamiSchema>;
 export type Membership = z.infer<typeof MembershipSchema>;
@@ -144,7 +143,7 @@ export const proofCaller = async (
   commonName: string,
   hostname: string,
   now: number,
-): Promise<{ caller: Caller; created: boolean; identity: GitIdentity }> => {
+): Promise<{ caller: Caller; created: boolean }> => {
   const tenantId = await derivedId("tenant", commonName);
   const principalId = await derivedId("principal", commonName);
   const email = `proof+${principalId.slice(0, 8)}@${hostname}`;
@@ -175,6 +174,5 @@ export const proofCaller = async (
   return {
     caller: { tenantId, principalId, role: membership.role },
     created: tenant?.results.length === 1,
-    identity: { gitAuthorName: PROOF_TENANT_NAME, gitAuthorEmail: email },
   };
 };

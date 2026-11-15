@@ -137,12 +137,7 @@ before(async () => {
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
   const browser = { "cf-access-jwt-assertion": assertion(), origin };
-  const created = await send(
-    "POST",
-    "/v1/tenants",
-    { name: "Uploads", gitAuthorName: "Uploads", gitAuthorEmail: EMAIL },
-    browser,
-  );
+  const created = await send("POST", "/v1/tenants", { name: "Uploads" }, browser);
   assert.equal(created.status, 200);
   tenantId = WhoamiSchema.parse(await created.json()).tenant.tenantId;
   const started = DeviceAuthorizationSchema.parse(

@@ -26,7 +26,6 @@ const OWNER = "owner@example.test";
 const BOB = "bob@example.test";
 const CAROL = "carol@example.test";
 const DAVE = "dave@example.test";
-const IDENTITY = { gitAuthorName: "Members", gitAuthorEmail: "members@example.test" };
 
 interface Database {
   prepare(query: string): { bind(...values: unknown[]): { run(): Promise<unknown>; first(): Promise<unknown> } };
@@ -68,7 +67,7 @@ const send = (
   });
 
 const signUp = async (email: string, name: string): Promise<string> => {
-  const answered = await send("POST", "/v1/tenants", { name, ...IDENTITY }, signedIn(email));
+  const answered = await send("POST", "/v1/tenants", { name }, signedIn(email));
   assert.equal(answered.status, 200);
   return WhoamiSchema.parse(await answered.json()).tenant.tenantId;
 };

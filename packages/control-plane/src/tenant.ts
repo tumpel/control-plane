@@ -16,11 +16,10 @@ import { TenantPrebuilds } from "./tenant-prebuilds";
 import { memberRows, sealContext, toKey } from "./tenant-sessions";
 
 export type Persona = z.infer<typeof PersonaSchema>;
-export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId" | "gitAuthorName" | "gitAuthorEmail"> & {
+export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & {
   files: StoredFile[];
 };
 export type PersonaChange = Omit<PersonaWrite, "harness">;
-export type GitIdentity = Pick<Persona, "gitAuthorName" | "gitAuthorEmail">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
@@ -58,8 +57,6 @@ type PersonaRow = {
   name: string;
   harness: string;
   secret_set_id: string;
-  git_author_name: string;
-  git_author_email: string;
   created_at: number;
   updated_at: number;
 };
@@ -73,7 +70,7 @@ type PersonaFileRow = {
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, harness, secret_set_id, git_author_name, git_author_email, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at FROM personas";
 
 export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
   sql
@@ -90,8 +87,6 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[]): Persona =>
     name: row.name,
     harness: row.harness,
     secretSetId: row.secret_set_id,
-    gitAuthorName: row.git_author_name,
-    gitAuthorEmail: row.git_author_email,
     files: files.map((file) => ({
       path: file.path,
       digest: file.digest,
@@ -167,7 +162,7 @@ export class Tenant extends TenantPrebuilds {
     });
   }
 
-  open(tenantId: string, identity: GitIdentity, now: number): void {
+  open(tenantId: string, now: number): void {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       const [existing] = sql.exec<{ persona_id: string }>("SELECT persona_id FROM personas LIMIT 1").toArray();
@@ -181,14 +176,12 @@ export class Tenant extends TenantPrebuilds {
         now,
       );
       sql.exec(
-        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, git_author_name, git_author_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         crypto.randomUUID(),
         tenantId,
         DEFAULT_PERSONA.name,
         DEFAULT_PERSONA.harness,
         secretSetId,
-        identity.gitAuthorName,
-        identity.gitAuthorEmail,
         now,
         now,
       );
@@ -239,14 +232,12 @@ export class Tenant extends TenantPrebuilds {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, git_author_name, git_author_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           persona.name,
           persona.harness,
           persona.secretSetId,
-          persona.gitAuthorName,
-          persona.gitAuthorEmail,
           now,
           now,
         );
@@ -263,11 +254,9 @@ export class Tenant extends TenantPrebuilds {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, git_author_name = ?, git_author_email = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
           persona.secretSetId,
-          persona.gitAuthorName,
-          persona.gitAuthorEmail,
           now,
           tenantId,
           personaId,

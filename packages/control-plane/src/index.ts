@@ -243,13 +243,8 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   const body = await parseBody(request, SignUpSchema, "signUp");
   if (!body.ok) return body.response;
   const now = Date.now();
-  const { name, gitAuthorName, gitAuthorEmail } = body.value;
-  const whoami = await signUp(env.DB, signed.email, name, now);
-  await env.TENANT.getByName(whoami.tenant.tenantId).open(
-    whoami.tenant.tenantId,
-    { gitAuthorName, gitAuthorEmail },
-    now,
-  );
+  const whoami = await signUp(env.DB, signed.email, body.value.name, now);
+  await env.TENANT.getByName(whoami.tenant.tenantId).open(whoami.tenant.tenantId, now);
   return json(WhoamiSchema.parse(whoami));
 };
 
@@ -422,8 +417,6 @@ const personaWrite = async (
       name: body.name,
       harness: body.harness,
       secretSetId: body.secretSetId,
-      gitAuthorName: body.gitAuthorName,
-      gitAuthorEmail: body.gitAuthorEmail,
       files: stored.files,
     },
   };
@@ -814,7 +807,7 @@ const signerMemberships = async (
     const now = Date.now();
     const proof = await proofCaller(env.DB, signed.commonName, url.hostname, now);
     if (proof.created) {
-      await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, proof.identity, now);
+      await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, now);
     }
     return [await whoamiOf(env.DB, proof.caller)];
   }

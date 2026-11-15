@@ -36,9 +36,6 @@ export const signUpPage = (email: string): Response =>
     "Create your tenant",
     `<p>Signed in as ${escapeHtml(email)}, which owns no tenant yet.</p>
 <form id="signup"><input name="name" placeholder="Tenant name" maxlength="100" required autofocus>
-<p>The default persona commits to git as:</p>
-<input name="gitAuthorName" placeholder="Git author name" maxlength="100" required>
-<input name="gitAuthorEmail" type="email" placeholder="Git author email" maxlength="320" required>
 <button type="submit">Create tenant</button></form>
 <p id="result" role="alert"></p>
 <script>${POST_JSON}

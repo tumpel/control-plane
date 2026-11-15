@@ -5,8 +5,6 @@
       "name": "Reviewer",
       "harness": "ClaudeCode",
       "secretSetName": "prod",
-      "gitAuthorName": "Reviewer",
-      "gitAuthorEmail": "reviewer@example.test",
       "files": [
         {
           "path": ".claude/CLAUDE.md",

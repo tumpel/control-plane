@@ -397,13 +397,13 @@ const sessionStart = async (name = "Default") => {
 };
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
-const GIT_IDENTITY = { gitAuthorName: "Ticket Worker", gitAuthorEmail: "ticket-worker@example.test" };
+const GITHUB_USER = { id: 4242, login: "ticket-worker" };
 
 const createPersona = async (name: string, secrets: unknown[], files: unknown[] = []): Promise<void> => {
   const created = await postJson("/v1/secret-sets", { name: `${name} secrets`, secrets }, bearer);
   assert.equal(created.status, 200);
   const { secretSetId } = SecretSetSchema.parse(await created.json());
-  const persona = { name, harness: "ClaudeCode", secretSetId, files, ...GIT_IDENTITY };
+  const persona = { name, harness: "ClaudeCode", secretSetId, files };
   const personas = await getJson("/v1/personas", PersonaSchema.array());
   const existing = personas.find((candidate) => candidate.name === name);
   const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
@@ -425,6 +425,11 @@ before(async () => {
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   github = createServer((request, response) => {
     const path = (request.url ?? "").toLowerCase();
+    if (path === "/user" && request.headers.authorization === "Bearer ghp-e2e") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(GITHUB_USER));
+      return;
+    }
     const issue = GITHUB_ISSUES[path];
     if (issue === undefined || request.headers.authorization !== "Bearer ghp-e2e") {
       response.writeHead(404, { "content-type": "application/json" });
@@ -464,7 +469,7 @@ before(async () => {
   await server.getWorker().applyD1Migrations("DB");
   await (await server.getWorker<{ RELEASES: Store }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
 
-  const signedUp = await postJson("/v1/tenants", { name: "Sessions", ...GIT_IDENTITY }, browser());
+  const signedUp = await postJson("/v1/tenants", { name: "Sessions" }, browser());
   assert.equal(signedUp.status, 200);
   const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
   bearer = { authorization: `Bearer ${await deviceToken(tenantId)}` };
@@ -528,7 +533,10 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   );
   assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
   assert.match(offer.personaFiles[0]?.downloadUrl ?? "", new RegExp(`/persona-files/${digest}\\?X-Tumpel-Method=GET`));
-  assert.deepEqual({ gitAuthorName: offer.gitAuthorName, gitAuthorEmail: offer.gitAuthorEmail }, GIT_IDENTITY);
+  assert.deepEqual(
+    [offer.gitAuthorName, offer.gitAuthorEmail],
+    ["ticket-worker", "4242+ticket-worker@users.noreply.github.com"],
+  );
   assert.deepEqual(
     [offer.image.imageDigest, offer.image.kernelDigest, offer.image.manifestDigest],
     [IMAGE_DIGEST, KERNEL_DIGEST, MANIFEST_DIGEST],
