@@ -11,9 +11,12 @@ export const GitHubManifestStateSchema = z.object({
   expiresAt: OffsetDateTimeSchema,
 });
 
+const EmailSchema = z.string().min(3).max(320);
+
 export const GitHubInstallStateSchema = z.object({
   purpose: z.literal("Installation"),
   tenantId: TenantIdSchema,
+  email: EmailSchema,
   expiresAt: OffsetDateTimeSchema,
   returnUrl: z.string().url().optional(),
 });
@@ -100,6 +103,11 @@ export const GitHubBotUserSchema = z.object({
 export const GitHubUserSchema = z.object({
   id: GitHubIdSchema,
   login: GitHubLoginSchema,
+});
+
+export const GitHubOrgMembershipSchema = z.object({
+  state: z.string(),
+  role: z.string(),
 });
 
 export const GitHubUserInstallationsSchema = z.object({

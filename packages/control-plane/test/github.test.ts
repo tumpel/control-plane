@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
-import { test } from "node:test";
-import { GitHubIssueSchema, GitHubRepositorySchema } from "@tumpel/api/schemas";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { after, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  GitHubInstallStartSchema,
+  GitHubIssueSchema,
+  GitHubRepositorySchema,
+  OAuthClientSchema,
+  OAuthTokenSchema,
+  WhoamiSchema,
+} from "@tumpel/api/schemas";
+import { createTestHarness, type TestHarness } from "wrangler";
 import { deriveSigningKey } from "../src/envelope.ts";
 import {
   appManifest,
@@ -116,6 +127,7 @@ test("a signed state reads back until it expires, and not when tampered with or 
   const claims = {
     purpose: "Installation" as const,
     tenantId: "tenant-1",
+    email: "owner@example.test",
     expiresAt: "2026-11-15T11:00:00.000Z",
   };
   const state = await signState(key, claims);
@@ -292,15 +304,15 @@ test("a repository outside the installation uses the secret set's GITHUB_TOKEN, 
 
 const oauthClient = { clientId: "Iv23client", clientSecret: "client-secret" };
 
-test("an installation links only when the person who authorized the App can access it", async () => {
+const origins = { api: "https://api.github.com", web: "https://github.com" };
+
+test("an installation links only when the person who authorized the App owns its account", async () => {
   const record = { id: 7, account: { login: "octo", type: "User" }, repository_selection: "selected" };
   const listed = { total_count: 1, installations: [record] };
+  const exchanged: [number, unknown] = [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }];
 
-  const owned = answering([
-    [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }],
-    [200, listed],
-  ]);
-  const installer = await verifyInstaller(owned.fetcher, "https://api.github.com", oauthClient, "code-1", 7);
+  const owned = answering([exchanged, [200, listed], [200, { id: 1, login: "Octo" }]]);
+  const installer = await verifyInstaller(owned.fetcher, origins, oauthClient, "code-1", 7);
   assert.deepEqual(installer, { kind: "Installer", installation: record });
   assert.equal(owned.calls[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(header(owned.calls[0]?.init ?? {}, "accept"), "application/json");
@@ -312,15 +324,27 @@ test("an installation links only when the person who authorized the App can acce
   assert.equal(owned.calls[1]?.url, "https://api.github.com/user/installations?per_page=100");
   assert.equal(header(owned.calls[1]?.init ?? {}, "authorization"), "Bearer ghu_user");
 
-  const someoneElses = answering([
-    [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }],
-    [200, listed],
-  ]);
-  const refused = await verifyInstaller(someoneElses.fetcher, "https://api.github.com", oauthClient, "code-1", 8);
-  assert.equal(refused.kind, "NotInstaller");
+  const someoneElses = answering([exchanged, [200, listed]]);
+  assert.equal((await verifyInstaller(someoneElses.fetcher, origins, oauthClient, "code-1", 8)).kind, "NotInstaller");
+
+  const collaborator = answering([exchanged, [200, listed], [200, { id: 2, login: "reader" }]]);
+  assert.equal((await verifyInstaller(collaborator.fetcher, origins, oauthClient, "code-1", 7)).kind, "NotInstaller");
+
+  const organization = { id: 9, account: { login: "acme", type: "Organization" }, repository_selection: "all" };
+  const orgListed: [number, unknown] = [200, { total_count: 1, installations: [organization] }];
+  const admin = answering([exchanged, orgListed, [200, { state: "active", role: "admin" }]]);
+  assert.deepEqual(await verifyInstaller(admin.fetcher, origins, oauthClient, "code-1", 9), {
+    kind: "Installer",
+    installation: organization,
+  });
+  assert.equal(admin.calls[2]?.url, "https://api.github.com/user/memberships/orgs/acme");
+  const member = answering([exchanged, orgListed, [200, { state: "active", role: "member" }]]);
+  assert.equal((await verifyInstaller(member.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
+  const outsider = answering([exchanged, orgListed, [404, { message: "Not Found" }]]);
+  assert.equal((await verifyInstaller(outsider.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
 
   const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
-  const failed = await verifyInstaller(spent.fetcher, "https://api.github.com", oauthClient, "spent", 7);
+  const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7);
   assert.equal(failed.kind, "Failed");
   assert.equal(spent.calls.length, 1);
 });
@@ -462,4 +486,253 @@ test("the box commits as the App's bot under its own user id, or as the GitHub u
   assert.equal(refused.ok, false);
   assert.match(refused.ok ? "" : refused.detail, /GET \S+\/user with 401: Bad credentials/);
   assert.doesNotMatch(JSON.stringify(refused), /ghp_stale/);
+});
+
+const AUDIENCE = "tumpel-github";
+const KID = "github-key";
+const CALLBACK = "https://claude.ai/api/mcp/auth_callback";
+const CSRF_COOKIE = "__Host-tumpel_connect";
+const VICTIM = "victim@example.test";
+const MALLORY = "mallory@example.test";
+const ORG_INSTALLATION = { id: 88, account: { login: "victimorg", type: "Organization" }, repository_selection: "all" };
+const MALLORY_INSTALLATION = { id: 77, account: { login: "mallory", type: "User" }, repository_selection: "all" };
+const GITHUB_PEOPLE: Record<string, { login: string; installations: unknown[]; role: string }> = {
+  ghu_victim: { login: "victim", installations: [ORG_INSTALLATION], role: "admin" },
+  ghu_reader: { login: "reader", installations: [ORG_INSTALLATION], role: "member" },
+  ghu_mallory: { login: "mallory", installations: [MALLORY_INSTALLATION], role: "none" },
+};
+
+interface Database {
+  prepare(query: string): { bind(...values: unknown[]): { first<T>(): Promise<T | null> } };
+}
+
+type HarnessInit = NonNullable<Parameters<TestHarness["fetch"]>[1]>;
+type HarnessResponse = Awaited<ReturnType<TestHarness["fetch"]>>;
+
+let fakeGitHub: Server;
+let harness: TestHarness;
+let origin: string;
+let issuer: string;
+let victimTenant: string;
+let malloryTenant: string;
+
+const bodyOf = async (request: IncomingMessage): Promise<string> => {
+  let text = "";
+  for await (const chunk of request) text += chunk;
+  return text;
+};
+
+const answer = (response: ServerResponse, status: number, body: unknown): void => {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(body));
+};
+
+const gitHubStandIn = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+  const path = request.url ?? "";
+  if (path === "/cdn-cgi/access/certs") {
+    return answer(response, 200, {
+      keys: [{ ...keyPair.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256" }],
+    });
+  }
+  if (path === "/app-manifests/conversion-code/conversions") {
+    return answer(response, 201, {
+      id: 42,
+      slug: "tumpel-test",
+      client_id: "Iv23client",
+      client_secret: "client-secret",
+      webhook_secret: "webhook-secret",
+      pem: pkcs1Pem,
+      owner: { login: "operator" },
+      html_url: "https://github.com/apps/tumpel-test",
+    });
+  }
+  if (path.startsWith("/users/")) return answer(response, 200, { id: 9001 });
+  if (path === "/login/oauth/access_token") {
+    const { code } = JSON.parse(await bodyOf(request));
+    return answer(response, 200, { access_token: `ghu_${String(code).replace(/-code$/, "")}`, token_type: "bearer" });
+  }
+  const person = GITHUB_PEOPLE[(request.headers.authorization ?? "").replace(/^Bearer /, "")];
+  if (person === undefined) return answer(response, 401, { message: "Bad credentials" });
+  if (path === "/user") return answer(response, 200, { id: 1, login: person.login });
+  if (path.startsWith("/user/installations")) {
+    return answer(response, 200, { total_count: person.installations.length, installations: person.installations });
+  }
+  if (path === "/user/memberships/orgs/victimorg" && person.role !== "none") {
+    return answer(response, 200, { state: "active", role: person.role });
+  }
+  return answer(response, 404, { message: "Not Found" });
+};
+
+const call = (path: string, init: HarnessInit = {}): Promise<HarnessResponse> =>
+  harness.fetch(path.startsWith("http") ? path : `${origin}${path}`, { redirect: "manual", ...init });
+
+const signedIn = (email: string): Record<string, string> => {
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const head = encode({ alg: "RS256", kid: KID, typ: "JWT" });
+  const payload = encode({ iss: issuer, aud: [AUDIENCE], email, iat: now, nbf: now, exp: now + 600 });
+  const signature = sign("RSA-SHA256", Buffer.from(`${head}.${payload}`), keyPair.privateKey).toString("base64url");
+  return { "cf-access-jwt-assertion": `${head}.${payload}.${signature}`, origin };
+};
+
+const form = (fields: Record<string, string>): string => new URLSearchParams(fields).toString();
+
+const signUp = async (email: string, name: string): Promise<string> => {
+  const answered = await call("/v1/tenants", {
+    method: "POST",
+    headers: { ...signedIn(email), "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  assert.equal(answered.status, 200);
+  return WhoamiSchema.parse(await answered.json()).tenant.tenantId;
+};
+
+const bearerFor = async (email: string, tenantId: string): Promise<Record<string, string>> => {
+  const registered = await call("/oauth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ redirect_uris: [CALLBACK], client_name: "github" }),
+  });
+  const client = OAuthClientSchema.parse(await registered.json());
+  const verifier = randomBytes(32).toString("base64url");
+  const ask = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: CALLBACK,
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+    code_challenge_method: "S256",
+  });
+  const url = new URL((await call(`/oauth/authorize?${ask}`)).headers.get("location") ?? "");
+  const cookie = ((await call(url.toString(), { headers: signedIn(email) })).headers.get("set-cookie") ?? "").split(
+    ";",
+  )[0];
+  const consented = await call(url.pathname, {
+    method: "POST",
+    headers: { ...signedIn(email), cookie: cookie ?? "", "content-type": "application/x-www-form-urlencoded" },
+    body: form({
+      request: url.searchParams.get("request") ?? "",
+      csrf: (cookie ?? "").slice(CSRF_COOKIE.length + 1),
+      tenant: tenantId,
+      action: "approve",
+    }),
+  });
+  assert.equal(consented.status, 303);
+  const redeemed = await call("/oauth/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form({
+      grant_type: "authorization_code",
+      code: new URL(consented.headers.get("location") ?? "").searchParams.get("code") ?? "",
+      code_verifier: verifier,
+      client_id: client.client_id,
+      redirect_uri: CALLBACK,
+    }),
+  });
+  assert.equal(redeemed.status, 200);
+  return { authorization: `Bearer ${OAuthTokenSchema.parse(await redeemed.json()).access_token}` };
+};
+
+const startedState = async (email: string, tenantId: string): Promise<string> => {
+  const started = await call("/v1/github-connection/start", {
+    method: "POST",
+    headers: await bearerFor(email, tenantId),
+  });
+  assert.equal(started.status, 200);
+  return new URL(GitHubInstallStartSchema.parse(await started.json()).installUrl).searchParams.get("state") ?? "";
+};
+
+const installed = (email: string, code: string, installationId: number, state?: string): Promise<HarnessResponse> =>
+  call(
+    `/github/app/installed?${form({ code, installation_id: String(installationId), setup_action: "install", ...(state === undefined ? {} : { state }) })}`,
+    { headers: signedIn(email) },
+  );
+
+const confirm = (email: string, fields: Record<string, string>, from = origin): Promise<HarnessResponse> =>
+  call("/github/app/installed", {
+    method: "POST",
+    headers: { ...signedIn(email), origin: from, "content-type": "application/x-www-form-urlencoded" },
+    body: form(fields),
+  });
+
+const linkedTenant = async (installationId: number): Promise<string | null> => {
+  const env = await harness.getWorker<{ DB: Database }>().getEnv();
+  const row = await env.DB.prepare("SELECT tenant_id FROM github_installations WHERE installation_id = ?")
+    .bind(installationId)
+    .first<{ tenant_id: string }>();
+  return row?.tenant_id ?? null;
+};
+
+const refusedPage = async (response: HarnessResponse, status: number, reason: RegExp): Promise<void> => {
+  assert.equal(response.status, status);
+  const html = await response.text();
+  assert.match(html, reason);
+  assert.match(html, />Connect from Tumpel</);
+};
+
+before(async () => {
+  fakeGitHub = createServer((request, response) => void gitHubStandIn(request, response));
+  await new Promise<void>((resolve) => fakeGitHub.listen(0, "127.0.0.1", resolve));
+  issuer = `http://127.0.0.1:${(fakeGitHub.address() as AddressInfo).port}`;
+  harness = createTestHarness({
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    workers: [
+      {
+        configPath: "./wrangler.jsonc",
+        vars: {
+          ACCESS_ISSUER: issuer,
+          ACCESS_AUD: AUDIENCE,
+          SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          GITHUB_API_ORIGIN: issuer,
+          GITHUB_WEB_ORIGIN: issuer,
+        },
+      },
+    ],
+  });
+  origin = (await harness.listen()).url.origin;
+  await harness.getWorker().applyD1Migrations("DB");
+  const setup = await (await call("/github/app/setup", { headers: signedIn(VICTIM) })).text();
+  const state = decodeURIComponent(/[?&]state=([^"&]+)/.exec(setup)?.[1] ?? "");
+  const created = await call(`/github/app/created?${form({ code: "conversion-code", state })}`, {
+    headers: signedIn(VICTIM),
+  });
+  assert.equal(created.status, 200);
+  victimTenant = await signUp(VICTIM, "Victim");
+  malloryTenant = await signUp(MALLORY, "Mallory");
+});
+
+after(async () => {
+  await harness?.close();
+  fakeGitHub?.close();
+});
+
+test("an attacker's install callback opened in a victim's session links nothing until the victim confirms on a form", async () => {
+  const page = await installed(VICTIM, "mallory-code", 77);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /Connect mallory to Victim/);
+  assert.match(html, /<form method="post"/);
+  assert.equal(await linkedTenant(77), null);
+
+  const choice = /name="choice" value="([^"]+)"/.exec(html)?.[1] ?? "";
+  const fields = { choice, tenant: victimTenant };
+  await refusedPage(await confirm(VICTIM, fields, "https://evil.test"), 403, /only this control plane/);
+  await refusedPage(await confirm(MALLORY, fields), 403, /confirmed for victim@example.test/);
+  assert.equal(await linkedTenant(77), null);
+
+  assert.equal((await confirm(VICTIM, fields)).status, 200);
+  assert.equal(await linkedTenant(77), victimTenant);
+});
+
+test("an install started by one person and finished in another's session, or by a read-only org member, is refused", async () => {
+  const mallorys = await startedState(MALLORY, malloryTenant);
+  await refusedPage(await installed(VICTIM, "victim-code", 88, mallorys), 403, /started by mallory@example.test/);
+  assert.equal(await linkedTenant(88), null);
+
+  const victims = await startedState(VICTIM, victimTenant);
+  await refusedPage(await installed(VICTIM, "reader-code", 88, victims), 403, /only an owner of victimorg/);
+  assert.equal(await linkedTenant(88), null);
+
+  assert.equal((await installed(VICTIM, "victim-code", 88, victims)).status, 200);
+  assert.equal(await linkedTenant(88), victimTenant);
 });

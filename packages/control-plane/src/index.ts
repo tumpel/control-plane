@@ -178,6 +178,7 @@ export interface Env extends SignerEnv {
   ISSUER_HOSTNAME: string;
   DASHBOARD_ORIGIN: string;
   GITHUB_API_ORIGIN: string;
+  GITHUB_WEB_ORIGIN: string;
 }
 
 const DEVICE_PAGE = "/device";

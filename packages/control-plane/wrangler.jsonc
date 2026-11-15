@@ -21,6 +21,7 @@
     "R2_BUCKET_NAME": "tumpel-sessions",
     "RELEASES_BUCKET_NAME": "tumpel-releases",
     "GITHUB_API_ORIGIN": "https://api.github.com",
+    "GITHUB_WEB_ORIGIN": "https://github.com",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -70,6 +71,7 @@
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
         "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
         "GITHUB_API_ORIGIN": "https://api.github.com",
+        "GITHUB_WEB_ORIGIN": "https://github.com",
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,

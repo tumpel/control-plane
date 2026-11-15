@@ -14,6 +14,7 @@ import {
   GitHubIssueRecordSchema,
   GitHubIssueRecordsSchema,
   type GitHubManifestStateSchema,
+  GitHubOrgMembershipSchema,
   GitHubUserInstallationsSchema,
   GitHubUserSchema,
   GitHubUserTokenSchema,
@@ -474,18 +475,63 @@ const personDetail = (answer: { status: number; detail: string }, asked: string)
     ? `GitHub answered ${asked} in a form tumpel does not read`
     : answer.detail;
 
-export const verifyInstaller = async (
+const installerOf = async (
   fetcher: Fetch,
   api: string,
+  token: string,
+  installation: GitHubInstallationRecord,
+): Promise<Installer> => {
+  const { login, type } = installation.account;
+  if (type === "User") {
+    const user = await tokenUser(fetcher, api, token);
+    if (!user.ok) return { kind: "Failed", detail: personDetail(user, "who you are") };
+    if (user.value.login.toLowerCase() === login.toLowerCase()) return { kind: "Installer", installation };
+    return {
+      kind: "NotInstaller",
+      detail: `installation ${installation.id} is on the personal account ${login}, and you authorized GitHub as ${user.value.login}; only ${login} connects their own account`,
+    };
+  }
+  const membership = await callGitHub(
+    fetcher,
+    {
+      method: "GET",
+      url: `${api}/user/memberships/orgs/${encodeURIComponent(login)}`,
+      accept: API_MEDIA_TYPE,
+      bearer: token,
+      body: null,
+    },
+    GitHubOrgMembershipSchema,
+    "GitHubOrgMembership",
+  );
+  if (!membership.ok && (membership.status === 403 || membership.status === 404)) {
+    return {
+      kind: "NotInstaller",
+      detail: `the GitHub account you authorized is no member of the organization ${login}; only an owner of ${login} connects it`,
+    };
+  }
+  if (!membership.ok) return { kind: "Failed", detail: personDetail(membership, `your membership of ${login}`) };
+  if (membership.value.state === "active" && membership.value.role === "admin") {
+    return { kind: "Installer", installation };
+  }
+  return {
+    kind: "NotInstaller",
+    detail: `the GitHub account you authorized is a ${membership.value.state} ${membership.value.role} of the organization ${login}, and only an owner of ${login} connects it`,
+  };
+};
+
+export const verifyInstaller = async (
+  fetcher: Fetch,
+  origins: { api: string; web: string },
   client: OAuthClient,
   code: string,
   installationId: number,
 ): Promise<Installer> => {
+  const { api, web } = origins;
   const exchanged = await callGitHub(
     fetcher,
     {
       method: "POST",
-      url: `${GITHUB_WEB}/login/oauth/access_token`,
+      url: `${web}/login/oauth/access_token`,
       accept: JSON_MEDIA_TYPE,
       bearer: null,
       body: { client_id: client.clientId, client_secret: client.clientSecret, code },
@@ -500,13 +546,14 @@ export const verifyInstaller = async (
       detail: `GitHub refused the authorization code with ${exchanged.value.error}: ${exchanged.value.error_description}`,
     };
   }
+  const token = exchanged.value.access_token;
   const listed = await callGitHub(
     fetcher,
     {
       method: "GET",
       url: `${api}/user/installations?per_page=100`,
       accept: API_MEDIA_TYPE,
-      bearer: exchanged.value.access_token,
+      bearer: token,
       body: null,
     },
     GitHubUserInstallationsSchema,
@@ -527,7 +574,7 @@ export const verifyInstaller = async (
       detail: `installation ${installationId} is on an account tumpel cannot link, such as an enterprise; install the App on a user or organization account`,
     };
   }
-  return { kind: "Installer", installation: installation.data };
+  return installerOf(fetcher, api, token, installation.data);
 };
 
 export const convertManifest = async (
