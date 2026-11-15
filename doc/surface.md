@@ -43,6 +43,7 @@ gh auth token | tumpel secret-set set-member <secretSetId> --kind Variable --nam
 | `GitHubActionsConnections_start`     | `tumpel_github_actions_start`     | `tumpel github-actions start`     |
 | `GitHubConnections_delete`           | `tumpel_github_delete`            | `tumpel github delete`            |
 | `GitHubConnections_get`              | `tumpel_github_get`               | `tumpel github get`               |
+| `GitHubConnections_list`             | `tumpel_github_list`              | `tumpel github list`              |
 | `GitHubConnections_listIssues`       | `tumpel_github_list_issues`       | `tumpel github list-issues`       |
 | `GitHubConnections_listRepositories` | `tumpel_github_list_repositories` | `tumpel github list-repositories` |
 | `GitHubConnections_start`            | `tumpel_github_start`             | `tumpel github start`             |

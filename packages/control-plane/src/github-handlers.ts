@@ -1,9 +1,12 @@
 import {
   GitHubConnectionSchema,
+  GitHubInstallationPathSchema,
+  GitHubInstallationSchema,
   GitHubInstallStartSchema,
   GitHubIssueSchema,
   GitHubRepositoryPathSchema,
   GitHubRepositorySchema,
+  type WhoamiSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import {
@@ -18,7 +21,7 @@ import {
   type Fetch,
   GITHUB_WEB,
   type GitHubAnswer,
-  type Installation,
+  type GitHubInstallationRecord,
   installUrl,
   listInstallationRepositories,
   listOpenIssues,
@@ -35,7 +38,10 @@ import {
   WEBHOOK_PATH,
 } from "./github.ts";
 import {
+  GitHubInstallationChoiceQuerySchema,
+  GitHubInstallationChoiceStateSchema,
   GitHubInstallationEventSchema,
+  GitHubInstallationRepositoriesEventSchema,
   GitHubInstallStateSchema,
   GitHubManifestCallbackSchema,
   GitHubManifestStateSchema,
@@ -45,22 +51,24 @@ import {
 } from "./github-schemas.ts";
 import {
   appKey,
-  installationOf,
+  type GitHubInstallation,
+  installationsOf,
   linkInstallation,
   oauthClient,
+  refreshInstallation,
   storeApp,
   storedApp,
   tenantOfInstallation,
   unlinkInstallation,
-  unlinkTenant,
+  unlinkTenantInstallation,
   webhookSecret,
 } from "./github-store.ts";
 import { json, problem, seeOther } from "./http";
-import type { Caller } from "./identity";
+import { type Caller, membershipsOfEmail } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
-import { appSetupPage, linkPage, messagePage } from "./pages";
+import { appSetupPage, connectAgainPage, installationTenantPage, linkPage, messagePage } from "./pages";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
 export type SignedInPerson = (request: Request, env: Env) => Promise<PersonCheck>;
@@ -68,6 +76,8 @@ export type Authenticate = (request: Request, env: Env) => Promise<Caller | Resp
 
 const START_PATH = "/v1/github-connection/start";
 const CONNECTION_PATH = "/v1/github-connection";
+const INSTALLATIONS_PATH = "/v1/github-connection/installations";
+const INSTALLATION_PATH = /^\/v1\/github-connection\/installations\/([^/]+)$/;
 const REPOSITORIES_PATH = "/v1/github-connection/repositories";
 const ISSUES_PATH = /^\/v1\/github-connection\/repositories\/([^/]+)\/([^/]+)\/issues$/;
 const fetcher: Fetch = (url, init) => fetch(url, init);
@@ -90,18 +100,19 @@ const handleConnection = async (caller: Caller, url: URL, env: Env): Promise<Res
     return json(
       GitHubConnectionSchema.parse({
         tenantId: caller.tenantId,
-        link: { state: "AppMissing", setupUrl: `${url.origin}${APP_SETUP_PATH}` },
+        app: { state: "AppMissing", setupUrl: `${url.origin}${APP_SETUP_PATH}` },
       }),
     );
   }
-  const installation = await installationOf(env.DB, caller.tenantId);
-  return json(
-    GitHubConnectionSchema.parse({
-      tenantId: caller.tenantId,
-      link: installation === null ? { state: "NotConnected", appSlug: app.slug } : { state: "Connected", installation },
-    }),
-  );
+  return json(GitHubConnectionSchema.parse({ tenantId: caller.tenantId, app: { state: "Ready", appSlug: app.slug } }));
 };
+
+const handleList = async (caller: Caller, env: Env): Promise<Response> =>
+  json(
+    (await installationsOf(env.DB, caller.tenantId)).map((installation) =>
+      GitHubInstallationSchema.parse(installation),
+    ),
+  );
 
 const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
   const refused = ownerRequired(caller, "gitHubConnections.start");
@@ -127,10 +138,24 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state), expiresAt }));
 };
 
-const handleDelete = async (caller: Caller, env: Env): Promise<Response> => {
+const noInstallation = (installationId: string): Response =>
+  problem(404, {
+    code: "NotFound",
+    title: "No such installation",
+    detail: `your tenant holds no GitHub App installation ${installationId}`,
+    fix: "List the installations with tumpel github list and pass an installationId it prints",
+  });
+
+const handleDelete = async (caller: Caller, env: Env, installationText: string): Promise<Response> => {
   const refused = ownerRequired(caller, "gitHubConnections.delete");
   if (refused) return refused;
-  await unlinkTenant(env.DB, caller.tenantId);
+  const path = GitHubInstallationPathSchema.safeParse({
+    installationId: /^[1-9][0-9]{0,15}$/.test(installationText) ? Number(installationText) : null,
+  });
+  if (!path.success) return noInstallation(installationText);
+  if (!(await unlinkTenantInstallation(env.DB, caller.tenantId, path.data.installationId))) {
+    return noInstallation(installationText);
+  }
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
@@ -138,7 +163,7 @@ const notConnected = (): Response =>
   problem(409, {
     code: "GitHubNotConnected",
     title: "GitHub not connected",
-    detail: "your tenant has not installed the stage's GitHub App, so no repository is covered",
+    detail: "your tenant holds no installation of the stage's GitHub App, so no repository is covered",
     fix: "Install it with tumpel github start and open the URL it prints",
   });
 
@@ -153,29 +178,41 @@ const unreadable = (detail: string): Response =>
 const listed = <T>(answer: GitHubAnswer<T[]>, schema: z.ZodType<T>): Response =>
   answer.ok ? json(answer.value.map((item) => schema.parse(item))) : unreadable(answer.detail);
 
-type Access = { ok: true; app: AppKey; installation: Installation } | { ok: false; response: Response };
+type Access = { ok: true; app: AppKey; installations: GitHubInstallation[] } | { ok: false; response: Response };
 
 const installationAccess = async (caller: Caller, url: URL, env: Env): Promise<Access> => {
   const app = await appKey(env.DB, keyStoreOf(env));
   if (app === null) return { ok: false, response: appMissing(url.origin) };
-  const installation = await installationOf(env.DB, caller.tenantId);
-  if (installation === null) return { ok: false, response: notConnected() };
-  return { ok: true, app, installation };
+  const installations = await installationsOf(env.DB, caller.tenantId);
+  if (installations.length === 0) return { ok: false, response: notConnected() };
+  return { ok: true, app, installations };
+};
+
+const repositoriesOf = async (
+  app: AppKey,
+  env: Env,
+  installation: GitHubInstallation,
+): Promise<GitHubAnswer<z.infer<typeof GitHubRepositorySchema>[]>> => {
+  const token = await mintInstallationWideToken(
+    fetcher,
+    env.GITHUB_API_ORIGIN,
+    app,
+    installation.installationId,
+    Date.now(),
+  );
+  if (!token.ok) return { ...token, detail: `${token.detail}, for the installation on ${installation.accountLogin}` };
+  return listInstallationRepositories(fetcher, env.GITHUB_API_ORIGIN, token.value);
 };
 
 const handleRepositories = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
   const access = await installationAccess(caller, url, env);
   if (!access.ok) return access.response;
-  const token = await mintInstallationWideToken(
-    fetcher,
-    env.GITHUB_API_ORIGIN,
-    access.app,
-    access.installation.installationId,
-    Date.now(),
-  );
-  if (!token.ok) return unreadable(token.detail);
+  const active = access.installations.filter((installation) => installation.status === "Active");
+  const answers = await Promise.all(active.map((installation) => repositoriesOf(access.app, env, installation)));
+  const refused = answers.find((answer) => !answer.ok);
+  if (refused !== undefined && !refused.ok) return unreadable(refused.detail);
   return listed(
-    await listInstallationRepositories(fetcher, env.GITHUB_API_ORIGIN, token.value),
+    { ok: true, value: answers.flatMap((answer) => (answer.ok ? answer.value : [])) },
     GitHubRepositorySchema,
   );
 };
@@ -196,10 +233,11 @@ const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, n
     fetcher,
     env.GITHUB_API_ORIGIN,
     access.app,
-    access.installation,
+    access.installations,
     path.data,
     Date.now(),
   );
+  if (minted.kind === "NoToken") return notConnected();
   if (minted.kind !== "Minted") return unreadable(minted.detail);
   return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, path.data), GitHubIssueSchema);
 };
@@ -212,14 +250,16 @@ export const handleGitHubConnection = async (
 ): Promise<Response | null> => {
   const starting = url.pathname === START_PATH && request.method === "POST";
   const reading = url.pathname === CONNECTION_PATH && request.method === "GET";
-  const deleting = url.pathname === CONNECTION_PATH && request.method === "DELETE";
+  const deleting = request.method === "DELETE" ? INSTALLATION_PATH.exec(url.pathname) : null;
   const getting = request.method === "GET";
+  const listing = getting && url.pathname === INSTALLATIONS_PATH;
   const repositories = getting && url.pathname === REPOSITORIES_PATH;
   const issuesOf = getting ? ISSUES_PATH.exec(url.pathname) : null;
-  if (!starting && !reading && !deleting && !repositories && issuesOf === null) return null;
+  if (!starting && !reading && deleting === null && !listing && !repositories && issuesOf === null) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
-  if (deleting) return handleDelete(caller, env);
+  if (deleting !== null) return handleDelete(caller, env, decodeURIComponent(deleting[1] ?? ""));
+  if (listing) return handleList(caller, env);
   if (repositories) return handleRepositories(caller, url, env);
   if (issuesOf !== null) {
     return handleIssues(caller, url, env, decodeURIComponent(issuesOf[1] ?? ""), decodeURIComponent(issuesOf[2] ?? ""));
@@ -292,11 +332,114 @@ const handleCreated = async (url: URL, env: Env, email: string): Promise<Respons
   );
 };
 
-const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
+const connectUrl = (env: Env, tenantId: string | null): string =>
+  tenantId === null
+    ? `${env.DASHBOARD_ORIGIN}/`
+    : `${env.DASHBOARD_ORIGIN}/t/${encodeURIComponent(tenantId)}/setup/github`;
+
+const refuseInstall = (env: Env, tenantId: string | null, status: number, title: string, text: string): Response =>
+  connectAgainPage(
+    status,
+    title,
+    `${text} Choose Connect from Tumpel to start again from the dashboard's GitHub step, or run tumpel github start on the CLI.`,
+    connectUrl(env, tenantId),
+  );
+
+const ownedTenants = async (env: Env, email: string): Promise<z.infer<typeof WhoamiSchema>[]> =>
+  (await membershipsOfEmail(env.DB, email)).filter((membership) => membership.principal.role === "Owner");
+
+const linked = async (
+  env: Env,
+  tenantId: string,
+  record: GitHubInstallationRecord,
+  returnUrl: string | undefined,
+): Promise<Response> => {
+  const outcome = await linkInstallation(env.DB, tenantId, record, Date.now());
+  if (outcome.kind === "OtherTenant") {
+    return refuseInstall(
+      env,
+      tenantId,
+      409,
+      "Installation in use",
+      `The installation on ${record.account.login} is linked to another tenant. Each installation serves one tenant; remove it there first.`,
+    );
+  }
+  if (returnUrl !== undefined) return seeOther(returnUrl);
+  return linkPage(
+    200,
+    "GitHub connected",
+    `Tenant ${outcome.installation.tenantId} now holds the GitHub App installation on ${outcome.installation.accountLogin}, next to any it held before. Each turn on a repository of ${outcome.installation.accountLogin} gets a token of its own. Connect another account or organization from the dashboard's GitHub connection, or with tumpel github start.`,
+    `${GITHUB_WEB}/settings/installations/${record.id}`,
+    "Choose the repositories it covers on GitHub",
+  );
+};
+
+const chooseTenant = async (url: URL, env: Env, email: string, record: GitHubInstallationRecord): Promise<Response> => {
+  const tenants = await ownedTenants(env, email);
+  const [only, ...others] = tenants;
+  if (only === undefined) {
+    return refuseInstall(
+      env,
+      null,
+      403,
+      "No tenant to connect",
+      `${email} owns no tenant, and only an Owner connects GitHub. Ask an Owner of your tenant to connect ${record.account.login}.`,
+    );
+  }
+  if (others.length === 0) return linked(env, only.tenant.tenantId, record, undefined);
+  const choice = await signState(await stateKey(env), {
+    purpose: "InstallationChoice",
+    email,
+    installation: record,
+    expiresAt: expiry(Date.now()),
+  });
+  return installationTenantPage(
+    email,
+    record.account.login,
+    tenants.map(({ tenant }) => {
+      const href = new URL(APP_INSTALLED_PATH, url.origin);
+      href.searchParams.set("choice", choice);
+      href.searchParams.set("tenant", tenant.tenantId);
+      return { name: tenant.name, href: href.toString() };
+    }),
+  );
+};
+
+const handleChoice = async (env: Env, email: string, query: Record<string, string>): Promise<Response> => {
+  const picked = GitHubInstallationChoiceQuerySchema.safeParse(query);
+  if (!picked.success) {
+    return refuseInstall(env, null, 400, "Nothing to connect", "The tenant choice is missing from the link.");
+  }
+  const state = await readState(
+    await stateKey(env),
+    picked.data.choice,
+    GitHubInstallationChoiceStateSchema,
+    Date.now(),
+  );
+  if (!state.ok)
+    return refuseInstall(env, null, 403, "Request refused", `The tenant choice is no longer valid: ${state.reason}.`);
+  if (state.claims.email !== email) {
+    return refuseInstall(
+      env,
+      null,
+      403,
+      "Request refused",
+      `The installation was confirmed for ${state.claims.email}, and you are signed in as ${email}.`,
+    );
+  }
+  const owned = await ownedTenants(env, email);
+  if (!owned.some(({ tenant }) => tenant.tenantId === picked.data.tenant)) {
+    return refuseInstall(env, null, 403, "Request refused", `${email} is no Owner of tenant ${picked.data.tenant}.`);
+  }
+  return linked(env, picked.data.tenant, state.claims.installation, undefined);
+};
+
+const handleInstalled = async (url: URL, env: Env, email: string): Promise<Response> => {
   const query = Object.fromEntries(url.searchParams);
+  if (query.choice !== undefined) return handleChoice(env, email, query);
   const action = GitHubSetupActionSchema.safeParse(query);
   if (!action.success) {
-    return messagePage(400, "Nothing to connect", "GitHub sent no setup action. Run tumpel github start again.");
+    return refuseInstall(env, null, 400, "Nothing to connect", "GitHub sent no setup action with this link.");
   }
   if (action.data.setup_action === "request") {
     const requested =
@@ -304,59 +447,58 @@ const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
         ? null
         : await readState(await stateKey(env), action.data.state, GitHubInstallStateSchema, Date.now());
     if (requested?.ok === true && requested.claims.returnUrl !== undefined) return seeOther(requested.claims.returnUrl);
-    return messagePage(
+    return connectAgainPage(
       202,
       "Installation requested",
-      "An owner of the GitHub organization must approve the installation. Once approved, run tumpel github start again and finish it from the URL it prints.",
+      "An owner of the GitHub organization must approve the installation. Once approved, connect again from Tumpel and finish it, or run tumpel github start on the CLI.",
+      connectUrl(env, requested?.ok === true ? requested.claims.tenantId : null),
     );
   }
   const callback = GitHubSetupCallbackSchema.safeParse(query);
   if (!callback.success) {
-    return messagePage(
+    return refuseInstall(
+      env,
+      null,
       400,
       "Nothing to connect",
-      `GitHub sent the installer back without ${issues(callback.error)}; this happens when the App is installed from GitHub instead of from tumpel. Run tumpel github start and open the URL it prints.`,
+      "GitHub sent the installer back without an installation and a sign-in code. The App must request user authorization during installation; the stage operator turns that on in the App's settings on GitHub.",
     );
   }
   const { code, installation_id: installationText, state: stateText } = callback.data;
-  const state = await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
-  if (!state.ok) return messagePage(403, "Request refused", `${state.reason}. Run tumpel github start again.`);
+  const state =
+    stateText === undefined
+      ? null
+      : await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
+  if (state !== null && !state.ok) {
+    return refuseInstall(
+      env,
+      null,
+      403,
+      "Request refused",
+      `The link from Tumpel is no longer valid: ${state.reason}.`,
+    );
+  }
   const client = await oauthClient(env.DB, keyStoreOf(env));
-  if (client === null)
+  if (client === null) {
     return messagePage(409, "No GitHub App", `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`);
+  }
+  const tenantId = state?.claims.tenantId ?? null;
   const installationId = Number(installationText);
   const installer = await verifyInstaller(fetcher, env.GITHUB_API_ORIGIN, client, code, installationId);
   if (installer.kind === "Failed") {
-    return messagePage(
-      502,
-      "GitHub did not confirm the installer",
-      `${installer.detail}. Run tumpel github start again.`,
-    );
+    return refuseInstall(env, tenantId, 502, "GitHub did not confirm the installer", `${installer.detail}.`);
   }
   if (installer.kind === "NotInstaller") {
-    return messagePage(
+    return refuseInstall(
+      env,
+      tenantId,
       403,
       "Request refused",
-      `${installer.detail}. Sign in to GitHub as a person who installed the App, then run tumpel github start again.`,
+      `${installer.detail}. Sign in to GitHub as a person who can access the installation.`,
     );
   }
-  const record = installer.installation;
-  const linked = await linkInstallation(env.DB, state.claims.tenantId, record, Date.now());
-  if (linked.kind === "OtherTenant") {
-    return messagePage(
-      409,
-      "Installation in use",
-      `The installation on ${record.account.login} is linked to another tenant. Each installation serves one tenant; uninstall it there first.`,
-    );
-  }
-  if (state.claims.returnUrl !== undefined) return seeOther(state.claims.returnUrl);
-  return linkPage(
-    200,
-    "GitHub connected",
-    `Tenant ${linked.installation.tenantId} now uses the GitHub App installation on ${linked.installation.accountLogin}. Each turn on a repository of ${linked.installation.accountLogin} gets a token of its own.`,
-    `${GITHUB_WEB}/settings/installations/${installationId}`,
-    "Choose the repositories it covers on GitHub",
-  );
+  if (state !== null) return linked(env, state.claims.tenantId, installer.installation, state.claims.returnUrl);
+  return chooseTenant(url, env, email, installer.installation);
 };
 
 export const handleGitHubPage = async (
@@ -368,10 +510,18 @@ export const handleGitHubPage = async (
   const pages = [APP_SETUP_PATH, APP_CREATED_PATH, APP_INSTALLED_PATH];
   if (request.method !== "GET" || !pages.includes(url.pathname)) return null;
   const person = await signedIn(request, env);
-  if (!person.ok) return messagePage(401, "Sign in again", `${person.reason}.`);
+  if (!person.ok) {
+    return linkPage(
+      401,
+      "Sign in again",
+      `${person.reason}. Sign in, then this page continues.`,
+      url.toString(),
+      "Sign in and continue",
+    );
+  }
   if (url.pathname === APP_SETUP_PATH) return handleSetupPage(url, env, person.email);
   if (url.pathname === APP_CREATED_PATH) return handleCreated(url, env, person.email);
-  return handleInstalled(url, env);
+  return handleInstalled(url, env, person.email);
 };
 
 const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Response): Promise<Response> => {
@@ -392,6 +542,21 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
     { action, runId: run.id, headSha: run.head_sha, htmlUrl: run.html_url, conclusion: run.conclusion },
     Date.now(),
   );
+  return noContent;
+};
+
+const handleInstallationRepositories = async (env: Env, body: ArrayBuffer, noContent: Response): Promise<Response> => {
+  const delivery = GitHubInstallationRepositoriesEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
+  if (!delivery.success) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Not an installation_repositories event",
+      detail: `the installation_repositories delivery does not parse: ${issues(delivery.error)}`,
+      fix: "Send installation_repositories events in the shape GitHub documents, with an installation and a repository_selection",
+    });
+  }
+  const { installation, repository_selection: selection } = delivery.data;
+  await refreshInstallation(env.DB, installation, selection, null, Date.now());
   return noContent;
 };
 
@@ -418,6 +583,7 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   const event = request.headers.get("x-github-event");
   if (event === "workflow_run") return handleWorkflowRun(env, body, noContent);
+  if (event === "installation_repositories") return handleInstallationRepositories(env, body, noContent);
   if (event !== "installation") return noContent;
   const delivery = GitHubInstallationEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
   if (!delivery.success) {
@@ -428,6 +594,12 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
       fix: "Send installation events in the shape GitHub documents, with an action and an installation",
     });
   }
-  if (delivery.data.action === "deleted") await unlinkInstallation(env.DB, delivery.data.installation.id);
+  const { action, installation } = delivery.data;
+  if (action === "deleted") {
+    await unlinkInstallation(env.DB, installation.id);
+    return noContent;
+  }
+  const status = action === "suspend" ? "Suspended" : action === "unsuspend" ? "Active" : null;
+  await refreshInstallation(env.DB, installation, installation.repository_selection, status, Date.now());
   return noContent;
 };

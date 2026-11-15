@@ -10,7 +10,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { CALLER_WORKFLOW_EXAMPLE, REUSABLE_WORKFLOW } from "./github-actions.ts";
-import { installationOf, storedApp } from "./github-store.ts";
+import { installationsOf, storedApp } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -55,10 +55,11 @@ const summary = (kind: string, account: string | null, configured: boolean): Con
 
 export const listConnections = async (env: Env, caller: Caller): Promise<ConnectionSummary[]> => {
   const app = await storedApp(env.DB);
-  const installation = app === null ? null : await installationOf(env.DB, caller.tenantId);
+  const installations = app === null ? [] : await installationsOf(env.DB, caller.tenantId);
+  const logins = installations.map((installation) => installation.accountLogin).join(", ");
   const accounts = await tenantOf(env, caller).connectedAccounts();
   return [
-    summary("GitHub", installation?.accountLogin ?? null, app !== null),
+    summary("GitHub", logins === "" ? null : logins, app !== null),
     summary("GitHubActions", accounts.GitHubActions, true),
     summary("Namespace", accounts.Namespace, stageIssuer(env.ISSUER_HOSTNAME) !== null),
   ];

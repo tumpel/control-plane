@@ -252,23 +252,28 @@ test("a Member is refused the member and connection operations of an Owner", asy
     await send("POST", "/v1/namespace-connection/start", { accountLabel: "ns", workspaceId: "tenant_ns" }, bob),
     await send("DELETE", "/v1/github-actions-connection", null, bob),
     await send("POST", "/v1/github-connection/start", null, bob),
-    await send("DELETE", "/v1/github-connection", null, bob),
+    await send("DELETE", "/v1/github-connection/installations/901", null, bob),
   ];
   for (const refused of refusals) assert.equal((await refusal(refused, 403)).code, "OwnerRequired");
   assert.equal((await call("/v1/connections", { headers: bob })).status, 200);
 });
 
-test("an Owner disconnects GitHub, removing only their own tenant's installation link", async () => {
+test("an Owner removes one GitHub installation, keeping the tenant's others and refusing another tenant's", async () => {
   const env = await server.getWorker<{ DB: Database }>().getEnv();
-  const link =
-    "INSERT INTO github_installations (installation_id, tenant_id, account_login, created_at) VALUES (?, ?, ?, ?)";
-  await env.DB.prepare(link).bind(901, acme, "acme", Date.now()).run();
-  await env.DB.prepare(link).bind(902, bobco, "bobco", Date.now()).run();
-  assert.equal((await send("DELETE", "/v1/github-connection", null, owner)).status, 204);
+  const link = `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type,
+    repository_selection, status, created_at, updated_at) VALUES (?, ?, ?, 'Organization', 'All', 'Active', ?, ?)`;
+  await env.DB.prepare(link).bind(901, acme, "acme", Date.now(), Date.now()).run();
+  await env.DB.prepare(link).bind(903, acme, "acme-tools", Date.now(), Date.now()).run();
+  await env.DB.prepare(link).bind(902, bobco, "bobco", Date.now(), Date.now()).run();
+  assert.equal((await send("DELETE", "/v1/github-connection/installations/901", null, owner)).status, 204);
   const linked = env.DB.prepare("SELECT tenant_id FROM github_installations WHERE installation_id = ?");
   assert.equal(await linked.bind(901).first(), null);
+  assert.deepEqual(await linked.bind(903).first(), { tenant_id: acme });
+  assert.equal(
+    (await refusal(await send("DELETE", "/v1/github-connection/installations/902", null, owner), 404)).code,
+    "NotFound",
+  );
   assert.deepEqual(await linked.bind(902).first(), { tenant_id: bobco });
-  assert.equal((await send("DELETE", "/v1/github-connection", null, owner)).status, 204);
 });
 
 test("a device approval or a consent naming a tenant the person does not belong to is refused", async () => {

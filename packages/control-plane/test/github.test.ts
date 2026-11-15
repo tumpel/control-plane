@@ -168,17 +168,20 @@ test("a webhook signature matches GitHub's documented example and nothing else",
   assert.ok(!(await verifyWebhookSignature(secret, bytes("Hello, World!"), signature.replace("sha256=", "sha1="))));
 });
 
-test("an installation token is minted for the session's repository with a JWT the App's key signs", async () => {
+test("an installation token is minted for the session's repository, by the installation on its owner, with a JWT the App's key signs", async () => {
   const now = Date.parse("2026-11-15T10:00:00Z");
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs1Pem)) };
-  const installation = { installationId: 7, accountLogin: "Octo" };
+  const installations = [
+    { installationId: 6, accountLogin: "acme", repositorySelection: "All" as const, status: "Active" as const },
+    { installationId: 7, accountLogin: "Octo", repositorySelection: "Selected" as const, status: "Active" as const },
+  ];
   const { fetcher, calls } = spiedFetch(201, { token: "ghs_minted", expires_at: "2026-11-15T11:00:00Z" });
 
   const minted = await mintInstallationToken(
     fetcher,
     "https://api.github.com",
     app,
-    installation,
+    installations,
     { owner: "octo", name: "widgets" },
     now,
   );
@@ -207,13 +210,18 @@ test("an installation token is minted for the session's repository with a JWT th
 test("a repository outside the installation names the fix, and only a 404 or 422 says to add it", async () => {
   const now = Date.parse("2026-11-15T10:00:00Z");
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
-  const installation = { installationId: 7, accountLogin: "octo" };
+  const installation = {
+    installationId: 7,
+    accountLogin: "octo",
+    repositorySelection: "Selected" as const,
+    status: "Active" as const,
+  };
 
   const notCovered = await mintInstallationToken(
     spiedFetch(422, { message: "There is at least one repository that does not exist or is not accessible" }).fetcher,
     "https://api.github.com",
     app,
-    installation,
+    [installation],
     { owner: "octo", name: "private" },
     now,
   );
@@ -225,7 +233,7 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     spiedFetch(503, { message: "Service Unavailable" }).fetcher,
     "https://api.github.com",
     app,
-    installation,
+    [installation],
     { owner: "octo", name: "private" },
     now,
   );
@@ -237,12 +245,32 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     elsewhere.fetcher,
     "https://api.github.com",
     app,
-    installation,
+    [installation],
     { owner: "acme", name: "x" },
     now,
   );
   assert.equal(foreign.kind, "Outside");
+  const suspended = await mintInstallationToken(
+    elsewhere.fetcher,
+    "https://api.github.com",
+    app,
+    [{ ...installation, status: "Suspended" }],
+    { owner: "octo", name: "x" },
+    now,
+  );
+  assert.match(suspended.kind === "Outside" ? suspended.detail : "", /suspended/);
   assert.equal(elsewhere.calls.length, 0);
+  assert.deepEqual(
+    await mintInstallationToken(
+      elsewhere.fetcher,
+      "https://api.github.com",
+      app,
+      [],
+      { owner: "octo", name: "x" },
+      now,
+    ),
+    { kind: "NoToken" },
+  );
 });
 
 test("a repository outside the installation uses the secret set's GITHUB_TOKEN, and is refused without one", () => {
@@ -265,14 +293,15 @@ test("a repository outside the installation uses the secret set's GITHUB_TOKEN, 
 const oauthClient = { clientId: "Iv23client", clientSecret: "client-secret" };
 
 test("an installation links only when the person who authorized the App can access it", async () => {
-  const listed = { total_count: 1, installations: [{ id: 7, account: { login: "octo" } }] };
+  const record = { id: 7, account: { login: "octo", type: "User" }, repository_selection: "selected" };
+  const listed = { total_count: 1, installations: [record] };
 
   const owned = answering([
     [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }],
     [200, listed],
   ]);
   const installer = await verifyInstaller(owned.fetcher, "https://api.github.com", oauthClient, "code-1", 7);
-  assert.deepEqual(installer, { kind: "Installer", installation: { id: 7, account: { login: "octo" } } });
+  assert.deepEqual(installer, { kind: "Installer", installation: record });
   assert.equal(owned.calls[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(header(owned.calls[0]?.init ?? {}, "accept"), "application/json");
   assert.deepEqual(JSON.parse(String(owned.calls[0]?.init.body)), {

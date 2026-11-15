@@ -9,6 +9,7 @@ import {
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
   GitHubActionsConnectionStartSchema,
+  GitHubInstallationPathSchema,
   GitHubRepositoryPathSchema,
   HarnessPathSchema,
   HarnessPinCreateSchema,
@@ -58,7 +59,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects one more GitHub account or organization through the GitHub App, tumpel_github_list lists the connected ones, tumpel_github_delete removes one, and tumpel_github_get reads the App, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -341,35 +342,42 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/github-connection",
     NO_ARGUMENTS,
-    "Read the tenant's GitHub connection. Returns the GitHubConnection of GET /v1/github-connection: link.state is Connected with its installation, NotConnected, or AppMissing with the setupUrl where a person creates the stage's GitHub App once.",
+    "Read the stage's GitHub App as the tenant sees it. Returns the GitHubConnection of GET /v1/github-connection: app.state is Ready with the appSlug, or AppMissing with the setupUrl where a person creates the stage's GitHub App once. tumpel_github_list lists the tenant's installations.",
+  ),
+  rest(
+    "tumpel_github_list",
+    "GET",
+    "/v1/github-connection/installations",
+    NO_ARGUMENTS,
+    "List every GitHub account or organization the tenant connected, one installation of the stage's GitHub App each. Returns the GitHubInstallation[] of GET /v1/github-connection/installations: installationId, accountLogin, accountType, repositorySelection (All or Selected), status (Active or Suspended), createdAt and updatedAt.",
   ),
   rest(
     "tumpel_github_start",
     "POST",
     "/v1/github-connection/start",
     NO_ARGUMENTS,
-    "Get the URL where a person installs the stage's GitHub App for the tenant. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of the installed account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
+    "Get the URL where a person installs the stage's GitHub App on one more account or organization for the tenant; installations already connected stay. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of that account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
   ),
   rest(
     "tumpel_github_delete",
     "DELETE",
-    "/v1/github-connection",
-    NO_ARGUMENTS,
-    "Disconnect the tenant from its GitHub App installation; turns then use the secret set's GITHUB_TOKEN. Calls DELETE /v1/github-connection. The installation stays on GitHub until a person uninstalls the App there.",
+    "/v1/github-connection/installations/{installationId}",
+    GitHubInstallationPathSchema,
+    "Remove one GitHub installation from the tenant, by the installationId tumpel_github_list prints; turns on repositories of its account then use the secret set's GITHUB_TOKEN. Calls DELETE /v1/github-connection/installations/{installationId}. The installation stays on GitHub until a person uninstalls the App there.",
   ),
   rest(
     "tumpel_github_list_repositories",
     "GET",
     "/v1/github-connection/repositories",
     NO_ARGUMENTS,
-    "List the repositories the tenant's GitHub App installation covers. Returns the GitHubRepository[] of GET /v1/github-connection/repositories: owner, name, defaultBranch, private and htmlUrl; refused GitHubNotConnected until the App is installed with tumpel_github_start.",
+    "List the repositories every GitHub installation of the tenant covers. Returns the GitHubRepository[] of GET /v1/github-connection/repositories: owner, name, defaultBranch, private and htmlUrl; refused GitHubNotConnected until the App is installed with tumpel_github_start.",
   ),
   rest(
     "tumpel_github_list_issues",
     "GET",
     "/v1/github-connection/repositories/{owner}/{name}/issues",
     GitHubRepositoryPathSchema,
-    "List the open issues of a repository the installation covers, most recently updated first, without pull requests. Returns the GitHubIssue[] of GET /v1/github-connection/repositories/{owner}/{name}/issues: issueNumber, title, htmlUrl, labels and updatedAt.",
+    "List the open issues of a repository an installation of the tenant covers, most recently updated first, without pull requests. Returns the GitHubIssue[] of GET /v1/github-connection/repositories/{owner}/{name}/issues: issueNumber, title, htmlUrl, labels and updatedAt.",
   ),
   rest(
     "tumpel_oauth_grant_list",
