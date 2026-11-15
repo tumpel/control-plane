@@ -1,7 +1,8 @@
-import { HarnessCatalogEntrySchema } from "@tumpel/api/schemas";
+import { type EffectiveHarnessVersionSchema, HarnessCatalogEntrySchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 
 export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
+export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSchema>;
 
 export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEntrySchema.array().parse([
   {
@@ -60,3 +61,13 @@ export const pinnedEntry = (
   const pinned = pins.find((pin) => pin.harness === harness);
   return pinned === undefined ? defaultEntry(harness) : catalogEntry(harness, pinned.harnessVersion);
 };
+
+export const effectiveVersions = (
+  pins: readonly { harness: string; harnessVersion: string }[],
+): EffectiveHarnessVersion[] =>
+  HARNESS_CATALOG.filter((entry) => defaultEntry(entry.harness) === entry).map((entry) => {
+    const pinned = pins.find((pin) => pin.harness === entry.harness);
+    return pinned === undefined
+      ? { harness: entry.harness, harnessVersion: entry.harnessVersion, pinned: false }
+      : { harness: entry.harness, harnessVersion: pinned.harnessVersion, pinned: true };
+  });

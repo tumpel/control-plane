@@ -171,7 +171,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/harnesses/pins",
     NO_ARGUMENTS,
-    "List the tenant's harness pins. Returns the HarnessPin[] of GET /v1/harnesses/pins.",
+    "List every harness of the catalog with the version new sessions of it run and whether the tenant pins it. Returns the EffectiveHarnessVersion[] of GET /v1/harnesses/pins.",
   ),
   rest(
     "tumpel_harness_pin",
