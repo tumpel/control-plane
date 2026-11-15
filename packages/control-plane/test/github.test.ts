@@ -5,6 +5,7 @@ import { GitHubIssueSchema, GitHubRepositorySchema } from "@tumpel/api/schemas";
 import { deriveSigningKey } from "../src/envelope.ts";
 import {
   appManifest,
+  commitIdentity,
   convertManifest,
   type Fetch,
   importAppKey,
@@ -378,4 +379,33 @@ test("a repository's open issues are one page of the 100 last updated, without p
     labels: ["bug"],
     updatedAt: "2026-11-14T09:30:00Z",
   });
+});
+
+test("the box commits as the installed App's bot, else as the GitHub user of the secret set's token", async () => {
+  const app = { appId: 42, slug: "tumpel-dev" };
+  const unused = answering([]);
+  assert.deepEqual(await commitIdentity(unused.fetcher, "https://api.github.test", app, "ghp_set", "set-1"), {
+    kind: "Identity",
+    identity: { gitAuthorName: "tumpel-dev[bot]", gitAuthorEmail: "42+tumpel-dev[bot]@users.noreply.github.com" },
+  });
+  assert.equal(unused.calls.length, 0);
+
+  const { fetcher, calls } = spiedFetch(200, { id: 4242, login: "octo-cat", name: "Octo" });
+  assert.deepEqual(await commitIdentity(fetcher, "https://api.github.test", null, "ghp_set", "set-1"), {
+    kind: "Identity",
+    identity: { gitAuthorName: "octo-cat", gitAuthorEmail: "4242+octo-cat@users.noreply.github.com" },
+  });
+  assert.equal(calls[0]?.url, "https://api.github.test/user");
+  assert.equal(header(calls[0]?.init ?? {}, "authorization"), "Bearer ghp_set");
+
+  const refused = await commitIdentity(
+    spiedFetch(401, { message: "Bad credentials" }).fetcher,
+    "https://api.github.test",
+    null,
+    "ghp_stale",
+    "set-1",
+  );
+  assert.equal(refused.kind, "Unresolved");
+  assert.match(refused.kind === "Unresolved" ? refused.detail : "", /401: Bad credentials.*secret set set-1/);
+  assert.doesNotMatch(JSON.stringify(refused), /ghp_stale/);
 });

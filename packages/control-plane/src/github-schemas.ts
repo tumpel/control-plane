@@ -78,6 +78,11 @@ export const GitHubInstallationRecordSchema = z.object({
   account: GitHubAccountSchema,
 });
 
+export const GitHubUserSchema = z.object({
+  id: GitHubIdSchema,
+  login: GitHubLoginSchema,
+});
+
 export const GitHubUserInstallationsSchema = z.object({
   installations: z.array(GitHubInstallationRecordSchema),
 });

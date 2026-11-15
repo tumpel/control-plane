@@ -13,6 +13,7 @@ import {
   GitHubIssueRecordsSchema,
   type GitHubManifestStateSchema,
   GitHubUserInstallationsSchema,
+  GitHubUserSchema,
   GitHubUserTokenSchema,
 } from "./github-schemas.ts";
 
@@ -540,6 +541,47 @@ export const readState = async <T extends GitHubState>(
     return { ok: false, reason: `the state expired at ${parsed.data.expiresAt}` };
   }
   return { ok: true, claims: parsed.data };
+};
+
+export interface CommitIdentity {
+  gitAuthorName: string;
+  gitAuthorEmail: string;
+}
+
+export type CommitIdentityAnswer =
+  | { kind: "Identity"; identity: CommitIdentity }
+  | { kind: "Unresolved"; detail: string };
+
+const noreply = (id: number, login: string): string => `${id}+${login}@users.noreply.github.com`;
+
+const UNPUSHABLE_IDENTITY: CommitIdentity = { gitAuthorName: "Tumpel Agent", gitAuthorEmail: "agent@tumpel.invalid" };
+
+export const commitIdentity = async (
+  fetcher: Fetch,
+  api: string,
+  installedApp: { appId: number; slug: string } | null,
+  token: string | null,
+  secretSetId: string,
+): Promise<CommitIdentityAnswer> => {
+  if (installedApp !== null) {
+    const bot = `${installedApp.slug}[bot]`;
+    return { kind: "Identity", identity: { gitAuthorName: bot, gitAuthorEmail: noreply(installedApp.appId, bot) } };
+  }
+  if (token === null) return { kind: "Identity", identity: UNPUSHABLE_IDENTITY };
+  const answer = await callGitHub(
+    fetcher,
+    { method: "GET", url: `${api}/user`, accept: API_MEDIA_TYPE, bearer: token, body: null },
+    GitHubUserSchema,
+    "GitHubUser",
+  );
+  if (!answer.ok) {
+    return {
+      kind: "Unresolved",
+      detail: `${answer.detail}; the box commits as the GitHub user of the ${REPOSITORY_TOKEN} of secret set ${secretSetId}, so write a valid token with tumpel config apply, or install the GitHub App with tumpel github start, then send the turn again`,
+    };
+  }
+  const { id, login } = answer.value;
+  return { kind: "Identity", identity: { gitAuthorName: login, gitAuthorEmail: noreply(id, login) } };
 };
 
 export const REPOSITORY_TOKEN = "GITHUB_TOKEN";

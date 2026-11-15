@@ -352,7 +352,7 @@ test("an Access email with no tenant signs up on the dashboard's consent page an
   const created = await call("/v1/tenants", {
     method: "POST",
     headers: { ...person(email), origin, "content-type": "application/json" },
-    body: JSON.stringify({ name: "First run", gitAuthorName: "First Run", gitAuthorEmail: "first-run@example.test" }),
+    body: JSON.stringify({ name: "First run" }),
   });
   assert.equal(created.status, 200);
 

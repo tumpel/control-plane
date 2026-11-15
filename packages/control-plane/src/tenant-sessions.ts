@@ -29,19 +29,23 @@ import {
 import {
   type CredentialRefusal,
   checkCredential,
+  type DispatchVariable,
   dispatchVariables,
   type SecretKey,
   type SecretMember,
 } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
 import {
+  type CommitIdentityAnswer,
+  commitIdentity,
   type GitHubRepository,
   githubRepository,
   type Minted,
   mintInstallationToken,
+  REPOSITORY_TOKEN,
   repositoryCredential,
 } from "./github.ts";
-import { appKey, installationOf } from "./github-store.ts";
+import { appKey, installationOf, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import { type Host, hostOf } from "./hosts";
 import type { Env } from "./index";
@@ -415,18 +419,11 @@ export class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  protected personaRow(
-    personaId: string,
-  ): { secretSetId: string; gitAuthorName: string; gitAuthorEmail: string } | null {
+  protected personaRow(personaId: string): { secretSetId: string } | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ secret_set_id: string; git_author_name: string; git_author_email: string }>(
-        "SELECT secret_set_id, git_author_name, git_author_email FROM personas WHERE persona_id = ?",
-        personaId,
-      )
+      .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM personas WHERE persona_id = ?", personaId)
       .toArray();
-    return row === undefined
-      ? null
-      : { secretSetId: row.secret_set_id, gitAuthorName: row.git_author_name, gitAuthorEmail: row.git_author_email };
+    return row === undefined ? null : { secretSetId: row.secret_set_id };
   }
 
   private secretSetName(session: SessionRow): string {
@@ -534,6 +531,22 @@ export class TenantSessions extends DurableObject<Env> {
       repository,
       now,
     );
+  }
+
+  protected async boxIdentity(
+    tenantId: string,
+    secretSetId: string,
+    variables: DispatchVariable[],
+  ): Promise<CommitIdentityAnswer> {
+    const installed = (await installationOf(this.env.DB, tenantId)) !== null;
+    const app = installed ? await storedApp(this.env.DB) : null;
+    if (installed && app === null) {
+      throw new Error(
+        `tenant ${tenantId} is linked to a GitHub installation, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
+      );
+    }
+    const token = variables.find((variable) => variable.name === REPOSITORY_TOKEN)?.value ?? null;
+    return commitIdentity((url, init) => fetch(url, init), this.env.GITHUB_API_ORIGIN, app, token, secretSetId);
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
@@ -1233,7 +1246,7 @@ export class TenantSessions extends DurableObject<Env> {
         `session ${session.session_id} runs on persona ${session.persona_id}, which is gone; turn ${turnId} has no secret set to run on`,
       );
     }
-    const { secretSetId, gitAuthorName, gitAuthorEmail } = persona;
+    const { secretSetId } = persona;
     const dispatch = dispatchVariables(entry, await this.members(secretSetId), now);
     if (dispatch.kind === "NoCredential") {
       throw new Error(
@@ -1275,6 +1288,11 @@ export class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", credential.detail, iso(now));
       return { kind: "Withdrawn" };
     }
+    const identity = await this.boxIdentity(tenantId, secretSetId, dispatch.variables);
+    if (identity.kind === "Unresolved") {
+      await this.failTurn(tenantId, turnId, "CommitIdentityUnresolved", identity.detail, iso(now));
+      return { kind: "Withdrawn" };
+    }
     const { variables, source } = credential;
     const handover = {
       credentialHandoverId: crypto.randomUUID(),
@@ -1312,8 +1330,7 @@ export class TenantSessions extends DurableObject<Env> {
       snapshots,
       personaFiles,
       image: guest.image,
-      gitAuthorName,
-      gitAuthorEmail,
+      ...identity.identity,
     };
   }
 

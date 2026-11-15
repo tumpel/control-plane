@@ -311,8 +311,6 @@ const planPersonas = (
     const removed = [...held.keys()].filter((path) => !wanted.has(path)).sort();
     const unchanged =
       setIds.get(persona.secretSetName) === current.secretSetId &&
-      persona.gitAuthorName === current.gitAuthorName &&
-      persona.gitAuthorEmail === current.gitAuthorEmail &&
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {
@@ -510,8 +508,6 @@ const refusedAt = async (answer: Response, change: ConfigChange, applied: Config
 const personaBody = (persona: ConfigPersona, files: PlannedFile[], setIds: Map<string, string>) => ({
   name: persona.name,
   secretSetId: setIds.get(persona.secretSetName) ?? "",
-  gitAuthorName: persona.gitAuthorName,
-  gitAuthorEmail: persona.gitAuthorEmail,
   files: fileWrites(files),
 });
 

@@ -64,7 +64,6 @@ const postJson = (path: string, body: unknown, headers: Record<string, string> =
   });
 
 const browser = (): Record<string, string> => ({ "cf-access-jwt-assertion": assertion(), origin });
-const IDENTITY = { gitAuthorName: "Ticket Worker", gitAuthorEmail: "ticket-worker@example.test" };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -155,7 +154,7 @@ before(async () => {
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
 
-  const signedUp = await postJson("/v1/tenants", { name: "Hosts", ...IDENTITY }, browser());
+  const signedUp = await postJson("/v1/tenants", { name: "Hosts" }, browser());
   assert.equal(signedUp.status, 200);
   const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
   const started = DeviceAuthorizationSchema.parse(
