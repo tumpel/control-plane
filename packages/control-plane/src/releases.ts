@@ -1,4 +1,4 @@
-import { type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
+import { ChannelProtocol, type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { issues } from "./http.ts";
 
@@ -32,8 +32,6 @@ export const manifestKey = (image: ReleaseImage): string => `${imagePrefix(image
 
 export const kernelKey = (image: ReleaseImage): string => `kernels/${arch(image.architecture)}/${image.kernelDigest}`;
 
-const urlNames = (url: string, key: string): boolean => new URL(url).pathname.endsWith(`/${key}`);
-
 const duplicates = (keys: string[]): string[] => [...new Set(keys.filter((key, index) => keys.indexOf(key) !== index))];
 
 export const parseRelease = (text: string): ReleaseManifest => {
@@ -50,15 +48,11 @@ export const parseRelease = (text: string): ReleaseManifest => {
     );
   }
   const manifest = parsed.data;
-  const misnamed = [
-    ...manifest.supervisors
-      .filter((supervisor) => !urlNames(supervisor.url, supervisorKey(supervisor)))
-      .map((supervisor) => `${supervisor.url} is not ${supervisorKey(supervisor)}`),
-    ...manifest.images.flatMap((image) => [
-      ...(urlNames(image.imageUrl, imageKey(image)) ? [] : [`${image.imageUrl} is not ${imageKey(image)}`]),
-      ...(urlNames(image.kernelUrl, kernelKey(image)) ? [] : [`${image.kernelUrl} is not ${kernelKey(image)}`]),
-    ]),
-  ];
+  if (manifest.channelProtocolVersion !== ChannelProtocol.Version) {
+    throw new Error(
+      `${CURRENT_RELEASE_KEY} of release ${manifest.releaseVersion} is built for channel protocol version ${manifest.channelProtocolVersion}, and this control plane speaks ${ChannelProtocol.Version}; ${republish} from the commit this control plane is deployed from`,
+    );
+  }
   const repeated = [
     ...duplicates(manifest.supervisors.map((supervisor) => supervisor.architecture)).map(
       (architecture) => `two supervisors for ${architecture}`,
@@ -67,9 +61,10 @@ export const parseRelease = (text: string): ReleaseManifest => {
       (image) => `two images for ${image}`,
     ),
   ];
-  const wrong = [...misnamed, ...repeated];
-  if (wrong.length > 0) {
-    throw new Error(`${CURRENT_RELEASE_KEY} of release ${manifest.releaseVersion}: ${wrong.join("; ")}; ${republish}`);
+  if (repeated.length > 0) {
+    throw new Error(
+      `${CURRENT_RELEASE_KEY} of release ${manifest.releaseVersion}: ${repeated.join("; ")}; ${republish}`,
+    );
   }
   return manifest;
 };

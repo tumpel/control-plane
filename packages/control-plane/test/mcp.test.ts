@@ -16,10 +16,14 @@ import {
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
+  ProblemSchema,
   SecretSetSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
+import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
+
+type Bucket = { put(key: string, value: string): Promise<unknown> };
 
 const AUDIENCE = "tumpel-mcp-e2e";
 const KID = "mcp-e2e-key";
@@ -198,6 +202,10 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   assert.ok(!schemas.includes('"value"'), "a tool takes a secret value");
 
   const hostId = await enrolHost();
+  await (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES.put(
+    "current.json",
+    JSON.stringify(CLAUDE_CODE_AMD64_RELEASE),
+  );
   assert.deepEqual(
     await toolJson(HostSchema, "tumpel_host_get", { hostId }),
     await rest(HostSchema, "GET", `/v1/hosts/${hostId}`),
@@ -221,6 +229,9 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     await rest(HarnessPinSchema.array(), "GET", "/v1/harnesses/pins"),
   );
   assert.deepEqual(await rest(HarnessPinSchema.array(), "GET", "/v1/harnesses/pins"), [pinned]);
+  const unreleased = await send("PUT", "/v1/harnesses/pins", { harness: "Codex", harnessVersion: "0.50.0" }, bearer);
+  assert.equal(unreleased.status, 422);
+  assert.equal(ProblemSchema.parse(await unreleased.json()).code, "ImageNotReleased");
   await toolDone("tumpel_harness_unpin", { harness: entry.harness });
   assert.deepEqual(await rest(HarnessPinSchema.array(), "GET", "/v1/harnesses/pins"), []);
 

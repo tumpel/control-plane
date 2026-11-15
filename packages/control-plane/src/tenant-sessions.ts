@@ -40,7 +40,7 @@ import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
-import { releaseSignerOf, signerOf } from "./presign";
+import { signerOf } from "./presign";
 import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
 import type { DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
@@ -670,7 +670,7 @@ export class TenantSessions extends DurableObject<Env> {
     claimSeconds: number,
     fetchSeconds: number,
     now: number,
-  ): Promise<GuestImageDownload> {
+  ): Promise<{ kind: "Released"; image: GuestImageDownload } | { kind: "NotReleased"; detail: string }> {
     const host = await hostOf(this.env.DB, tenantId, hostId);
     if (host === null)
       throw new Error(
@@ -681,22 +681,31 @@ export class TenantSessions extends DurableObject<Env> {
       (each) => each.architecture === host.architecture,
     );
     if (image === undefined) {
-      throw new Error(
-        `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); publish a release that carries it with the release workflow, then send the turn again`,
-      );
+      return {
+        kind: "NotReleased",
+        detail: `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a version tumpel release current lists for ${host.architecture} with tumpel harness pin, then send the turn again`,
+      };
     }
-    const signer = releaseSignerOf(this.env);
+    const signer = signerOf(
+      this.env,
+      this.env.RELEASES_BUCKET_NAME,
+      this.env.RELEASES_ACCESS_KEY_ID,
+      this.env.RELEASES_SECRET_ACCESS_KEY,
+    );
     const at = new Date(now);
     const seconds = claimSeconds + fetchSeconds;
     return {
-      imageDigest: image.imageDigest,
-      kernelDigest: image.kernelDigest,
-      manifestDigest: image.manifestDigest,
-      imageUrl: await signer.presign("GET", imageKey(image), seconds, at),
-      kernelUrl: await signer.presign("GET", kernelKey(image), seconds, at),
-      manifestUrl: await signer.presign("GET", manifestKey(image), seconds, at),
-      downloadExpiresAt: iso(now + seconds * 1000),
-      fetchSeconds,
+      kind: "Released",
+      image: {
+        imageDigest: image.imageDigest,
+        kernelDigest: image.kernelDigest,
+        manifestDigest: image.manifestDigest,
+        imageUrl: await signer.presign("GET", imageKey(image), seconds, at),
+        kernelUrl: await signer.presign("GET", kernelKey(image), seconds, at),
+        manifestUrl: await signer.presign("GET", manifestKey(image), seconds, at),
+        downloadExpiresAt: iso(now + seconds * 1000),
+        fetchSeconds,
+      },
     };
   }
 
@@ -1171,6 +1180,19 @@ export class TenantSessions extends DurableObject<Env> {
       );
       return { kind: "Withdrawn" };
     }
+    const settings = settingsOf(this.env);
+    const guest = await this.guestImage(
+      tenantId,
+      session,
+      hostId,
+      settings.turnClaimBudgetSeconds,
+      settings.turnImageFetchBudgetSeconds,
+      now,
+    );
+    if (guest.kind === "NotReleased") {
+      await this.failTurn(tenantId, turnId, "ImageNotReleased", guest.detail, iso(now));
+      return { kind: "Withdrawn" };
+    }
     const minted = await this.repositoryToken(tenantId, session.repository, now);
     const credential = repositoryCredential(dispatch.variables, minted);
     if (credential.kind === "Refused") {
@@ -1178,7 +1200,6 @@ export class TenantSessions extends DurableObject<Env> {
       return { kind: "Withdrawn" };
     }
     const { variables, source } = credential;
-    const settings = settingsOf(this.env);
     const handover = {
       credentialHandoverId: crypto.randomUUID(),
       turnId,
@@ -1203,14 +1224,6 @@ export class TenantSessions extends DurableObject<Env> {
       .toArray();
     const snapshots = await this.downloads(stored, settings.turnClaimBudgetSeconds, now);
     const personaFiles = await this.personaFiles(tenantId, session.persona_id, settings.turnClaimBudgetSeconds, now);
-    const image = await this.guestImage(
-      tenantId,
-      session,
-      hostId,
-      settings.turnClaimBudgetSeconds,
-      settings.turnImageFetchBudgetSeconds,
-      now,
-    );
     return {
       kind: "Ready",
       credential: {
@@ -1221,7 +1234,7 @@ export class TenantSessions extends DurableObject<Env> {
       lastLineSeq: session.last_line_seq,
       snapshots,
       personaFiles,
-      image,
+      image: guest.image,
       gitAuthorName,
       gitAuthorEmail,
     };
@@ -1240,7 +1253,12 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (files.length === 0) return [];
-    const signer = signerOf(this.env);
+    const signer = signerOf(
+      this.env,
+      this.env.R2_BUCKET_NAME,
+      this.env.R2_ACCESS_KEY_ID,
+      this.env.R2_SECRET_ACCESS_KEY,
+    );
     const downloads: PersonaFileDownload[] = [];
     for (const file of files) {
       downloads.push({
@@ -1260,7 +1278,12 @@ export class TenantSessions extends DurableObject<Env> {
     now: number,
   ): Promise<SnapshotDownload[]> {
     if (stored.length === 0) return [];
-    const signer = signerOf(this.env);
+    const signer = signerOf(
+      this.env,
+      this.env.R2_BUCKET_NAME,
+      this.env.R2_ACCESS_KEY_ID,
+      this.env.R2_SECRET_ACCESS_KEY,
+    );
     const snapshots: SnapshotDownload[] = [];
     for (const row of stored) {
       snapshots.push({
@@ -1414,7 +1437,12 @@ export class TenantSessions extends DurableObject<Env> {
       );
       return message.packs.filter((pack) => !stored.has(pack.packDigest));
     });
-    const signer = signerOf(this.env);
+    const signer = signerOf(
+      this.env,
+      this.env.R2_BUCKET_NAME,
+      this.env.R2_ACCESS_KEY_ID,
+      this.env.R2_SECRET_ACCESS_KEY,
+    );
     const uploads = [];
     for (const pack of missing) {
       uploads.push({
@@ -1481,7 +1509,12 @@ export class TenantSessions extends DurableObject<Env> {
       )
       .toArray()
       .filter((row) => row.held === 1);
-    const signer = signerOf(this.env);
+    const signer = signerOf(
+      this.env,
+      this.env.R2_BUCKET_NAME,
+      this.env.R2_ACCESS_KEY_ID,
+      this.env.R2_SECRET_ACCESS_KEY,
+    );
     const downloads = [];
     for (const pack of packs) {
       downloads.push({
@@ -1797,7 +1830,12 @@ export class TenantSessions extends DurableObject<Env> {
       now,
     );
     const deadlineSeconds = settingsOf(this.env).snapshotDeadlineSeconds;
-    const uploadUrl = await signerOf(this.env).presign("PUT", storageKey, deadlineSeconds, new Date(now));
+    const uploadUrl = await signerOf(
+      this.env,
+      this.env.R2_BUCKET_NAME,
+      this.env.R2_ACCESS_KEY_ID,
+      this.env.R2_SECRET_ACCESS_KEY,
+    ).presign("PUT", storageKey, deadlineSeconds, new Date(now));
     await this.timers(tenantId, session.session_id, {
       SnapshotAnswer: { turnId: turn.turn_id, at: now + deadlineSeconds * 1000 },
     });

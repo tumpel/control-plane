@@ -21,10 +21,7 @@ export interface SigV4Credentials {
 }
 
 export interface SignerEnv {
-  R2_BUCKET_NAME: string;
   R2_ACCOUNT_ID?: string;
-  R2_ACCESS_KEY_ID?: string;
-  R2_SECRET_ACCESS_KEY?: string;
   R2_STUB_ORIGIN?: string;
 }
 
@@ -123,42 +120,18 @@ const stubSigner = (origin: string, bucket: string): Signer => {
   };
 };
 
-export const signerOf = (env: SignerEnv): Signer => {
-  if (env.R2_STUB_ORIGIN) return stubSigner(env.R2_STUB_ORIGIN, env.R2_BUCKET_NAME);
-  const { R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = env;
-  if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+export const signerOf = (
+  env: SignerEnv,
+  bucket: string,
+  accessKeyId: string | undefined,
+  secretAccessKey: string | undefined,
+): Signer => {
+  if (env.R2_STUB_ORIGIN) return stubSigner(env.R2_STUB_ORIGIN, bucket);
+  const { R2_ACCOUNT_ID } = env;
+  if (!R2_ACCOUNT_ID || !accessKeyId || !secretAccessKey) {
     throw new Error(
-      "R2_ACCOUNT_ID, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY must all be set to presign snapshot URLs; put the R2 S3 API key pair with wrangler secret put as doc/deploy.md describes",
+      `R2_ACCOUNT_ID and the S3 key pair of bucket ${bucket} must all be set to presign its URLs; npm run deploy puts them on the Worker from the tofu output worker_secrets, as doc/deploy.md describes`,
     );
   }
-  return r2Signer(R2_ACCOUNT_ID, env.R2_BUCKET_NAME, {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-    region: "auto",
-    service: "s3",
-  });
-};
-
-export interface ReleaseSignerEnv {
-  RELEASES_BUCKET_NAME: string;
-  R2_ACCOUNT_ID?: string;
-  RELEASES_ACCESS_KEY_ID?: string;
-  RELEASES_SECRET_ACCESS_KEY?: string;
-  R2_STUB_ORIGIN?: string;
-}
-
-export const releaseSignerOf = (env: ReleaseSignerEnv): Signer => {
-  if (env.R2_STUB_ORIGIN) return stubSigner(env.R2_STUB_ORIGIN, env.RELEASES_BUCKET_NAME);
-  const { R2_ACCOUNT_ID, RELEASES_ACCESS_KEY_ID, RELEASES_SECRET_ACCESS_KEY } = env;
-  if (!R2_ACCOUNT_ID || !RELEASES_ACCESS_KEY_ID || !RELEASES_SECRET_ACCESS_KEY) {
-    throw new Error(
-      "R2_ACCOUNT_ID, RELEASES_ACCESS_KEY_ID and RELEASES_SECRET_ACCESS_KEY must all be set to presign release URLs; npm run deploy puts them from the tofu output worker_secrets, as doc/deploy.md describes",
-    );
-  }
-  return r2Signer(R2_ACCOUNT_ID, env.RELEASES_BUCKET_NAME, {
-    accessKeyId: RELEASES_ACCESS_KEY_ID,
-    secretAccessKey: RELEASES_SECRET_ACCESS_KEY,
-    region: "auto",
-    service: "s3",
-  });
+  return r2Signer(R2_ACCOUNT_ID, bucket, { accessKeyId, secretAccessKey, region: "auto", service: "s3" });
 };

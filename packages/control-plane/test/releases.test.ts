@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ProblemSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
+import { ChannelProtocol, ProblemSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { parseRelease, type ReleaseManifest } from "../src/releases.ts";
 
 const R2_STUB_ORIGIN = "https://r2.example.test";
-const S3 = "https://account.r2.cloudflarestorage.com/tumpel-releases";
 const SUPERVISOR_SHA = "a".repeat(64);
 const IMAGE = "b".repeat(64);
 const KERNEL = "c".repeat(64);
@@ -15,18 +14,14 @@ const MANIFEST = "d".repeat(64);
 const RELEASE: ReleaseManifest = {
   releaseVersion: "0.2.0",
   commit: "e".repeat(40),
-  channelProtocolVersion: 8,
-  supervisors: [
-    { architecture: "Amd64", url: `${S3}/supervisor/amd64/${SUPERVISOR_SHA}`, sha256: SUPERVISOR_SHA, sizeBytes: 4096 },
-  ],
+  channelProtocolVersion: ChannelProtocol.Version,
+  supervisors: [{ architecture: "Amd64", sha256: SUPERVISOR_SHA, sizeBytes: 4096 }],
   images: [
     {
       harness: "ClaudeCode",
       harnessVersion: "2.0.0",
       architecture: "Amd64",
-      imageUrl: `${S3}/images/ClaudeCode/2.0.0/amd64/${IMAGE}`,
       imageDigest: IMAGE,
-      kernelUrl: `${S3}/kernels/amd64/${KERNEL}`,
       kernelDigest: KERNEL,
       manifestDigest: MANIFEST,
     },
@@ -52,7 +47,7 @@ after(async () => {
 
 const get = (path: string) => server.fetch(`${origin}${path}`, { redirect: "manual" });
 
-test("current.json parses against ReleaseManifest and refuses a URL off its digest's key or a repeated image", () => {
+test("current.json parses against ReleaseManifest and refuses another channel protocol version or a repeated image", () => {
   assert.deepEqual(parseRelease(JSON.stringify(RELEASE)), RELEASE);
   assert.throws(() => parseRelease("{"), /current\.json in the release bucket is not JSON/);
   assert.throws(
@@ -63,8 +58,10 @@ test("current.json parses against ReleaseManifest and refuses a URL off its dige
   const [image] = RELEASE.images;
   assert.ok(image);
   assert.throws(
-    () => parseRelease(JSON.stringify({ ...RELEASE, images: [{ ...image, kernelUrl: `${S3}/kernels/amd64/x` }] })),
-    new RegExp(`${S3}/kernels/amd64/x is not kernels/amd64/${KERNEL}`),
+    () => parseRelease(JSON.stringify({ ...RELEASE, channelProtocolVersion: ChannelProtocol.Version + 1 })),
+    new RegExp(
+      `built for channel protocol version ${ChannelProtocol.Version + 1}, and this control plane speaks ${ChannelProtocol.Version}`,
+    ),
   );
   assert.throws(
     () => parseRelease(JSON.stringify({ ...RELEASE, images: [image, image] })),
