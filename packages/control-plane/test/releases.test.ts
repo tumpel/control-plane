@@ -24,6 +24,7 @@ const RELEASE: ReleaseManifest = {
       imageDigest: IMAGE,
       kernelDigest: KERNEL,
       manifestDigest: MANIFEST,
+      ociDigest: "e".repeat(64),
     },
   ],
 };

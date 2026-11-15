@@ -82,6 +82,7 @@ const RELEASE = {
       imageDigest: IMAGE_DIGEST,
       kernelDigest: KERNEL_DIGEST,
       manifestDigest: MANIFEST_DIGEST,
+      ociDigest: "e".repeat(64),
     },
   ],
 };
