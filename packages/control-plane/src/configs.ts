@@ -498,16 +498,8 @@ const fileWrites = (files: PlannedFile[]): PersonaFileWrite[] =>
   );
 
 const refusedAt = async (answer: Response, change: ConfigChange, applied: ConfigChange[]): Promise<Response> => {
-  const parsed = ProblemSchema.safeParse(await answer.json().catch(() => null));
+  const refusal: Problem = ProblemSchema.parse(await answer.json());
   const status = ProblemResponseSchema.shape.statusCode.safeParse(answer.status);
-  const refusal: Problem = parsed.success
-    ? parsed.data
-    : {
-        code: "InvalidRequest",
-        title: "Change refused",
-        detail: `the API answered ${answer.status} without a Problem`,
-        fix: "Report an issue with the config and the change named in the detail",
-      };
   const done =
     applied.length === 0
       ? "no change was applied"
@@ -520,7 +512,7 @@ const refusedAt = async (answer: Response, change: ConfigChange, applied: Config
 
 const personaBody = (persona: ConfigPersona, files: PlannedFile[], setIds: Map<string, string>) => ({
   name: persona.name,
-  secretSetId: setIds.get(persona.secretSetName) ?? "",
+  secretSetId: setIds.get(persona.secretSetName),
   files: fileWrites(files),
 });
 
@@ -639,15 +631,12 @@ export const applyConfig = async (body: ApplyRequest, call: Call): Promise<Respo
     live.value,
   );
   if (!planned.ok) return stopped(planned.problems);
-  const { steps } = planned;
-  const changes = steps.map(changeOf);
-  const missing = missingValues(steps, values);
+  const missing = missingValues(planned.steps, values);
   if (missing.length > 0) return stopped(missing);
   const setIds = new Map(live.value.secretSets.map((set) => [set.name, set.secretSetId]));
   const applied: ConfigChange[] = [];
-  for (const [index, step] of steps.entries()) {
-    const change = changes[index];
-    if (change === undefined) throw new Error(`the plan has no change for step ${index}`);
+  for (const step of planned.steps) {
+    const change = changeOf(step);
     const answer = await send(step, call, setIds, values);
     if (!answer.ok) return refusedAt(answer, change, applied);
     if (step.kind === "CreateSecretSet") {
@@ -656,5 +645,5 @@ export const applyConfig = async (body: ApplyRequest, call: Call): Promise<Respo
     }
     applied.push(change);
   }
-  return json(ConfigPlanSchema.parse({ changes }));
+  return json(ConfigPlanSchema.parse({ changes: applied }));
 };
