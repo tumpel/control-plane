@@ -12,6 +12,7 @@ import {
   type ClaudeSetupEvent,
   type ClaudeSetupFailureReason,
   type ClaudeSetupRow,
+  overdue,
   setupOffer,
   stateOf,
   TOKEN_LIFETIME_MS,
@@ -79,6 +80,17 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       .exec<ClaudeSetupRow>(`${CLAUDE_SETUP_SELECT} WHERE claude_setup_id = ?`, claudeSetupId)
       .toArray();
     return row ?? null;
+  }
+
+  private async currentClaudeSetupRow(
+    tenantId: string,
+    claudeSetupId: string,
+    now: number,
+  ): Promise<ClaudeSetupRow | null> {
+    const row = this.claudeSetupRow(claudeSetupId);
+    if (row === null || !overdue(row, now)) return row;
+    await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, now);
+    return this.claudeSetupRow(claudeSetupId);
   }
 
   private presentClaudeSetup(tenantId: string, claudeSetupId: string): ClaudeSetup {
@@ -149,8 +161,8 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return { kind: "Started", setup: toClaudeSetup(tenantId, row) };
   }
 
-  getClaudeSetup(tenantId: string, claudeSetupId: string): ClaudeSetup | null {
-    const row = this.claudeSetupRow(claudeSetupId);
+  async getClaudeSetup(tenantId: string, claudeSetupId: string, now: number): Promise<ClaudeSetup | null> {
+    const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
     return row === null ? null : toClaudeSetup(tenantId, row);
   }
 
@@ -160,7 +172,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     code: string,
     now: number,
   ): Promise<ClaudeSetupCoded> {
-    const row = this.claudeSetupRow(claudeSetupId);
+    const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
     if (row === null) return { kind: "NotFound" };
     const step = advance(claudeSetupId, stateOf(row), { kind: "Code" }, settingsOf(this.env));
     if (step.kind === "Refuse") return { kind: "NotWaiting", detail: step.detail };
@@ -189,9 +201,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     token: string,
     now: number,
   ): Promise<ClaudeSetupStored> {
-    const row = this.claudeSetupRow(claudeSetupId);
-    if (row === null) return { kind: "NotFound" };
+    if (this.claudeSetupRow(claudeSetupId) === null) return { kind: "NotFound" };
     if (!sameSecret(credential, await this.boxToken(tenantId, claudeSetupId))) return { kind: "Refused" };
+    const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
+    if (row === null) return { kind: "NotFound" };
     const step = advance(claudeSetupId, stateOf(row), { kind: "Stored" }, settingsOf(this.env));
     if (step.kind !== "Complete") {
       return {

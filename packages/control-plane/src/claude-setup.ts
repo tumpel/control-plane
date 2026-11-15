@@ -137,6 +137,8 @@ export const boxEndsAt = (createdAt: number, budgets: ClaudeSetupBudgets): numbe
     1000;
 
 const statusOf = (row: ClaudeSetupRow): Record<string, unknown> => {
+  if (row.state === "Starting") return { state: row.state, urlDueAt: iso(row.phase_due_at) };
+  if (row.state === "Minting") return { state: row.state, tokenDueAt: iso(row.phase_due_at) };
   if (row.state === "AwaitingCode") {
     return { state: row.state, signInUrl: row.sign_in_url, codeDueAt: iso(row.phase_due_at) };
   }
@@ -151,8 +153,10 @@ const statusOf = (row: ClaudeSetupRow): Record<string, unknown> => {
   if (row.state === "Failed") {
     return { state: row.state, reason: row.reason, detail: row.detail, failedAt: endedAt(row) };
   }
-  return { state: row.state };
+  throw new Error(`Claude setup ${row.claude_setup_id} is in state ${row.state}, which ClaudeSetupState does not name`);
 };
+
+export const overdue = (row: ClaudeSetupRow, now: number): boolean => isLive(stateOf(row)) && now >= row.phase_due_at;
 
 export const toClaudeSetup = (tenantId: string, row: ClaudeSetupRow): ClaudeSetup =>
   ClaudeSetupSchema.parse({

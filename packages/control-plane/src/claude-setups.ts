@@ -156,7 +156,7 @@ export const handleClaudeSetups = async (
   const { claudeSetupId } = path.data;
   const tenant = env.TENANT.getByName(caller.tenantId);
   if (tail === undefined) {
-    const setup = await tenant.getClaudeSetup(caller.tenantId, claudeSetupId);
+    const setup = await tenant.getClaudeSetup(caller.tenantId, claudeSetupId, Date.now());
     return setup === null ? setupNotFound(claudeSetupId) : json(setup);
   }
   const body = await parseBody(request, ClaudeSetupCodeSubmitSchema, "claudeSetups.submitCode");

@@ -803,6 +803,47 @@ test("a setup box token writes its own setup's member once, only while the setup
   });
 });
 
+test("a Minting setup read past its mint budget reads Failed SetupTimedOut and discards its box even when its alarm never fired", async () => {
+  const created = await postJson("/v1/secret-sets", { name: "Overdue setup secrets", secrets: [] }, bearer);
+  assert.equal(created.status, 200, await created.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const started = await postJson("/v1/claude-setups", { secretSetId }, bearer);
+  assert.equal(started.status, 200, await started.clone().text());
+  const starting = ClaudeSetupSchema.parse(await started.json());
+  assert.equal(starting.status.state, "Starting");
+  const offer = await host.next("ClaudeSetupBoxOffer");
+  const { claudeSetupId, tenantId } = offer;
+  const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
+  host.send({ type: "ClaudeSetupBoxUrl", claudeSetupId, signInUrl: "https://claude.ai/oauth/authorize?state=overdue" });
+  await eventually("the setup reading AwaitingCode", status, (setup) => setup.status.state === "AwaitingCode");
+  const coded = await postJson(`/v1/claude-setups/${claudeSetupId}/code`, { code: "overdue-code" }, bearer);
+  assert.equal(coded.status, 200, await coded.clone().text());
+  const minting = ClaudeSetupSchema.parse(await coded.json());
+  assert.equal(minting.status.state, "Minting");
+  assert.ok(minting.status.state === "Minting" && Date.parse(minting.status.tokenDueAt) > Date.now());
+  await host.next("ClaudeSetupBoxCode");
+
+  const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenantId });
+  await storage.exec(
+    "UPDATE claude_setups SET phase_due_at = ? WHERE claude_setup_id = ?",
+    Date.now() - 1,
+    claudeSetupId,
+  );
+
+  const read = await status();
+  assert.equal(read.status.state, "Failed");
+  assert.ok(read.status.state === "Failed" && read.status.reason === "SetupTimedOut");
+  assert.match(read.status.state === "Failed" ? read.status.detail : "", /minted no token/);
+  assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, claudeSetupId);
+  const late = await postJson(
+    `/v1/claude-setups/${claudeSetupId}/token`,
+    { tenantId, value: "overdue-subscription-token" },
+    { authorization: `Bearer ${offer.tokenCredential}` },
+  );
+  assert.equal(late.status, 409, await late.clone().text());
+  assert.equal(ProblemSchema.parse(await late.json()).code, "ClaudeSetupNotWaiting");
+});
+
 const deletePersona = (personaId: string) => call(`/v1/personas/${personaId}`, { method: "DELETE", headers: bearer });
 
 test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and its persona stays", async () => {
