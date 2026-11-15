@@ -14,8 +14,6 @@ import {
   HostLabelsSchema,
   IssuerJwksSchema,
   IssuerKeyRotationSchema,
-  IssuerTokenMintSchema,
-  IssuerTokenSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
@@ -75,7 +73,6 @@ import { bearerOf, type Caller, callerForDeviceToken, proofCaller, signUp, whoam
 import {
   ISSUER_DOCUMENT_HEADERS,
   issuerOf,
-  issuerSubject,
   JWKS_PATH,
   OPENID_CONFIGURATION_PATH,
   openIdConfiguration,
@@ -780,51 +777,28 @@ const handleDeviceDeny = async (request: Request, url: URL, env: Env): Promise<R
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
+const notTheOperator = (): Response =>
+  problem(403, {
+    code: "Forbidden",
+    title: "Only the operator tooling rotates",
+    detail: "the issuer key rotates for the proof service token of this stage only, not for a person",
+    fix: "Run npm run issuer:rotate, which signs in with the stage's proof service token",
+  });
+
 const handleIssuerRotate = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const signed = await assertedSigner(request, env);
   if (!signed.ok) return browserSignedOut(url, signed.reason);
   const refused = sameOriginJson(request, url);
   if (refused) return refused;
-  if (signed.kind === "ServiceToken") {
-    const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
-    if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheProofToken();
-  }
+  if (signed.kind !== "ServiceToken") return notTheOperator();
+  const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
+  if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheOperator();
   const rotation = await issuerOf(env).rotate();
   return json(
     IssuerKeyRotationSchema.parse({
+      signingKid: rotation.signingKid,
       kid: rotation.kid,
-      retiring: rotation.retiring.map((key) => ({ kid: key.kid, retiresAt: new Date(key.retiresAt).toISOString() })),
-    }),
-  );
-};
-
-const handleIssuerMint = async (request: Request, _url: URL, env: Env): Promise<Response> => {
-  const caller = await deviceCaller(request, env);
-  if (caller instanceof Response) return caller;
-  const body = await parseBody(request, IssuerTokenMintSchema, "issuerTokens.mint");
-  if (!body.ok) return body.response;
-  const persona = await env.TENANT.getByName(caller.tenantId).getPersona(caller.tenantId, body.value.personaId);
-  if (persona === null) return personaNotFound(body.value.personaId);
-  if (persona.name.includes(":")) {
-    return problem(422, {
-      code: "InvalidRequest",
-      title: "Colon in the persona name",
-      detail: `persona ${persona.name} holds a colon, which would let its token subject match another persona's trust rule`,
-      fix: "Rename the persona without a colon with PUT /v1/personas/{personaId}",
-    });
-  }
-  const issued = await issuerOf(env).signIssuerToken(
-    issuerSubject(caller.tenantId, persona.name),
-    body.value.audience,
-    {},
-  );
-  return json(
-    IssuerTokenSchema.parse({
-      token: issued.token,
-      kid: issued.kid,
-      subject: issued.subject,
-      audience: issued.audience,
-      expiresAt: new Date(issued.expiresAt).toISOString(),
+      signsFrom: new Date(rotation.signsFrom).toISOString(),
     }),
   );
 };
@@ -1129,7 +1103,6 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
   "POST /v1/issuer-keys/rotate": handleIssuerRotate,
-  "POST /v1/issuer-tokens": handleIssuerMint,
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,
