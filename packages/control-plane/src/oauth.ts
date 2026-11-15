@@ -321,6 +321,13 @@ const issue = async (db: D1Database, clientId: string, principalId: string, now:
   });
 };
 
+const revokeGrants = async (db: D1Database, clientId: string, principalId: string): Promise<void> => {
+  await db
+    .prepare("DELETE FROM oauth_tokens WHERE client_id = ? AND principal_id = ?")
+    .bind(clientId, principalId)
+    .run();
+};
+
 const refuseGrant = (error: OAuthErrorCode, description: string): TokenOutcome => ({ ok: false, error, description });
 
 export interface CodeRedemption {
@@ -343,11 +350,12 @@ export const redeemCode = async (
   if (resourceMismatch(redemption.resources, origin)) {
     return refuseGrant("invalid_target", `resource must be ${resourceOf(origin)}`);
   }
+  const codeHash = await sha256Hex(redemption.code);
   const spent = await db
     .prepare(
-      "DELETE FROM oauth_codes WHERE code_sha256 = ? RETURNING client_id, principal_id, redirect_uri, code_challenge, expires_at",
+      "UPDATE oauth_codes SET spent = 1 WHERE code_sha256 = ? AND spent = 0 RETURNING client_id, principal_id, redirect_uri, code_challenge, expires_at",
     )
-    .bind(await sha256Hex(redemption.code))
+    .bind(codeHash)
     .first<{
       client_id: string;
       principal_id: string;
@@ -355,7 +363,14 @@ export const redeemCode = async (
       code_challenge: string;
       expires_at: number;
     }>();
-  if (spent === null) return refuseGrant("invalid_grant", "the authorization code is unknown or already used");
+  if (spent === null) {
+    const reused = await db
+      .prepare("SELECT client_id, principal_id FROM oauth_codes WHERE code_sha256 = ? AND spent = 1")
+      .bind(codeHash)
+      .first<{ client_id: string; principal_id: string }>();
+    if (reused !== null) await revokeGrants(db, reused.client_id, reused.principal_id);
+    return refuseGrant("invalid_grant", "the authorization code is unknown or already used");
+  }
   if (spent.expires_at <= now) return refuseGrant("invalid_grant", "the authorization code expired");
   if (spent.client_id !== redemption.clientId) {
     return refuseGrant("invalid_grant", "the authorization code was issued to another client");
@@ -380,13 +395,23 @@ export const refreshGrant = async (
   if (resourceMismatch(resources, origin)) {
     return refuseGrant("invalid_target", `resource must be ${resourceOf(origin)}`);
   }
+  const refreshHash = await sha256Hex(refreshToken);
   const spent = await db
     .prepare(
-      "DELETE FROM oauth_tokens WHERE token_sha256 = ? AND kind = 'refresh' RETURNING client_id, principal_id, expires_at",
+      "UPDATE oauth_tokens SET spent = 1 WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 0 RETURNING client_id, principal_id, expires_at",
     )
-    .bind(await sha256Hex(refreshToken))
+    .bind(refreshHash)
     .first<{ client_id: string; principal_id: string; expires_at: number }>();
-  if (spent === null) return refuseGrant("invalid_grant", "the refresh token is unknown or already used");
+  if (spent === null) {
+    const reused = await db
+      .prepare(
+        "SELECT client_id, principal_id FROM oauth_tokens WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 1",
+      )
+      .bind(refreshHash)
+      .first<{ client_id: string; principal_id: string }>();
+    if (reused !== null) await revokeGrants(db, reused.client_id, reused.principal_id);
+    return refuseGrant("invalid_grant", "the refresh token is unknown or already used");
+  }
   if (spent.expires_at <= now) return refuseGrant("invalid_grant", "the refresh token expired");
   if (spent.client_id !== clientId) return refuseGrant("invalid_grant", "the refresh token belongs to another client");
   return { ok: true, token: await issue(db, spent.client_id, spent.principal_id, now) };

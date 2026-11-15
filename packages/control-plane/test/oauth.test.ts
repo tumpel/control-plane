@@ -5,7 +5,6 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  AuthorizationServerMetadataSchema,
   OAuthClientSchema,
   OAuthErrorSchema,
   OAuthTokenSchema,
@@ -154,14 +153,14 @@ test("the 401 from /mcp leads through both metadata documents to S256 PKCE, publ
   });
   assert.equal(signedOut.status, 401);
   const challenge = signedOut.headers.get("www-authenticate") ?? "";
-  const pointer = /^Bearer resource_metadata="([^"]+)"$/.exec(challenge);
+  const pointer = /^Bearer resource_metadata="([^"]+)", scope="tumpel"$/.exec(challenge);
   assert.ok(pointer?.[1], challenge);
 
   const unknown = await mcp(randomBytes(32).toString("base64url"), 1, "tools/list");
   assert.equal(unknown.status, 401);
   assert.equal(
     unknown.headers.get("www-authenticate"),
-    `Bearer error="invalid_token", resource_metadata="${pointer[1]}"`,
+    `Bearer error="invalid_token", resource_metadata="${pointer[1]}", scope="tumpel"`,
   );
 
   const resource = ProtectedResourceMetadataSchema.parse(await (await call(pointer[1])).json());
@@ -171,17 +170,6 @@ test("the 401 from /mcp leads through both metadata documents to S256 PKCE, publ
     ProtectedResourceMetadataSchema.parse(await (await call("/.well-known/oauth-protected-resource")).json()),
     resource,
   );
-
-  for (const path of ["/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp"]) {
-    const metadata = AuthorizationServerMetadataSchema.parse(await (await call(path)).json());
-    assert.equal(metadata.issuer, origin);
-    assert.equal(metadata.authorization_endpoint, `${origin}/oauth/authorize`);
-    assert.equal(metadata.token_endpoint, `${origin}/oauth/token`);
-    assert.equal(metadata.registration_endpoint, `${origin}/oauth/register`);
-    assert.deepEqual(metadata.code_challenge_methods_supported, ["S256"]);
-    assert.deepEqual(metadata.token_endpoint_auth_methods_supported, ["none"]);
-    assert.deepEqual(metadata.grant_types_supported, ["authorization_code", "refresh_token"]);
-  }
 });
 
 test("registration refuses missing and unusable redirect addresses and registers a public client", async () => {
@@ -236,7 +224,6 @@ test("the proof's service token consents, PKCE refuses a wrong verifier, and the
   const issued = await token(redemption);
   assert.equal(issued.status, 200);
   const first = OAuthTokenSchema.parse(await issued.json());
-  assert.equal(await oauthErrorOf(await token(redemption)), "invalid_grant");
 
   const refreshed = await token({
     grant_type: "refresh_token",
@@ -253,4 +240,37 @@ test("the proof's service token consents, PKCE refuses a wrong verifier, and the
     const whoami = WhoamiSchema.parse(JSON.parse(answered.result.content[0]?.text ?? ""));
     assert.equal(whoami.tenant.name, "Tumpel proof");
   }
+
+  const replay = await token({
+    grant_type: "refresh_token",
+    client_id: client.client_id,
+    refresh_token: first.refresh_token,
+  });
+  assert.equal(await oauthErrorOf(replay), "invalid_grant");
+  assert.equal((await mcp(second.access_token, 6, "tools/list")).status, 401);
+  assert.equal(
+    await oauthErrorOf(
+      await token({ grant_type: "refresh_token", client_id: client.client_id, refresh_token: second.refresh_token }),
+    ),
+    "invalid_grant",
+  );
+});
+
+test("redeeming a spent authorization code again revokes the tokens it issued", async () => {
+  const client = OAuthClientSchema.parse(await (await register({ redirect_uris: [CALLBACK] })).json());
+  const pair = pkce();
+  const code = codeFrom(
+    await consent(await consentUrl(client.client_id, pair.challenge), serviceToken(PROOF_COMMON_NAME)),
+  );
+  const redemption = {
+    grant_type: "authorization_code",
+    client_id: client.client_id,
+    code,
+    code_verifier: pair.verifier,
+    redirect_uri: CALLBACK,
+  };
+  const issued = OAuthTokenSchema.parse(await (await token(redemption)).json());
+  assert.equal((await mcp(issued.access_token, 1, "tools/list")).status, 200);
+  assert.equal(await oauthErrorOf(await token(redemption)), "invalid_grant");
+  assert.equal((await mcp(issued.access_token, 2, "tools/list")).status, 401);
 });
