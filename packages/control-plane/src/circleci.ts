@@ -220,6 +220,23 @@ export const triggerPipeline = async (
   return { kind: "Created", pipelineId: answer.value.id, number: answer.value.number };
 };
 
+const PipelineSchema = z.object({ id: z.string(), vcs: z.object({ revision: z.string() }) });
+
+export const readPipelineRevision = async (
+  fetcher: Fetch,
+  api: string,
+  token: string,
+  pipelineId: string,
+): Promise<CircleCIAnswer<string>> => {
+  const answer = await callCircleCI(
+    fetcher,
+    { method: "GET", url: v2(api, `/pipeline/${encodeURIComponent(pipelineId)}`), token, body: null },
+    PipelineSchema,
+    "CircleCIPipeline",
+  );
+  return answer.ok ? { ok: true, status: answer.status, value: answer.value.vcs.revision } : answer;
+};
+
 export const pipelineLogUrl = (projectSlug: string, number: number): string =>
   `https://app.circleci.com/pipelines/${projectSlug}/${number}`;
 

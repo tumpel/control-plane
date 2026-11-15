@@ -141,3 +141,8 @@ export const jwtVerifier = (keysUrl: string, issuer: string, audience: string): 
     return { ok: true, claims };
   };
 };
+
+export const unverifiedIssuer = (token: string): string | null => {
+  const claims = decodeJson(token.split(".")[1] ?? "");
+  return typeof claims?.iss === "string" ? claims.iss : null;
+};
