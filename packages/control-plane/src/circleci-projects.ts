@@ -102,6 +102,8 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
       `project ${add.projectSlug} belongs to CircleCI organization ${project.value.organization_id}, and the connection names ${connection.organizationId}`,
     );
   }
+  const bound = await tenant.circleCIProjectBoundTo(caller.tenantId, project.value.id);
+  if (bound !== null) return projectAlreadyBound(add.projectSlug, bound.repository, bound.circleCIProjectId);
   const definition = await readPipelineDefinition(
     fetcher,
     env.CIRCLECI_API_ORIGIN,
@@ -148,6 +150,14 @@ const alreadyBound = (repository: string, projectSlug: string, circleCIProjectId
     code: "Conflict",
     title: "Repository already bound",
     detail: `${repository} is bound to CircleCI project ${projectSlug} as ${circleCIProjectId}`,
+    fix: `Delete that binding with tumpel circleci project delete ${circleCIProjectId}, then add it again`,
+  });
+
+const projectAlreadyBound = (projectSlug: string, repository: string, circleCIProjectId: string): Response =>
+  problem(409, {
+    code: "Conflict",
+    title: "Project already bound",
+    detail: `CircleCI project ${projectSlug} is bound to ${repository} as ${circleCIProjectId}`,
     fix: `Delete that binding with tumpel circleci project delete ${circleCIProjectId}, then add it again`,
   });
 
