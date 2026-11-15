@@ -1,41 +1,6 @@
 import { callGitHub, type Fetch, type GitHubAnswer, type GitHubRepository } from "./github.ts";
 import { GitHubWorkflowDispatchSchema } from "./github-schemas.ts";
 
-export const REUSABLE_WORKFLOW = "mvhenten/tumpel/.github/workflows/prebuild.yml@main";
-
-const INPUTS: [string, string][] = [
-  ["prebuildId", "The prebuild Tumpel started"],
-  ["tenantId", "The tenant that started the prebuild"],
-  ["apiOrigin", "The Tumpel API the upload job calls"],
-  ["rootfsUrl", "A presigned GET of the guest image's root filesystem tar"],
-  ["imageDigest", "The digest of the guest image the layer is built on"],
-];
-
-export const CALLER_WORKFLOW_EXAMPLE = [
-  "name: tumpel prebuild",
-  "",
-  "on:",
-  "  workflow_dispatch:",
-  "    inputs:",
-  ...INPUTS.flatMap(([name, description]) => [
-    `      ${name}:`,
-    `        description: ${description}`,
-    "        required: true",
-    "        type: string",
-  ]),
-  "",
-  "permissions:",
-  "  contents: read",
-  "  id-token: write",
-  "",
-  "jobs:",
-  "  prebuild:",
-  `    uses: ${REUSABLE_WORKFLOW}`,
-  "    with:",
-  ...INPUTS.map(([name]) => `      ${name}: \${{ inputs.${name} }}`),
-  "",
-].join("\n");
-
 export interface PrebuildInputs {
   prebuildId: string;
   tenantId: string;
@@ -85,16 +50,3 @@ export interface RunEvent {
   htmlUrl: string;
   conclusion: string | null;
 }
-
-export type RunOutcome =
-  | { kind: "Started" }
-  | { kind: "Succeeded" }
-  | { kind: "Failed"; conclusion: string }
-  | { kind: "Pending" };
-
-export const runOutcome = (event: RunEvent): RunOutcome => {
-  if (event.action === "in_progress") return { kind: "Started" };
-  if (event.action !== "completed") return { kind: "Pending" };
-  if (event.conclusion === "success") return { kind: "Succeeded" };
-  return { kind: "Failed", conclusion: event.conclusion ?? "without a conclusion" };
-};
