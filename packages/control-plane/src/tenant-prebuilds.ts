@@ -37,6 +37,7 @@ export interface PrebuildKey {
 export interface PrebuildDispatch {
   personaId: string;
   key: PrebuildKey;
+  defaultBranch: string;
   provider: BuildProvider;
   logUrl: string;
 }
@@ -46,9 +47,12 @@ export interface PrebuildLayerUpload {
   layerSizeBytes: number;
 }
 
-export type JobBinding =
-  | { provider: "GitHubActions"; callerWorkflow: string }
-  | { provider: "Namespace"; workspaceId: string };
+export interface UploadTarget {
+  prebuild: Prebuild;
+  defaultBranch: string;
+  callerWorkflow: string | null;
+  upload: PrebuildLayerUpload | null;
+}
 
 export type UploadRecorded = { kind: "Recorded"; prebuild: Prebuild } | { kind: "NotUploading"; prebuild: Prebuild };
 
@@ -61,6 +65,7 @@ type PrebuildRow = {
   prebuild_id: string;
   persona_id: string;
   repository: string;
+  default_branch: string;
   input_digest: string;
   guest_image_digest: string;
   provider: string;
@@ -74,7 +79,6 @@ type PrebuildRow = {
   layer_finished_at: string | null;
   upload_layer_digest: string | null;
   upload_layer_size_bytes: number | null;
-  uploaded_at: string | null;
   failure_phase: string | null;
   failure_finished_at: string | null;
 };
@@ -87,12 +91,11 @@ type FailureRow = {
   created_at: number;
 };
 
-const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, input_digest, guest_image_digest, provider, state,
+const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, provider, state,
   started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
   prebuild_layers.layer_size_bytes, prebuild_layers.finished_at AS layer_finished_at,
   prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at,
-  prebuild_uploads.layer_digest AS upload_layer_digest, prebuild_uploads.layer_size_bytes AS upload_layer_size_bytes,
-  prebuild_uploads.uploaded_at
+  prebuild_uploads.layer_digest AS upload_layer_digest, prebuild_uploads.layer_size_bytes AS upload_layer_size_bytes
   FROM prebuilds
   LEFT JOIN prebuild_layers USING (prebuild_id)
   LEFT JOIN prebuild_uploads USING (prebuild_id)
@@ -112,7 +115,7 @@ const statusOf = (row: PrebuildRow): unknown => {
       state: row.state,
       layerDigest: row.upload_layer_digest,
       layerSizeBytes: row.upload_layer_size_bytes,
-      uploadedAt: row.uploaded_at,
+      uploadedAt: new Date(row.updated_at).toISOString(),
     };
   }
   if (row.state === "Failed") {
@@ -171,11 +174,12 @@ export class TenantPrebuilds extends TenantSessions {
   recordDispatchedPrebuild(tenantId: string, dispatch: PrebuildDispatch, now: number): Prebuild {
     const prebuildId = crypto.randomUUID();
     this.ctx.storage.sql.exec(
-      `INSERT INTO prebuilds (prebuild_id, persona_id, repository, input_digest, guest_image_digest, provider, state,
-      started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+      `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
+      provider, state, started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
       prebuildId,
       dispatch.personaId,
       dispatch.key.repository,
+      dispatch.defaultBranch,
       dispatch.key.inputDigest,
       dispatch.key.guestImageDigest,
       dispatch.provider,
@@ -189,36 +193,75 @@ export class TenantPrebuilds extends TenantSessions {
     return prebuild;
   }
 
-  recordPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {
-    const recorded = this.ctx.storage.transactionSync(() => {
-      const moved = this.ctx.storage.sql.exec(
-        "UPDATE prebuilds SET state = 'Converting', updated_at = ? WHERE prebuild_id = ? AND state IN ('Dispatched', 'Building')",
+  recordPrebuildBuilding(prebuildId: string, now: number): boolean {
+    return (
+      this.ctx.storage.sql.exec(
+        "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
         now,
         prebuildId,
-      ).rowsWritten;
-      if (moved === 0) return false;
+      ).rowsWritten > 0
+    );
+  }
+
+  uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {
+    const [row] = this.ctx.storage.sql
+      .exec<PrebuildRow>(`${PREBUILD_SELECT} WHERE prebuilds.prebuild_id = ?`, prebuildId)
+      .toArray();
+    if (row === undefined) return null;
+    const connection = this.connectionRow<{ caller_workflow: string }>("GitHubActions");
+    return {
+      prebuild: toPrebuild(tenantId, row),
+      defaultBranch: row.default_branch,
+      callerWorkflow: connection?.caller_workflow ?? null,
+      upload:
+        row.upload_layer_digest === null || row.upload_layer_size_bytes === null
+          ? null
+          : { layerDigest: row.upload_layer_digest, layerSizeBytes: row.upload_layer_size_bytes },
+    };
+  }
+
+  startPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {
+    const recorded = this.ctx.storage.transactionSync(() => {
+      const [building] = this.ctx.storage.sql
+        .exec("SELECT 1 FROM prebuilds WHERE prebuild_id = ? AND state = 'Building'", prebuildId)
+        .toArray();
+      if (building === undefined) return false;
       this.ctx.storage.sql.exec(
-        "INSERT INTO prebuild_uploads (prebuild_id, layer_digest, layer_size_bytes, uploaded_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        `INSERT INTO prebuild_uploads (prebuild_id, layer_digest, layer_size_bytes, created_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (prebuild_id) DO UPDATE SET layer_digest = excluded.layer_digest,
+        layer_size_bytes = excluded.layer_size_bytes, created_at = excluded.created_at`,
         prebuildId,
         upload.layerDigest,
         upload.layerSizeBytes,
-        new Date(now).toISOString(),
         now,
       );
       return true;
     });
+    return this.uploadRecorded(tenantId, prebuildId, recorded);
+  }
+
+  completePrebuildUpload(
+    tenantId: string,
+    prebuildId: string,
+    upload: PrebuildLayerUpload,
+    now: number,
+  ): UploadRecorded {
+    const moved = this.ctx.storage.sql.exec(
+      `UPDATE prebuilds SET state = 'Converting', updated_at = ? WHERE prebuild_id = ? AND state = 'Building'
+      AND EXISTS (SELECT 1 FROM prebuild_uploads WHERE prebuild_id = ? AND layer_digest = ? AND layer_size_bytes = ?)`,
+      now,
+      prebuildId,
+      prebuildId,
+      upload.layerDigest,
+      upload.layerSizeBytes,
+    ).rowsWritten;
+    return this.uploadRecorded(tenantId, prebuildId, moved > 0);
+  }
+
+  private uploadRecorded(tenantId: string, prebuildId: string, recorded: boolean): UploadRecorded {
     const prebuild = this.getPrebuild(tenantId, prebuildId);
     if (prebuild === null) throw new Error(`prebuild ${prebuildId} is gone; the upload checked it a moment ago`);
     return recorded ? { kind: "Recorded", prebuild } : { kind: "NotUploading", prebuild };
-  }
-
-  jobBinding(provider: BuildProvider): JobBinding | null {
-    if (provider === "GitHubActions") {
-      const row = this.connectionRow<{ caller_workflow: string }>(provider);
-      return row === null ? null : { provider, callerWorkflow: row.caller_workflow };
-    }
-    const row = this.connectionRow<{ workspace_id: string }>(provider);
-    return row === null ? null : { provider, workspaceId: row.workspace_id };
   }
 
   getPrebuildFailure(tenantId: string, prebuildId: string): PrebuildFailure | null {

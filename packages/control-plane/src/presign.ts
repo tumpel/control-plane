@@ -3,6 +3,13 @@ export type PresignMethod = "GET" | "PUT";
 export interface Signer {
   presign(method: PresignMethod, storageKey: string, expiresInSeconds: number, now: Date): Promise<string>;
   presignChecked(storageKey: string, sha256Hex: string, expiresInSeconds: number, now: Date): Promise<string>;
+  presignCheckedSized(
+    storageKey: string,
+    sha256Hex: string,
+    sizeBytes: number,
+    expiresInSeconds: number,
+    now: Date,
+  ): Promise<string>;
 }
 
 export const CHECKSUM_HEADER = "x-amz-checksum-sha256";
@@ -104,6 +111,11 @@ const r2Signer = (accountId: string, bucket: string, credentials: SigV4Credentia
       presignUrl(credentials, "PUT", origin, segments(storageKey), expiresInSeconds, now, [
         [CHECKSUM_HEADER, checksumOf(sha256Hex)],
       ]),
+    presignCheckedSized: (storageKey, sha256Hex, sizeBytes, expiresInSeconds, now) =>
+      presignUrl(credentials, "PUT", origin, segments(storageKey), expiresInSeconds, now, [
+        ["content-length", String(sizeBytes)],
+        [CHECKSUM_HEADER, checksumOf(sha256Hex)],
+      ]),
   };
 };
 
@@ -117,6 +129,8 @@ const stubSigner = (origin: string, bucket: string): Signer => {
     presign: async (method, storageKey, expiresInSeconds, now) => stub(method, storageKey, expiresInSeconds, now),
     presignChecked: async (storageKey, sha256Hex, expiresInSeconds, now) =>
       `${stub("PUT", storageKey, expiresInSeconds, now)}&X-Tumpel-Checksum=${encodeRfc3986(checksumOf(sha256Hex))}`,
+    presignCheckedSized: async (storageKey, sha256Hex, sizeBytes, expiresInSeconds, now) =>
+      `${stub("PUT", storageKey, expiresInSeconds, now)}&X-Tumpel-Checksum=${encodeRfc3986(checksumOf(sha256Hex))}&X-Tumpel-Length=${sizeBytes}`,
   };
 };
 

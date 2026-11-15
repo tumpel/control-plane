@@ -35,7 +35,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { accessVerifier, cachedAccessKeys, type Verification, type Verify } from "./access";
+import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
 import { handleConnections } from "./connections.ts";
 import { randomToken, sameSecret } from "./crypto";
@@ -166,8 +166,7 @@ const verifierFor = (env: Env): Verify => {
   }
   const key = `${env.ACCESS_ISSUER} ${env.ACCESS_AUD}`;
   if (verifier?.key === key) return verifier.verify;
-  const keys = cachedAccessKeys(`${env.ACCESS_ISSUER}/cdn-cgi/access/certs`);
-  verifier = { key, verify: accessVerifier(keys, env.ACCESS_ISSUER, env.ACCESS_AUD) };
+  verifier = { key, verify: accessVerifier(env.ACCESS_ISSUER, env.ACCESS_AUD) };
   return verifier.verify;
 };
 

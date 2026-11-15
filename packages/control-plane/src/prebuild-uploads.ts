@@ -4,63 +4,60 @@ import {
   PrebuildUploadGrantSchema,
   PrebuildUploadStartSchema,
 } from "@tumpel/api/schemas";
-import type { z } from "zod";
 import { json, parseBody, problem } from "./http";
 import type { Env } from "./index";
-import { verifyJobToken } from "./job-token.ts";
+import { jwtVerifier, type VerifyJwt } from "./jwt";
 import { signerOf } from "./presign";
 import { settingsOf } from "./settings";
-import type { BuildProvider, JobBinding, Prebuild } from "./tenant-prebuilds";
+import type { Prebuild, PrebuildLayerUpload, UploadTarget } from "./tenant-prebuilds";
 
-type PrebuildUploadGrant = z.infer<typeof PrebuildUploadGrantSchema>;
-type UploadFile = z.infer<typeof PrebuildUploadStartSchema>["manifest"];
-
-type Bound = { ok: true; prebuild: Prebuild } | { ok: false; response: Response };
+type Bound = { ok: true; tenantId: string; target: UploadTarget } | { ok: false; response: Response };
 
 const UPLOADS_PATH = /^\/v1\/prebuilds\/([^/]+)\/uploads(\/complete)?$/;
+const DISPATCH_EVENT = "workflow_dispatch";
 
-const ISSUER_SETTING: Record<BuildProvider, "gitHubActions" | "namespaceBuilds"> = {
-  GitHubActions: "gitHubActions",
-  Namespace: "namespaceBuilds",
+export const prebuildLayerKey = (tenantId: string, prebuildId: string, digest: string): string =>
+  `${tenantId}/prebuilds/${prebuildId}/layers/${digest}`;
+
+let jobVerifier: { key: string; verify: VerifyJwt } | undefined;
+
+const verifierFor = (env: Env, audience: string): VerifyJwt => {
+  const issuer = settingsOf(env).gitHubActionsIssuer.replace(/\/+$/, "");
+  const key = `${issuer} ${audience}`;
+  if (jobVerifier?.key === key) return jobVerifier.verify;
+  jobVerifier = { key, verify: jwtVerifier(`${issuer}/.well-known/jwks`, issuer, audience) };
+  return jobVerifier.verify;
 };
 
-const TOKEN_FIX: Record<BuildProvider, string> = {
-  GitHubActions:
-    "Request the job token with the audience of this API's origin from the job of the caller workflow (permissions id-token: write), and present it as Authorization: Bearer <token> within its lifetime",
-  Namespace:
-    "Issue the token with nsc auth issue-id-token --audience <this API's origin> in the connected workspace, and present it as Authorization: Bearer <token> within its lifetime",
-};
-
-export const prebuildBlobKey = (tenantId: string, prebuildId: string, digest: string): string =>
-  `${tenantId}/prebuilds/${prebuildId}/blobs/${digest}`;
-
-export const prebuildManifestKey = (tenantId: string, prebuildId: string): string =>
-  `${tenantId}/prebuilds/${prebuildId}/manifest.json`;
-
-const tokenRefused = (provider: BuildProvider, check: string, detail: string): Response =>
+const tokenRefused = (check: string, detail: string, audience: string): Response =>
   problem(
     401,
-    { code: "JobTokenRefused", title: `Job token refused: ${check}`, detail, fix: TOKEN_FIX[provider] },
+    {
+      code: "JobTokenRefused",
+      title: `Job token refused: ${check}`,
+      detail,
+      fix: `Request the token with core.getIDToken('${audience}') in the upload job, which holds permissions id-token: write, and present it as Authorization: Bearer <token> within its lifetime`,
+    },
     { "www-authenticate": "Bearer" },
   );
 
 const tokenMismatch = (check: string, detail: string, fix: string): Response =>
   problem(403, { code: "JobTokenMismatch", title: `Job token refused: ${check}`, detail, fix });
 
-const notFound = (tenantId: string, prebuildId: string): Response =>
+const notFound = (): Response =>
   problem(404, {
     code: "NotFound",
     title: "No such prebuild",
-    detail: `tenant ${tenantId} has no prebuild ${prebuildId}`,
-    fix: "Pass the tenantId and prebuildId the dispatch handed the job",
+    detail: "no prebuild of this id takes an upload from this job token",
+    fix: "Pass the tenantId and prebuildId the dispatch handed the job, from a run in the prebuild's repository",
   });
 
 const notUploading = (prebuild: Prebuild): Response =>
   problem(409, {
     code: "PrebuildNotUploading",
-    title: "Prebuild past its upload",
-    detail: `prebuild ${prebuild.prebuildId} is ${prebuild.status.state}, and only a Dispatched or Building prebuild takes a layer`,
-    fix: `Start a new prebuild with tumpel prebuild start --rebuild, and read this one with tumpel prebuild get ${prebuild.prebuildId}`,
+    title: "Prebuild not uploading",
+    detail: `prebuild ${prebuild.prebuildId} is ${prebuild.status.state}, and only a Building prebuild takes its layer`,
+    fix: `Upload from the run the prebuild dispatched once it runs, or start a new prebuild with tumpel prebuild start --rebuild; read this one with tumpel prebuild get ${prebuild.prebuildId}`,
   });
 
 const claimOf = (claims: Record<string, unknown>, name: string): string | null => {
@@ -68,26 +65,41 @@ const claimOf = (claims: Record<string, unknown>, name: string): string | null =
   return typeof value === "string" ? value : null;
 };
 
-const bindClaims = (prebuild: Prebuild, binding: JobBinding, claims: Record<string, unknown>): Response | null => {
-  if (binding.provider === "Namespace") {
-    const workspace = claimOf(claims, "tenant_id");
-    if (workspace === binding.workspaceId) return null;
+const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repository: string): Response | null => {
+  const { prebuild, defaultBranch, callerWorkflow } = target;
+  if (prebuild.provider !== "GitHubActions") {
     return tokenMismatch(
-      "tenant_id",
-      `the token names Namespace workspace ${workspace ?? "(none)"}, and the tenant connected workspace ${binding.workspaceId}`,
-      "Run the build in the connected workspace, or connect this workspace with tumpel namespace start --workspace-id",
+      "provider",
+      `prebuild ${prebuild.prebuildId} runs on ${prebuild.provider}, which uploads no layer through this endpoint`,
+      "Upload only the layer of a GitHub Actions prebuild with its job token",
     );
   }
-  const repository = claimOf(claims, "repository");
-  if (repository === null || `https://github.com/${repository.toLowerCase()}` !== prebuild.repository) {
+  if (callerWorkflow === null) {
     return tokenMismatch(
-      "repository",
-      `the token comes from repository ${repository ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${prebuild.repository}`,
-      "Upload a prebuild's layer only from a run in its own repository",
+      "connection",
+      "the tenant has no GitHub Actions connection",
+      "Reconnect GitHub Actions with tumpel github-actions start, then start the prebuild again",
     );
   }
-  const workflow = claimOf(claims, "workflow_ref")?.split("@")[0] ?? null;
-  const expected = `${repository}/${binding.callerWorkflow}`;
+  const ref = claimOf(claims, "ref");
+  const expectedRef = `refs/heads/${defaultBranch}`;
+  if (ref !== expectedRef) {
+    return tokenMismatch(
+      "ref",
+      `the token comes from a run on ${ref ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${expectedRef}`,
+      "Upload only from the run the prebuild dispatched on the repository's default branch",
+    );
+  }
+  const event = claimOf(claims, "event_name");
+  if (event !== DISPATCH_EVENT) {
+    return tokenMismatch(
+      "event_name",
+      `the token comes from a run triggered by ${event ?? "(none)"}, and a prebuild runs only on ${DISPATCH_EVENT}`,
+      "Upload only from the run the prebuild dispatched",
+    );
+  }
+  const workflow = claimOf(claims, "workflow_ref");
+  const expected = `${repository}/${callerWorkflow}@${expectedRef}`;
   if (workflow === expected) return null;
   return tokenMismatch(
     "workflow_ref",
@@ -96,89 +108,69 @@ const bindClaims = (prebuild: Prebuild, binding: JobBinding, claims: Record<stri
   );
 };
 
-const bound = async (request: Request, url: URL, env: Env, prebuildId: string, tenantId: string): Promise<Bound> => {
-  const authorization = request.headers.get("authorization") ?? "";
-  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
+const bound = async (
+  env: Env,
+  claims: Record<string, unknown>,
+  prebuildId: string,
+  tenantId: string,
+): Promise<Bound> => {
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
-  if (tenant === null) return { ok: false, response: notFound(tenantId, prebuildId) };
-  const stub = env.TENANT.getByName(tenantId);
-  const prebuild = await stub.getPrebuild(tenantId, prebuildId);
-  if (prebuild === null) return { ok: false, response: notFound(tenantId, prebuildId) };
-  const { provider } = prebuild;
-  if (token === "") {
-    return {
-      ok: false,
-      response: tokenRefused(provider, "token", "the request carries no Authorization: Bearer token"),
-    };
+  if (tenant === null) return { ok: false, response: notFound() };
+  const target = await env.TENANT.getByName(tenantId).uploadTarget(tenantId, prebuildId);
+  if (target === null) return { ok: false, response: notFound() };
+  const repository = claimOf(claims, "repository");
+  if (repository === null || `https://github.com/${repository.toLowerCase()}` !== target.prebuild.repository) {
+    return { ok: false, response: notFound() };
   }
-  const issuer = settingsOf(env).buildProviderIssuers[ISSUER_SETTING[provider]].replace(/\/+$/, "");
-  const verified = await verifyJobToken(token, issuer, url.origin, Date.now());
-  if (!verified.ok) return { ok: false, response: tokenRefused(provider, verified.check, verified.detail) };
-  const binding = await stub.jobBinding(provider);
-  if (binding === null) {
-    return {
-      ok: false,
-      response: tokenMismatch(
-        "connection",
-        `tenant ${tenantId} has disconnected ${provider}, which ran prebuild ${prebuildId}`,
-        "Reconnect the build provider, then start the prebuild again",
-      ),
-    };
-  }
-  const mismatch = bindClaims(prebuild, binding, verified.claims);
+  const mismatch = bindClaims(target, claims, repository);
   if (mismatch !== null) return { ok: false, response: mismatch };
-  if (prebuild.status.state !== "Dispatched" && prebuild.status.state !== "Building") {
-    return { ok: false, response: notUploading(prebuild) };
-  }
-  return { ok: true, prebuild };
+  if (target.prebuild.status.state !== "Building") return { ok: false, response: notUploading(target.prebuild) };
+  return { ok: true, tenantId, target };
 };
 
-const presignUploads = async (
-  env: Env,
-  prebuild: Prebuild,
-  blobs: UploadFile[],
-  manifest: UploadFile,
-  now: number,
-): Promise<PrebuildUploadGrant> => {
+const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: PrebuildLayerUpload) => {
+  const { prebuildId } = binding.prebuild;
+  const recorded = await env.TENANT.getByName(tenantId).startPrebuildUpload(tenantId, prebuildId, upload, Date.now());
+  if (recorded.kind === "NotUploading") return notUploading(recorded.prebuild);
   const signer = signerOf(env, env.R2_BUCKET_NAME, env.R2_ACCESS_KEY_ID, env.R2_SECRET_ACCESS_KEY);
   const seconds = settingsOf(env).prebuildUploadBudgetSeconds;
-  const at = new Date(now);
-  const { tenantId, prebuildId } = prebuild;
-  const signed = async (file: UploadFile, storageKey: string) => ({
-    ...file,
-    uploadUrl: await signer.presignChecked(storageKey, file.digest, seconds, at),
-  });
-  return PrebuildUploadGrantSchema.parse({
-    prebuildId,
-    tenantId,
-    blobs: await Promise.all(blobs.map((blob) => signed(blob, prebuildBlobKey(tenantId, prebuildId, blob.digest)))),
-    manifest: await signed(manifest, prebuildManifestKey(tenantId, prebuildId)),
-    uploadExpiresAt: new Date(now + seconds * 1000).toISOString(),
-  });
+  const now = Date.now();
+  return json(
+    PrebuildUploadGrantSchema.parse({
+      prebuildId,
+      tenantId,
+      sha256: upload.layerDigest,
+      url: await signer.presignCheckedSized(
+        prebuildLayerKey(tenantId, prebuildId, upload.layerDigest),
+        upload.layerDigest,
+        upload.layerSizeBytes,
+        seconds,
+        new Date(now),
+      ),
+      uploadExpiresAt: new Date(now + seconds * 1000).toISOString(),
+    }),
+  );
 };
 
-const complete = async (request: Request, url: URL, env: Env, prebuildId: string): Promise<Response> => {
-  const body = await parseBody(request, PrebuildUploadCompleteSchema, "prebuildUploads.complete");
-  if (!body.ok) return body.response;
-  const { tenantId, layerDigest, layerSizeBytes } = body.value;
-  const binding = await bound(request, url, env, prebuildId, tenantId);
-  if (!binding.ok) return binding.response;
-  const stored = await env.STORE.head(prebuildBlobKey(tenantId, prebuildId, layerDigest));
-  if (stored === null || stored.size !== layerSizeBytes) {
+const complete = async (env: Env, binding: UploadTarget, tenantId: string): Promise<Response> => {
+  const { prebuild, upload } = binding;
+  const stored =
+    upload === null ? null : await env.STORE.head(prebuildLayerKey(tenantId, prebuild.prebuildId, upload.layerDigest));
+  if (upload === null || stored === null) {
     return problem(409, {
       code: "LayerNotUploaded",
       title: "Layer not uploaded",
       detail:
-        stored === null
-          ? `the bucket holds no layer blob ${layerDigest} for prebuild ${prebuildId}`
-          : `the bucket holds layer blob ${layerDigest} of prebuild ${prebuildId} at ${stored.size} bytes, not ${layerSizeBytes}`,
-      fix: "PUT the layer blob to the URL the upload exchange answered, then call complete with its digest and size",
+        upload === null
+          ? `prebuild ${prebuild.prebuildId} has no upload started`
+          : `the bucket holds no layer ${upload.layerDigest} for prebuild ${prebuild.prebuildId}`,
+      fix: "Start the upload, PUT the layer to the URL it answered, then call complete",
     });
   }
-  const recorded = await env.TENANT.getByName(tenantId).recordPrebuildUpload(
+  const recorded = await env.TENANT.getByName(tenantId).completePrebuildUpload(
     tenantId,
-    prebuildId,
-    { layerDigest, layerSizeBytes },
+    prebuild.prebuildId,
+    upload,
     Date.now(),
   );
   if (recorded.kind === "NotUploading") return notUploading(recorded.prebuild);
@@ -188,21 +180,25 @@ const complete = async (request: Request, url: URL, env: Env, prebuildId: string
 export const handlePrebuildUploads = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   const route = UPLOADS_PATH.exec(url.pathname);
   if (route === null || request.method !== "POST") return null;
-  const raw = decodeURIComponent(route[1] ?? "");
-  const path = PrebuildPathSchema.safeParse({ prebuildId: raw });
-  if (!path.success) {
-    return problem(404, {
-      code: "NotFound",
-      title: "No such prebuild",
-      detail: `${raw} is no prebuild id`,
-      fix: "Pass the prebuildId the dispatch handed the job",
-    });
-  }
+  const authorization = request.headers.get("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
+  if (token === "") return tokenRefused("token", "the request carries no Authorization: Bearer token", url.origin);
+  const verified = await verifierFor(env, url.origin)(token);
+  if (!verified.ok) return tokenRefused(verified.check, verified.detail, url.origin);
+  const path = PrebuildPathSchema.safeParse({ prebuildId: decodeURIComponent(route[1] ?? "") });
+  if (!path.success) return notFound();
   const { prebuildId } = path.data;
-  if (route[2] === "/complete") return complete(request, url, env, prebuildId);
+  if (route[2] === "/complete") {
+    const body = await parseBody(request, PrebuildUploadCompleteSchema, "prebuildUploads.complete");
+    if (!body.ok) return body.response;
+    const binding = await bound(env, verified.claims, prebuildId, body.value.tenantId);
+    if (!binding.ok) return binding.response;
+    return complete(env, binding.target, binding.tenantId);
+  }
   const body = await parseBody(request, PrebuildUploadStartSchema, "prebuildUploads.start");
   if (!body.ok) return body.response;
-  const binding = await bound(request, url, env, prebuildId, body.value.tenantId);
+  const binding = await bound(env, verified.claims, prebuildId, body.value.tenantId);
   if (!binding.ok) return binding.response;
-  return json(await presignUploads(env, binding.prebuild, body.value.blobs, body.value.manifest, Date.now()));
+  const { layerDigest, layerSizeBytes } = body.value;
+  return start(env, binding.target, binding.tenantId, { layerDigest, layerSizeBytes });
 };

@@ -1,0 +1,45 @@
+DROP TABLE prebuild_uploads;
+DROP TABLE prebuild_layers;
+DROP TABLE prebuild_failures;
+DROP TABLE prebuilds;
+
+CREATE TABLE prebuilds (
+  prebuild_id TEXT PRIMARY KEY,
+  persona_id TEXT NOT NULL,
+  repository TEXT NOT NULL,
+  default_branch TEXT NOT NULL,
+  input_digest TEXT NOT NULL,
+  guest_image_digest TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  log_url TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX prebuilds_key ON prebuilds (repository, input_digest, guest_image_digest, created_at);
+
+CREATE TABLE prebuild_layers (
+  prebuild_id TEXT PRIMARY KEY REFERENCES prebuilds (prebuild_id),
+  layer_digest TEXT NOT NULL,
+  layer_size_bytes INTEGER NOT NULL,
+  finished_at TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE prebuild_failures (
+  prebuild_id TEXT PRIMARY KEY REFERENCES prebuilds (prebuild_id),
+  phase TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  fix TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE prebuild_uploads (
+  prebuild_id TEXT PRIMARY KEY REFERENCES prebuilds (prebuild_id),
+  layer_digest TEXT NOT NULL,
+  layer_size_bytes INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
