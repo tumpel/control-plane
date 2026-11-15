@@ -18,7 +18,7 @@ test("each phase advances on its own event, fails on its budget with its named r
       next: "AwaitingCode",
       due: 600,
     },
-    { state: "AwaitingCode", event: { kind: "Code" }, kind: "Advance", next: "Minting", due: 120 },
+    { state: "AwaitingCode", event: { kind: "Code" }, kind: "Advance", next: "Minting", due: 130 },
     { state: "Minting", event: { kind: "Stored" }, kind: "Complete" },
     { state: "Starting", event: { kind: "Deadline" }, kind: "Fail", reason: "SetupUrlMissing" },
     { state: "AwaitingCode", event: { kind: "Deadline" }, kind: "Fail", reason: "SetupTimedOut" },
