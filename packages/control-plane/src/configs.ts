@@ -16,8 +16,8 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
-import { json, type Problem, problem } from "./http";
-import { type PersonaFileWrite, sha256Hex } from "./persona-files";
+import { json, type Problem, problem } from "./http.ts";
+import { type PersonaFileWrite, sha256Hex } from "./persona-files.ts";
 
 type PlanRequest = z.infer<typeof TenantConfigPlanRequestSchema>;
 type ApplyRequest = z.infer<typeof TenantConfigApplySchema>;
@@ -38,7 +38,7 @@ type Session = z.infer<typeof SessionSchema>;
 
 export type Call = (method: string, path: string, body: unknown) => Promise<Response>;
 
-interface Live {
+export interface Live {
   personas: Persona[];
   secretSets: SecretSet[];
   pins: Pin[];
@@ -53,7 +53,7 @@ interface LocalFile {
   content: string | null;
 }
 
-interface SentFile {
+export interface SentFile {
   digest: string;
   sizeBytes: number;
   content: string | null;
@@ -71,7 +71,7 @@ interface ResolvedSet {
   secrets: ResolvedSecret[];
 }
 
-type Step =
+export type Step =
   | { kind: "CreatePersona"; persona: ConfigPersona; files: PlannedFile[] }
   | { kind: "UpdatePersona"; personaId: string; persona: ConfigPersona; files: PlannedFile[]; removed: string[] }
   | { kind: "DeletePersona"; personaId: string; name: string }
@@ -392,14 +392,16 @@ const planHosts = (desired: ConfigHost[], live: Host[], steps: Step[], problems:
   }
 };
 
-interface Desired {
+export interface Desired {
   config: TenantConfig;
   files: Map<string, SentFile>;
   expiryValues: PlanRequest["expiryValues"];
   secretEnvs: Set<string>;
 }
 
-const planOf = (desired: Desired, live: Live): Outcome<Step[]> => {
+export type Planned = { ok: true; steps: Step[] } | { ok: false; problems: string[] };
+
+export const planOf = (desired: Desired, live: Live): Planned => {
   const { config } = desired;
   const problems: string[] = [];
   const rename = "give each one its own name";
@@ -465,8 +467,8 @@ const planOf = (desired: Desired, live: Live): Outcome<Step[]> => {
   planSecretSetDeletes(sets, live.secretSets, steps);
   planPins(config.harnessPins, live.pins, steps);
   planHosts(config.hosts, live.hosts, steps, problems);
-  if (problems.length > 0) return { ok: false, response: stopped(problems) };
-  return { ok: true, value: steps };
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, steps };
 };
 
 const missingValues = (steps: Step[], values: Map<string, string>): string[] =>
@@ -621,8 +623,8 @@ export const planConfig = async (body: PlanRequest, call: Call): Promise<Respons
     },
     live.value,
   );
-  if (!planned.ok) return planned.response;
-  return json(ConfigPlanSchema.parse({ changes: planned.value.map(changeOf) }));
+  if (!planned.ok) return stopped(planned.problems);
+  return json(ConfigPlanSchema.parse({ changes: planned.steps.map(changeOf) }));
 };
 
 export const applyConfig = async (body: ApplyRequest, call: Call): Promise<Response> => {
@@ -636,8 +638,8 @@ export const applyConfig = async (body: ApplyRequest, call: Call): Promise<Respo
     { config: body.config, files, expiryValues: body.expiryValues, secretEnvs: new Set(values.keys()) },
     live.value,
   );
-  if (!planned.ok) return planned.response;
-  const steps = planned.value;
+  if (!planned.ok) return stopped(planned.problems);
+  const { steps } = planned;
   const changes = steps.map(changeOf);
   const missing = missingValues(steps, values);
   if (missing.length > 0) return stopped(missing);
