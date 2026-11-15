@@ -41,7 +41,6 @@ import { appSetupPage, linkPage, messagePage } from "./pages";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
 export type SignedInPerson = (request: Request, env: Env) => Promise<PersonCheck>;
-export type TenantOfEmail = (env: Env, email: string) => Promise<Caller | null>;
 export type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
 const START_PATH = "/v1/github-connection/start";
@@ -168,7 +167,7 @@ const handleCreated = async (url: URL, env: Env, email: string): Promise<Respons
   );
 };
 
-const handleInstalled = async (url: URL, env: Env, email: string, tenantOf: TenantOfEmail): Promise<Response> => {
+const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
   const query = GitHubSetupCallbackSchema.safeParse(Object.fromEntries(url.searchParams));
   if (!query.success) {
     return messagePage(400, "Nothing to connect", "GitHub sent no setup action. Run tumpel github start again.");
@@ -190,14 +189,6 @@ const handleInstalled = async (url: URL, env: Env, email: string, tenantOf: Tena
   }
   const state = await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
   if (!state.ok) return messagePage(403, "Request refused", `${state.reason}. Run tumpel github start again.`);
-  const caller = await tenantOf(env, email);
-  if (caller === null || caller.tenantId !== state.claims.tenantId || caller.principalId !== state.claims.principalId) {
-    return messagePage(
-      403,
-      "Request refused",
-      `The install URL was made for another principal than ${email}. Sign in as the person who ran tumpel github start, or run it again as yourself.`,
-    );
-  }
   const app = await appCredentials(env.DB, keyStoreOf(env));
   if (app === null)
     return messagePage(409, "No GitHub App", `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`);
@@ -210,7 +201,7 @@ const handleInstalled = async (url: URL, env: Env, email: string, tenantOf: Tena
       `${record.detail}. Install the App again from the URL tumpel github start prints.`,
     );
   }
-  const linked = await linkInstallation(env.DB, caller.tenantId, record.value, Date.now());
+  const linked = await linkInstallation(env.DB, state.claims.tenantId, record.value, Date.now());
   if (linked.kind === "OtherTenant") {
     return messagePage(
       409,
@@ -221,7 +212,7 @@ const handleInstalled = async (url: URL, env: Env, email: string, tenantOf: Tena
   return linkPage(
     200,
     "GitHub connected",
-    `Your tenant now uses the GitHub App installation on ${linked.installation.accountLogin}. Each turn on a repository of ${linked.installation.accountLogin} gets a token of its own.`,
+    `Tenant ${linked.installation.tenantId} now uses the GitHub App installation on ${linked.installation.accountLogin}. Each turn on a repository of ${linked.installation.accountLogin} gets a token of its own.`,
     `${GITHUB_WEB}/settings/installations/${installationId}`,
     "Choose the repositories it covers on GitHub",
   );
@@ -232,7 +223,6 @@ export const handleGitHubPage = async (
   url: URL,
   env: Env,
   signedIn: SignedInPerson,
-  tenantOf: TenantOfEmail,
 ): Promise<Response | null> => {
   const pages = [APP_SETUP_PATH, APP_CREATED_PATH, APP_INSTALLED_PATH];
   if (request.method !== "GET" || !pages.includes(url.pathname)) return null;
@@ -240,7 +230,7 @@ export const handleGitHubPage = async (
   if (!person.ok) return messagePage(401, "Sign in again", `${person.reason}.`);
   if (url.pathname === APP_SETUP_PATH) return handleSetupPage(url, env, person.email);
   if (url.pathname === APP_CREATED_PATH) return handleCreated(url, env, person.email);
-  return handleInstalled(url, env, person.email, tenantOf);
+  return handleInstalled(url, env);
 };
 
 const DROPPING_ACTIONS = ["deleted", "suspend"];

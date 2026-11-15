@@ -49,12 +49,7 @@ import {
   startDeviceCode,
 } from "./device";
 import { checkCredential } from "./dispatch-variables.ts";
-import {
-  handleGitHubConnection,
-  handleGitHubPage,
-  handleGitHubWebhook,
-  type TenantOfEmail,
-} from "./github-handlers.ts";
+import { handleGitHubConnection, handleGitHubPage, handleGitHubWebhook } from "./github-handlers.ts";
 import { HARNESS_CATALOG, inCatalog, pinnedEntry } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
 import {
@@ -216,11 +211,6 @@ const deviceCaller = async (request: Request, env: Env): Promise<Caller | Respon
   if (connector !== undefined) return connector;
   const caller = await callerForDeviceToken(env.DB, bearerOf(request), Date.now());
   return caller ?? signedOut("this device token is missing, unknown or revoked", "Run tumpel login");
-};
-
-const tenantOfEmail: TenantOfEmail = async (env, email) => {
-  const owner = await whoamiForEmail(env.DB, email);
-  return owner === null ? null : { tenantId: owner.tenant.tenantId, principalId: owner.principal.principalId };
 };
 
 const handleWhoami = async (request: Request, env: Env): Promise<Response> => {
@@ -986,7 +976,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (sessions) return sessions;
   const github =
     (await handleGitHubConnection(request, url, env, deviceCaller)) ??
-    (await handleGitHubPage(request, url, env, assertedEmail, tenantOfEmail)) ??
+    (await handleGitHubPage(request, url, env, assertedEmail)) ??
     (await handleGitHubWebhook(request, url, env));
   if (github) return github;
   const host = await handleHost(request, url, env);
