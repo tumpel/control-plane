@@ -107,7 +107,10 @@ const mint = async (): Promise<string> => {
   const response = await postJson("/v1/enrolment-tokens", { expiresInSeconds: 600 }, bearer);
   assert.equal(response.status, 200);
   const minted = MintedEnrolmentTokenSchema.parse(await response.json());
-  assert.match(minted.installCommand, /^tumpel-supervisor enrol --endpoint http/);
+  assert.equal(
+    minted.installCommand,
+    `curl -fL ${origin}/v1/releases/supervisor/Amd64 -o tumpel-supervisor && chmod +x tumpel-supervisor && printf '%s' '${minted.token}' | ./tumpel-supervisor install --endpoint ${origin} --token-file -`,
+  );
   return minted.token;
 };
 

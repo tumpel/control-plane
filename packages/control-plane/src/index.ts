@@ -19,6 +19,7 @@ import {
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
+  OAuthRevocationRequestSchema,
   OpenIdConfigurationSchema,
   PersonaCreateSchema,
   PersonaFileUploadRequestSchema,
@@ -90,6 +91,7 @@ import {
   callerForAccessToken,
   clientFor,
   clientName,
+  DASHBOARD_CLIENT_ID,
   forgetAuthorization,
   grantCode,
   MCP_PATH,
@@ -97,6 +99,7 @@ import {
   pendingAuthorization,
   protectedResourceMetadata,
   REGISTER_PATH,
+  REVOKE_PATH,
   readAuthorizeAsk,
   redeemCode,
   redirectBack,
@@ -104,6 +107,7 @@ import {
   refreshGrant,
   registerClient,
   resourceMetadataUrl,
+  revokeToken,
   SCOPE,
   startAuthorization,
   TOKEN_PATH,
@@ -149,6 +153,7 @@ export interface Env extends SignerEnv {
   ACCESS_PROOF_COMMON_NAME?: string;
   SECRETS_KEK?: string;
   ISSUER_HOSTNAME: string;
+  DASHBOARD_ORIGIN?: string;
 }
 
 const DEVICE_PAGE = "/device";
@@ -870,29 +875,16 @@ const handleDevicePage = async (request: Request, url: URL, env: Env): Promise<R
   return confirmPage(signed.email, owner.tenant.name, formatUserCode(pending.userCode), pending.deviceName);
 };
 
-const corsHeaders = (request: Request): Record<string, string> => {
-  const origin = request.headers.get("origin");
-  if (origin === null || !CONNECTOR_ORIGINS.includes(origin)) return {};
-  return {
-    "access-control-allow-origin": origin,
-    "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "authorization, content-type, accept, mcp-protocol-version, mcp-method, mcp-name",
-    "access-control-expose-headers": "www-authenticate",
-    "access-control-max-age": "86400",
-    vary: "origin",
-  };
-};
+const allowedOrigins = (env: Env): string[] =>
+  env.DASHBOARD_ORIGIN ? [...CONNECTOR_ORIGINS, env.DASHBOARD_ORIGIN] : CONNECTOR_ORIGINS;
 
-const dashboardOrigin = (url: URL): string | null =>
-  url.hostname.startsWith("api.") ? `https://app.${url.hostname.slice("api.".length)}` : null;
-
-const dashboardCors = (request: Request, url: URL): Record<string, string> | null => {
+const corsHeaders = (request: Request, env: Env): Record<string, string> => {
   const origin = request.headers.get("origin");
-  if (origin === null || origin !== dashboardOrigin(url)) return null;
+  if (origin === null || !allowedOrigins(env).includes(origin)) return {};
   return {
     "access-control-allow-origin": origin,
     "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "access-control-allow-headers": "authorization, content-type, accept",
+    "access-control-allow-headers": "authorization, content-type, accept, mcp-protocol-version, mcp-method, mcp-name",
     "access-control-expose-headers": "www-authenticate",
     "access-control-max-age": "86400",
     vary: "origin",
@@ -905,9 +897,6 @@ const withHeaders = (answer: Response, extra: Record<string, string>): Response 
   for (const [name, value] of Object.entries(extra)) headers.set(name, value);
   return new Response(answer.body, { status: answer.status, headers });
 };
-
-const preflight = (request: Request): Response =>
-  new Response(null, { status: 204, headers: { ...corsHeaders(request), "cache-control": "no-store" } });
 
 const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
   const own = new URL(request.url).origin;
@@ -931,7 +920,7 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
         detail: `no bearer token reached ${MCP_PATH}`,
         fix: "Add tumpel as a custom connector, which registers itself and takes you through the sign-in",
       },
-      { "www-authenticate": `Bearer resource_metadata="${metadata}", scope="${SCOPE}"`, ...corsHeaders(request) },
+      { "www-authenticate": `Bearer resource_metadata="${metadata}", scope="${SCOPE}"` },
     );
   }
   const now = Date.now();
@@ -945,10 +934,7 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
         detail: "this access token is unknown, expired or revoked",
         fix: "Connect the connector again",
       },
-      {
-        "www-authenticate": `Bearer error="invalid_token", resource_metadata="${metadata}", scope="${SCOPE}"`,
-        ...corsHeaders(request),
-      },
+      { "www-authenticate": `Bearer error="invalid_token", resource_metadata="${metadata}", scope="${SCOPE}"` },
     );
   }
   return caller;
@@ -961,14 +947,11 @@ const asConnector =
     return dispatch(request, new URL(request.url), env);
   };
 
-const handleMcp = async (request: Request, env: Env): Promise<Response> => {
-  if (request.method === "OPTIONS") return preflight(request);
-  const answered = await mcpEndpoint(request, async () => {
+const handleMcp = (request: Request, env: Env): Promise<Response> =>
+  mcpEndpoint(request, async () => {
     const caller = await mcpCaller(request, env);
     return caller instanceof Response ? caller : asConnector(env, caller);
   });
-  return withHeaders(answered, corsHeaders(request));
-};
 
 const handleRegister = async (request: Request, env: Env): Promise<Response> => {
   const parsed = OAuthClientRegistrationSchema.safeParse(await readJson(request));
@@ -990,7 +973,7 @@ const handleRegister = async (request: Request, env: Env): Promise<Response> => 
 
 const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
   const ask = readAuthorizeAsk(url);
-  const client = ask.clientId === "" ? null : await clientFor(env.DB, ask.clientId);
+  const client = ask.clientId === "" ? null : await clientFor(env.DB, ask.clientId, env.DASHBOARD_ORIGIN);
   if (client === null) {
     return problem(400, {
       code: "InvalidRequest",
@@ -1036,6 +1019,10 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "GET") {
     const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
     if (asked === null) return expired();
+    if (asked.clientId === DASHBOARD_CLIENT_ID) {
+      const code = await grantCode(env.DB, asked, caller.principalId, Date.now());
+      return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
+    }
     return grantPage(email, asked.clientName, new URL(asked.redirectUri).origin, asked.requestId, randomToken());
   }
   const form = new URLSearchParams(await request.text());
@@ -1103,6 +1090,15 @@ const handleToken = async (request: Request, url: URL, env: Env): Promise<Respon
   return outcome.ok ? json(outcome.token) : oauthError(outcome.error, outcome.description);
 };
 
+const handleRevoke = async (request: Request, env: Env): Promise<Response> => {
+  const parsed = OAuthRevocationRequestSchema.safeParse(await readParams(request));
+  if (!parsed.success) return oauthError("invalid_request", issues(parsed.error));
+  const refused = await revokeToken(env.DB, parsed.data.token, parsed.data.client_id);
+  return refused === null
+    ? new Response(null, { status: 200, headers: { "cache-control": "no-store" } })
+    : oauthError(refused.error, refused.description);
+};
+
 const wellKnown = (pathname: string): ((origin: string) => unknown) | null => {
   for (const [path, document] of [
     [PROTECTED_RESOURCE_PATH, protectedResourceMetadata],
@@ -1139,18 +1135,14 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/hosts/usage": handleListHostUsage,
   "GET /v1/releases/current": handleCurrentRelease,
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
-  [`OPTIONS ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`GET ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
-  [`OPTIONS ${REGISTER_PATH}`]: async (request) => preflight(request),
-  [`POST ${REGISTER_PATH}`]: async (request, _url, env) =>
-    withHeaders(await handleRegister(request, env), corsHeaders(request)),
+  [`POST ${REGISTER_PATH}`]: (request, _url, env) => handleRegister(request, env),
   [`GET ${AUTHORIZE_PATH}`]: (_request, url, env) => handleAuthorize(url, env),
   [`GET ${CONSENT_PATH}`]: handleConsent,
   [`POST ${CONSENT_PATH}`]: handleConsent,
-  [`OPTIONS ${TOKEN_PATH}`]: async (request) => preflight(request),
-  [`POST ${TOKEN_PATH}`]: async (request, url, env) =>
-    withHeaders(await handleToken(request, url, env), corsHeaders(request)),
+  [`POST ${TOKEN_PATH}`]: handleToken,
+  [`POST ${REVOKE_PATH}`]: (request, _url, env) => handleRevoke(request, env),
 };
 
 const dispatch = async (request: Request, url: URL, env: Env): Promise<Response> => {
@@ -1205,11 +1197,10 @@ export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
     if (url.hostname === env.ISSUER_HOSTNAME) return handleIssuerHost(request, url, env);
-    const dashboard = dashboardCors(request, url);
-    if (dashboard === null) return dispatch(request, url, env);
+    const cors = corsHeaders(request, env);
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { ...dashboard, "cache-control": "no-store" } });
+      return new Response(null, { status: 204, headers: { ...cors, "cache-control": "no-store" } });
     }
-    return withHeaders(await dispatch(request, url, env), dashboard);
+    return withHeaders(await dispatch(request, url, env), cors);
   },
 } satisfies ExportedHandler<Env>;

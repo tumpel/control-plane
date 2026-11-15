@@ -122,7 +122,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/enrolment-tokens",
     EnrolmentTokenMintSchema,
-    "Mint a one-time enrolment token for a new host; expiresInSeconds is how long the token enrols a host. Returns the MintedEnrolmentToken of POST /v1/enrolment-tokens: {enrolmentToken, token, installCommand}. The token is shown once; save it in the file the install command names, on the host.",
+    "Mint a one-time enrolment token for a new host; expiresInSeconds is how long the token enrols a host. Returns the MintedEnrolmentToken of POST /v1/enrolment-tokens: {enrolmentToken, token, installCommand}. The token is shown once and installCommand carries it: run installCommand on the new x86_64 host, which downloads the supervisor, installs it and enrols the host.",
   ),
   rest(
     "tumpel_host_list",

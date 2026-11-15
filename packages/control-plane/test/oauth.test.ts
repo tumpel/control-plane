@@ -20,6 +20,9 @@ const PROOF_COMMON_NAME = "0123456789abcdef.access";
 const OTHER_COMMON_NAME = "fedcba9876543210.access";
 const CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const CSRF_COOKIE = "__Host-tumpel_connect";
+const DASHBOARD = "https://app.tumpel.test";
+const DASHBOARD_CALLBACK = `${DASHBOARD}/auth/callback`;
+const DASHBOARD_CLIENT = "tumpel-dashboard";
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
@@ -132,6 +135,7 @@ before(async () => {
           ACCESS_AUD: AUDIENCE,
           ACCESS_PROOF_COMMON_NAME: PROOF_COMMON_NAME,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
+          DASHBOARD_ORIGIN: DASHBOARD,
         },
       },
     ],
@@ -273,4 +277,67 @@ test("redeeming a spent authorization code again revokes the tokens it issued", 
   assert.equal((await mcp(issued.access_token, 1, "tools/list")).status, 200);
   assert.equal(await oauthErrorOf(await token(redemption)), "invalid_grant");
   assert.equal((await mcp(issued.access_token, 2, "tools/list")).status, 401);
+});
+
+test("the dashboard client skips the approval step but not Access, and its access token reaches a REST route", async () => {
+  const pair = pkce();
+  const ask = new URLSearchParams({
+    response_type: "code",
+    client_id: DASHBOARD_CLIENT,
+    redirect_uri: DASHBOARD_CALLBACK,
+    state: "dashboard-state",
+    code_challenge: pair.challenge,
+    code_challenge_method: "S256",
+  });
+  const redirected = await call(`/oauth/authorize?${ask}`);
+  assert.equal(redirected.status, 303);
+  const consentAt = new URL(redirected.headers.get("location") ?? "");
+  assert.equal(consentAt.pathname, "/oauth/consent");
+
+  assert.equal((await call(consentAt.toString())).status, 401);
+
+  const granted = await call(consentAt.toString(), { headers: serviceToken(PROOF_COMMON_NAME) });
+  assert.equal(granted.status, 303);
+  const callback = new URL(granted.headers.get("location") ?? "");
+  assert.equal(`${callback.origin}${callback.pathname}`, DASHBOARD_CALLBACK);
+  assert.equal(callback.searchParams.get("state"), "dashboard-state");
+
+  const issued = await token({
+    grant_type: "authorization_code",
+    client_id: DASHBOARD_CLIENT,
+    code: callback.searchParams.get("code") ?? "",
+    code_verifier: pair.verifier,
+    redirect_uri: DASHBOARD_CALLBACK,
+  });
+  assert.equal(issued.status, 200);
+  const signedIn = OAuthTokenSchema.parse(await issued.json());
+
+  const whoami = await call("/v1/whoami", {
+    headers: { authorization: `Bearer ${signedIn.access_token}`, origin: DASHBOARD },
+  });
+  assert.equal(whoami.status, 200);
+  assert.equal(whoami.headers.get("access-control-allow-origin"), DASHBOARD);
+  assert.equal(WhoamiSchema.parse(await whoami.json()).tenant.name, "Tumpel proof");
+
+  const revoked = await call("/oauth/revoke", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token: signedIn.refresh_token, client_id: DASHBOARD_CLIENT }).toString(),
+  });
+  assert.equal(revoked.status, 200);
+  const signedOut = await call("/v1/whoami", { headers: { authorization: `Bearer ${signedIn.access_token}` } });
+  assert.equal(signedOut.status, 401);
+});
+
+test("an Origin outside the allow-list gets no access-control-allow-origin, the dashboard origin does", async () => {
+  for (const method of ["OPTIONS", "GET"]) {
+    const answered = await call("/v1/whoami", { method, headers: { origin: "https://app.elsewhere.test" } });
+    assert.equal(answered.headers.get("access-control-allow-origin"), null, method);
+  }
+  const preflight = await call("/v1/hosts", {
+    method: "OPTIONS",
+    headers: { origin: DASHBOARD, "access-control-request-method": "GET" },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), DASHBOARD);
 });
