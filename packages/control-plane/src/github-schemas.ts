@@ -21,6 +21,18 @@ export const GitHubInstallStateSchema = z.object({
   returnUrl: z.string().url().optional(),
 });
 
+export const GitHubInstallerIdentityStateSchema = z.object({
+  purpose: z.literal("InstallerIdentity"),
+  email: EmailSchema,
+  installationId: GitHubIdSchema,
+  expiresAt: OffsetDateTimeSchema,
+});
+
+export const GitHubInstallerIdentityCallbackSchema = z.object({
+  code: z.string().min(1),
+  state: z.string().min(1),
+});
+
 export const GitHubManifestCallbackSchema = z.object({
   code: z.string().min(1),
   state: z.string().min(1),

@@ -10,6 +10,7 @@ import {
   GitHubInstallationRecordSchema,
   GitHubInstallationRepositoriesSchema,
   GitHubInstallationTokenSchema,
+  type GitHubInstallerIdentityStateSchema,
   type GitHubInstallStateSchema,
   GitHubIssueRecordSchema,
   GitHubIssueRecordsSchema,
@@ -30,7 +31,8 @@ export type GitHubIssueRecord = z.infer<typeof GitHubIssueRecordSchema>;
 export type GitHubState =
   | z.infer<typeof GitHubManifestStateSchema>
   | z.infer<typeof GitHubInstallStateSchema>
-  | z.infer<typeof GitHubInstallationChoiceStateSchema>;
+  | z.infer<typeof GitHubInstallationChoiceStateSchema>
+  | z.infer<typeof GitHubInstallerIdentityStateSchema>;
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export const GITHUB_WEB = "https://github.com";
@@ -120,6 +122,9 @@ export const dashboardReturn = (returnUrl: string | null, dashboardOrigin: strin
 
 export const installUrl = (slug: string, state: string): string =>
   `${GITHUB_WEB}/apps/${encodeURIComponent(slug)}/installations/new?state=${encodeURIComponent(state)}`;
+
+export const authorizeUrl = (web: string, clientId: string, redirectUri: string, state: string): string =>
+  `${web}/login/oauth/authorize?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, state })}`;
 
 const fromBase64 = (text: string): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
 
@@ -494,7 +499,7 @@ const installerOf = async (
   if (!membership.ok && membership.status === 403) {
     return {
       kind: "MembershipUnreadable",
-      detail: `GitHub refused this stage's App a read of your membership of the organization ${login}`,
+      detail: `GitHub refused a read of your membership of the organization ${login}: ${membership.detail}`,
     };
   }
   if (!membership.ok && membership.status === 404) {

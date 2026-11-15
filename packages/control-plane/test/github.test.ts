@@ -321,10 +321,16 @@ test("an installation links only when the person who authorized the App owns its
   const outsider = answering([exchanged, orgListed, [404, { message: "Not Found" }]]);
   assert.equal((await verifyInstaller(outsider.fetcher, origins, oauthClient, "code-1", 9)).kind, "NotInstaller");
   const unpermitted = answering([exchanged, orgListed, [403, { message: "Resource not accessible by integration" }]]);
-  assert.equal(
-    (await verifyInstaller(unpermitted.fetcher, origins, oauthClient, "code-1", 9)).kind,
-    "MembershipUnreadable",
-  );
+  const unreadable = await verifyInstaller(unpermitted.fetcher, origins, oauthClient, "code-1", 9);
+  assert.equal(unreadable.kind, "MembershipUnreadable");
+  assert.match(unreadable.kind === "MembershipUnreadable" ? unreadable.detail : "", /403: Resource not accessible/);
+  const saml = answering([
+    exchanged,
+    orgListed,
+    [403, { message: "Resource protected by organization SAML enforcement." }],
+  ]);
+  const samlRefused = await verifyInstaller(saml.fetcher, origins, oauthClient, "code-1", 9);
+  assert.match(samlRefused.kind === "MembershipUnreadable" ? samlRefused.detail : "", /SAML enforcement/);
 
   const spent = answering([[200, { error: "bad_verification_code", error_description: "The code is incorrect." }]]);
   const failed = await verifyInstaller(spent.fetcher, origins, oauthClient, "spent", 7);
@@ -479,8 +485,9 @@ const VICTIM = "victim@example.test";
 const MALLORY = "mallory@example.test";
 const ORG_INSTALLATION = { id: 88, account: { login: "victimorg", type: "Organization" } };
 const MALLORY_INSTALLATION = { id: 77, account: { login: "mallory", type: "User" } };
+const VICTIM_INSTALLATION = { id: 66, account: { login: "victim", type: "User" } };
 const GITHUB_PEOPLE: Record<string, { login: string; installations: unknown[]; role: string }> = {
-  ghu_victim: { login: "victim", installations: [ORG_INSTALLATION], role: "admin" },
+  ghu_victim: { login: "victim", installations: [ORG_INSTALLATION, VICTIM_INSTALLATION], role: "admin" },
   ghu_reader: { login: "reader", installations: [ORG_INSTALLATION], role: "member" },
   ghu_mallory: { login: "mallory", installations: [MALLORY_INSTALLATION], role: "none" },
 };
@@ -689,22 +696,49 @@ after(async () => {
   fakeGitHub?.close();
 });
 
-test("an attacker's install callback opened in a victim's session links nothing until the victim confirms on a form", async () => {
-  const page = await installed(VICTIM, "mallory-code", 77);
+const identityState = (response: HarnessResponse): string => {
+  assert.equal(response.status, 303);
+  const location = new URL(response.headers.get("location") ?? "");
+  assert.equal(`${location.origin}${location.pathname}`, `${issuer}/login/oauth/authorize`);
+  assert.equal(location.searchParams.get("client_id"), "Iv23client");
+  assert.equal(location.searchParams.get("redirect_uri"), `${origin}/github/app/installed`);
+  return location.searchParams.get("state") ?? "";
+};
+
+const identified = (email: string, code: string, state: string): Promise<HarnessResponse> =>
+  call(`/github/app/installed?${form({ code, state })}`, { headers: signedIn(email) });
+
+test("an attacker's install callback opened in a victim's session ignores the attacker's code and checks the victim's own GitHub account", async () => {
+  const redirected = await installed(VICTIM, "mallory-code", 77);
+  assert.doesNotMatch(redirected.headers.get("location") ?? "", /mallory-code/);
+  const victims = identityState(redirected);
+
+  const refused = await identified(VICTIM, "victim-code", victims);
+  assert.equal(refused.status, 403);
+  assert.match(await refused.text(), /installation 77 is not among the installations/);
+  assert.equal(await linkedTenant(77), null);
+
+  const mallorys = identityState(await installed(MALLORY, "mallory-code", 77));
+  await refusedPage(await identified(VICTIM, "mallory-code", mallorys), 403, /started by mallory@example.test/);
+  assert.equal(await linkedTenant(77), null);
+});
+
+test("an install made directly on GitHub links after the installer signs in to GitHub and confirms on the form", async () => {
+  const state = identityState(await installed(VICTIM, "stale-code", 66));
+  const page = await identified(VICTIM, "victim-code", state);
   assert.equal(page.status, 200);
   const html = await page.text();
-  assert.match(html, /Connect mallory to Victim/);
-  assert.match(html, /<form method="post"/);
-  assert.equal(await linkedTenant(77), null);
+  assert.match(html, /Connect victim to Victim/);
+  assert.equal(await linkedTenant(66), null);
 
   const choice = /name="choice" value="([^"]+)"/.exec(html)?.[1] ?? "";
   const fields = { choice, tenant: victimTenant };
   await refusedPage(await confirm(VICTIM, fields, "https://evil.test"), 403, /only this control plane/);
   await refusedPage(await confirm(MALLORY, fields), 403, /confirmed for victim@example.test/);
-  assert.equal(await linkedTenant(77), null);
+  assert.equal(await linkedTenant(66), null);
 
   assert.equal((await confirm(VICTIM, fields)).status, 200);
-  assert.equal(await linkedTenant(77), victimTenant);
+  assert.equal(await linkedTenant(66), victimTenant);
 });
 
 test("an install started by one person and finished in another's session, or by a read-only org member, is refused", async () => {
