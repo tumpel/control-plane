@@ -253,7 +253,6 @@ export interface AppKey {
 export interface Installation {
   installationId: number;
   accountLogin: string;
-  repositorySelection: "All" | "Selected";
   status: "Active" | "Suspended";
 }
 
@@ -281,27 +280,11 @@ const installationSettings = (installationId: number): string =>
 
 const OUTSIDE_STATUSES = [404, 422];
 
-const ownedBy = (installation: Installation, target: GitHubRepository): boolean =>
-  installation.accountLogin.toLowerCase() === target.owner.toLowerCase();
-
-export const coveringInstallation = <T extends Installation>(installations: T[], target: GitHubRepository): T | null =>
-  installations
-    .filter((installation) => installation.status === "Active" && ownedBy(installation, target))
-    .sort((a, b) => Number(a.repositorySelection === "Selected") - Number(b.repositorySelection === "Selected"))[0] ??
-  null;
-
-const outsideAll = (installations: Installation[], target: GitHubRepository): Minted => {
-  const suspended = installations.find((installation) => ownedBy(installation, target));
-  if (suspended !== undefined) {
-    return {
-      kind: "Outside",
-      detail: `the tenant's GitHub App installation on ${suspended.accountLogin} is suspended; unsuspend it at ${installationSettings(suspended.installationId)}, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
-    };
-  }
-  const accounts = installations.map((installation) => installation.accountLogin).join(", ");
+export const uncovered = (accounts: string[], target: GitHubRepository): Minted => {
+  if (accounts.length === 0) return { kind: "NoToken" };
   return {
     kind: "Outside",
-    detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installations cover repositories of ${accounts} only; start the session on a repository of one of them, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
+    detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installations cover repositories of ${accounts.join(", ")} only; start the session on a repository of one of them, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
   };
 };
 
@@ -309,13 +292,16 @@ export const mintInstallationToken = async (
   fetcher: Fetch,
   api: string,
   app: AppKey,
-  installations: Installation[],
+  installation: Installation,
   target: GitHubRepository,
   now: number,
 ): Promise<Minted> => {
-  if (installations.length === 0) return { kind: "NoToken" };
-  const installation = coveringInstallation(installations, target);
-  if (installation === null) return outsideAll(installations, target);
+  if (installation.status === "Suspended") {
+    return {
+      kind: "Outside",
+      detail: `the tenant's GitHub App installation on ${installation.accountLogin} is suspended; unsuspend it at ${installationSettings(installation.installationId)}, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
+    };
+  }
   const { installationId } = installation;
   const answer = await callGitHub(
     fetcher,

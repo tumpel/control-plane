@@ -362,7 +362,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/github-connection/installations",
     NO_ARGUMENTS,
-    "List every GitHub account or organization the tenant connected, one installation of the stage's GitHub App each. Returns the GitHubInstallation[] of GET /v1/github-connection/installations: installationId, accountLogin, accountType, repositorySelection (All or Selected), status (Active or Suspended), createdAt and updatedAt.",
+    "List every GitHub account or organization the tenant connected, one installation of the stage's GitHub App each. Returns the GitHubInstallation[] of GET /v1/github-connection/installations: installationId, accountLogin, status (Active or Suspended), createdAt and updatedAt.",
   ),
   rest(
     "tumpel_github_start",
