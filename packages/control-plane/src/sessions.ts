@@ -282,7 +282,7 @@ export const startSessionFromIssue = async (
   );
   if (!read.ok && (read.status === 404 || read.status === 410)) {
     return refuse(404, {
-      code: "NotFound",
+      code: "IssueNotFound",
       title: "No such issue",
       detail: `${issueUrl} does not exist or was deleted: ${read.detail}`,
       fix: `List the open issues with tumpel github list-issues ${target.owner} ${target.name} and start from one of them`,
