@@ -1,21 +1,19 @@
 import {
-  CiDispatchConnectionLinkSchema,
-  CiDispatchConnectionStartSchema,
   ConnectedConnectionSchema,
-  EphemeralVmConnectionLinkSchema,
-  EphemeralVmConnectionStartSchema,
+  GitHubActionsConnectionLinkSchema,
+  GitHubActionsConnectionStartSchema,
+  NamespaceConnectionLinkSchema,
+  NamespaceConnectionStartSchema,
   NotConfiguredConnectionSchema,
   NotConnectedConnectionSchema,
-  RemoteBuildKitConnectionLinkSchema,
-  RemoteBuildKitConnectionStartSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { BUILD_PROVIDER_ORDER, type BuildProviderKind, stageIssuer, subjectPattern } from "./build-provider.ts";
 import { installationOf, storedApp } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
-import type { RemoteBuildKitRow } from "./tenant-prebuilds";
+import { issuerSubject } from "./issuer.ts";
+import type { BuildProvider, NamespaceRow } from "./tenant-prebuilds";
 
 export type ConnectionSummary =
   | z.infer<typeof ConnectedConnectionSchema>
@@ -25,10 +23,19 @@ export type ConnectionSummary =
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
 const CONNECTIONS_PATH = "/v1/connections";
-const PATHS: Record<BuildProviderKind, string> = {
-  CiDispatch: "/v1/ci-dispatch-connection",
-  RemoteBuildKit: "/v1/remote-buildkit-connection",
-  EphemeralVm: "/v1/ephemeral-vm-connection",
+const PATHS: Record<BuildProvider, string> = {
+  GitHubActions: "/v1/github-actions-connection",
+  Namespace: "/v1/namespace-connection",
+};
+const BUILD_PROVIDERS: readonly BuildProvider[] = ["GitHubActions", "Namespace"];
+
+const stageIssuer = (issuerHostname: string | undefined): string | null =>
+  issuerHostname ? `https://${issuerHostname}` : null;
+
+const subjectPattern = (tenantId: string): string => {
+  const pattern = issuerSubject(tenantId, "<personaName>");
+  if (!pattern.ok) throw new Error(`the subject pattern of tenant ${tenantId} is refused: ${pattern.detail}`);
+  return pattern.subject;
 };
 
 const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
@@ -47,26 +54,25 @@ export const listConnections = async (env: Env, caller: Caller): Promise<Connect
   const accounts = await tenantOf(env, caller).connectedAccounts();
   return [
     summary("GitHub", installation?.accountLogin ?? null, app !== null),
-    ...BUILD_PROVIDER_ORDER.map((kind) =>
-      summary(kind, accounts[kind], kind !== "RemoteBuildKit" || stageIssuer(env.ISSUER_HOSTNAME) !== null),
-    ),
+    summary("GitHubActions", accounts.GitHubActions, true),
+    summary("Namespace", accounts.Namespace, stageIssuer(env.ISSUER_HOSTNAME) !== null),
   ];
 };
 
 const issuerMissing = () => ({
-  detail: "the stage has no issuer hostname, so no provider can trust a token of this control plane",
+  detail: "the stage has no issuer hostname, so Namespace cannot trust a token of this control plane",
   fix: "Deploy the stage with npm run deploy, which sets ISSUER_HOSTNAME from the issuer_hostname output of the infra",
 });
 
-const remoteBuildKitLink = (tenantId: string, issuer: string | null, row: RemoteBuildKitRow | null): unknown => {
+const namespaceLink = (tenantId: string, issuer: string | null, row: NamespaceRow | null): unknown => {
   if (issuer === null) return { state: "NotConfigured", ...issuerMissing() };
   const subject = subjectPattern(tenantId);
   if (row === null) return { state: "NotConnected", issuer, subjectPattern: subject };
-  const { remoteBuildKitConnectionId, accountLabel, audience, createdAt, updatedAt } = row;
+  const { namespaceConnectionId, accountLabel, audience, createdAt, updatedAt } = row;
   return {
     state: "Connected",
     connection: {
-      remoteBuildKitConnectionId,
+      namespaceConnectionId,
       tenantId,
       accountLabel,
       issuer,
@@ -78,61 +84,47 @@ const remoteBuildKitLink = (tenantId: string, issuer: string | null, row: Remote
   };
 };
 
-const connected = (connection: unknown): unknown =>
-  connection === null ? { state: "NotConnected" } : { state: "Connected", connection };
-
-const readLink = async (env: Env, caller: Caller, kind: BuildProviderKind): Promise<unknown> => {
+const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Promise<unknown> => {
   const tenant = tenantOf(env, caller);
   const { tenantId } = caller;
-  if (kind === "CiDispatch") {
-    return CiDispatchConnectionLinkSchema.parse({
+  if (provider === "GitHubActions") {
+    const connection = await tenant.gitHubActionsConnection(tenantId);
+    return GitHubActionsConnectionLinkSchema.parse({
       tenantId,
-      link: connected(await tenant.ciDispatchConnection(tenantId)),
+      link: connection === null ? { state: "NotConnected" } : { state: "Connected", connection },
     });
   }
-  if (kind === "EphemeralVm") {
-    return EphemeralVmConnectionLinkSchema.parse({
-      tenantId,
-      link: connected(await tenant.ephemeralVmConnection(tenantId)),
-    });
-  }
-  return RemoteBuildKitConnectionLinkSchema.parse({
+  return NamespaceConnectionLinkSchema.parse({
     tenantId,
-    link: remoteBuildKitLink(tenantId, stageIssuer(env.ISSUER_HOSTNAME), await tenant.remoteBuildKitConnection()),
+    link: namespaceLink(tenantId, stageIssuer(env.ISSUER_HOSTNAME), await tenant.namespaceConnection()),
   });
 };
 
-const connect = async (request: Request, env: Env, caller: Caller, kind: BuildProviderKind): Promise<Response> => {
+const connect = async (request: Request, env: Env, caller: Caller, provider: BuildProvider): Promise<Response> => {
   const tenant = tenantOf(env, caller);
   const now = Date.now();
-  if (kind === "CiDispatch") {
-    const body = await parseBody(request, CiDispatchConnectionStartSchema, "ciDispatchConnections.start");
+  if (provider === "GitHubActions") {
+    const body = await parseBody(request, GitHubActionsConnectionStartSchema, "gitHubActionsConnections.start");
     if (!body.ok) return body.response;
-    await tenant.connectCiDispatch(caller.tenantId, body.value, now);
+    await tenant.connectGitHubActions(caller.tenantId, body.value, now);
+    return json(await readLink(env, caller, provider));
   }
-  if (kind === "EphemeralVm") {
-    const body = await parseBody(request, EphemeralVmConnectionStartSchema, "ephemeralVmConnections.start");
-    if (!body.ok) return body.response;
-    await tenant.connectEphemeralVm(caller.tenantId, body.value, now);
+  const body = await parseBody(request, NamespaceConnectionStartSchema, "namespaceConnections.start");
+  if (!body.ok) return body.response;
+  if (stageIssuer(env.ISSUER_HOSTNAME) === null) {
+    return problem(409, { code: "IssuerMissing", title: "No issuer", ...issuerMissing() });
   }
-  if (kind === "RemoteBuildKit") {
-    const body = await parseBody(request, RemoteBuildKitConnectionStartSchema, "remoteBuildKitConnections.start");
-    if (!body.ok) return body.response;
-    if (stageIssuer(env.ISSUER_HOSTNAME) === null) {
-      return problem(409, { code: "IssuerMissing", title: "No issuer", ...issuerMissing() });
-    }
-    await tenant.connectRemoteBuildKit(body.value, now);
-  }
-  return json(await readLink(env, caller, kind));
+  await tenant.connectNamespace(body.value, now);
+  return json(await readLink(env, caller, provider));
 };
 
-const routeOf = (request: Request, pathname: string): { kind: BuildProviderKind; action: string } | null => {
-  for (const kind of BUILD_PROVIDER_ORDER) {
-    const path = PATHS[kind];
+const routeOf = (request: Request, pathname: string): { provider: BuildProvider; action: string } | null => {
+  for (const provider of BUILD_PROVIDERS) {
+    const path = PATHS[provider];
     if (pathname === path && (request.method === "GET" || request.method === "DELETE")) {
-      return { kind, action: request.method };
+      return { provider, action: request.method };
     }
-    if (pathname === `${path}/start` && request.method === "POST") return { kind, action: "START" };
+    if (pathname === `${path}/start` && request.method === "POST") return { provider, action: "START" };
   }
   return null;
 };
@@ -149,10 +141,10 @@ export const handleConnections = async (
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (route === null) return json(await listConnections(env, caller));
-  if (route.action === "START") return connect(request, env, caller, route.kind);
+  if (route.action === "START") return connect(request, env, caller, route.provider);
   if (route.action === "DELETE") {
-    await tenantOf(env, caller).deleteBuildConnection(route.kind);
+    await tenantOf(env, caller).deleteBuildConnection(route.provider);
     return noContent();
   }
-  return json(await readLink(env, caller, route.kind));
+  return json(await readLink(env, caller, route.provider));
 };

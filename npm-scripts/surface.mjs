@@ -26,9 +26,8 @@ const NOUNS = {
   Snapshots: "snapshot",
   Prebuilds: "prebuild",
   Connections: "connection",
-  CiDispatchConnections: "ci-dispatch",
-  RemoteBuildKitConnections: "remote-buildkit",
-  EphemeralVmConnections: "ephemeral-vm",
+  GitHubActionsConnections: "github-actions",
+  NamespaceConnections: "namespace",
 };
 const VERBS = {
   EnrolmentTokens_mint: "mint-token",
