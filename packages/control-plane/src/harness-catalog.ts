@@ -1,10 +1,7 @@
-import { HarnessCatalogEntrySchema, type HostArchitectureSchema } from "@tumpel/api/schemas";
+import { HarnessCatalogEntrySchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 
 export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
-export type HostArchitecture = z.infer<typeof HostArchitectureSchema>;
-
-export const IMAGE_ARCHITECTURES: readonly HostArchitecture[] = ["Amd64"];
 
 export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEntrySchema.array().parse([
   {

@@ -64,6 +64,36 @@ type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
 type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
 
+const RELEASE_S3 = "https://account.r2.cloudflarestorage.com/tumpel-releases";
+const IMAGE_DIGEST = "b".repeat(64);
+const KERNEL_DIGEST = "c".repeat(64);
+const MANIFEST_DIGEST = "d".repeat(64);
+const RELEASE = {
+  releaseVersion: "0.2.0",
+  commit: "e".repeat(40),
+  channelProtocolVersion: ChannelProtocol.Version,
+  supervisors: [
+    {
+      architecture: "Amd64",
+      url: `${RELEASE_S3}/supervisor/amd64/${"a".repeat(64)}`,
+      sha256: "a".repeat(64),
+      sizeBytes: 4096,
+    },
+  ],
+  images: [
+    {
+      harness: "ClaudeCode",
+      harnessVersion: "2.0.0",
+      architecture: "Amd64",
+      imageUrl: `${RELEASE_S3}/images/ClaudeCode/2.0.0/amd64/${IMAGE_DIGEST}`,
+      imageDigest: IMAGE_DIGEST,
+      kernelUrl: `${RELEASE_S3}/kernels/amd64/${KERNEL_DIGEST}`,
+      kernelDigest: KERNEL_DIGEST,
+      manifestDigest: MANIFEST_DIGEST,
+    },
+  ],
+};
+
 let certs: Server;
 let server: TestHarness;
 let origin: string;
@@ -388,6 +418,7 @@ before(async () => {
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
+  await (await server.getWorker<{ RELEASES: Store }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
 
   assert.equal((await postJson("/v1/tenants", { name: "Sessions", ...GIT_IDENTITY }, browser())).status, 200);
   bearer = { authorization: `Bearer ${await deviceToken()}` };
@@ -451,6 +482,18 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
   assert.match(offer.personaFiles[0]?.downloadUrl ?? "", new RegExp(`/persona-files/${digest}\\?X-Tumpel-Method=GET`));
   assert.deepEqual({ gitAuthorName: offer.gitAuthorName, gitAuthorEmail: offer.gitAuthorEmail }, GIT_IDENTITY);
+  assert.deepEqual(
+    [offer.image.imageDigest, offer.image.kernelDigest, offer.image.manifestDigest],
+    [IMAGE_DIGEST, KERNEL_DIGEST, MANIFEST_DIGEST],
+  );
+  for (const [url, key] of [
+    [offer.image.imageUrl, `images/ClaudeCode/2.0.0/amd64/${IMAGE_DIGEST}`],
+    [offer.image.kernelUrl, `kernels/amd64/${KERNEL_DIGEST}`],
+    [offer.image.manifestUrl, `images/ClaudeCode/2.0.0/amd64/${MANIFEST_DIGEST}`],
+  ]) {
+    assert.match(url ?? "", new RegExp(`^${R2_STUB_ORIGIN}/tumpel-releases/${key}\\?X-Tumpel-Method=GET`));
+  }
+  assert.equal(offer.image.downloadExpiresAt, offer.personaFiles[0]?.downloadExpiresAt);
   const { turnId } = offer;
   const { sessionId } = started.session;
 

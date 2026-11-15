@@ -9,7 +9,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
-import { HARNESS_CATALOG, IMAGE_ARCHITECTURES, pinnedEntry } from "./harness-catalog";
+import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
@@ -110,9 +110,26 @@ const why = (refused: Unplaceable): string => {
   const named = `${refused.host.name} (${refused.host.hostId})`;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NoImage") {
-    return `${named} is ${refused.host.architecture}, and the guest images are built for ${IMAGE_ARCHITECTURES.join(", ")} only`;
+    const { harness, harnessVersion, architectures } = refused.image;
+    const carried =
+      architectures.length === 0
+        ? `no ${harness} ${harnessVersion} guest image`
+        : `${harness} ${harnessVersion} guest images for ${architectures.join(", ")} only`;
+    return `${named} is ${refused.host.architecture}, and the current release carries ${carried}`;
   }
   return `${named} runs a turn in all ${refused.usage.boxCapacity} of its box slots`;
+};
+
+const placeableFix = (hosts: Unplaceable[], retry: string): string => {
+  const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
+  if (lacking === undefined) {
+    return `Start tumpel-supervisor run on a host, or enrol one with tumpel host mint-token, then ${retry}`;
+  }
+  const { harness, harnessVersion, architectures } = lacking;
+  if (architectures.length === 0) {
+    return `Publish a release that carries a ${harness} ${harnessVersion} guest image with the release workflow, or pin a version tumpel release current lists with tumpel harness pin, then ${retry}`;
+  }
+  return `Start tumpel-supervisor run on an ${architectures.join(" or ")} host, or enrol one with tumpel host mint-token, then ${retry}`;
 };
 
 const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
@@ -137,7 +154,7 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
     code: "NoHostAvailable",
     title: "No host can take the session",
     detail: `no host of your tenant can take a session: ${detail}`,
-    fix: `Start tumpel-supervisor run on an ${IMAGE_ARCHITECTURES.join(" or ")} host, or enrol one with tumpel host mint-token, then ${retry}`,
+    fix: placeableFix(hosts, retry),
   });
 };
 

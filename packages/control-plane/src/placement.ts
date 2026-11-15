@@ -1,14 +1,20 @@
 import type { HostSchema, ReportedHostUsageSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import type { HostArchitecture } from "./harness-catalog.ts";
+import type { HostArchitecture } from "./releases.ts";
 
 type Host = z.infer<typeof HostSchema>;
 
 export type ReportedHostUsage = z.infer<typeof ReportedHostUsageSchema>;
 
+export interface ImageAvailability {
+  harness: string;
+  harnessVersion: string;
+  architectures: readonly HostArchitecture[];
+}
+
 export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
-  | { kind: "Unplaceable"; host: Host; reason: "NoImage" }
+  | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
   | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage };
 
 type Candidate = { kind: "Candidate"; host: Host; usage: ReportedHostUsage };
@@ -20,10 +26,10 @@ const freeSlots = (usage: ReportedHostUsage): number => usage.boxCapacity - usag
 const assess = (
   host: Host,
   usages: ReadonlyMap<string, ReportedHostUsage>,
-  architectures: readonly HostArchitecture[],
+  image: ImageAvailability,
 ): Candidate | Unplaceable => {
   if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
-  if (!architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage" };
+  if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
   const usage = usages.get(host.hostId);
   if (usage === undefined) {
     throw new Error(
@@ -37,10 +43,10 @@ const assess = (
 export const placeSession = (
   hosts: readonly Host[],
   usages: readonly ReportedHostUsage[],
-  architectures: readonly HostArchitecture[],
+  image: ImageAvailability,
 ): Placement => {
   const byHost = new Map(usages.map((usage) => [usage.hostId, usage]));
-  const assessed = hosts.map((host) => assess(host, byHost, architectures));
+  const assessed = hosts.map((host) => assess(host, byHost, image));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
     .sort((a, b) => freeSlots(b.usage) - freeSlots(a.usage) || b.usage.memoryAvailableMib - a.usage.memoryAvailableMib);
