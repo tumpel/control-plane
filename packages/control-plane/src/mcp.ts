@@ -14,6 +14,9 @@ import {
   PersonaFileUploadRequestSchema,
   PersonaPathSchema,
   PersonaUpdateSchema,
+  PrebuildListQuerySchema,
+  PrebuildPathSchema,
+  PrebuildStartSchema,
   ProblemSchema,
   SecretSetPathSchema,
   SessionListQuerySchema,
@@ -40,7 +43,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -257,6 +260,34 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/github-connection/start",
     NO_ARGUMENTS,
     "Get the URL where a person installs the stage's GitHub App for the tenant. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of the installed account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
+  ),
+  rest(
+    "tumpel_prebuild_start",
+    "POST",
+    "/v1/prebuilds",
+    PrebuildStartSchema,
+    "Start a prebuild of a repository's default branch on the tenant's connected build provider; personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it. Returns the Prebuild of POST /v1/prebuilds; a stored or running prebuild with the same key comes back unless rebuild is true. Refused NoBuildProvider while no build provider is connected.",
+  ),
+  rest(
+    "tumpel_prebuild_list",
+    "GET",
+    "/v1/prebuilds",
+    PrebuildListQuerySchema,
+    "List the prebuilds of one repository, newest first. Returns the Prebuild[] of GET /v1/prebuilds?repository=.",
+  ),
+  rest(
+    "tumpel_prebuild_get",
+    "GET",
+    "/v1/prebuilds/{prebuildId}",
+    PrebuildPathSchema,
+    "Read one prebuild. Returns the Prebuild of GET /v1/prebuilds/{prebuildId}; status.state is Dispatched, Building, Converting, Done with the layer, or Failed with the phase.",
+  ),
+  rest(
+    "tumpel_prebuild_failure",
+    "GET",
+    "/v1/prebuilds/{prebuildId}/failure",
+    PrebuildPathSchema,
+    "Read why a Failed prebuild failed. Returns the PrebuildFailure of GET /v1/prebuilds/{prebuildId}/failure: {phase, detail, fix}.",
   ),
   rest(
     "tumpel_secret_set_list",

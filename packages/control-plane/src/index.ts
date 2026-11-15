@@ -118,6 +118,7 @@ import {
   signUpPage,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { currentRelease, imagesFor, supervisorKey } from "./releases";
 import type { SessionTimer } from "./session-timer";
@@ -1176,6 +1177,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (resource) return resource;
   const sessions = await handleSessions(request, url, env, deviceCaller);
   if (sessions) return sessions;
+  const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
+  if (prebuilds) return prebuilds;
   const github =
     (await handleGitHubConnection(request, url, env, deviceCaller)) ??
     (await handleGitHubPage(request, url, env, assertedEmail)) ??
