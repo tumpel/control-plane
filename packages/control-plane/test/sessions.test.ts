@@ -541,6 +541,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(upload.pathname, `/tumpel-sessions/${request.storageKey}`);
   assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
   assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
+  await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 4096 });
   const [snapshot] = await eventually(
     "a stored snapshot",
@@ -663,7 +664,9 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
   host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
   host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
   host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
   const warm = await host.next("SnapshotRequest");
+  await store.put(warm.storageKey, '{"entries":[]}');
   host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, sizeBytes: 14 });
   await eventually(
     "a stored snapshot",
@@ -691,6 +694,7 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
   const again = await host.next("SnapshotRequest");
   assert.equal(again.sessionId, sessionId);
   assert.equal(again.turnId, turnId);
+  await store.put(again.storageKey, '{"entries":[]}');
   host.send({ type: "SnapshotDone", snapshotId: again.snapshotId, sizeBytes: 14 });
   await eventually(
     "a second stored snapshot",
@@ -729,6 +733,98 @@ test("a stop whose snapshot fails returns the session to Idle and does not ask f
 
   await sleep(SETTINGS.snapshotDelaySeconds * 3000);
   assert.equal(host.snapshotRequestsFor(sessionId), 0);
+});
+
+const completedTurn = async (prompt: string) => {
+  const started = await tool("tumpel_session_start", { ...(await sessionStart()), prompt }, StartedSessionSchema);
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.sessionId, started.session.sessionId);
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: '{"type":"result"}' });
+  host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  return { session: started.session, offer };
+};
+
+const storedChunks = async (
+  store: Store,
+  sessionId: string,
+  digests: string[],
+): Promise<{ request: Extract<ControlMessage, { type: "SnapshotRequest" }>; uploaded: string[] }> => {
+  const request = await host.next("SnapshotRequest");
+  assert.equal(request.sessionId, sessionId);
+  host.send({ type: "SnapshotChunks", snapshotId: request.snapshotId, part: 1, digests });
+  const answer = await host.next("SnapshotUploads");
+  assert.equal(answer.snapshotId, request.snapshotId);
+  assert.equal(answer.part, 1);
+  assert.equal(answer.uploadExpiresAt, request.uploadExpiresAt);
+  for (const upload of answer.uploads) {
+    const url = new URL(upload.url);
+    assert.equal(url.pathname, `/tumpel-sessions/${request.storageKey.split("/")[0]}/chunks/${upload.digest}`);
+    assert.equal(url.searchParams.get("X-Tumpel-Method"), "PUT");
+    await store.put(url.pathname.replace("/tumpel-sessions/", ""), "chunk bytes");
+  }
+  await store.put(request.storageKey, '{"entries":[]}');
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, sizeBytes: 64 });
+  await eventually(
+    "a stored snapshot",
+    () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+    (snapshots) => snapshots.some((snapshot) => snapshot.outcome.state === "Stored"),
+  );
+  return { request, uploaded: answer.uploads.map((upload) => upload.digest) };
+};
+
+test("a snapshot gets upload URLs only for chunks the tenant lacks, a restore only for its session's chunks, and an archive deletes the chunks no other session holds", async () => {
+  const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
+  const [one, two, three, four] = ["1", "2", "3", "4"].map((digit) => digit.repeat(64)) as [
+    string,
+    string,
+    string,
+    string,
+  ];
+  const first = await completedTurn("chunk the first");
+  const { request, uploaded } = await storedChunks(store, first.session.sessionId, [one, two]);
+  assert.deepEqual(uploaded, [one, two]);
+  const tenantId = request.storageKey.split("/")[0] ?? "";
+
+  const second = await completedTurn("chunk the second");
+  const shared = await storedChunks(store, second.session.sessionId, [two, three, three]);
+  assert.deepEqual(shared.uploaded, [three]);
+
+  await tool("tumpel_turn_send", { sessionId: first.session.sessionId, prompt: "restore me" }, TurnSchema);
+  const restoring = await host.next("TurnOffer");
+  assert.deepEqual(
+    restoring.snapshots.map((snapshot) => snapshot.snapshotId),
+    [request.snapshotId],
+  );
+  host.send({ type: "RestoreChunks", turnId: restoring.turnId, part: 1, digests: [one, three, four] });
+  const downloads = await host.next("RestoreDownloads");
+  assert.equal(downloads.turnId, restoring.turnId);
+  assert.deepEqual(
+    downloads.downloads.map((download) => [download.digest, new URL(download.url).searchParams.get("X-Tumpel-Method")]),
+    [[one, "GET"]],
+  );
+  await eventually(
+    "the unclaimed restore turn reading Failed",
+    () => getJson(`/v1/turns/${restoring.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
+
+  await tool("tumpel_session_stop", { sessionId: first.session.sessionId }, SessionSchema);
+  const teardown = await host.next("BoxTeardown");
+  host.send({ type: "BoxGone", sessionId: first.session.sessionId, boxId: teardown.boxId });
+  await eventually(
+    "the session reading Stopped",
+    () => tool("tumpel_session_get", { sessionId: first.session.sessionId }, SessionSchema),
+    (session) => session.state === "Stopped",
+  );
+  await tool("tumpel_session_archive", { sessionId: first.session.sessionId }, SessionSchema);
+  assert.equal(await store.head(`${tenantId}/chunks/${one}`), null);
+  assert.notEqual(await store.head(`${tenantId}/chunks/${two}`), null);
+  assert.notEqual(await store.head(`${tenantId}/chunks/${three}`), null);
+
+  const third = await completedTurn("chunk the third");
+  const again = await storedChunks(store, third.session.sessionId, [one, two]);
+  assert.deepEqual(again.uploaded, [one]);
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
