@@ -64,7 +64,7 @@ import {
   webhookSecret,
 } from "./github-store.ts";
 import { json, problem, seeOther } from "./http";
-import { type Caller, membershipsOfEmail } from "./identity";
+import { type Caller, membershipsOfEmail, whoamiOf } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
@@ -129,9 +129,11 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
   const app = await storedApp(env.DB);
   if (app === null) return appMissing(url.origin);
   const expiresAt = expiry(Date.now());
+  const { principal } = await whoamiOf(env.DB, caller);
   const state = await signState(await stateKey(env), {
     purpose: "Installation",
     tenantId: caller.tenantId,
+    email: principal.email,
     expiresAt,
     ...(back.returnUrl === undefined ? {} : { returnUrl: back.returnUrl }),
   });
@@ -374,10 +376,9 @@ const linked = async (
   );
 };
 
-const chooseTenant = async (url: URL, env: Env, email: string, record: GitHubInstallationRecord): Promise<Response> => {
+const confirmInstallation = async (env: Env, email: string, record: GitHubInstallationRecord): Promise<Response> => {
   const tenants = await ownedTenants(env, email);
-  const [only, ...others] = tenants;
-  if (only === undefined) {
+  if (tenants.length === 0) {
     return refuseInstall(
       env,
       null,
@@ -386,7 +387,6 @@ const chooseTenant = async (url: URL, env: Env, email: string, record: GitHubIns
       `${email} owns no tenant, and only an Owner connects GitHub. Ask an Owner of your tenant to connect ${record.account.login}.`,
     );
   }
-  if (others.length === 0) return linked(env, only.tenant.tenantId, record, undefined);
   const choice = await signState(await stateKey(env), {
     purpose: "InstallationChoice",
     email,
@@ -396,19 +396,33 @@ const chooseTenant = async (url: URL, env: Env, email: string, record: GitHubIns
   return installationTenantPage(
     email,
     record.account.login,
-    tenants.map(({ tenant }) => {
-      const href = new URL(APP_INSTALLED_PATH, url.origin);
-      href.searchParams.set("choice", choice);
-      href.searchParams.set("tenant", tenant.tenantId);
-      return { name: tenant.name, href: href.toString() };
-    }),
+    APP_INSTALLED_PATH,
+    choice,
+    tenants.map(({ tenant }) => ({ tenantId: tenant.tenantId, name: tenant.name })),
   );
 };
 
-const handleChoice = async (env: Env, email: string, query: Record<string, string>): Promise<Response> => {
-  const picked = GitHubInstallationChoiceQuerySchema.safeParse(query);
+const choiceOf = async (request: Request): Promise<Record<string, string>> => {
+  const form = await request.formData().catch(() => new FormData());
+  const fields: Record<string, string> = {};
+  for (const [name, value] of form) if (typeof value === "string") fields[name] = value;
+  return fields;
+};
+
+const handleChoice = async (request: Request, url: URL, env: Env, email: string): Promise<Response> => {
+  const origin = request.headers.get("origin");
+  if (origin !== url.origin) {
+    return refuseInstall(
+      env,
+      null,
+      403,
+      "Request refused",
+      `The confirmation came from ${origin ?? "a page that sent no origin"}, and only this control plane's own confirmation page connects an installation.`,
+    );
+  }
+  const picked = GitHubInstallationChoiceQuerySchema.safeParse(await choiceOf(request));
   if (!picked.success) {
-    return refuseInstall(env, null, 400, "Nothing to connect", "The tenant choice is missing from the link.");
+    return refuseInstall(env, null, 400, "Nothing to connect", "The confirmation names no installation and tenant.");
   }
   const state = await readState(
     await stateKey(env),
@@ -417,7 +431,7 @@ const handleChoice = async (env: Env, email: string, query: Record<string, strin
     Date.now(),
   );
   if (!state.ok)
-    return refuseInstall(env, null, 403, "Request refused", `The tenant choice is no longer valid: ${state.reason}.`);
+    return refuseInstall(env, null, 403, "Request refused", `The confirmation is no longer valid: ${state.reason}.`);
   if (state.claims.email !== email) {
     return refuseInstall(
       env,
@@ -434,9 +448,53 @@ const handleChoice = async (env: Env, email: string, query: Record<string, strin
   return linked(env, picked.data.tenant, state.claims.installation, undefined);
 };
 
+type StartedBy = { ok: true; tenantId: string; returnUrl: string | undefined } | { ok: false; response: Response };
+
+const startedBy = async (env: Env, email: string, stateText: string): Promise<StartedBy> => {
+  const state = await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
+  if (!state.ok) {
+    return {
+      ok: false,
+      response: refuseInstall(
+        env,
+        null,
+        403,
+        "Request refused",
+        `The link from Tumpel is no longer valid: ${state.reason}.`,
+      ),
+    };
+  }
+  const { tenantId, returnUrl } = state.claims;
+  if (state.claims.email !== email) {
+    return {
+      ok: false,
+      response: refuseInstall(
+        env,
+        null,
+        403,
+        "Request refused",
+        `This installation was started by ${state.claims.email}, and you are signed in as ${email}. Each person connects GitHub from their own Tumpel session.`,
+      ),
+    };
+  }
+  const owned = await ownedTenants(env, email);
+  if (!owned.some(({ tenant }) => tenant.tenantId === tenantId)) {
+    return {
+      ok: false,
+      response: refuseInstall(
+        env,
+        null,
+        403,
+        "Request refused",
+        `${email} is no longer an Owner of tenant ${tenantId}, and only an Owner connects GitHub.`,
+      ),
+    };
+  }
+  return { ok: true, tenantId, returnUrl };
+};
+
 const handleInstalled = async (url: URL, env: Env, email: string): Promise<Response> => {
   const query = Object.fromEntries(url.searchParams);
-  if (query.choice !== undefined) return handleChoice(env, email, query);
   const action = GitHubSetupActionSchema.safeParse(query);
   if (!action.success) {
     return refuseInstall(env, null, 400, "Nothing to connect", "GitHub sent no setup action with this link.");
@@ -465,26 +523,26 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
     );
   }
   const { code, installation_id: installationText, state: stateText } = callback.data;
-  const state =
-    stateText === undefined
-      ? null
-      : await readState(await stateKey(env), stateText, GitHubInstallStateSchema, Date.now());
-  if (state !== null && !state.ok) {
-    return refuseInstall(
-      env,
-      null,
-      403,
-      "Request refused",
-      `The link from Tumpel is no longer valid: ${state.reason}.`,
-    );
-  }
+  const started = stateText === undefined ? null : await startedBy(env, email, stateText);
+  if (started !== null && !started.ok) return started.response;
+  const tenantId = started?.tenantId ?? null;
   const client = await oauthClient(env.DB, keyStoreOf(env));
   if (client === null) {
-    return messagePage(409, "No GitHub App", `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`);
+    return refuseInstall(
+      env,
+      tenantId,
+      409,
+      "No GitHub App",
+      `This stage has no GitHub App; create it at ${APP_SETUP_PATH}.`,
+    );
   }
-  const tenantId = state?.claims.tenantId ?? null;
-  const installationId = Number(installationText);
-  const installer = await verifyInstaller(fetcher, env.GITHUB_API_ORIGIN, client, code, installationId);
+  const installer = await verifyInstaller(
+    fetcher,
+    { api: env.GITHUB_API_ORIGIN, web: env.GITHUB_WEB_ORIGIN },
+    client,
+    code,
+    Number(installationText),
+  );
   if (installer.kind === "Failed") {
     return refuseInstall(env, tenantId, 502, "GitHub did not confirm the installer", `${installer.detail}.`);
   }
@@ -494,11 +552,11 @@ const handleInstalled = async (url: URL, env: Env, email: string): Promise<Respo
       tenantId,
       403,
       "Request refused",
-      `${installer.detail}. Sign in to GitHub as a person who can access the installation.`,
+      `${installer.detail}. Sign in to GitHub as an owner of the account, or ask one to connect it.`,
     );
   }
-  if (state !== null) return linked(env, state.claims.tenantId, installer.installation, state.claims.returnUrl);
-  return chooseTenant(url, env, email, installer.installation);
+  if (started !== null) return linked(env, started.tenantId, installer.installation, started.returnUrl);
+  return confirmInstallation(env, email, installer.installation);
 };
 
 export const handleGitHubPage = async (
@@ -508,17 +566,19 @@ export const handleGitHubPage = async (
   signedIn: SignedInPerson,
 ): Promise<Response | null> => {
   const pages = [APP_SETUP_PATH, APP_CREATED_PATH, APP_INSTALLED_PATH];
-  if (request.method !== "GET" || !pages.includes(url.pathname)) return null;
+  const confirming = request.method === "POST" && url.pathname === APP_INSTALLED_PATH;
+  if (!confirming && (request.method !== "GET" || !pages.includes(url.pathname))) return null;
   const person = await signedIn(request, env);
   if (!person.ok) {
     return linkPage(
       401,
       "Sign in again",
       `${person.reason}. Sign in, then this page continues.`,
-      url.toString(),
+      confirming ? connectUrl(env, null) : url.toString(),
       "Sign in and continue",
     );
   }
+  if (confirming) return handleChoice(request, url, env, person.email);
   if (url.pathname === APP_SETUP_PATH) return handleSetupPage(url, env, person.email);
   if (url.pathname === APP_CREATED_PATH) return handleCreated(url, env, person.email);
   return handleInstalled(url, env, person.email);

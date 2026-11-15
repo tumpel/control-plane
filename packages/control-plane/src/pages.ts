@@ -271,11 +271,13 @@ export const connectAgainPage = (status: number, title: string, text: string, co
 export const installationTenantPage = (
   email: string,
   accountLogin: string,
-  tenants: { name: string; href: string }[],
+  action: string,
+  choice: string,
+  tenants: { tenantId: string; name: string }[],
 ): Response =>
   page(
     200,
-    "Choose a tenant",
-    `<p>Signed in as ${escapeHtml(email)}, an Owner of several tenants. Choose the tenant that gets the GitHub App installation on ${escapeHtml(accountLogin)}.</p>
-<ul>${tenants.map((tenant) => `<li><a href="${escapeHtml(tenant.href)}">${escapeHtml(tenant.name)}</a></li>`).join("")}</ul>`,
+    "Connect GitHub",
+    `<p>Signed in as ${escapeHtml(email)}. Connect the GitHub App installation on <strong>${escapeHtml(accountLogin)}</strong> only if you started this installation yourself; its repositories become available to every member of the tenant you choose.</p>
+${tenants.map((tenant) => `<form method="post" action="${escapeHtml(action)}"><input type="hidden" name="choice" value="${escapeHtml(choice)}"><input type="hidden" name="tenant" value="${escapeHtml(tenant.tenantId)}"><button type="submit">Connect ${escapeHtml(accountLogin)} to ${escapeHtml(tenant.name)}</button></form>`).join("")}`,
   );
