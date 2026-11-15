@@ -1,5 +1,8 @@
 import {
   type BuildProviderSchema,
+  type CircleCIConnectionStartSchema,
+  type CircleCIProjectAddSchema,
+  CircleCIProjectSchema,
   GitHubActionsConnectionSchema,
   type GitHubActionsConnectionStartSchema,
   type NamespaceConnectionStartSchema,
@@ -7,8 +10,15 @@ import {
   PrebuildSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
-import { dispatchCallerWorkflow, type PrebuildInputs, type RunEvent } from "./github-actions.ts";
+import { seal, unseal } from "./envelope.ts";
+import {
+  type GitHubAnswer,
+  type GitHubRepository,
+  type Minted,
+  REPOSITORY_TOKEN,
+  repositoryCredential,
+} from "./github.ts";
+import { type DispatchedRun, dispatchCallerWorkflow, type PrebuildInputs, type RunEvent } from "./github-actions.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
@@ -19,6 +29,52 @@ export type BuildProvider = z.infer<typeof BuildProviderSchema>;
 export type GitHubActionsConnection = z.infer<typeof GitHubActionsConnectionSchema>;
 export type GitHubActionsConnectionStart = z.infer<typeof GitHubActionsConnectionStartSchema>;
 export type NamespaceConnectionStart = z.infer<typeof NamespaceConnectionStartSchema>;
+export type CircleCIConnectionStart = z.infer<typeof CircleCIConnectionStartSchema>;
+export type CircleCIProject = z.infer<typeof CircleCIProjectSchema>;
+export type CircleCIProjectAdd = z.infer<typeof CircleCIProjectAddSchema>;
+
+export interface CircleCIRow {
+  circleCIConnectionId: string;
+  accountLabel: string;
+  organizationId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CircleCIBinding {
+  repository: string;
+  projectSlug: string;
+  projectId: string;
+  pipelineDefinitionId: string;
+}
+
+export type CircleCIProjectAdded =
+  | { kind: "Added"; project: CircleCIProject }
+  | { kind: "Bound"; project: CircleCIProject };
+
+type CircleCIProjectRow = {
+  circleci_project_id: string;
+  repository: string;
+  project_slug: string;
+  project_id: string;
+  pipeline_definition_id: string;
+  created_at: number;
+  updated_at: number;
+};
+
+const CIRCLECI_TOKEN_CONTEXT = "circleci-connection/api_token";
+
+const toCircleCIProject = (tenantId: string, row: CircleCIProjectRow): CircleCIProject =>
+  CircleCIProjectSchema.parse({
+    circleCIProjectId: row.circleci_project_id,
+    tenantId,
+    repository: row.repository,
+    projectSlug: row.project_slug,
+    projectId: row.project_id,
+    pipelineDefinitionId: row.pipeline_definition_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
 
 export interface NamespaceRow {
   namespaceConnectionId: string;
@@ -59,8 +115,11 @@ export interface PrebuildStartRecord {
   prebuildId: string;
   personaId: string;
   key: PrebuildKey;
+  target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
+  rootfsUrl: string;
+  apiOrigin: string;
 }
 
 export type DispatchedPrebuild =
@@ -96,6 +155,7 @@ export type UploadRecorded =
 
 const CONNECTION_TABLES: Record<BuildProvider, string> = {
   GitHubActions: "github_actions_connections",
+  CircleCI: "circleci_connections",
   Namespace: "namespace_connections",
 };
 
@@ -221,6 +281,11 @@ export class TenantPrebuilds extends TenantSessions {
   }
 
   async recordDispatchedPrebuild(tenantId: string, dispatch: PrebuildDispatch, now: number): Promise<Prebuild> {
+    this.writeDispatchedPrebuild(dispatch, now);
+    return this.armDispatch(tenantId, dispatch.prebuildId, now);
+  }
+
+  private writeDispatchedPrebuild(dispatch: PrebuildDispatch, now: number): void {
     const { prebuildId } = dispatch;
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
@@ -246,6 +311,9 @@ export class TenantPrebuilds extends TenantSessions {
         now,
       );
     });
+  }
+
+  private async armDispatch(tenantId: string, prebuildId: string, now: number): Promise<Prebuild> {
     await this.prebuildTimers(tenantId, prebuildId, {
       PrebuildDispatch: { prebuildId, at: now + settingsOf(this.env).prebuildDispatchBudgetSeconds * 1000 },
     });
@@ -302,11 +370,11 @@ export class TenantPrebuilds extends TenantSessions {
     return failed;
   }
 
-  async recordPrebuildBuilding(tenantId: string, prebuildId: string, run: PrebuildRun, now: number): Promise<boolean> {
+  async recordPrebuildBuilding(tenantId: string, prebuildId: string, run: PrebuildRun, now: number): Promise<void> {
     const recorded = this.recordedRun(prebuildId);
     const prebuild = this.getPrebuild(tenantId, prebuildId);
     if (recorded.kind === "NoRun" || recorded.run.runId !== run.runId || prebuild?.status.state !== "Dispatched") {
-      return false;
+      return;
     }
     if (recorded.run.headSha !== run.headSha) {
       await this.failPrebuild(
@@ -321,19 +389,18 @@ export class TenantPrebuilds extends TenantSessions {
         prebuild.logUrl,
         now,
       );
-      return false;
+      return;
     }
     const moved = this.ctx.storage.sql.exec(
       "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
       now,
       prebuildId,
     ).rowsWritten;
-    if (moved === 0) return false;
+    if (moved === 0) return;
     await this.prebuildTimers(tenantId, prebuildId, {
       PrebuildDispatch: null,
       PrebuildBuild: { prebuildId, at: now + settingsOf(this.env).prebuildBuildBudgetSeconds * 1000 },
     });
-    return true;
   }
 
   async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
@@ -414,41 +481,48 @@ export class TenantPrebuilds extends TenantSessions {
 
   async dispatchPrebuild(
     tenantId: string,
-    target: GitHubRepository,
     callerWorkflow: string,
     start: PrebuildStartRecord,
-    inputs: PrebuildInputs,
     now: number,
   ): Promise<DispatchedPrebuild> {
+    const { prebuildId, target } = start;
     const minted: Minted = await this.repositoryToken(tenantId, target, now);
     if (minted.kind === "NoToken") return { kind: "NoInstallation" };
     if (minted.kind !== "Minted") return { kind: "Refused", detail: minted.detail };
-    return this.ctx.blockConcurrencyWhile(async (): Promise<DispatchedPrebuild> => {
-      const run = await dispatchCallerWorkflow(
+    const inputs: PrebuildInputs = {
+      prebuildId,
+      tenantId,
+      apiOrigin: start.apiOrigin,
+      rootfsUrl: start.rootfsUrl,
+      imageDigest: start.key.guestImageDigest,
+    };
+    const run = await this.ctx.blockConcurrencyWhile(async (): Promise<GitHubAnswer<DispatchedRun>> => {
+      const answer = await dispatchCallerWorkflow(
         (url, init) => fetch(url, init),
         this.env.GITHUB_API_ORIGIN,
         minted.token,
         target,
         { callerWorkflow, ref: start.defaultBranch, inputs },
       );
-      if (!run.ok) {
-        return { kind: "Refused", detail: `${run.detail}, dispatching ${callerWorkflow} of ${start.key.repository}` };
-      }
-      const prebuild = await this.recordDispatchedPrebuild(
-        tenantId,
+      if (!answer.ok) return answer;
+      this.writeDispatchedPrebuild(
         {
-          prebuildId: start.prebuildId,
+          prebuildId,
           personaId: start.personaId,
           key: start.key,
           defaultBranch: start.defaultBranch,
           provider: "GitHubActions",
-          run: { runId: run.value.runId, headSha: start.headSha },
-          logUrl: run.value.htmlUrl,
+          run: { runId: answer.value.runId, headSha: start.headSha },
+          logUrl: answer.value.htmlUrl,
         },
         now,
       );
-      return { kind: "Dispatched", prebuild };
+      return answer;
     });
+    if (!run.ok) {
+      return { kind: "Refused", detail: `${run.detail}, dispatching ${callerWorkflow} of ${start.key.repository}` };
+    }
+    return { kind: "Dispatched", prebuild: await this.armDispatch(tenantId, prebuildId, now) };
   }
 
   uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {
@@ -558,7 +632,11 @@ export class TenantPrebuilds extends TenantSessions {
   connectedAccounts(): Record<BuildProvider, string | null> {
     const account = (provider: BuildProvider): string | null =>
       this.connectionRow<{ account_label: string }>(provider)?.account_label ?? null;
-    return { GitHubActions: account("GitHubActions"), Namespace: account("Namespace") };
+    return {
+      GitHubActions: account("GitHubActions"),
+      CircleCI: account("CircleCI"),
+      Namespace: account("Namespace"),
+    };
   }
 
   buildProviderConnected(provider: BuildProvider): boolean {
@@ -566,7 +644,100 @@ export class TenantPrebuilds extends TenantSessions {
   }
 
   deleteBuildConnection(provider: BuildProvider): boolean {
-    return this.ctx.storage.sql.exec(`DELETE FROM ${CONNECTION_TABLES[provider]}`).rowsWritten > 0;
+    return this.ctx.storage.transactionSync(() => {
+      if (provider === "CircleCI") this.ctx.storage.sql.exec("DELETE FROM circleci_projects");
+      return this.ctx.storage.sql.exec(`DELETE FROM ${CONNECTION_TABLES[provider]}`).rowsWritten > 0;
+    });
+  }
+
+  circleCIConnection(): CircleCIRow | null {
+    const row = this.connectionRow<{
+      circleci_connection_id: string;
+      account_label: string;
+      organization_id: string;
+      created_at: number;
+      updated_at: number;
+    }>("CircleCI");
+    if (row === null) return null;
+    return {
+      circleCIConnectionId: row.circleci_connection_id,
+      accountLabel: row.account_label,
+      organizationId: row.organization_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async circleCIToken(): Promise<string | null> {
+    const row = this.connectionRow<{ api_token_sealed: string }>("CircleCI");
+    if (row === null) return null;
+    return unseal(
+      await this.dataKey(),
+      row.api_token_sealed,
+      CIRCLECI_TOKEN_CONTEXT,
+      "connect CircleCI again with tumpel circleci start --token-stdin",
+    );
+  }
+
+  async connectCircleCI(start: CircleCIConnectionStart, now: number): Promise<CircleCIRow> {
+    await this.holdDataKey();
+    const sealed = await seal(await this.dataKey(), start.apiToken, CIRCLECI_TOKEN_CONTEXT);
+    this.ctx.storage.sql.exec(
+      `INSERT INTO circleci_connections (connection_slot, circleci_connection_id, account_label, organization_id, api_token_sealed,
+      created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET
+      account_label = excluded.account_label, organization_id = excluded.organization_id,
+      api_token_sealed = excluded.api_token_sealed, updated_at = excluded.updated_at`,
+      crypto.randomUUID(),
+      start.accountLabel,
+      start.organizationId,
+      sealed,
+      now,
+      now,
+    );
+    const connection = this.circleCIConnection();
+    if (connection === null) throw new Error("the CircleCI connection was written and then not found");
+    return connection;
+  }
+
+  listCircleCIProjects(tenantId: string): CircleCIProject[] {
+    return this.ctx.storage.sql
+      .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects ORDER BY repository")
+      .toArray()
+      .map((row) => toCircleCIProject(tenantId, row));
+  }
+
+  circleCIProjectOf(tenantId: string, repository: string): CircleCIProject | null {
+    const [row] = this.ctx.storage.sql
+      .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects WHERE repository = ?", repository)
+      .toArray();
+    return row === undefined ? null : toCircleCIProject(tenantId, row);
+  }
+
+  addCircleCIProject(tenantId: string, binding: CircleCIBinding, now: number): CircleCIProjectAdded {
+    const held = this.circleCIProjectOf(tenantId, binding.repository);
+    if (held !== null) return { kind: "Bound", project: held };
+    this.ctx.storage.sql.exec(
+      `INSERT INTO circleci_projects (circleci_project_id, repository, project_slug, project_id, pipeline_definition_id,
+      created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      crypto.randomUUID(),
+      binding.repository,
+      binding.projectSlug,
+      binding.projectId,
+      binding.pipelineDefinitionId,
+      now,
+      now,
+    );
+    const project = this.circleCIProjectOf(tenantId, binding.repository);
+    if (project === null)
+      throw new Error(`the CircleCI binding of ${binding.repository} was written and then not found`);
+    return { kind: "Added", project };
+  }
+
+  deleteCircleCIProject(circleCIProjectId: string): boolean {
+    return (
+      this.ctx.storage.sql.exec("DELETE FROM circleci_projects WHERE circleci_project_id = ?", circleCIProjectId)
+        .rowsWritten > 0
+    );
   }
 
   gitHubActionsConnection(tenantId: string): GitHubActionsConnection | null {

@@ -1,4 +1,6 @@
 import {
+  CircleCIConnectionLinkSchema,
+  CircleCIConnectionStartSchema,
   ConnectedConnectionSchema,
   type ConnectionSummarySchema,
   GitHubActionsConnectionLinkSchema,
@@ -9,6 +11,7 @@ import {
   NotConnectedConnectionSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import { CIRCLECI_CONFIG_EXAMPLE, CIRCLECI_ORB, circleCIIssuer, readMe } from "./circleci.ts";
 import { CALLER_WORKFLOW_EXAMPLE, REUSABLE_WORKFLOW } from "./github-actions.ts";
 import { installationsOf, storedApp } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
@@ -16,7 +19,7 @@ import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { issuerSubject } from "./issuer.ts";
 import { ownerRequired } from "./members";
-import type { BuildProvider, NamespaceRow } from "./tenant-prebuilds";
+import type { BuildProvider, CircleCIRow, NamespaceRow } from "./tenant-prebuilds";
 
 export type ConnectionSummary = z.infer<typeof ConnectionSummarySchema>;
 
@@ -25,13 +28,15 @@ type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 const CONNECTIONS_PATH = "/v1/connections";
 const PATHS: Record<BuildProvider, string> = {
   GitHubActions: "/v1/github-actions-connection",
+  CircleCI: "/v1/circleci-connection",
   Namespace: "/v1/namespace-connection",
 };
 const OPERATIONS: Record<BuildProvider, string> = {
   GitHubActions: "gitHubActionsConnections",
+  CircleCI: "circleCIConnections",
   Namespace: "namespaceConnections",
 };
-const BUILD_PROVIDERS: readonly BuildProvider[] = ["GitHubActions", "Namespace"];
+const BUILD_PROVIDERS: readonly BuildProvider[] = ["GitHubActions", "CircleCI", "Namespace"];
 const NAMESPACE_AUDIENCE = "federation.namespaceapis.com";
 
 const stageIssuer = (issuerHostname: string | undefined): string | null =>
@@ -61,6 +66,7 @@ export const listConnections = async (env: Env, caller: Caller): Promise<Connect
   return [
     summary("GitHub", logins === "" ? null : logins, app !== null),
     summary("GitHubActions", accounts.GitHubActions, true),
+    summary("CircleCI", accounts.CircleCI, true),
     summary("Namespace", accounts.Namespace, stageIssuer(env.ISSUER_HOSTNAME) !== null),
   ];
 };
@@ -91,6 +97,30 @@ const namespaceLink = (tenantId: string, issuer: string | null, row: NamespaceRo
   };
 };
 
+const circleCILink = (env: Env, tenantId: string, row: CircleCIRow | null): unknown => {
+  const link =
+    row === null
+      ? { state: "NotConnected" }
+      : {
+          state: "Connected",
+          connection: {
+            circleCIConnectionId: row.circleCIConnectionId,
+            tenantId,
+            accountLabel: row.accountLabel,
+            organizationId: row.organizationId,
+            issuer: circleCIIssuer(env.CIRCLECI_OIDC_ORIGIN, row.organizationId),
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+          },
+        };
+  return CircleCIConnectionLinkSchema.parse({
+    tenantId,
+    link,
+    orb: CIRCLECI_ORB,
+    configExample: CIRCLECI_CONFIG_EXAMPLE,
+  });
+};
+
 const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Promise<unknown> => {
   const tenant = tenantOf(env, caller);
   const { tenantId } = caller;
@@ -103,6 +133,7 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Prom
       callerWorkflowExample: CALLER_WORKFLOW_EXAMPLE,
     });
   }
+  if (provider === "CircleCI") return circleCILink(env, tenantId, await tenant.circleCIConnection());
   return NamespaceConnectionLinkSchema.parse({
     tenantId,
     link: namespaceLink(tenantId, stageIssuer(env.ISSUER_HOSTNAME), await tenant.namespaceConnection()),
@@ -116,6 +147,21 @@ const connect = async (request: Request, env: Env, caller: Caller, provider: Bui
     const body = await parseBody(request, GitHubActionsConnectionStartSchema, "gitHubActionsConnections.start");
     if (!body.ok) return body.response;
     await tenant.connectGitHubActions(caller.tenantId, body.value, now);
+    return json(await readLink(env, caller, provider));
+  }
+  if (provider === "CircleCI") {
+    const body = await parseBody(request, CircleCIConnectionStartSchema, "circleCIConnections.start");
+    if (!body.ok) return body.response;
+    const me = await readMe((url, init) => fetch(url, init), env.CIRCLECI_API_ORIGIN, body.value.apiToken);
+    if (!me.ok) {
+      return problem(422, {
+        code: "CircleCITokenRefused",
+        title: "CircleCI refused the token",
+        detail: `${me.detail}; the token was not stored`,
+        fix: "Create a personal API token at https://app.circleci.com/settings/user/tokens as a member of the organization, then connect again with tumpel circleci start --token-stdin; CircleCI's API v2 refuses project tokens",
+      });
+    }
+    await tenant.connectCircleCI(body.value, now);
     return json(await readLink(env, caller, provider));
   }
   const body = await parseBody(request, NamespaceConnectionStartSchema, "namespaceConnections.start");

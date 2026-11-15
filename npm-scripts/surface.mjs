@@ -28,6 +28,8 @@ const NOUNS = {
   Prebuilds: "prebuild",
   Connections: "connection",
   GitHubActionsConnections: "github-actions",
+  CircleCIConnections: "circleci",
+  CircleCIProjects: "circleci project",
   NamespaceConnections: "namespace",
   TenantConfigs: "config",
   OAuthGrants: "oauth-grant",
@@ -48,7 +50,7 @@ const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase(
 const namesFor = (operationId) => {
   const [group, op = ""] = operationId.split("_");
   const parts = [NOUNS[group] ?? kebab(group), VERBS[operationId] ?? kebab(op)].filter(Boolean);
-  return { tool: `tumpel_${parts.join("_").replaceAll("-", "_")}`, command: `tumpel ${parts.join(" ")}` };
+  return { tool: `tumpel_${parts.join("_").replaceAll(/[- ]/g, "_")}`, command: `tumpel ${parts.join(" ")}` };
 };
 
 const operations = () => {
@@ -118,11 +120,11 @@ const commands = () => {
       })),
     );
   }
-  return new Set(
-    (enums.get("Command") ?? []).flatMap(({ name, nested }) =>
-      nested ? (enums.get(nested) ?? []).map((sub) => `tumpel ${name} ${sub.name}`) : [`tumpel ${name}`],
-    ),
-  );
+  const expand = (prefix, enumName) =>
+    (enums.get(enumName) ?? []).flatMap(({ name, nested }) =>
+      nested ? [`${prefix} ${name}`, ...expand(`${prefix} ${name}`, nested)] : [`${prefix} ${name}`],
+    );
+  return new Set(expand("tumpel", "Command"));
 };
 
 const table = ([header, ...body]) => {
