@@ -233,7 +233,7 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
 };
 
 export const withSupervisorUpdates = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
-  const updates = await env.TENANT.getByName(tenantId).supervisorUpdates();
+  const updates = await env.TENANT.getByName(tenantId).supervisorUpdates(hosts.map((host) => host.hostId));
   return hosts.map((host) => ({ ...host, ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES) }));
 };
 

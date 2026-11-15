@@ -34,32 +34,26 @@ export const NO_SUPERVISOR_UPDATES: SupervisorUpdates = {
   supervisorUpdateFailure: NOT_REPORTED,
 };
 
-export const recordSupervisorUpdate = (
-  sql: SqlStorage,
-  hostId: string,
-  message: SupervisorUpdateMessage,
-  now: number,
-): void => {
+export const recordSupervisorUpdate = (sql: SqlStorage, hostId: string, message: SupervisorUpdateMessage): void => {
   if (message.type === "SupervisorUpdateStep") {
     sql.exec(
-      `INSERT INTO supervisor_update_latest_steps (host_id, from_sha256, to_sha256, phase, at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO supervisor_update_latest_steps (host_id, from_sha256, to_sha256, phase, at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (host_id) DO UPDATE SET from_sha256 = excluded.from_sha256, to_sha256 = excluded.to_sha256,
-        phase = excluded.phase, at = excluded.at, updated_at = excluded.updated_at`,
+        phase = excluded.phase, at = excluded.at`,
       hostId,
       message.fromSha256,
       message.toSha256,
       message.phase,
       message.at,
-      now,
     );
     return;
   }
   sql.exec(
-    `INSERT INTO supervisor_update_latest_failures (host_id, from_sha256, to_sha256, reason, detail, output_tail, failed_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO supervisor_update_latest_failures (host_id, from_sha256, to_sha256, reason, detail, output_tail, failed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (host_id) DO UPDATE SET from_sha256 = excluded.from_sha256, to_sha256 = excluded.to_sha256,
       reason = excluded.reason, detail = excluded.detail, output_tail = excluded.output_tail,
-      failed_at = excluded.failed_at, updated_at = excluded.updated_at`,
+      failed_at = excluded.failed_at`,
     hostId,
     message.fromSha256,
     message.toSha256,
@@ -67,18 +61,20 @@ export const recordSupervisorUpdate = (
     message.detail,
     JSON.stringify(message.outputTail),
     message.failedAt,
-    now,
   );
 };
 
-export const supervisorUpdatesByHost = (sql: SqlStorage): Record<string, SupervisorUpdates> => {
+export const supervisorUpdatesByHost = (sql: SqlStorage, hostIds: string[]): Record<string, SupervisorUpdates> => {
   const byHost: Record<string, SupervisorUpdates> = {};
   const of = (hostId: string): SupervisorUpdates => {
     byHost[hostId] ??= { ...NO_SUPERVISOR_UPDATES };
     return byHost[hostId];
   };
   for (const row of sql
-    .exec<StepRow>("SELECT host_id, from_sha256, to_sha256, phase, at FROM supervisor_update_latest_steps")
+    .exec<StepRow>(
+      "SELECT host_id, from_sha256, to_sha256, phase, at FROM supervisor_update_latest_steps WHERE host_id IN (SELECT value FROM json_each(?))",
+      JSON.stringify(hostIds),
+    )
     .toArray()) {
     of(row.host_id).supervisorUpdateStep = {
       state: "Reported",
@@ -87,7 +83,8 @@ export const supervisorUpdatesByHost = (sql: SqlStorage): Record<string, Supervi
   }
   for (const row of sql
     .exec<FailureRow>(
-      "SELECT host_id, from_sha256, to_sha256, reason, detail, output_tail, failed_at FROM supervisor_update_latest_failures",
+      "SELECT host_id, from_sha256, to_sha256, reason, detail, output_tail, failed_at FROM supervisor_update_latest_failures WHERE host_id IN (SELECT value FROM json_each(?))",
+      JSON.stringify(hostIds),
     )
     .toArray()) {
     of(row.host_id).supervisorUpdateFailure = {
