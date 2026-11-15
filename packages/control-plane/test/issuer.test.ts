@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, verify } from "node:crypto";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { IssuerJwksSchema } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { d1Issuer, ISSUER_KEY_OVERLAP_MS, type IssuerDatabase, type IssuerJwk } from "../src/issuer.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
@@ -90,4 +91,27 @@ test("after a rotation both keys verify until the old one retires, and then the 
   );
   assert.ok(!verifies(before.token, retired));
   assert.ok(verifies(after.token, retired));
+});
+
+test("the issuer hostname serves the discovery document and the JWKS, and nothing else", async () => {
+  const configuration = await server.fetch(`${ISSUER}/.well-known/openid-configuration`);
+  assert.equal(configuration.status, 200);
+  assert.deepEqual(await configuration.json(), {
+    issuer: ISSUER,
+    jwks_uri: `${ISSUER}/.well-known/jwks.json`,
+    response_types_supported: ["id_token"],
+    subject_types_supported: ["public"],
+    id_token_signing_alg_values_supported: ["RS256"],
+  });
+
+  const jwks = await server.fetch(`${ISSUER}/.well-known/jwks.json`);
+  assert.equal(jwks.status, 200);
+  const { keys } = IssuerJwksSchema.parse(await jwks.json());
+  assert.ok(keys.length >= 1);
+  assert.ok(keys.every((key) => key.kty === "RSA" && key.alg === "RS256" && key.use === "sig"));
+
+  for (const path of ["/healthz", "/v1/whoami", "/.well-known/oauth-authorization-server"]) {
+    assert.equal((await server.fetch(`${ISSUER}${path}`)).status, 404, path);
+  }
+  assert.equal((await server.fetch("https://api.test.tumpel.dev/.well-known/jwks.json")).status, 404);
 });

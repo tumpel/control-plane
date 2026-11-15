@@ -6,7 +6,7 @@ fails when an operation lacks a tool or a command, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`.
+Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, IssuerTokens `issuer`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`.
 `EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in
@@ -34,6 +34,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Hosts_revoke`                     | `tumpel_host_revoke`           | `tumpel host revoke`           |
 | `Hosts_setLabels`                  | `tumpel_host_set_labels`       | `tumpel host set-labels`       |
 | `Identity_whoami`                  | `tumpel_whoami`                | `tumpel whoami`                |
+| `IssuerTokens_mint`                | `tumpel_issuer_mint`           | `tumpel issuer mint`           |
 | `Personas_create`                  | `tumpel_persona_create`        | `tumpel persona create`        |
 | `Personas_delete`                  | `tumpel_persona_delete`        | `tumpel persona delete`        |
 | `Personas_get`                     | `tumpel_persona_get`           | `tumpel persona get`           |
@@ -64,4 +65,4 @@ nothing: the server cannot read your environment, so they return the config entr
 Excluded by rule:
 
 - browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `IssuerKeys_rotate`, `Tenants_signUp`.
-- OAuth, device-flow, enrolment and host download wire: no principal: `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`, `Releases_supervisor`.
+- OAuth, device-flow, enrolment and host download wire: no principal: `WellKnown_jwks`, `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `WellKnown_openIdConfiguration`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`, `Releases_supervisor`.

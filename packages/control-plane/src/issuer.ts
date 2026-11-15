@@ -1,4 +1,4 @@
-import { IssuerJwkSchema } from "@tumpel/api/schemas";
+import { IssuerJwkSchema, type OpenIdConfigurationSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { fromBase64, generateDataKey, seal, toBase64, unseal } from "./envelope.ts";
 import { type KeyStore, keyStoreOf } from "./key-store.ts";
@@ -8,6 +8,20 @@ export type IssuerClaims = Record<string, string>;
 
 export const ISSUER_TOKEN_TTL_SECONDS = 300;
 export const ISSUER_KEY_OVERLAP_MS = 86_400_000;
+export const OPENID_CONFIGURATION_PATH = "/.well-known/openid-configuration";
+export const JWKS_PATH = "/.well-known/jwks.json";
+export const ISSUER_DOCUMENT_HEADERS = { "cache-control": "public, max-age=3600", "access-control-allow-origin": "*" };
+
+export const issuerSubject = (tenantId: string, personaName: string): string =>
+  `tenant:${tenantId}:persona:${personaName}:job:prebuild`;
+
+export const openIdConfiguration = (issuer: string): z.infer<typeof OpenIdConfigurationSchema> => ({
+  issuer,
+  jwks_uri: `${issuer}${JWKS_PATH}`,
+  response_types_supported: ["id_token"],
+  subject_types_supported: ["public"],
+  id_token_signing_alg_values_supported: ["RS256"],
+});
 
 export interface IssuedToken {
   token: string;
