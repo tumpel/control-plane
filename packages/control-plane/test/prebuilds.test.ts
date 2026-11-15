@@ -294,7 +294,6 @@ test("the latest listing answers the newest prebuild of each repository, by repo
           personaId: persona.personaId,
           key: { repository, inputDigest: seed.repeat(64), guestImageDigest: "c".repeat(64) },
           configSource: "Default",
-          defaultCommands: ["npm ci"],
           defaultBranch: "main",
           headSha: "f".repeat(40),
           rootfsKey: "images/claude-code/1/amd64/rootfs/x",
