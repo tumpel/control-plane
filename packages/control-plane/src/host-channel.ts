@@ -75,6 +75,16 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
+  releasePublished(releaseVersion: string): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket.readyState !== WebSocket.READY_STATE_OPEN) continue;
+      const attachment = this.attachment(socket);
+      if (attachment.connection.phase !== "Open") continue;
+      this.port(socket, attachment).send({ type: "ReleasePublished", releaseVersion });
+      socket.serializeAttachment(attachment);
+    }
+  }
+
   async send(message: StoredControlMessage): Promise<void> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);

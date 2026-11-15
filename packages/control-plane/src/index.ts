@@ -173,6 +173,7 @@ import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./pe
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
+import { noticeRelease } from "./release-notices.ts";
 import { cliKey, currentRelease, imagesFor, type ReleaseManifest, readRelease, supervisorKey } from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
@@ -1522,5 +1523,12 @@ export default {
       return new Response(null, { status: 204, headers: { ...cors, "cache-control": "no-store" } });
     }
     return withHeaders(await dispatch(request, url, env), cors);
+  },
+  async queue(batch, env): Promise<void> {
+    await noticeRelease(
+      env,
+      batch.messages.map((message) => message.body),
+      Date.now(),
+    );
   },
 } satisfies ExportedHandler<Env>;
