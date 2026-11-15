@@ -1,8 +1,4 @@
-import {
-  GitHubAccountKindSchema,
-  GitHubAccountRoleSchema,
-  GitHubAccountUnavailableReasonSchema,
-} from "@tumpel/api/schemas";
+import { GitHubAccountRoleSchema } from "@tumpel/api/schemas";
 import { z } from "zod";
 
 const GitHubIdSchema = z.int().min(1);
@@ -25,6 +21,14 @@ export const GitHubInstallStateSchema = z.object({
   expiresAt: OffsetDateTimeSchema,
   returnUrl: z.string().url().optional(),
   gitHubAccountId: GitHubIdSchema.optional(),
+});
+
+export const GitHubAccountsRefreshStateSchema = z.object({
+  purpose: z.literal("AccountsRefresh"),
+  tenantId: TenantIdSchema,
+  email: EmailSchema,
+  expiresAt: OffsetDateTimeSchema,
+  returnUrl: z.string().url(),
 });
 
 export const GitHubInstallerIdentityStateSchema = z.object({
@@ -123,7 +127,7 @@ export const GitHubAppConversionSchema = z.object({
 
 export const GitHubInstallationRecordSchema = z.object({
   id: GitHubIdSchema,
-  account: z.object({ login: GitHubLoginSchema, type: z.enum(["User", "Organization"]) }),
+  account: z.object({ id: GitHubIdSchema, login: GitHubLoginSchema, type: z.enum(["User", "Organization"]) }),
 });
 
 export const GitHubInstallationChoiceStateSchema = z.object({
@@ -146,13 +150,8 @@ export const GitHubUserInstallationsSchema = z.object({
   installations: z.array(z.object({ id: GitHubIdSchema }).loose()),
 });
 
-export const GitHubReachableInstallationSchema = z.object({
-  id: GitHubIdSchema,
-  account: z.object({ id: GitHubIdSchema, login: GitHubLoginSchema, type: z.enum(["User", "Organization"]) }),
-});
-
 export const GitHubReachableInstallationsSchema = z.object({
-  installations: z.array(z.unknown()),
+  installations: z.array(GitHubInstallationRecordSchema),
 });
 
 export const GitHubOrganizationMembershipsSchema = z.array(
@@ -162,25 +161,13 @@ export const GitHubOrganizationMembershipsSchema = z.array(
   }),
 );
 
-const StoredAccountFields = {
-  gitHubAccountId: GitHubIdSchema,
-  login: GitHubLoginSchema,
-  kind: GitHubAccountKindSchema,
-  role: GitHubAccountRoleSchema,
-};
-
-export const StoredGitHubAccountSchema = z.discriminatedUnion("standing", [
-  z.object({ ...StoredAccountFields, standing: z.literal("Open") }),
-  z.object({ ...StoredAccountFields, standing: z.literal("Requested") }),
-  z.object({
-    ...StoredAccountFields,
-    standing: z.literal("Unavailable"),
-    installationId: GitHubIdSchema,
-    reason: GitHubAccountUnavailableReasonSchema,
-  }),
-]);
-
-export const StoredGitHubAccountsSchema = z.array(StoredGitHubAccountSchema);
+export const GitHubReadingSchema = z.object({
+  user: z.object({ githubUserId: GitHubIdSchema, login: GitHubLoginSchema }),
+  organizations: z.array(
+    z.object({ gitHubAccountId: GitHubIdSchema, login: GitHubLoginSchema, role: GitHubAccountRoleSchema }),
+  ),
+  installations: z.array(GitHubInstallationRecordSchema),
+});
 
 export const GitHubInstallationTokenSchema = z.object({
   token: z.string(),

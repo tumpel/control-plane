@@ -419,7 +419,7 @@ test("a tenant holds an installation per account, a suspension changes only that
   )
     .bind(INSTALLATION_ID + 1, tenantId, "octo", Date.now(), Date.now())
     .run();
-  const octo = { id: INSTALLATION_ID + 1, account: { login: "octo", type: "User" } };
+  const octo = { id: INSTALLATION_ID + 1, account: { id: 4242, login: "octo", type: "User" } };
   const sender = { id: 4242, login: "octo" };
 
   await signedDelivery("installation", { action: "suspend", installation: octo, sender });
@@ -440,8 +440,8 @@ test("a tenant holds an installation per account, a suspension changes only that
 
 test("connecting another account from Tumpel adds its installation and keeps the one the tenant held", async () => {
   const db = (await server.getWorker<{ DB: Parameters<typeof linkInstallation>[0] }>().getEnv()).DB;
-  const kattebak = { id: 91, account: { login: "kattebak", type: "User" as const } };
-  const tumpel = { id: 92, account: { login: "tumpel", type: "Organization" as const } };
+  const kattebak = { id: 91, account: { id: 191, login: "kattebak", type: "User" as const } };
+  const tumpel = { id: 92, account: { id: 192, login: "tumpel", type: "Organization" as const } };
   assert.equal((await linkInstallation(db, tenantId, kattebak, Date.now())).kind, "Linked");
   assert.equal((await linkInstallation(db, tenantId, tumpel, Date.now())).kind, "Linked");
   assert.equal((await linkInstallation(db, tenantId, kattebak, Date.now())).kind, "Linked");

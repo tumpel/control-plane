@@ -5,8 +5,10 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  GitHubAccountListSchema,
   GitHubInstallStartSchema,
   GitHubIssueSchema,
+  GitHubRefreshStartSchema,
   GitHubRepositorySchema,
   OAuthClientSchema,
   OAuthTokenSchema,
@@ -287,7 +289,7 @@ const oauthClient = { clientId: "Iv23client", clientSecret: "client-secret" };
 const origins = { api: "https://api.github.com", web: "https://github.com" };
 
 test("an installation is accessible only when the authorized account can access it", async () => {
-  const record = { id: 7, account: { login: "octo", type: "User" } };
+  const record = { id: 7, account: { id: 1, login: "octo", type: "User" } };
   const listed = { total_count: 1, installations: [record] };
   const exchanged: [number, unknown] = [200, { access_token: "ghu_user", token_type: "bearer", scope: "" }];
 
@@ -316,8 +318,8 @@ test("an installation is accessible only when the authorized account can access 
   assert.equal(spent.calls.length, 1);
 });
 
-test("a personal account links only to its own login, and an organization only to its recorded installer", () => {
-  const personal = { id: 7, account: { login: "octo", type: "User" as const } };
+test("a personal account links only to its own account id, and an organization only to its recorded installer", () => {
+  const personal = { id: 7, account: { id: 1, login: "octo", type: "User" as const } };
   assert.deepEqual(installedBy({ githubUserId: 1, login: "Octo" }, personal, { kind: "Unrecorded" }), {
     kind: "Installer",
     installation: personal,
@@ -327,7 +329,7 @@ test("a personal account links only to its own login, and an organization only t
     "NotInstaller",
   );
 
-  const organization = { id: 9, account: { login: "acme", type: "Organization" as const } };
+  const organization = { id: 9, account: { id: 900, login: "acme", type: "Organization" as const } };
   const owner = { githubUserId: 5, login: "owner" };
   assert.equal(installedBy(owner, organization, { kind: "Unrecorded" }).kind, "InstallerUnknown");
   assert.deepEqual(installedBy(owner, organization, { kind: "Recorded", githubUserId: 5 }), {
@@ -491,6 +493,13 @@ const ORG_INSTALLATION = { id: 88, account: { id: 500, login: "victimorg", type:
 const MALLORY_INSTALLATION = { id: 77, account: { id: 3, login: "mallory", type: "User" } };
 const VICTIM_INSTALLATION = { id: 66, account: { id: 1, login: "victim", type: "User" } };
 const VICTIM_ORG = { role: "admin", state: "active", organization: { id: 500, login: "victimorg" } };
+const RIVAL = "rival@example.test";
+const MULTI = "multi@example.test";
+const SHARED_ORG = { id: 120, account: { id: 700, login: "sharedorg", type: "Organization" } };
+const MULTI_PERSONAL = { id: 121, account: { id: 21, login: "multi", type: "User" } };
+const MULTI_ORG = { id: 122, account: { id: 701, login: "multiorg", type: "Organization" } };
+const SHARED_MEMBERSHIP = { role: "admin", state: "active", organization: { id: 700, login: "sharedorg" } };
+const MULTI_MEMBERSHIP = { role: "admin", state: "active", organization: { id: 701, login: "multiorg" } };
 const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[]; organizations: unknown[] }> =
   {
     ghu_victim: {
@@ -501,6 +510,13 @@ const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: 
     },
     ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION], organizations: [VICTIM_ORG] },
     ghu_mallory: { id: 3, login: "mallory", installations: [MALLORY_INSTALLATION], organizations: [] },
+    ghu_rival: { id: 20, login: "rival", installations: [SHARED_ORG], organizations: [SHARED_MEMBERSHIP] },
+    ghu_multi: {
+      id: 21,
+      login: "multi",
+      installations: [MULTI_PERSONAL, MULTI_ORG, SHARED_ORG],
+      organizations: [MULTI_MEMBERSHIP, SHARED_MEMBERSHIP],
+    },
   };
 
 interface Database {
@@ -761,18 +777,43 @@ const delivered = async (installation: unknown, senderId: number): Promise<numbe
   return answered.status;
 };
 
-test("a refresh returns only to a page on the dashboard's origin", async () => {
-  const headers = await bearerFor(VICTIM, victimTenant);
-  const elsewhere = await call(`/v1/github-connection/refresh?${form({ returnUrl: "https://evil.test/t/x" })}`, {
-    method: "POST",
-    headers,
-  });
-  assert.equal(elsewhere.status, 400);
-  const dashboard = await call(
+const refreshedBy = async (email: string, tenantId: string, code: string): Promise<HarnessResponse> => {
+  const started = await call(
     `/v1/github-connection/refresh?${form({ returnUrl: "https://app.tumpel.test/t/x/connections" })}`,
-    { method: "POST", headers },
+    {
+      method: "POST",
+      headers: await bearerFor(email, tenantId),
+    },
   );
-  assert.equal(dashboard.status, 200);
+  assert.equal(started.status, 200);
+  const authorizeAt = new URL(GitHubRefreshStartSchema.parse(await started.json()).authorizeUrl);
+  return identified(email, code, authorizeAt.searchParams.get("state") ?? "");
+};
+
+test("one return links every installation the person installed and never moves one another tenant holds", async () => {
+  const rivalTenant = await signUp(RIVAL, "Rival");
+  const multiTenant = await signUp(MULTI, "Multi");
+  assert.equal(await delivered(SHARED_ORG, 20), 204);
+  assert.equal((await refreshedBy(RIVAL, rivalTenant, "rival-code")).status, 303);
+  assert.equal(await linkedTenant(120), rivalTenant);
+
+  assert.equal(await delivered(SHARED_ORG, 21), 204);
+  assert.equal(await delivered(MULTI_ORG, 21), 204);
+  const back = await refreshedBy(MULTI, multiTenant, "multi-code");
+  assert.equal(back.status, 303);
+  assert.equal(new URL(back.headers.get("location") ?? "").searchParams.get("from"), "github");
+  assert.equal(await linkedTenant(121), multiTenant);
+  assert.equal(await linkedTenant(122), multiTenant);
+  assert.equal(await linkedTenant(120), rivalTenant);
+
+  const answered = await call("/v1/github-connection/accounts", { headers: await bearerFor(MULTI, multiTenant) });
+  const listed = GitHubAccountListSchema.parse(await answered.json());
+  assert.deepEqual(
+    listed.accounts.map((account) =>
+      account.state === "Installed" ? `Installed ${account.installationId}` : `${account.state} ${account.login}`,
+    ),
+    ["Installed 121", "Installed 122", "Unavailable sharedorg"],
+  );
 });
 
 test("an organization install connects only for the GitHub account its installation notice names, whichever arrives first", async () => {

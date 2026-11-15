@@ -380,7 +380,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/github-connection/accounts",
     NO_ARGUMENTS,
-    "List the GitHub accounts the person named on the tenant's last return from GitHub: their personal account and each organization they belong to. Returns the GitHubAccountList of GET /v1/github-connection/accounts: state Unlisted until someone returns from GitHub, or Listed with refreshedAt and accounts, each with gitHubAccountId, login, kind, role and state Installed (installationId, status, linkedAt), Install, Request, Requested or Unavailable (installationId, reason OtherTenant, NotInstaller or InstallerUnknown).",
+    "List every installation the tenant holds, then the GitHub accounts the person named on the tenant's last return from GitHub: their personal account and each organization they belong to. Returns the GitHubAccountList of GET /v1/github-connection/accounts: state Unlisted with only the installations until someone returns from GitHub, or Listed with refreshedAt; each Installed row has installationId, login, status and linkedAt, every other row gitHubAccountId, login, kind, role and state Install, Request, Requested or Unavailable (installationId, reason OtherTenant, NotInstaller or InstallerUnknown).",
   ),
   rest(
     "tumpel_github_refresh",
