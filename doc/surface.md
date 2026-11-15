@@ -1,8 +1,9 @@
 # Public surface
 
-Every operation a signed-in principal calls over REST is also one MCP tool and one CLI command,
-backed by the same REST handler. `npm run surface` writes this file; `npm run surface:check`
-fails when an operation lacks a tool or a command, or when this file is stale.
+Every tenant operation is one MCP tool and one CLI command, backed by the same REST handler, so an
+MCP session sets up and runs a whole tenant. `npm run surface` writes this file; `npm run surface:check`
+fails when an operation lacks a tool or a command and is not on the allowlist, when an allowlist entry
+names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
@@ -86,8 +87,28 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_list`                         | `tumpel_turn_list`                | `tumpel turn list`                |
 | `Turns_send`                         | `tumpel_turn_send`                | `tumpel turn send`                |
 
-Excluded by rule:
+Allowlist: operations that are not tenant operations, with no tool or command:
 
-- browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `Invitations_accept`, `IssuerKeys_rotate`, `Tenants_signUp`.
-- OAuth, device-flow, enrolment and host download wire: no principal: `WellKnown_jwks`, `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `WellKnown_openIdConfiguration`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_revoke`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`, `Releases_cli`, `Releases_supervisor`.
-- build job wire: the provider's OIDC job token, no principal: `PrebuildUploads_start`, `PrebuildUploads_complete`.
+- `DeviceFlow_approve`: browser-only page behind the identity-aware proxy, signed in by its assertion.
+- `DeviceFlow_deny`: browser-only page behind the identity-aware proxy, signed in by its assertion.
+- `Invitations_accept`: browser-only page behind the identity-aware proxy, signed in by its assertion.
+- `IssuerKeys_rotate`: operator page behind the identity-aware proxy that rotates the stage's issuer keys.
+- `Tenants_signUp`: browser-only page behind the identity-aware proxy, signed in by its assertion.
+- `WellKnown_jwks`: OAuth and OpenID discovery document a client reads before it signs in.
+- `WellKnown_authorizationServer`: OAuth and OpenID discovery document a client reads before it signs in.
+- `WellKnown_authorizationServerForMcp`: OAuth and OpenID discovery document a client reads before it signs in.
+- `WellKnown_protectedResource`: OAuth and OpenID discovery document a client reads before it signs in.
+- `WellKnown_protectedResourceForMcp`: OAuth and OpenID discovery document a client reads before it signs in.
+- `WellKnown_openIdConfiguration`: OAuth and OpenID discovery document a client reads before it signs in.
+- `OAuth_authorize`: OAuth wire a client signs in with before it holds a token.
+- `OAuth_register`: OAuth wire a client signs in with before it holds a token.
+- `OAuth_revoke`: OAuth wire a client signs in with before it holds a token.
+- `OAuth_token`: OAuth wire a client signs in with before it holds a token.
+- `DeviceFlow_start`: device-code wire the CLI signs in with before it holds a token.
+- `DeviceFlow_token`: device-code wire the CLI signs in with before it holds a token.
+- `health`: liveness probe of the control plane, no principal.
+- `Hosts_enrol`: host channel: the supervisor trades its one-time enrolment token for the host's identity.
+- `Releases_cli`: release download the installer and the supervisor fetch without sign-in.
+- `Releases_supervisor`: release download the installer and the supervisor fetch without sign-in.
+- `PrebuildUploads_start`: build job wire, signed by the provider's OIDC job token, never by a principal.
+- `PrebuildUploads_complete`: build job wire, signed by the provider's OIDC job token, never by a principal.

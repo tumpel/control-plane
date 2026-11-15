@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const OPENAPI = join(ROOT, "packages/api/generated/openapi.json");
 const MCP = join(ROOT, "packages/control-plane/src/mcp.ts");
-const SRC = join(ROOT, "packages/control-plane/src");
 const CLI = join(ROOT, "crates/tumpel/src/main.rs");
 const DOC = join(ROOT, "doc/surface.md");
 
@@ -44,7 +43,7 @@ const VERBS = {
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
 const namesFor = (operationId) => {
-  const [group, op] = operationId.split("_");
+  const [group, op = ""] = operationId.split("_");
   const parts = [NOUNS[group] ?? kebab(group), VERBS[operationId] ?? kebab(op)].filter(Boolean);
   return { tool: `tumpel_${parts.join("_").replaceAll("-", "_")}`, command: `tumpel ${parts.join(" ")}` };
 };
@@ -63,32 +62,38 @@ const operations = () => {
   );
 };
 
-const served = readdirSync(SRC, { recursive: true })
-  .filter((file) => String(file).endsWith(".ts"))
-  .map((file) => readFileSync(join(SRC, String(file)), "utf8"))
-  .join("\n");
+const BROWSER_ONLY = "browser-only page behind the identity-aware proxy, signed in by its assertion";
+const OAUTH_WIRE = "OAuth wire a client signs in with before it holds a token";
+const DISCOVERY = "OAuth and OpenID discovery document a client reads before it signs in";
+const DEVICE_WIRE = "device-code wire the CLI signs in with before it holds a token";
+const RELEASE_DOWNLOAD = "release download the installer and the supervisor fetch without sign-in";
+const BUILD_JOB = "build job wire, signed by the provider's OIDC job token, never by a principal";
 
-const PUBLIC_READS = new Set(["Releases_current"]);
-
-const RULES = [
-  {
-    rule: "browser-only: signed in by the identity assertion",
-    matches: (op) => op.security.some((scheme) => "IdentityAssertion" in scheme),
-  },
-  {
-    rule: "OAuth, device-flow, enrolment and host download wire: no principal",
-    matches: (op) =>
-      !PUBLIC_READS.has(op.operationId) && op.security.some((scheme) => Object.keys(scheme).length === 0),
-  },
-  {
-    rule: "build job wire: the provider's OIDC job token, no principal",
-    matches: (op) => op.security.some((scheme) => "ProviderJobToken" in scheme),
-  },
-  {
-    rule: "not served yet: no control-plane route",
-    matches: (op) => !served.includes(op.path.split("/").slice(0, 3).join("/")),
-  },
-];
+const ALLOWLIST = {
+  DeviceFlow_approve: BROWSER_ONLY,
+  DeviceFlow_deny: BROWSER_ONLY,
+  Invitations_accept: BROWSER_ONLY,
+  IssuerKeys_rotate: "operator page behind the identity-aware proxy that rotates the stage's issuer keys",
+  Tenants_signUp: BROWSER_ONLY,
+  WellKnown_jwks: DISCOVERY,
+  WellKnown_authorizationServer: DISCOVERY,
+  WellKnown_authorizationServerForMcp: DISCOVERY,
+  WellKnown_protectedResource: DISCOVERY,
+  WellKnown_protectedResourceForMcp: DISCOVERY,
+  WellKnown_openIdConfiguration: DISCOVERY,
+  OAuth_authorize: OAUTH_WIRE,
+  OAuth_register: OAUTH_WIRE,
+  OAuth_revoke: OAUTH_WIRE,
+  OAuth_token: OAUTH_WIRE,
+  DeviceFlow_start: DEVICE_WIRE,
+  DeviceFlow_token: DEVICE_WIRE,
+  health: "liveness probe of the control plane, no principal",
+  Hosts_enrol: "host channel: the supervisor trades its one-time enrolment token for the host's identity",
+  Releases_cli: RELEASE_DOWNLOAD,
+  Releases_supervisor: RELEASE_DOWNLOAD,
+  PrebuildUploads_start: BUILD_JOB,
+  PrebuildUploads_complete: BUILD_JOB,
+};
 
 const tools = () => new Set([...readFileSync(MCP, "utf8").matchAll(/"(tumpel_[a-z_]+)"/g)].map((match) => match[1]));
 
@@ -117,13 +122,14 @@ const table = ([header, ...body]) => {
   return [line(header), line(widths.map((width) => "-".repeat(width))), ...body.map(line)];
 };
 
-const render = (rows, excluded) =>
+const render = (rows) =>
   [
     "# Public surface",
     "",
-    "Every operation a signed-in principal calls over REST is also one MCP tool and one CLI command,",
-    "backed by the same REST handler. `npm run surface` writes this file; `npm run surface:check`",
-    "fails when an operation lacks a tool or a command, or when this file is stale.",
+    "Every tenant operation is one MCP tool and one CLI command, backed by the same REST handler, so an",
+    "MCP session sets up and runs a whole tenant. `npm run surface` writes this file; `npm run surface:check`",
+    "fails when an operation lacks a tool or a command and is not on the allowlist, when an allowlist entry",
+    "names no operation or one that has a tool, or when this file is stale.",
     "",
     "Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command",
     "`tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:",
@@ -145,29 +151,27 @@ const render = (rows, excluded) =>
       ...rows.map((row) => [row.operationId, row.tool, row.command].map((cell) => `\`${cell}\``)),
     ]),
     "",
-    "Excluded by rule:",
+    "Allowlist: operations that are not tenant operations, with no tool or command:",
     "",
-    ...excluded
-      .filter(({ ids }) => ids.length > 0)
-      .map(({ rule, ids }) => `- ${rule}: ${ids.map((id) => `\`${id}\``).join(", ")}.`),
+    ...Object.entries(ALLOWLIST).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
     "",
   ].join("\n");
 
 const all = operations();
-const ruleOf = (op) => RULES.find(({ matches }) => matches(op))?.rule;
-const excluded = RULES.map(({ rule }) => ({
-  rule,
-  ids: all.filter((op) => ruleOf(op) === rule).map((op) => op.operationId),
-}));
-const excludedIds = new Set(excluded.flatMap(({ ids }) => ids));
 const rows = all
-  .filter((op) => !excludedIds.has(op.operationId))
+  .filter((op) => !(op.operationId in ALLOWLIST))
   .map((op) => ({ ...op, ...namesFor(op.operationId) }))
   .sort((a, b) => a.operationId.localeCompare(b.operationId));
 
 const toolNames = tools();
 const commandNames = commands();
 const failures = [
+  ...Object.keys(ALLOWLIST)
+    .filter((operationId) => !all.some((op) => op.operationId === operationId))
+    .map((operationId) => `the allowlist names ${operationId}, which is no operation`),
+  ...Object.keys(ALLOWLIST)
+    .filter((operationId) => toolNames.has(namesFor(operationId).tool))
+    .map((operationId) => `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the allowlist`),
   ...rows.filter((row) => !toolNames.has(row.tool)).map((row) => `${row.operationId} has no MCP tool ${row.tool}`),
   ...rows
     .filter((row) => !commandNames.has(row.command))
@@ -177,7 +181,7 @@ const failures = [
     .map((tool) => `the MCP tool ${tool} names no operation`),
 ];
 
-const document = render(rows, excluded);
+const document = render(rows);
 if (process.argv.includes("--write")) writeFileSync(DOC, document);
 const current = existsSync(DOC) ? readFileSync(DOC, "utf8") : "";
 if (current !== document) failures.push("doc/surface.md is stale; run npm run surface and commit it");
@@ -187,5 +191,5 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log(
-  `surface: ${rows.length} operations each have an MCP tool and a CLI command; ${excludedIds.size} excluded by rule`,
+  `surface: ${rows.length} operations each have an MCP tool and a CLI command; ${Object.keys(ALLOWLIST).length} allowlisted`,
 );
