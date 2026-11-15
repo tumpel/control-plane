@@ -8,13 +8,20 @@ import {
   PrincipalSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
+import {
+  acceptPage,
+  invitationExpiredPage,
+  invitationNotFoundPage,
+  invitationOtherEmailPage,
+  signInAgainPage,
+} from "@tumpel/pages";
 import type { z } from "zod";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
 import type { PersonCheck } from "./github-handlers.ts";
 import { json, parseBody, problem } from "./http";
 import { type Caller, type Role, type Whoami, whoamiOf } from "./identity";
 import type { Env } from "./index";
-import { acceptPage, messagePage } from "./pages";
+import { htmlPage, INVITATION_ACCEPT_PATH } from "./pages";
 
 type Principal = z.infer<typeof PrincipalSchema>;
 type Invitation = z.infer<typeof InvitationSchema>;
@@ -27,7 +34,6 @@ export const INVITATION_TTL_MS = 604_800_000;
 export const ACCEPT_PAGE_PATH = "/invitations/accept";
 const MEMBERS_PATH = "/v1/members";
 const INVITATIONS_PATH = "/v1/invitations";
-const ACCEPT_PATH = "/v1/invitations/accept";
 const MEMBER_PATH = /^\/v1\/members\/([^/]+)$/;
 const INVITATION_PATH = /^\/v1\/invitations\/([^/]+)$/;
 
@@ -359,28 +365,26 @@ const handleAccept = async (
 };
 
 const handleAcceptPage = async (url: URL, env: Env, person: PersonCheck): Promise<Response> => {
-  if (!person.ok) return messagePage(401, "Sign in again", `${person.reason}.`);
+  if (!person.ok) return htmlPage(env, url, 401, (links) => signInAgainPage(links, person.reason, url.href));
+  const { email } = person;
   const token = url.searchParams.get("token") ?? "";
-  const preview = await previewInvitation(env.DB, token, person.email, Date.now());
+  const preview = await previewInvitation(env.DB, token, email, Date.now());
   if (preview.kind === "Open") {
-    const next = env.DASHBOARD_ORIGIN ? env.DASHBOARD_ORIGIN : `${url.origin}/device`;
-    return acceptPage(person.email, preview.tenantName, preview.role, token, next);
-  }
-  if (preview.kind === "Expired") {
-    return messagePage(410, "Invitation expired", "This invitation expired. Ask an Owner of the tenant for a new one.");
-  }
-  if (preview.kind === "OtherEmail") {
-    return messagePage(
-      403,
-      "Invitation for another email",
-      `This invitation is for ${preview.email}, and you are signed in as ${person.email}. Sign in to Cloudflare Access as ${preview.email}.`,
+    return htmlPage(env, url, 200, (links) =>
+      acceptPage(links, {
+        email,
+        tenantName: preview.tenantName,
+        role: preview.role,
+        token,
+        next: links.dashboard,
+      }),
     );
   }
-  return messagePage(
-    404,
-    "No such invitation",
-    "This invitation is unknown, revoked or already accepted. Ask an Owner of the tenant for a new one.",
-  );
+  if (preview.kind === "Expired") return htmlPage(env, url, 410, (links) => invitationExpiredPage(links, email));
+  if (preview.kind === "OtherEmail") {
+    return htmlPage(env, url, 403, (links) => invitationOtherEmailPage(links, email, preview.email));
+  }
+  return htmlPage(env, url, 404, (links) => invitationNotFoundPage(links, email));
 };
 
 export interface MemberRouting {
@@ -401,7 +405,7 @@ export const handleMembers = async (
   if (method === "GET" && pathname === ACCEPT_PAGE_PATH) {
     return handleAcceptPage(url, env, await routing.signedIn(request, env));
   }
-  if (method === "POST" && pathname === ACCEPT_PATH) {
+  if (method === "POST" && pathname === INVITATION_ACCEPT_PATH) {
     return handleAccept(request, url, env, routing.signedIn, routing.sameOrigin, (reason) =>
       routing.signedOut(url, reason),
     );

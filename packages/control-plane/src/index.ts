@@ -40,6 +40,22 @@ import {
   TenantConfigPlanRequestSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
+import {
+  codeNotFoundPage,
+  confirmPage,
+  consentPage,
+  consentRefusedPage,
+  enterCodePage,
+  noBuildPage,
+  noReleasePage,
+  noSuchPage,
+  noTenantPage,
+  nothingToConnectPage,
+  signInAgainPage,
+  signUpPage,
+  type TenantChoice,
+  unknownClientPage,
+} from "@tumpel/pages";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
@@ -138,13 +154,14 @@ import {
 } from "./oauth";
 import {
   CONSENT_CSRF_COOKIE,
-  confirmPage,
-  enterCodePage,
-  grantPage,
-  messagePage,
+  DEVICE_APPROVE_PATH,
+  DEVICE_DENY_PATH,
+  DEVICE_PAGE,
+  dashboardOrigin,
+  htmlPage,
   readCookie,
-  signUpPage,
-  type TenantChoice,
+  SIGN_UP_PATH,
+  wantsHtml,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildUploads } from "./prebuild-uploads.ts";
@@ -184,8 +201,6 @@ export interface Env extends SignerEnv {
   CIRCLECI_API_ORIGIN: string;
   CIRCLECI_OIDC_ORIGIN: string;
 }
-
-const DEVICE_PAGE = "/device";
 
 let verifier: { key: string; verify: Verify } | undefined;
 
@@ -813,13 +828,20 @@ const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Pro
   return release.kind === "Published" ? json(release.manifest) : noRelease();
 };
 
-const handleReleaseDownload = async (url: URL, env: Env): Promise<Response | null> => {
+const handleReleaseDownload = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   const matched = RELEASE_DOWNLOAD_PATH.exec(url.pathname);
   if (matched?.[1] === undefined || matched[2] === undefined) return null;
   const kind = matched[1] === "cli" ? "cli" : "supervisor";
   const binary = RELEASE_BINARIES[kind];
+  const browser = wantsHtml(request);
+  const noBuild = (status: number, detail: string): Response => {
+    const amd64 = new URL(`/v1/releases/${kind}/Amd64`, url.origin).href;
+    return htmlPage(env, url, status, (links) => noBuildPage(links, kind, detail, amd64));
+  };
   const parsed = binary.pathSchema.safeParse({ architecture: decodeURIComponent(matched[2]) });
   if (!parsed.success) {
+    if (browser)
+      return noBuild(400, `Releases build for Amd64 only, and this link asks for ${decodeURIComponent(matched[2])}`);
     return problem(400, {
       code: "InvalidRequest",
       title: "Unknown architecture",
@@ -829,10 +851,19 @@ const handleReleaseDownload = async (url: URL, env: Env): Promise<Response | nul
   }
   const { architecture } = parsed.data;
   const release = await currentRelease(env.RELEASES, Date.now());
-  if (release.kind === "Unpublished") return noRelease();
+  if (release.kind === "Unpublished") {
+    if (!browser) return noRelease();
+    return htmlPage(env, url, 404, (links) => noReleasePage(links, url.href));
+  }
   const published = binary.binaries(release.manifest);
   const found = published.find((each) => each.architecture === architecture);
   if (found === undefined) {
+    if (browser) {
+      return noBuild(
+        404,
+        `Release ${release.manifest.releaseVersion} builds for ${published.map((each) => each.architecture).join(", ")}, and this link asks for ${architecture}`,
+      );
+    }
     return problem(404, {
       code: "NotFound",
       title: binary.title,
@@ -1051,27 +1082,25 @@ const handleDeviceToken = async (request: Request, env: Env): Promise<Response> 
 
 const handleDevicePage = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const signed = await assertedEmail(request, env);
-  if (!signed.ok) return messagePage(401, "Sign in again", `${signed.reason}.`);
-  const memberships = await membershipsOfEmail(env.DB, signed.email);
-  if (memberships.length === 0) return signUpPage(signed.email);
+  if (!signed.ok) return htmlPage(env, url, 401, (links) => signInAgainPage(links, signed.reason, url.href));
+  const { email } = signed;
+  const memberships = await membershipsOfEmail(env.DB, email);
+  if (memberships.length === 0) return htmlPage(env, url, 200, (links) => signUpPage(links, email));
   const typed = url.searchParams.get("code") ?? "";
-  if (typed === "") return enterCodePage(signed.email);
+  if (typed === "") return htmlPage(env, url, 200, (links) => enterCodePage(links, email));
   const userCode = parseUserCode(typed);
   const pending = userCode === null ? null : await pendingDeviceCode(env.DB, userCode, Date.now());
-  if (pending === null) {
-    return messagePage(404, "Code not found", "The code is wrong, expired or already decided. Run tumpel login again.");
-  }
-  return confirmPage(signed.email, choicesOf(memberships), formatUserCode(pending.userCode), pending.deviceName);
+  if (pending === null) return htmlPage(env, url, 404, (links) => codeNotFoundPage(links, email));
+  const deviceRequest = {
+    email,
+    tenants: choicesOf(memberships),
+    userCode: formatUserCode(pending.userCode),
+    deviceName: pending.deviceName,
+  };
+  return htmlPage(env, url, 200, (links, context) => confirmPage(links, deviceRequest, context));
 };
 
-const allowedOrigins = (env: Env): string[] => {
-  if (!env.DASHBOARD_ORIGIN) {
-    throw new Error(
-      "DASHBOARD_ORIGIN is not set; deploy with npm run deploy, which sets it to https:// plus the tofu output dashboard_hostname, or pass --var DASHBOARD_ORIGIN:https://<dashboard hostname> to wrangler",
-    );
-  }
-  return [...CONNECTOR_ORIGINS, env.DASHBOARD_ORIGIN];
-};
+const allowedOrigins = (env: Env): string[] => [...CONNECTOR_ORIGINS, dashboardOrigin(env)];
 
 const corsHeaders = (request: Request, env: Env): Record<string, string> => {
   const allowed = allowedOrigins(env);
@@ -1167,10 +1196,11 @@ const handleRegister = async (request: Request, env: Env): Promise<Response> => 
   return json(client, 201);
 };
 
-const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
+const handleAuthorize = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const ask = readAuthorizeAsk(url);
   const client = ask.clientId === "" ? null : await clientFor(env.DB, ask.clientId);
   if (client === null) {
+    if (wantsHtml(request)) return htmlPage(env, url, 400, (links) => unknownClientPage(links));
     return problem(400, {
       code: "InvalidRequest",
       title: "Unknown client",
@@ -1202,22 +1232,22 @@ const handleAuthorize = async (url: URL, env: Env): Promise<Response> => {
 
 const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const asserted = await assertedSigner(request, env);
-  if (!asserted.ok) return messagePage(401, "Sign in again", `${asserted.reason}.`);
+  if (!asserted.ok) return htmlPage(env, url, 401, (links) => signInAgainPage(links, asserted.reason, url.href));
   if (request.method === "GET" && asserted.kind === "Person") {
     const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
     const tenantless = (await membershipsOfEmail(env.DB, asserted.email)).length === 0;
-    if (asked?.firstParty === true && tenantless) return signUpPage(asserted.email);
+    if (asked?.firstParty === true && tenantless) {
+      return htmlPage(env, url, 200, (links) => signUpPage(links, asserted.email));
+    }
+    if (tenantless && wantsHtml(request)) {
+      return htmlPage(env, url, 403, (links) => noTenantPage(links, asserted.email));
+    }
   }
   const memberships = await signerMemberships(asserted, url, env);
   if (memberships instanceof Response) return memberships;
   const [first, ...others] = memberships;
   const email = first.principal.email;
-  const expired = (): Response =>
-    messagePage(
-      404,
-      "Nothing to connect",
-      "This sign-in has expired or was already finished. Start again from the client.",
-    );
+  const expired = (): Response => htmlPage(env, url, 404, (links) => nothingToConnectPage(links, email));
   if (request.method === "GET") {
     const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
     if (asked === null) return expired();
@@ -1225,20 +1255,25 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
       const code = await grantCode(env.DB, asked, callerOf(first), Date.now());
       return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
     }
-    return grantPage(
+    const csrf = randomToken();
+    const consent = {
       email,
-      choicesOf(memberships),
-      asked.clientName,
-      new URL(asked.redirectUri).origin,
-      asked.requestId,
-      randomToken(),
+      tenants: choicesOf(memberships),
+      clientName: asked.clientName,
+      callbackOrigin: new URL(asked.redirectUri).origin,
+      requestId: asked.requestId,
+      csrf,
+    };
+    return withHeaders(
+      htmlPage(env, url, 200, (links) => consentPage(links, consent)),
+      { "set-cookie": `${CONSENT_CSRF_COOKIE}=${csrf}; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Strict` },
     );
   }
   const form = new URLSearchParams(await request.text());
   const cookie = readCookie(request.headers.get("cookie"), CONSENT_CSRF_COOKIE);
   const csrf = form.get("csrf") ?? "";
   if (request.headers.get("origin") !== url.origin || cookie === null || !sameSecret(cookie, csrf)) {
-    return messagePage(403, "Request refused", "The form did not come from this page. Reload it and try again.");
+    return htmlPage(env, url, 403, (links) => consentRefusedPage(links, email, "CrossSite"));
   }
   const asked = await pendingAuthorization(env.DB, form.get("request") ?? "", Date.now());
   if (asked === null) return expired();
@@ -1252,9 +1287,9 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
       }),
     );
   }
-  if (action !== "approve") return messagePage(400, "Bad request", "Choose Connect or Cancel.");
+  if (action !== "approve") return htmlPage(env, url, 400, (links) => consentRefusedPage(links, email, "NoAction"));
   const caller = chosenCaller(memberships, form.get("tenant") ?? "");
-  if (caller === null) return messagePage(403, "Not your tenant", "Choose one of the tenants the page lists.");
+  if (caller === null) return htmlPage(env, url, 403, (links) => consentRefusedPage(links, email, "NotYourTenant"));
   const code = await grantCode(env.DB, asked, caller, Date.now());
   return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
 };
@@ -1323,12 +1358,12 @@ const wellKnown = (pathname: string): ((origin: string) => unknown) | null => {
 type Route = (request: Request, url: URL, env: Env) => Promise<Response>;
 
 const ROUTES: Record<string, Route> = {
-  "POST /v1/tenants": handleSignUp,
+  [`POST ${SIGN_UP_PATH}`]: handleSignUp,
   "GET /v1/whoami": (request, _url, env) => handleWhoami(request, env),
   "GET /v1/whoami/tenants": (request, _url, env) => handleListTenants(request, env),
   "POST /v1/device/code": handleDeviceStart,
-  "POST /v1/device/approve": handleDeviceApprove,
-  "POST /v1/device/deny": handleDeviceDeny,
+  [`POST ${DEVICE_APPROVE_PATH}`]: handleDeviceApprove,
+  [`POST ${DEVICE_DENY_PATH}`]: handleDeviceDeny,
   "GET /v1/devices": (request, _url, env) => handleDevicesList(request, env),
   "GET /v1/oauth-grants": (request, _url, env) => handleGrantsList(request, env),
   "POST /v1/tenant-config/plan": handleConfigPlan,
@@ -1353,7 +1388,7 @@ const ROUTES: Record<string, Route> = {
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`GET ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`POST ${REGISTER_PATH}`]: (request, _url, env) => handleRegister(request, env),
-  [`GET ${AUTHORIZE_PATH}`]: (_request, url, env) => handleAuthorize(url, env),
+  [`GET ${AUTHORIZE_PATH}`]: handleAuthorize,
   [`GET ${CONSENT_PATH}`]: handleConsent,
   [`POST ${CONSENT_PATH}`]: handleConsent,
   [`POST ${TOKEN_PATH}`]: handleToken,
@@ -1422,8 +1457,11 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const host = await handleHost(request, url, env);
   if (host) return host;
   if (request.method === "GET") {
-    const download = await handleReleaseDownload(url, env);
+    const download = await handleReleaseDownload(request, url, env);
     if (download) return download;
+  }
+  if (wantsHtml(request)) {
+    return htmlPage(env, url, 404, (links) => noSuchPage(links, url.pathname));
   }
   return problem(404, {
     code: "NotFound",
