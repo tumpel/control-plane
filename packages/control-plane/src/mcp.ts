@@ -440,7 +440,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions/from-issue",
     SessionStartFromIssueSchema,
-    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass repository as https://github.com/<owner>/<name>. Returns the StartedSession of POST /v1/sessions/from-issue; session.origin names the issue and the branch. Refused NotFound for a missing issue and IssueNotOpen for a closed one or a pull request.",
+    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass the owner and name tumpel_github_list_repositories prints. Returns the StartedSessionFromIssue of POST /v1/sessions/from-issue; issue names the issue and the branch. Refused NotFound for a missing issue and IssueNotOpen for a closed one or a pull request.",
   ),
   rest(
     "tumpel_session_list",

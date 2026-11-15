@@ -246,6 +246,9 @@ export const githubRepository = (repository: string): GitHubRepository | null =>
   return matched?.[1] === undefined || matched[2] === undefined ? null : { owner: matched[1], name: matched[2] };
 };
 
+export const repositoryUrl = (target: GitHubRepository): string =>
+  `${GITHUB_WEB}/${target.owner}/${target.name}`.toLowerCase();
+
 export type Minted =
   | { kind: "Minted"; token: string; expiresAt: string }
   | { kind: "NoToken" }
@@ -261,16 +264,14 @@ export const mintInstallationToken = async (
   fetcher: Fetch,
   app: AppKey,
   installation: Installation,
-  repository: string,
+  target: GitHubRepository,
   now: number,
-): Promise<Minted> => {
-  const target = githubRepository(repository);
-  if (target === null) return { kind: "NoToken" };
+): Promise<Exclude<Minted, { kind: "NoToken" }>> => {
   const { installationId, accountLogin } = installation;
   if (target.owner.toLowerCase() !== accountLogin.toLowerCase()) {
     return {
       kind: "Outside",
-      detail: `${repository} belongs to ${target.owner}, and the tenant's GitHub App installation covers repositories of ${accountLogin} only; start the session on a repository of ${accountLogin}, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
+      detail: `${target.owner}/${target.name} belongs to ${target.owner}, and the tenant's GitHub App installation covers repositories of ${accountLogin} only; start the session on a repository of ${accountLogin}, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
     };
   }
   const answer = await callGitHub(
@@ -354,45 +355,49 @@ export const listInstallationRepositories = async (
   }
 };
 
-const issuesUrl = (target: GitHubRepository): string =>
-  `${GITHUB_API}/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/issues`;
+const issuesUrl = (api: string, target: GitHubRepository): string =>
+  `${api}/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/issues`;
 
 export const listOpenIssues = async (
   fetcher: Fetch,
+  api: string,
   token: string,
   target: GitHubRepository,
 ): Promise<GitHubAnswer<GitHubIssueSummary[]>> => {
-  const issues: GitHubIssueSummary[] = [];
-  for (let page = 1; ; page += 1) {
-    const answer = await callGitHub(
-      fetcher,
-      {
-        method: "GET",
-        url: `${issuesUrl(target)}?state=open&sort=updated&direction=desc&per_page=${PAGE_SIZE}&page=${page}`,
-        accept: API_MEDIA_TYPE,
-        bearer: token,
-        body: null,
-      },
-      GitHubIssueRecordsSchema,
-      "GitHubIssue[]",
-    );
-    if (!answer.ok) return answer;
-    for (const issue of answer.value) {
-      if (issue.pull_request !== undefined) continue;
-      issues.push({
-        issueNumber: issue.number,
-        title: issue.title,
-        htmlUrl: issue.html_url,
-        labels: issue.labels.map((label) => label.name),
-        updatedAt: issue.updated_at,
-      });
-    }
-    if (answer.value.length < PAGE_SIZE) return { ok: true, value: issues };
-  }
+  const answer = await callGitHub(
+    fetcher,
+    {
+      method: "GET",
+      url: `${issuesUrl(api, target)}?state=open&sort=updated&direction=desc&per_page=${PAGE_SIZE}`,
+      accept: API_MEDIA_TYPE,
+      bearer: token,
+      body: null,
+    },
+    GitHubIssueRecordsSchema,
+    "GitHubIssue[]",
+  );
+  if (!answer.ok) return answer;
+  return {
+    ok: true,
+    value: answer.value.flatMap((issue) =>
+      issue.pull_request === undefined
+        ? [
+            {
+              issueNumber: issue.number,
+              title: issue.title,
+              htmlUrl: issue.html_url,
+              labels: issue.labels.map((label) => label.name),
+              updatedAt: issue.updated_at,
+            },
+          ]
+        : [],
+    ),
+  };
 };
 
 export const readIssue = (
   fetcher: Fetch,
+  api: string,
   token: string,
   target: GitHubRepository,
   issueNumber: number,
@@ -401,7 +406,7 @@ export const readIssue = (
     fetcher,
     {
       method: "GET",
-      url: `${issuesUrl(target)}/${issueNumber}`,
+      url: `${issuesUrl(api, target)}/${issueNumber}`,
       accept: API_MEDIA_TYPE,
       bearer: token,
       body: null,

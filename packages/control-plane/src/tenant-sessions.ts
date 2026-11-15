@@ -4,9 +4,11 @@ import {
   type RepositoryCloneFailureCauseSchema,
   SecretSetCreateSchema,
   SecretSetSchema,
+  type SessionIssueSchema,
   SessionSchema,
   type SessionStartSchema,
   SnapshotSchema,
+  type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
   StopFailureSchema,
   TranscriptLineSchema,
@@ -32,7 +34,13 @@ import {
   type SecretMember,
 } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
-import { type Minted, mintInstallationToken, repositoryCredential } from "./github.ts";
+import {
+  type GitHubRepository,
+  githubRepository,
+  type Minted,
+  mintInstallationToken,
+  repositoryCredential,
+} from "./github.ts";
 import { appKey, installationOf } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import { type Host, hostOf } from "./hosts";
@@ -53,15 +61,15 @@ export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
 export type SessionStart = z.infer<typeof SessionStartSchema>;
 export type StartedSession = z.infer<typeof StartedSessionSchema>;
+export type StartedSessionFromIssue = z.infer<typeof StartedSessionFromIssueSchema>;
+export type SessionIssue = z.infer<typeof SessionIssueSchema>;
+export type IssueOfSession = Omit<SessionIssue, "sessionId">;
 type TurnFailureReason = TurnFailure["reason"];
 type SessionState = Session["state"];
 export type StopFailure = z.infer<typeof StopFailureSchema>;
 
-export type SessionOrigin = Session["origin"];
-
 export interface NewSession {
   principalId: string;
-  origin: SessionOrigin;
   hosts: Host[];
   harness: Session["harness"];
   harnessVersion: string;
@@ -74,7 +82,7 @@ export interface SessionFilter {
   hostId?: string;
 }
 
-export type Started = { kind: "Started"; started: StartedSession } | { kind: "Unplaced"; hosts: Unplaceable[] };
+export type Started<T> = { kind: "Started"; started: T } | { kind: "Unplaced"; hosts: Unplaceable[] };
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
@@ -121,28 +129,10 @@ type SessionRow = {
   updated_at: number;
 };
 
-type SessionViewRow = {
-  session_id: string;
-  principal_id: string;
-  host_id: string;
-  box_id: string;
-  persona_id: string;
-  repository: string;
-  harness: string;
-  harness_version: string;
-  model: string;
-  state: string;
-  created_at: number;
-  updated_at: number;
+type SessionViewRow = SessionRow & {
   last_turn_id: string;
   last_turn_state: string;
   last_turn_at: number;
-  issue_owner: string | null;
-  issue_name: string | null;
-  issue_number: number | null;
-  issue_title: string | null;
-  issue_html_url: string | null;
-  issue_branch: string | null;
 };
 
 type TurnRow = {
@@ -236,12 +226,10 @@ type SnapshotRequestRow = {
 
 const SESSION_SELECT =
   "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at FROM sessions";
-const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.created_at, s.updated_at,
-  t.turn_id AS last_turn_id, t.state AS last_turn_state, t.updated_at AS last_turn_at,
-  i.owner AS issue_owner, i.name AS issue_name, i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.created_at, s.updated_at,
+  t.turn_id AS last_turn_id, t.state AS last_turn_state, t.updated_at AS last_turn_at
   FROM sessions AS s
-  JOIN turns AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
-  LEFT JOIN session_issues AS i ON i.session_id = s.session_id`;
+  JOIN turns AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)`;
 const TURN_SELECT =
   "SELECT turn_id, session_id, host_id, box_id, prompt, state, line_count, created_at, updated_at FROM turns";
 const SNAPSHOT_SELECT = `SELECT * FROM (
@@ -267,21 +255,6 @@ const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chun
 const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
   AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
 
-const originOf = (row: SessionViewRow): unknown =>
-  row.issue_number === null
-    ? { source: "Prompt" }
-    : {
-        source: "Issue",
-        issue: {
-          owner: row.issue_owner,
-          name: row.issue_name,
-          issueNumber: row.issue_number,
-          title: row.issue_title,
-          htmlUrl: row.issue_html_url,
-          branch: row.issue_branch,
-        },
-      };
-
 const toSession = (tenantId: string, row: SessionViewRow): Session =>
   SessionSchema.parse({
     sessionId: row.session_id,
@@ -295,7 +268,6 @@ const toSession = (tenantId: string, row: SessionViewRow): Session =>
     harnessVersion: row.harness_version,
     model: row.model,
     state: row.state,
-    origin: originOf(row),
     lastTurnId: row.last_turn_id,
     lastTurnState: row.last_turn_state,
     lastTurnAt: new Date(row.last_turn_at).toISOString(),
@@ -401,15 +373,8 @@ export class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private sessionView(tenantId: string, sessionId: string): Session | null {
-    const [row] = this.ctx.storage.sql
-      .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
-      .toArray();
-    return row === undefined ? null : toSession(tenantId, row);
-  }
-
   private presentSession(tenantId: string, sessionId: string): Session {
-    const session = this.sessionView(tenantId, sessionId);
+    const session = this.getSession(tenantId, sessionId);
     if (session === null) throw new Error(`session ${sessionId} vanished while it was read back`);
     return session;
   }
@@ -552,7 +517,7 @@ export class TenantSessions extends DurableObject<Env> {
     return members;
   }
 
-  protected async repositoryToken(tenantId: string, repository: string, now: number): Promise<Minted> {
+  protected async repositoryToken(tenantId: string, repository: GitHubRepository, now: number): Promise<Minted> {
     const installation = await installationOf(this.env.DB, tenantId);
     if (installation === null) return { kind: "NoToken" };
     const app = await appKey(this.env.DB, keyStoreOf(this.env));
@@ -776,7 +741,39 @@ export class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  async startSession(tenantId: string, input: NewSession, now: number): Promise<Started> {
+  startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
+    return this.begin(tenantId, input, now, () => undefined);
+  }
+
+  async startSessionFromIssue(
+    tenantId: string,
+    input: NewSession,
+    issue: IssueOfSession,
+    now: number,
+  ): Promise<Started<StartedSessionFromIssue>> {
+    const begun = await this.begin(tenantId, input, now, (sessionId) => {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO session_issues (session_id, issue_number, title, html_url, branch) VALUES (?, ?, ?, ?, ?)",
+        sessionId,
+        issue.issueNumber,
+        issue.title,
+        issue.htmlUrl,
+        issue.branch,
+      );
+    });
+    if (begun.kind === "Unplaced") return begun;
+    return {
+      kind: "Started",
+      started: { ...begun.started, issue: { sessionId: begun.started.session.sessionId, ...issue } },
+    };
+  }
+
+  private async begin(
+    tenantId: string,
+    input: NewSession,
+    now: number,
+    record: (sessionId: string) => void,
+  ): Promise<Started<StartedSession>> {
     const { start } = input;
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image);
@@ -816,19 +813,7 @@ export class TenantSessions extends DurableObject<Env> {
         session.created_at,
         session.updated_at,
       );
-      if (input.origin.source === "Issue") {
-        const { issue } = input.origin;
-        this.ctx.storage.sql.exec(
-          "INSERT INTO session_issues (session_id, owner, name, issue_number, title, html_url, branch) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          session.session_id,
-          issue.owner,
-          issue.name,
-          issue.issueNumber,
-          issue.title,
-          issue.htmlUrl,
-          issue.branch,
-        );
-      }
+      record(session.session_id);
       return this.insertTurn(session.session_id, session.host_id, session.box_id, start.prompt, now);
     });
     await this.offer(tenantId, session, turn);
@@ -1063,7 +1048,10 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   getSession(tenantId: string, sessionId: string): Session | null {
-    return this.sessionView(tenantId, sessionId);
+    const [row] = this.ctx.storage.sql
+      .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
+      .toArray();
+    return row === undefined ? null : toSession(tenantId, row);
   }
 
   listSessions(tenantId: string, filter: SessionFilter): Session[] {
@@ -1273,7 +1261,8 @@ export class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, "ImageNotReleased", guest.detail, iso(now));
       return { kind: "Withdrawn" };
     }
-    const minted = await this.repositoryToken(tenantId, session.repository, now);
+    const target = githubRepository(session.repository);
+    const minted: Minted = target === null ? { kind: "NoToken" } : await this.repositoryToken(tenantId, target, now);
     const credential = repositoryCredential(dispatch.variables, minted);
     if (credential.kind === "Refused") {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", credential.detail, iso(now));

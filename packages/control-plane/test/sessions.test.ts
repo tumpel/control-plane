@@ -22,6 +22,7 @@ import {
   SecretSetSchema,
   SessionSchema,
   SnapshotSchema,
+  StartedSessionFromIssueSchema,
   StartedSessionSchema,
   StopFailureSchema,
   SupervisorHostKeySchema,
@@ -92,6 +93,7 @@ const RELEASE = {
 };
 
 let certs: Server;
+let github: Server;
 let server: TestHarness;
 let origin: string;
 let issuer: string;
@@ -150,6 +152,25 @@ const tool = async <T>(name: string, args: Record<string, unknown>, schema: z.Zo
   assert.equal(body.result.isError, undefined, `${name} failed: ${text}`);
   assert.equal(text.includes(PROVIDER_KEY), false, `${name} answered with the provider key`);
   return schema.parse(JSON.parse(text));
+};
+
+const toolRefusal = async (name: string, args: Record<string, unknown>): Promise<string> => {
+  mcpId += 1;
+  const response = await postJson(
+    "/mcp",
+    { jsonrpc: "2.0", id: mcpId, method: "tools/call", params: { name, arguments: args } },
+    { authorization: `Bearer ${mcpToken}` },
+  );
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { result: { content: { text: string }[]; isError?: boolean } };
+  const text = body.result.content[0]?.text ?? "";
+  assert.equal(body.result.isError, true, `${name} answered ${text}`);
+  return text;
+};
+
+const GITHUB_ISSUES: Record<string, { state: string; title: string; body: string }> = {
+  "/repos/acme/app/issues/12": { state: "open", title: "Fix the login: it loops", body: "Steps: sign in" },
+  "/repos/acme/app/issues/2": { state: "closed", title: "Done already", body: "" },
 };
 
 const eventually = async <T>(
@@ -402,6 +423,26 @@ before(async () => {
   });
   await new Promise<void>((resolve) => certs.listen(0, "127.0.0.1", resolve));
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
+  github = createServer((request, response) => {
+    const path = (request.url ?? "").toLowerCase();
+    const issue = GITHUB_ISSUES[path];
+    if (issue === undefined || request.headers.authorization !== "Bearer ghp-e2e") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ message: "Not Found" }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        ...issue,
+        number: Number(path.split("/").at(-1)),
+        html_url: `https://github.com${path.replace("/repos", "")}`,
+        updated_at: "2026-11-15T09:00:00Z",
+        labels: [],
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => github.listen(0, "127.0.0.1", resolve));
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
     workers: [
@@ -414,6 +455,7 @@ before(async () => {
           R2_STUB_ORIGIN,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          GITHUB_API_ORIGIN: `http://127.0.0.1:${(github.address() as AddressInfo).port}`,
         },
       },
     ],
@@ -455,6 +497,7 @@ after(async () => {
   host?.close();
   await server?.close();
   certs?.close();
+  github?.close();
   if (scratch) rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -649,7 +692,6 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   const start = await sessionStart("Archivable");
   const started = await tool("tumpel_session_start", { ...start, prompt: "stop me" }, StartedSessionSchema);
   const { sessionId } = started.session;
-  assert.deepEqual(started.session.origin, { source: "Prompt" });
   assert.equal(started.session.lastTurnId, started.turn.turnId);
   assert.equal(started.session.lastTurnState, "Offered");
   assert.equal(Date.parse(started.session.lastTurnAt), started.turn.updatedAt);
@@ -996,6 +1038,55 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NotClaimed");
   assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
+});
+
+test("a start from an issue over MCP refuses a missing or closed issue, and an open one saves the issue and offers its prompt", async () => {
+  const { personaId, model } = await sessionStart();
+  const fromIssue = { personaId, model, owner: "Acme", name: "App" };
+
+  assert.match(
+    await toolRefusal("tumpel_session_start_from_issue", { ...fromIssue, issueNumber: 404 }),
+    /^No such issue: https:\/\/github\.com\/acme\/app\/issues\/404 does not exist/,
+  );
+  assert.match(
+    await toolRefusal("tumpel_session_start_from_issue", { ...fromIssue, issueNumber: 2 }),
+    /^Issue not open: https:\/\/github\.com\/acme\/app\/issues\/2 is a closed issue/,
+  );
+
+  const started = await tool(
+    "tumpel_session_start_from_issue",
+    { ...fromIssue, issueNumber: 12 },
+    StartedSessionFromIssueSchema,
+  );
+  const { sessionId, tenantId } = started.session;
+  assert.equal(started.session.repository, "https://github.com/acme/app");
+  const issue = {
+    sessionId,
+    issueNumber: 12,
+    title: "Fix the login: it loops",
+    htmlUrl: "https://github.com/acme/app/issues/12",
+    branch: "ticket/12-fix-the-login-it-loops",
+  };
+  assert.deepEqual(started.issue, issue);
+
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.turnId, started.turn.turnId);
+  assert.ok(offer.prompt.includes(`Closes ${issue.htmlUrl}`));
+
+  const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenantId });
+  assert.deepEqual(
+    await storage.exec(
+      "SELECT session_id, issue_number, title, html_url, branch FROM session_issues WHERE session_id = ?",
+      sessionId,
+    ),
+    [{ session_id: sessionId, issue_number: 12, title: issue.title, html_url: issue.htmlUrl, branch: issue.branch }],
+  );
+
+  await eventually(
+    "the unclaimed turn reading Failed",
+    () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
 });
 
 test("a claimed turn whose TurnRepositoryReady is lost fails NoFirstOutput once the clone and first-line budgets run out", async () => {

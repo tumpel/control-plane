@@ -10,7 +10,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
-import { githubRepository, readIssue } from "./github.ts";
+import { readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -20,12 +20,14 @@ import type { Unplaceable } from "./placement";
 import { settingsOf } from "./settings";
 import type {
   CredentialHandover,
+  NewSession,
   Session,
   SessionFilter,
-  SessionOrigin,
   SessionStart,
   Snapshot,
+  Started,
   StartedSession,
+  StartedSessionFromIssue,
   StopFailure,
   Turn,
   TurnFailure,
@@ -189,14 +191,13 @@ const personaNotFound = (personaId: string): Refused =>
     fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
   });
 
-const startWith = async (
+const prepareStart = async (
   env: Env,
   caller: Caller,
   start: SessionStart,
-  origin: SessionOrigin,
   endpoint: string,
   now: number,
-): Promise<Outcome<StartedSession>> => {
+): Promise<Outcome<NewSession>> => {
   const tenant = tenantOf(env, caller);
   const persona = await tenant.getPersona(caller.tenantId, start.personaId);
   if (persona === null) return personaNotFound(start.personaId);
@@ -222,30 +223,30 @@ const startWith = async (
       "start again",
     );
   }
-  const started = await tenant.startSession(
-    caller.tenantId,
-    {
-      principalId: caller.principalId,
-      origin,
-      hosts: await listHosts(env.DB, caller.tenantId),
-      harness: entry.harness,
-      harnessVersion: entry.harnessVersion,
-      endpoint,
-      start,
-    },
-    now,
-  );
-  if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
-  return ok(started.started);
+  return ok({
+    principalId: caller.principalId,
+    hosts: await listHosts(env.DB, caller.tenantId),
+    harness: entry.harness,
+    harnessVersion: entry.harnessVersion,
+    endpoint,
+    start,
+  });
 };
 
-export const startSession = (
+const placed = <T>(started: Started<T>): Outcome<T> =>
+  started.kind === "Unplaced" ? unplaced(started.hosts, "start again") : ok(started.started);
+
+export const startSession = async (
   env: Env,
   caller: Caller,
   start: SessionStart,
   endpoint: string,
   now: number,
-): Promise<Outcome<StartedSession>> => startWith(env, caller, start, { source: "Prompt" }, endpoint, now);
+): Promise<Outcome<StartedSession>> => {
+  const prepared = await prepareStart(env, caller, start, endpoint, now);
+  if (!prepared.ok) return prepared;
+  return placed(await tenantOf(env, caller).startSession(caller.tenantId, prepared.value, now));
+};
 
 export const startSessionFromIssue = async (
   env: Env,
@@ -253,17 +254,9 @@ export const startSessionFromIssue = async (
   start: SessionStartFromIssue,
   endpoint: string,
   now: number,
-): Promise<Outcome<StartedSession>> => {
-  const target = githubRepository(start.repository);
-  if (target === null) {
-    return refuse(422, {
-      code: "InvalidRequest",
-      title: "Not a GitHub repository",
-      detail: `${start.repository} is not a repository URL on github.com`,
-      fix: "Pass the repository as https://github.com/<owner>/<name>",
-    });
-  }
-  const issueUrl = `https://github.com/${target.owner}/${target.name}/issues/${start.issueNumber}`;
+): Promise<Outcome<StartedSessionFromIssue>> => {
+  const target = { owner: start.owner, name: start.name };
+  const issueUrl = `${repositoryUrl(target)}/issues/${start.issueNumber}`;
   const tenant = tenantOf(env, caller);
   if ((await tenant.getPersona(caller.tenantId, start.personaId)) === null) return personaNotFound(start.personaId);
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
@@ -275,7 +268,13 @@ export const startSessionFromIssue = async (
       fix: "Give the GitHub App installation or the persona's GITHUB_TOKEN read access to the repository, then start again",
     });
   }
-  const read = await readIssue((url, init) => fetch(url, init), token.token, target, start.issueNumber);
+  const read = await readIssue(
+    (url, init) => fetch(url, init),
+    env.GITHUB_API_ORIGIN,
+    token.token,
+    target,
+    start.issueNumber,
+  );
   if (!read.ok && (read.status === 404 || read.status === 410)) {
     return refuse(404, {
       code: "NotFound",
@@ -308,28 +307,21 @@ export const startSessionFromIssue = async (
     issue: { number: issue.number, title: issue.title, body: issue.body ?? "", url: issue.html_url },
     branch,
   });
-  return startWith(
+  const prepared = await prepareStart(
     env,
     caller,
-    {
-      personaId: start.personaId,
-      repository: `https://github.com/${target.owner}/${target.name}.git`,
-      model: start.model,
-      prompt,
-    },
-    {
-      source: "Issue",
-      issue: {
-        owner: target.owner,
-        name: target.name,
-        issueNumber: issue.number,
-        title: issue.title,
-        htmlUrl: issue.html_url,
-        branch,
-      },
-    },
+    { personaId: start.personaId, repository: repositoryUrl(target), model: start.model, prompt },
     endpoint,
     now,
+  );
+  if (!prepared.ok) return prepared;
+  return placed(
+    await tenant.startSessionFromIssue(
+      caller.tenantId,
+      prepared.value,
+      { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
+      now,
+    ),
   );
 };
 

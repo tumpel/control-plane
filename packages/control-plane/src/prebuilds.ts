@@ -1,6 +1,6 @@
 import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { type GitHubRepository, githubRepository } from "./github.ts";
+import { githubRepository, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import type { Outcome, Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -49,9 +49,6 @@ const notGitHub = (repository: string): Refused =>
     detail: `${repository} is not a GitHub repository URL; prebuilds read their inputs from GitHub`,
     fix: "Pass a repository like https://github.com/acme/app.git",
   });
-
-export const prebuildRepository = (target: GitHubRepository): string =>
-  `https://github.com/${target.owner.toLowerCase()}/${target.name.toLowerCase()}`;
 
 export const noBuildProvider = (provider: BuildProvider, repository: string): Refused =>
   refuse(409, {
@@ -104,7 +101,7 @@ export const startPrebuild = async (
 ): Promise<Outcome<Prebuild>> => {
   const target = githubRepository(start.repository);
   if (target === null) return notGitHub(start.repository);
-  const repository = prebuildRepository(target);
+  const repository = repositoryUrl(target);
   const tenant = tenantOf(env, caller);
   const persona = await tenant.getPersona(caller.tenantId, start.personaId);
   if (persona === null) {
@@ -158,7 +155,7 @@ const repositoryUnreadable = (detail: string): Refused =>
 export const listPrebuilds = async (env: Env, caller: Caller, repository: string): Promise<Outcome<Prebuild[]>> => {
   const target = githubRepository(repository);
   if (target === null) return notGitHub(repository);
-  return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, prebuildRepository(target)));
+  return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, repositoryUrl(target)));
 };
 
 export const listLatestPrebuilds = async (env: Env, caller: Caller): Promise<Prebuild[]> =>

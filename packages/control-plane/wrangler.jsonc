@@ -20,6 +20,7 @@
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
     "RELEASES_BUCKET_NAME": "tumpel-releases",
+    "GITHUB_API_ORIGIN": "https://api.github.com",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -63,6 +64,7 @@
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
         "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
+        "GITHUB_API_ORIGIN": "https://api.github.com",
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,
