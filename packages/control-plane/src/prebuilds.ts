@@ -1,13 +1,14 @@
 import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { buildProviderFor, noAdapter } from "./build-provider.ts";
-import { githubRepository } from "./github.ts";
+import { type GitHubRepository, githubRepository } from "./github.ts";
+import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import type { Outcome, Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { inputDigest, readInputs } from "./prebuild-inputs.ts";
-import type { Prebuild, PrebuildFailure } from "./tenant-prebuilds";
+import { currentRelease, imagesFor } from "./releases";
+import type { BuildProvider, Prebuild, PrebuildFailure } from "./tenant-prebuilds";
 
 export type PrebuildStart = z.infer<typeof PrebuildStartSchema>;
 
@@ -15,6 +16,12 @@ type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
 const PREBUILDS_PATH = "/v1/prebuilds";
 const PREBUILD_PATH = /^\/v1\/prebuilds\/([^/]+)(\/failure)?$/;
+const PREBUILD_ARCHITECTURE = "Amd64";
+
+const CONNECT_COMMANDS: Record<BuildProvider, string> = {
+  GitHubActions: "tumpel github-actions start",
+  Namespace: "tumpel namespace start",
+};
 
 const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
 
@@ -34,13 +41,59 @@ const prebuildNotFound = (prebuildId: string): Refused =>
     fix: "List a repository's prebuilds with tumpel prebuild list --repository <url>",
   });
 
-export const noBuildProvider = (repository: string): Refused =>
+const notGitHub = (repository: string): Refused =>
+  refuse(422, {
+    code: "InvalidRequest",
+    title: "Not a GitHub repository",
+    detail: `${repository} is not a GitHub repository URL; prebuilds read their inputs from GitHub`,
+    fix: "Pass a repository like https://github.com/acme/app.git",
+  });
+
+export const prebuildRepository = (target: GitHubRepository): string =>
+  `https://github.com/${target.owner.toLowerCase()}/${target.name.toLowerCase()}`;
+
+export const noBuildProvider = (provider: BuildProvider, repository: string): Refused =>
   refuse(409, {
     code: "NoBuildProvider",
-    title: "No build provider",
-    detail: `your tenant has no build provider connected, so no prebuild of ${repository} can run`,
-    fix: "Connect a build provider account of your own with tumpel ci-dispatch start, tumpel remote-buildkit start or tumpel ephemeral-vm start, then start the prebuild again",
+    title: "Build provider not connected",
+    detail: `your tenant has not connected ${provider}, so no prebuild of ${repository} can run on it`,
+    fix: `Connect your own ${provider} account with ${CONNECT_COMMANDS[provider]}, or name a connected provider, then start the prebuild again`,
   });
+
+const buildProviderUnavailable = (provider: BuildProvider, repository: string): Refused =>
+  refuse(409, {
+    code: "BuildProviderUnavailable",
+    title: "Build provider unavailable",
+    detail: `your tenant connected ${provider}, and this control plane cannot dispatch a prebuild to ${provider} yet, so no prebuild of ${repository} was started`,
+    fix: "Start the prebuild again once the operator deploys a control plane that dispatches to this provider",
+  });
+
+const guestImageDigest = async (
+  env: Env,
+  harness: string,
+  harnessVersion: string,
+  now: number,
+): Promise<Outcome<string>> => {
+  const release = await currentRelease(env.RELEASES, now);
+  if (release.kind === "Unpublished") {
+    return refuse(409, {
+      code: "NoRelease",
+      title: "No release published",
+      detail: "the release bucket of this stage holds no current.json, so no guest image exists to build a prebuild on",
+      fix: "Ask the operator to publish a release with the release workflow, then start the prebuild again",
+    });
+  }
+  const image = imagesFor(release, harness, harnessVersion).find((each) => each.architecture === PREBUILD_ARCHITECTURE);
+  if (image === undefined) {
+    return refuse(422, {
+      code: "ImageNotReleased",
+      title: "Harness version not in the current release",
+      detail: `release ${release.manifest.releaseVersion} carries no ${harness} ${harnessVersion} guest image for ${PREBUILD_ARCHITECTURE}, the architecture prebuilds build on`,
+      fix: `Pin a version tumpel release current lists for ${PREBUILD_ARCHITECTURE} with tumpel harness pin, then start the prebuild again`,
+    });
+  }
+  return ok(image.imageDigest);
+};
 
 export const startPrebuild = async (
   env: Env,
@@ -48,16 +101,12 @@ export const startPrebuild = async (
   start: PrebuildStart,
   now: number,
 ): Promise<Outcome<Prebuild>> => {
-  if (githubRepository(start.repository) === null) {
-    return refuse(422, {
-      code: "InvalidRequest",
-      title: "Not a GitHub repository",
-      detail: `${start.repository} is not a GitHub repository URL; prebuilds read their inputs from GitHub`,
-      fix: "Pass a repository like https://github.com/acme/app.git",
-    });
-  }
+  const target = githubRepository(start.repository);
+  if (target === null) return notGitHub(start.repository);
+  const repository = prebuildRepository(target);
   const tenant = tenantOf(env, caller);
-  if (!(await tenant.hasPersona(start.personaId))) {
+  const persona = await tenant.getPersona(caller.tenantId, start.personaId);
+  if (persona === null) {
     return refuse(404, {
       code: "NotFound",
       title: "No such persona",
@@ -65,11 +114,21 @@ export const startPrebuild = async (
       fix: "List your personas with tumpel persona list",
     });
   }
-  const providerKind = await tenant.connectedBuildProvider();
-  if (providerKind === null) return noBuildProvider(start.repository);
-  const token = await tenant.prebuildReadToken(caller.tenantId, start.personaId, start.repository, now);
+  if (!(await tenant.buildProviderConnected(start.provider))) return noBuildProvider(start.provider, repository);
+  const entry = pinnedEntry(await tenant.listPins(), persona.harness);
+  if (entry === undefined) {
+    return refuse(422, {
+      code: "HarnessNotInCatalog",
+      title: "Harness not in the catalog",
+      detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
+      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists, with tumpel config apply",
+    });
+  }
+  const image = await guestImageDigest(env, entry.harness, entry.harnessVersion, now);
+  if (!image.ok) return image;
+  const token = await tenant.prebuildReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
-  const inputs = await readInputs((url, init) => fetch(url, init), start.repository, token.token);
+  const inputs = await readInputs((url, init) => fetch(url, init), target, token.token);
   if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);
   if (inputs.kind === "Empty") {
     return refuse(422, {
@@ -79,32 +138,12 @@ export const startPrebuild = async (
       fix: "Add a .devcontainer/devcontainer.json or commit a lockfile at the repository root, then start the prebuild again",
     });
   }
-  const digest = await inputDigest(inputs.files);
-  const begun = await tenant.beginPrebuild(
-    caller.tenantId,
-    {
-      personaId: start.personaId,
-      repository: start.repository,
-      inputDigest: digest,
-      providerKind,
-      rebuild: start.rebuild,
-    },
-    now,
-  );
-  if (begun.kind === "Held") return ok(begun.prebuild);
-  const provider = buildProviderFor(providerKind);
-  const prebuildId = begun.prebuild.prebuildId;
-  if (provider === null) {
-    return ok(
-      await tenant.failPrebuild(caller.tenantId, prebuildId, { phase: "Dispatch", ...noAdapter(providerKind) }, now),
-    );
+  const key = { repository, inputDigest: await inputDigest(inputs.files), guestImageDigest: image.value };
+  if (!start.rebuild) {
+    const held = await tenant.heldPrebuild(caller.tenantId, key);
+    if (held !== null) return ok(held);
   }
-  const dispatched = await provider.dispatch(begun.prebuild, { inputDigest: digest, files: inputs.files });
-  if (dispatched.kind === "Refused") {
-    const { detail, fix } = dispatched;
-    return ok(await tenant.failPrebuild(caller.tenantId, prebuildId, { phase: "Dispatch", detail, fix }, now));
-  }
-  return ok(await tenant.recordDispatch(caller.tenantId, prebuildId, dispatched.logUrl, now));
+  return buildProviderUnavailable(start.provider, repository);
 };
 
 const repositoryUnreadable = (detail: string): Refused =>
@@ -115,8 +154,11 @@ const repositoryUnreadable = (detail: string): Refused =>
     fix: "Give the GitHub App installation or the persona's GITHUB_TOKEN read access to the repository, then start the prebuild again",
   });
 
-export const listPrebuilds = async (env: Env, caller: Caller, repository: string): Promise<Outcome<Prebuild[]>> =>
-  ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, repository));
+export const listPrebuilds = async (env: Env, caller: Caller, repository: string): Promise<Outcome<Prebuild[]>> => {
+  const target = githubRepository(repository);
+  if (target === null) return notGitHub(repository);
+  return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, prebuildRepository(target)));
+};
 
 export const getPrebuild = async (env: Env, caller: Caller, prebuildId: string): Promise<Outcome<Prebuild>> => {
   const prebuild = await tenantOf(env, caller).getPrebuild(caller.tenantId, prebuildId);
