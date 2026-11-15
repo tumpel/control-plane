@@ -9,6 +9,7 @@ import {
   NotConnectedConnectionSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import { CALLER_WORKFLOW_EXAMPLE, REUSABLE_WORKFLOW } from "./github-actions.ts";
 import { installationOf, storedApp } from "./github-store.ts";
 import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
@@ -97,6 +98,8 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Prom
     return GitHubActionsConnectionLinkSchema.parse({
       tenantId,
       link: connection === null ? { state: "NotConnected" } : { state: "Connected", connection },
+      reusableWorkflow: REUSABLE_WORKFLOW,
+      callerWorkflowExample: CALLER_WORKFLOW_EXAMPLE,
     });
   }
   return NamespaceConnectionLinkSchema.parse({

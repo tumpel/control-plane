@@ -4,6 +4,7 @@ import {
   PrebuildUploadGrantSchema,
   PrebuildUploadStartSchema,
 } from "@tumpel/api/schemas";
+import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAG } from "./github-actions";
 import { json, parseBody, problem } from "./http";
 import type { Env } from "./index";
 import { jwtVerifier, type VerifyJwt } from "./jwt";
@@ -15,6 +16,7 @@ type Bound = { ok: true; tenantId: string; target: UploadTarget } | { ok: false;
 
 const UPLOADS_PATH = /^\/v1\/prebuilds\/([^/]+)\/uploads(\/complete)?$/;
 const DISPATCH_EVENT = "workflow_dispatch";
+const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
 
 export const prebuildLayerKey = (tenantId: string, prebuildId: string, digest: string): string =>
   `${tenantId}/prebuilds/${prebuildId}/layers/${digest}`;
@@ -65,6 +67,13 @@ const claimOf = (claims: Record<string, unknown>, name: string): string | null =
   return typeof value === "string" ? value : null;
 };
 
+const isReusableWorkflow = (jobWorkflow: string | null): boolean => {
+  const prefix = `${REUSABLE_WORKFLOW_PATH}@refs/tags/`;
+  if (jobWorkflow === null || !jobWorkflow.startsWith(prefix)) return false;
+  const tag = jobWorkflow.slice(prefix.length);
+  return tag === REUSABLE_WORKFLOW_TAG || RELEASE_TAG.test(tag);
+};
+
 const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repository: string): Response | null => {
   const { prebuild, defaultBranch, callerWorkflow, run } = target;
   if (prebuild.provider !== "GitHubActions") {
@@ -105,6 +114,14 @@ const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repos
       "workflow_ref",
       `the token comes from workflow ${workflow ?? "(none)"}, and the tenant's GitHub Actions connection names ${expected}`,
       "Run the upload from the caller workflow the connection names, or reconnect with tumpel github-actions start --caller-workflow",
+    );
+  }
+  const jobWorkflow = claimOf(claims, "job_workflow_ref");
+  if (!isReusableWorkflow(jobWorkflow)) {
+    return tokenMismatch(
+      "job_workflow_ref",
+      `the token comes from job workflow ${jobWorkflow ?? "(none)"}, and a prebuild uploads only from ${REUSABLE_WORKFLOW}`,
+      `Call ${REUSABLE_WORKFLOW} from the caller workflow, as tumpel github-actions get shows, then start the prebuild again`,
     );
   }
   if (run.kind === "NoRun") {
