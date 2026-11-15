@@ -100,3 +100,29 @@ export const GitHubInstallationEventSchema = z.object({
   action: z.string(),
   installation: GitHubInstallationRecordSchema,
 });
+
+export const GitHubInstallationRepositoriesSchema = z.object({
+  total_count: z.int().min(0),
+  repositories: z.array(
+    z.object({
+      name: z.string(),
+      owner: GitHubAccountSchema,
+      default_branch: z.string(),
+      private: z.boolean(),
+      html_url: z.string().url(),
+    }),
+  ),
+});
+
+export const GitHubIssueRecordSchema = z.object({
+  number: z.int().min(1),
+  title: z.string(),
+  html_url: z.string().url(),
+  body: z.string().nullable(),
+  state: z.string(),
+  updated_at: OffsetDateTimeSchema,
+  labels: z.array(z.object({ name: z.string() })),
+  pull_request: z.object({}).loose().optional(),
+});
+
+export const GitHubIssueRecordsSchema = z.array(GitHubIssueRecordSchema);

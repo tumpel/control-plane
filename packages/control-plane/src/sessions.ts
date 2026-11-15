@@ -1,6 +1,7 @@
 import {
   SessionListQuerySchema,
   SessionPathSchema,
+  SessionStartFromIssueSchema,
   SessionStartSchema,
   TranscriptPageSchema,
   TranscriptQuerySchema,
@@ -9,6 +10,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
+import { githubRepository, readIssue } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -20,6 +22,7 @@ import type {
   CredentialHandover,
   Session,
   SessionFilter,
+  SessionOrigin,
   SessionStart,
   Snapshot,
   StartedSession,
@@ -27,11 +30,13 @@ import type {
   Turn,
   TurnFailure,
 } from "./tenant-sessions";
+import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
 import { compactorOf, DEFAULT_PAGE_BYTES, decodeLines, pageOf } from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
 export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
 
 const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused => ({
   ok: false,
@@ -176,23 +181,25 @@ const stranded = (session: Session, hosts: Host[], missingTurnIds: string[]): Re
 
 const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
 
-export const startSession = async (
+const personaNotFound = (personaId: string): Refused =>
+  refuse(404, {
+    code: "NotFound",
+    title: "No such persona",
+    detail: `your tenant owns no persona ${personaId}`,
+    fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
+  });
+
+const startWith = async (
   env: Env,
   caller: Caller,
   start: SessionStart,
+  origin: SessionOrigin,
   endpoint: string,
   now: number,
 ): Promise<Outcome<StartedSession>> => {
   const tenant = tenantOf(env, caller);
   const persona = await tenant.getPersona(caller.tenantId, start.personaId);
-  if (persona === null) {
-    return refuse(404, {
-      code: "NotFound",
-      title: "No such persona",
-      detail: `your tenant owns no persona ${start.personaId}`,
-      fix: "List the personas with GET /v1/personas and start with one of the ids it returns",
-    });
-  }
+  if (persona === null) return personaNotFound(start.personaId);
   const entry = pinnedEntry(await tenant.listPins(), persona.harness);
   if (entry === undefined) {
     return refuse(422, {
@@ -219,6 +226,7 @@ export const startSession = async (
     caller.tenantId,
     {
       principalId: caller.principalId,
+      origin,
       hosts: await listHosts(env.DB, caller.tenantId),
       harness: entry.harness,
       harnessVersion: entry.harnessVersion,
@@ -229,6 +237,100 @@ export const startSession = async (
   );
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   return ok(started.started);
+};
+
+export const startSession = (
+  env: Env,
+  caller: Caller,
+  start: SessionStart,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<StartedSession>> => startWith(env, caller, start, { source: "Prompt" }, endpoint, now);
+
+export const startSessionFromIssue = async (
+  env: Env,
+  caller: Caller,
+  start: SessionStartFromIssue,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<StartedSession>> => {
+  const target = githubRepository(start.repository);
+  if (target === null) {
+    return refuse(422, {
+      code: "InvalidRequest",
+      title: "Not a GitHub repository",
+      detail: `${start.repository} is not a repository URL on github.com`,
+      fix: "Pass the repository as https://github.com/<owner>/<name>",
+    });
+  }
+  const issueUrl = `https://github.com/${target.owner}/${target.name}/issues/${start.issueNumber}`;
+  const tenant = tenantOf(env, caller);
+  if ((await tenant.getPersona(caller.tenantId, start.personaId)) === null) return personaNotFound(start.personaId);
+  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
+  if (token.kind === "Refused") {
+    return refuse(409, {
+      code: "RepositoryUnreadable",
+      title: "Repository unreadable",
+      detail: token.detail,
+      fix: "Give the GitHub App installation or the persona's GITHUB_TOKEN read access to the repository, then start again",
+    });
+  }
+  const read = await readIssue((url, init) => fetch(url, init), token.token, target, start.issueNumber);
+  if (!read.ok && (read.status === 404 || read.status === 410)) {
+    return refuse(404, {
+      code: "NotFound",
+      title: "No such issue",
+      detail: `${issueUrl} does not exist or was deleted: ${read.detail}`,
+      fix: `List the open issues with tumpel github list-issues ${target.owner} ${target.name} and start from one of them`,
+    });
+  }
+  if (!read.ok) {
+    return refuse(409, {
+      code: "RepositoryUnreadable",
+      title: "Issue unreadable",
+      detail: `${issueUrl} could not be read: ${read.detail}`,
+      fix: "Give the GitHub App installation or the persona's GITHUB_TOKEN read access to the repository's issues, then start again",
+    });
+  }
+  const issue = read.value;
+  if (issue.pull_request !== undefined || issue.state !== "open") {
+    return refuse(409, {
+      code: "IssueNotOpen",
+      title: "Issue not open",
+      detail: `${issue.html_url} is ${issue.pull_request === undefined ? `a ${issue.state} issue` : "a pull request"}, and a session starts from an open issue only`,
+      fix: `List the open issues with tumpel github list-issues ${target.owner} ${target.name} and start from one of them`,
+    });
+  }
+  const branch = ticketBranch(issue);
+  const prompt = ticketPrompt({
+    owner: target.owner,
+    repo: target.name,
+    issue: { number: issue.number, title: issue.title, body: issue.body ?? "", url: issue.html_url },
+    branch,
+  });
+  return startWith(
+    env,
+    caller,
+    {
+      personaId: start.personaId,
+      repository: `https://github.com/${target.owner}/${target.name}.git`,
+      model: start.model,
+      prompt,
+    },
+    {
+      source: "Issue",
+      issue: {
+        owner: target.owner,
+        name: target.name,
+        issueNumber: issue.number,
+        title: issue.title,
+        htmlUrl: issue.html_url,
+        branch,
+      },
+    },
+    endpoint,
+    now,
+  );
 };
 
 export const getSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Session>> => {
@@ -456,6 +558,7 @@ const SESSION_PATH =
   /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop-failures|\/stop|\/archive)?$/;
 const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers", "/stop-failures"];
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
+const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure)?$/;
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
@@ -503,6 +606,7 @@ export const handleSessions = async (
   const snapshot = SNAPSHOT_PATH.exec(pathname);
   const posting = request.method === "POST";
   const routed =
+    (pathname === FROM_ISSUE_PATH && posting) ||
     (pathname === "/v1/sessions" && (posting || request.method === "GET")) ||
     (session !== null &&
       (posting ? SESSION_POSTS : request.method === "GET" ? SESSION_GETS : []).includes(session[2] ?? "")) ||
@@ -510,6 +614,11 @@ export const handleSessions = async (
   if (!routed) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
+  if (pathname === FROM_ISSUE_PATH) {
+    const body = await parseBody(request, SessionStartFromIssueSchema, "sessions.startFromIssue");
+    if (!body.ok) return body.response;
+    return answer(await startSessionFromIssue(env, caller, body.value, url.origin, Date.now()));
+  }
   if (pathname === "/v1/sessions" && posting) {
     const body = await parseBody(request, SessionStartSchema, "sessions.start");
     if (!body.ok) return body.response;

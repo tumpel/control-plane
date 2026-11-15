@@ -126,7 +126,7 @@ export const startPrebuild = async (
   }
   const image = await guestImageDigest(env, entry.harness, entry.harnessVersion, now);
   if (!image.ok) return image;
-  const token = await tenant.prebuildReadToken(caller.tenantId, start.personaId, target, now);
+  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const inputs = await readInputs((url, init) => fetch(url, init), target, token.token);
   if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);

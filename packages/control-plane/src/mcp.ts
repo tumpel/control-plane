@@ -6,6 +6,7 @@ import {
   DevicePathSchema,
   EnrolmentTokenMintSchema,
   GitHubActionsConnectionStartSchema,
+  GitHubRepositoryPathSchema,
   HarnessPathSchema,
   HarnessPinCreateSchema,
   HostLabelsSchema,
@@ -22,6 +23,7 @@ import {
   SecretSetPathSchema,
   SessionListQuerySchema,
   SessionPathSchema,
+  SessionStartFromIssueSchema,
   SessionStartSchema,
   SnapshotPathSchema,
   TranscriptQuerySchema,
@@ -44,7 +46,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -256,6 +258,20 @@ export const TOOLS: ToolDefinition[] = [
     "Get the URL where a person installs the stage's GitHub App for the tenant. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of the installed account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
   ),
   rest(
+    "tumpel_github_list_repositories",
+    "GET",
+    "/v1/github-connection/repositories",
+    NO_ARGUMENTS,
+    "List the repositories the tenant's GitHub App installation covers. Returns the GitHubRepository[] of GET /v1/github-connection/repositories: owner, name, defaultBranch, private and htmlUrl; refused GitHubNotConnected until the App is installed with tumpel_github_start.",
+  ),
+  rest(
+    "tumpel_github_list_issues",
+    "GET",
+    "/v1/github-connection/repositories/{owner}/{name}/issues",
+    GitHubRepositoryPathSchema,
+    "List the open issues of a repository the installation covers, most recently updated first, without pull requests. Returns the GitHubIssue[] of GET /v1/github-connection/repositories/{owner}/{name}/issues: issueNumber, title, htmlUrl, labels and updatedAt.",
+  ),
+  rest(
     "tumpel_connection_list",
     "GET",
     "/v1/connections",
@@ -366,6 +382,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/sessions",
     SessionStartSchema,
     "Start a session with its first prompt on the online host of the tenant with the most free box slots, then the most memory available; refused PoolExhausted when every host runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns the StartedSession of POST /v1/sessions: {session, turn}, before the harness writes anything.",
+  ),
+  rest(
+    "tumpel_session_start_from_issue",
+    "POST",
+    "/v1/sessions/from-issue",
+    SessionStartFromIssueSchema,
+    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass repository as https://github.com/<owner>/<name>. Returns the StartedSession of POST /v1/sessions/from-issue; session.origin names the issue and the branch. Refused NotFound for a missing issue and IssueNotOpen for a closed one or a pull request.",
   ),
   rest(
     "tumpel_session_list",

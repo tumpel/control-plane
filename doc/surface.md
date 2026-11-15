@@ -17,60 +17,63 @@ session; `session get` also prints the session's stop failures.
 nothing: the server cannot read your environment, so they return the config entry for
 `tumpel config apply`, which writes the values.
 
-| Operation                          | MCP tool                       | CLI command                    |
-| ---------------------------------- | ------------------------------ | ------------------------------ |
-| `Connections_list`                 | `tumpel_connection_list`       | `tumpel connection list`       |
-| `Devices_list`                     | `tumpel_devices_list`          | `tumpel devices list`          |
-| `Devices_revoke`                   | `tumpel_devices_revoke`        | `tumpel devices revoke`        |
-| `EnrolmentTokens_mint`             | `tumpel_host_mint_token`       | `tumpel host mint-token`       |
-| `GitHubActionsConnections_delete`  | `tumpel_github_actions_delete` | `tumpel github-actions delete` |
-| `GitHubActionsConnections_get`     | `tumpel_github_actions_get`    | `tumpel github-actions get`    |
-| `GitHubActionsConnections_start`   | `tumpel_github_actions_start`  | `tumpel github-actions start`  |
-| `GitHubConnections_get`            | `tumpel_github_get`            | `tumpel github get`            |
-| `GitHubConnections_start`          | `tumpel_github_start`          | `tumpel github start`          |
-| `HarnessCatalog_list`              | `tumpel_harness_list`          | `tumpel harness list`          |
-| `HarnessCatalog_listPins`          | `tumpel_harness_list_pins`     | `tumpel harness list-pins`     |
-| `HarnessCatalog_pin`               | `tumpel_harness_pin`           | `tumpel harness pin`           |
-| `HarnessCatalog_unpin`             | `tumpel_harness_unpin`         | `tumpel harness unpin`         |
-| `Hosts_get`                        | `tumpel_host_get`              | `tumpel host get`              |
-| `Hosts_list`                       | `tumpel_host_list`             | `tumpel host list`             |
-| `Hosts_listUsage`                  | `tumpel_host_list_usage`       | `tumpel host list-usage`       |
-| `Hosts_revoke`                     | `tumpel_host_revoke`           | `tumpel host revoke`           |
-| `Hosts_setLabels`                  | `tumpel_host_set_labels`       | `tumpel host set-labels`       |
-| `Identity_whoami`                  | `tumpel_whoami`                | `tumpel whoami`                |
-| `NamespaceConnections_delete`      | `tumpel_namespace_delete`      | `tumpel namespace delete`      |
-| `NamespaceConnections_get`         | `tumpel_namespace_get`         | `tumpel namespace get`         |
-| `NamespaceConnections_start`       | `tumpel_namespace_start`       | `tumpel namespace start`       |
-| `Personas_create`                  | `tumpel_persona_create`        | `tumpel persona create`        |
-| `Personas_delete`                  | `tumpel_persona_delete`        | `tumpel persona delete`        |
-| `Personas_get`                     | `tumpel_persona_get`           | `tumpel persona get`           |
-| `Personas_list`                    | `tumpel_persona_list`          | `tumpel persona list`          |
-| `Personas_update`                  | `tumpel_persona_update`        | `tumpel persona update`        |
-| `Personas_uploadFile`              | `tumpel_persona_upload_file`   | `tumpel persona upload-file`   |
-| `Prebuilds_get`                    | `tumpel_prebuild_get`          | `tumpel prebuild get`          |
-| `Prebuilds_getFailure`             | `tumpel_prebuild_failure`      | `tumpel prebuild failure`      |
-| `Prebuilds_list`                   | `tumpel_prebuild_list`         | `tumpel prebuild list`         |
-| `Prebuilds_start`                  | `tumpel_prebuild_start`        | `tumpel prebuild start`        |
-| `Releases_current`                 | `tumpel_release_current`       | `tumpel release current`       |
-| `SecretSets_create`                | `tumpel_secret_set_create`     | `tumpel secret-set create`     |
-| `SecretSets_delete`                | `tumpel_secret_set_delete`     | `tumpel secret-set delete`     |
-| `SecretSets_get`                   | `tumpel_secret_set_get`        | `tumpel secret-set get`        |
-| `SecretSets_list`                  | `tumpel_secret_set_list`       | `tumpel secret-set list`       |
-| `SecretSets_update`                | `tumpel_secret_set_update`     | `tumpel secret-set update`     |
-| `Sessions_archive`                 | `tumpel_session_archive`       | `tumpel session archive`       |
-| `Sessions_get`                     | `tumpel_session_get`           | `tumpel session get`           |
-| `Sessions_list`                    | `tumpel_session_list`          | `tumpel session list`          |
-| `Sessions_listCredentialHandovers` | `tumpel_session_handovers`     | `tumpel session handovers`     |
-| `Sessions_listStopFailures`        | `tumpel_session_stop_failures` | `tumpel session stop-failures` |
-| `Sessions_start`                   | `tumpel_session_start`         | `tumpel session start`         |
-| `Sessions_stop`                    | `tumpel_session_stop`          | `tumpel session stop`          |
-| `Snapshots_get`                    | `tumpel_snapshot_get`          | `tumpel snapshot get`          |
-| `Snapshots_list`                   | `tumpel_snapshot_list`         | `tumpel snapshot list`         |
-| `Transcripts_read`                 | `tumpel_transcript_read`       | `tumpel transcript read`       |
-| `Turns_get`                        | `tumpel_turn_get`              | `tumpel turn get`              |
-| `Turns_getFailure`                 | `tumpel_turn_failure`          | `tumpel turn failure`          |
-| `Turns_list`                       | `tumpel_turn_list`             | `tumpel turn list`             |
-| `Turns_send`                       | `tumpel_turn_send`             | `tumpel turn send`             |
+| Operation                            | MCP tool                          | CLI command                       |
+| ------------------------------------ | --------------------------------- | --------------------------------- |
+| `Connections_list`                   | `tumpel_connection_list`          | `tumpel connection list`          |
+| `Devices_list`                       | `tumpel_devices_list`             | `tumpel devices list`             |
+| `Devices_revoke`                     | `tumpel_devices_revoke`           | `tumpel devices revoke`           |
+| `EnrolmentTokens_mint`               | `tumpel_host_mint_token`          | `tumpel host mint-token`          |
+| `GitHubActionsConnections_delete`    | `tumpel_github_actions_delete`    | `tumpel github-actions delete`    |
+| `GitHubActionsConnections_get`       | `tumpel_github_actions_get`       | `tumpel github-actions get`       |
+| `GitHubActionsConnections_start`     | `tumpel_github_actions_start`     | `tumpel github-actions start`     |
+| `GitHubConnections_get`              | `tumpel_github_get`               | `tumpel github get`               |
+| `GitHubConnections_listIssues`       | `tumpel_github_list_issues`       | `tumpel github list-issues`       |
+| `GitHubConnections_listRepositories` | `tumpel_github_list_repositories` | `tumpel github list-repositories` |
+| `GitHubConnections_start`            | `tumpel_github_start`             | `tumpel github start`             |
+| `HarnessCatalog_list`                | `tumpel_harness_list`             | `tumpel harness list`             |
+| `HarnessCatalog_listPins`            | `tumpel_harness_list_pins`        | `tumpel harness list-pins`        |
+| `HarnessCatalog_pin`                 | `tumpel_harness_pin`              | `tumpel harness pin`              |
+| `HarnessCatalog_unpin`               | `tumpel_harness_unpin`            | `tumpel harness unpin`            |
+| `Hosts_get`                          | `tumpel_host_get`                 | `tumpel host get`                 |
+| `Hosts_list`                         | `tumpel_host_list`                | `tumpel host list`                |
+| `Hosts_listUsage`                    | `tumpel_host_list_usage`          | `tumpel host list-usage`          |
+| `Hosts_revoke`                       | `tumpel_host_revoke`              | `tumpel host revoke`              |
+| `Hosts_setLabels`                    | `tumpel_host_set_labels`          | `tumpel host set-labels`          |
+| `Identity_whoami`                    | `tumpel_whoami`                   | `tumpel whoami`                   |
+| `NamespaceConnections_delete`        | `tumpel_namespace_delete`         | `tumpel namespace delete`         |
+| `NamespaceConnections_get`           | `tumpel_namespace_get`            | `tumpel namespace get`            |
+| `NamespaceConnections_start`         | `tumpel_namespace_start`          | `tumpel namespace start`          |
+| `Personas_create`                    | `tumpel_persona_create`           | `tumpel persona create`           |
+| `Personas_delete`                    | `tumpel_persona_delete`           | `tumpel persona delete`           |
+| `Personas_get`                       | `tumpel_persona_get`              | `tumpel persona get`              |
+| `Personas_list`                      | `tumpel_persona_list`             | `tumpel persona list`             |
+| `Personas_update`                    | `tumpel_persona_update`           | `tumpel persona update`           |
+| `Personas_uploadFile`                | `tumpel_persona_upload_file`      | `tumpel persona upload-file`      |
+| `Prebuilds_get`                      | `tumpel_prebuild_get`             | `tumpel prebuild get`             |
+| `Prebuilds_getFailure`               | `tumpel_prebuild_failure`         | `tumpel prebuild failure`         |
+| `Prebuilds_list`                     | `tumpel_prebuild_list`            | `tumpel prebuild list`            |
+| `Prebuilds_start`                    | `tumpel_prebuild_start`           | `tumpel prebuild start`           |
+| `Releases_current`                   | `tumpel_release_current`          | `tumpel release current`          |
+| `SecretSets_create`                  | `tumpel_secret_set_create`        | `tumpel secret-set create`        |
+| `SecretSets_delete`                  | `tumpel_secret_set_delete`        | `tumpel secret-set delete`        |
+| `SecretSets_get`                     | `tumpel_secret_set_get`           | `tumpel secret-set get`           |
+| `SecretSets_list`                    | `tumpel_secret_set_list`          | `tumpel secret-set list`          |
+| `SecretSets_update`                  | `tumpel_secret_set_update`        | `tumpel secret-set update`        |
+| `Sessions_archive`                   | `tumpel_session_archive`          | `tumpel session archive`          |
+| `Sessions_get`                       | `tumpel_session_get`              | `tumpel session get`              |
+| `Sessions_list`                      | `tumpel_session_list`             | `tumpel session list`             |
+| `Sessions_listCredentialHandovers`   | `tumpel_session_handovers`        | `tumpel session handovers`        |
+| `Sessions_listStopFailures`          | `tumpel_session_stop_failures`    | `tumpel session stop-failures`    |
+| `Sessions_start`                     | `tumpel_session_start`            | `tumpel session start`            |
+| `Sessions_startFromIssue`            | `tumpel_session_start_from_issue` | `tumpel session start-from-issue` |
+| `Sessions_stop`                      | `tumpel_session_stop`             | `tumpel session stop`             |
+| `Snapshots_get`                      | `tumpel_snapshot_get`             | `tumpel snapshot get`             |
+| `Snapshots_list`                     | `tumpel_snapshot_list`            | `tumpel snapshot list`            |
+| `Transcripts_read`                   | `tumpel_transcript_read`          | `tumpel transcript read`          |
+| `Turns_get`                          | `tumpel_turn_get`                 | `tumpel turn get`                 |
+| `Turns_getFailure`                   | `tumpel_turn_failure`             | `tumpel turn failure`             |
+| `Turns_list`                         | `tumpel_turn_list`                | `tumpel turn list`                |
+| `Turns_send`                         | `tumpel_turn_send`                | `tumpel turn send`                |
 
 Excluded by rule:
 

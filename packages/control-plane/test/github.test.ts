@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
+import { GitHubIssueSchema, GitHubRepositorySchema } from "@tumpel/api/schemas";
 import { deriveSigningKey } from "../src/envelope.ts";
 import {
   appManifest,
   convertManifest,
   type Fetch,
   importAppKey,
+  listInstallationRepositories,
+  listOpenIssues,
   mintInstallationToken,
+  mintInstallationWideToken,
   pkcs8FromPem,
   readState,
   repositoryCredential,
@@ -263,5 +267,94 @@ test("the handover names where GITHUB_TOKEN came from, and an installation token
   assert.deepEqual(withRepositoryToken([provider, fromSet, { name: "GH_TOKEN", value: "ghp_gh" }], "ghs_app"), {
     variables: [provider, { name: "GITHUB_TOKEN", value: "ghs_app" }, { name: "GH_TOKEN", value: "ghs_app" }],
     source: "GitHubApp",
+  });
+});
+
+const gitHubRepository = (index: number) => ({
+  id: index,
+  name: `repo-${index}`,
+  full_name: `octo/repo-${index}`,
+  owner: { login: "octo", id: 1 },
+  default_branch: index % 2 === 0 ? "main" : "trunk",
+  private: index % 2 === 1,
+  html_url: `https://github.com/octo/repo-${index}`,
+});
+
+const gitHubIssue = (number: number, pullRequest: boolean) => ({
+  number,
+  title: `issue ${number}`,
+  html_url: `https://github.com/octo/widgets/${pullRequest ? "pull" : "issues"}/${number}`,
+  body: null,
+  state: "open",
+  updated_at: "2026-11-14T09:30:00Z",
+  labels: [{ id: 3, name: "bug", color: "d73a4a" }],
+  ...(pullRequest ? { pull_request: { url: `https://api.github.com/repos/octo/widgets/pulls/${number}` } } : {}),
+});
+
+test("an installation-wide token is minted without naming repositories", async () => {
+  const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
+  const { fetcher, calls } = spiedFetch(201, { token: "ghs_wide", expires_at: "2026-11-15T11:00:00Z" });
+  assert.deepEqual(await mintInstallationWideToken(fetcher, app, 7, Date.parse("2026-11-15T10:00:00Z")), {
+    ok: true,
+    value: "ghs_wide",
+  });
+  assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
+  assert.equal(calls[0]?.init.method, "POST");
+  assert.equal(calls[0]?.init.body, null);
+});
+
+test("the installation's repositories are read page by page until total_count, as owner, name, default branch, visibility and URL", async () => {
+  const first = Array.from({ length: 100 }, (_, index) => gitHubRepository(index + 1));
+  const { fetcher, calls } = answering([
+    [200, { total_count: 101, repositories: first }],
+    [200, { total_count: 101, repositories: [gitHubRepository(101)] }],
+  ]);
+  const listed = await listInstallationRepositories(fetcher, "ghs_wide");
+  assert.ok(listed.ok);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [
+      "https://api.github.com/installation/repositories?per_page=100&page=1",
+      "https://api.github.com/installation/repositories?per_page=100&page=2",
+    ],
+  );
+  assert.equal(header(calls[0]?.init ?? {}, "authorization"), "Bearer ghs_wide");
+  assert.equal(listed.value.length, 101);
+  assert.deepEqual(GitHubRepositorySchema.parse(listed.value[100]), {
+    owner: "octo",
+    name: "repo-101",
+    defaultBranch: "trunk",
+    private: true,
+    htmlUrl: "https://github.com/octo/repo-101",
+  });
+
+  const refused = await listInstallationRepositories(spiedFetch(401, { message: "Bad credentials" }).fetcher, "x");
+  assert.ok(!refused.ok);
+  assert.match(refused.detail, /GET https:\/\/api.github.com\/installation\/repositories with 401: Bad credentials/);
+});
+
+test("a repository's open issues are read page by page, newest update first, without pull requests", async () => {
+  const first = Array.from({ length: 100 }, (_, index) => gitHubIssue(index + 1, index % 10 === 0));
+  const { fetcher, calls } = answering([
+    [200, first],
+    [200, [gitHubIssue(101, false), gitHubIssue(102, true)]],
+  ]);
+  const listed = await listOpenIssues(fetcher, "ghs_repo", { owner: "octo", name: "widgets" });
+  assert.ok(listed.ok);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [1, 2].map(
+      (page) =>
+        `https://api.github.com/repos/octo/widgets/issues?state=open&sort=updated&direction=desc&per_page=100&page=${page}`,
+    ),
+  );
+  assert.equal(listed.value.length, 91);
+  assert.ok(listed.value.every((issue) => issue.htmlUrl.includes("/issues/")));
+  assert.deepEqual(GitHubIssueSchema.parse(listed.value.at(-1)), {
+    issueNumber: 101,
+    title: "issue 101",
+    htmlUrl: "https://github.com/octo/widgets/issues/101",
+    labels: ["bug"],
+    updatedAt: "2026-11-14T09:30:00Z",
   });
 });

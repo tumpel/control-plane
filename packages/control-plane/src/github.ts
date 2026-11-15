@@ -1,4 +1,4 @@
-import type { RepositoryCredentialSourceSchema } from "@tumpel/api/schemas";
+import type { GitHubIssueSchema, GitHubRepositorySchema, RepositoryCredentialSourceSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import type { DispatchVariable } from "./dispatch-variables.ts";
 import {
@@ -6,8 +6,11 @@ import {
   type GitHubAppManifestSchema,
   GitHubErrorSchema,
   type GitHubInstallationRecordSchema,
+  GitHubInstallationRepositoriesSchema,
   GitHubInstallationTokenSchema,
   type GitHubInstallStateSchema,
+  GitHubIssueRecordSchema,
+  GitHubIssueRecordsSchema,
   type GitHubManifestStateSchema,
   GitHubUserInstallationsSchema,
   GitHubUserTokenSchema,
@@ -17,6 +20,9 @@ export type GitHubAppManifest = z.infer<typeof GitHubAppManifestSchema>;
 export type GitHubAppConversion = z.infer<typeof GitHubAppConversionSchema>;
 export type GitHubInstallationRecord = z.infer<typeof GitHubInstallationRecordSchema>;
 export type RepositoryCredentialSource = z.infer<typeof RepositoryCredentialSourceSchema>;
+export type GitHubRepositorySummary = z.infer<typeof GitHubRepositorySchema>;
+export type GitHubIssueSummary = z.infer<typeof GitHubIssueSchema>;
+export type GitHubIssueRecord = z.infer<typeof GitHubIssueRecordSchema>;
 export type GitHubState = z.infer<typeof GitHubManifestStateSchema> | z.infer<typeof GitHubInstallStateSchema>;
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -291,6 +297,118 @@ export const mintInstallationToken = async (
     detail: `${answer.detail}; send the turn again once GitHub answers, and check https://www.githubstatus.com if it keeps failing`,
   };
 };
+
+export const mintInstallationWideToken = async (
+  fetcher: Fetch,
+  app: AppKey,
+  installationId: number,
+  now: number,
+): Promise<GitHubAnswer<string>> => {
+  const answer = await callGitHub(
+    fetcher,
+    {
+      method: "POST",
+      url: `${GITHUB_API}/app/installations/${installationId}/access_tokens`,
+      accept: API_MEDIA_TYPE,
+      bearer: await appJwt(app.clientId, app.privateKey, now),
+      body: null,
+    },
+    GitHubInstallationTokenSchema,
+    "GitHubInstallationToken",
+  );
+  return answer.ok ? { ok: true, value: answer.value.token } : answer;
+};
+
+const PAGE_SIZE = 100;
+
+export const listInstallationRepositories = async (
+  fetcher: Fetch,
+  token: string,
+): Promise<GitHubAnswer<GitHubRepositorySummary[]>> => {
+  const repositories: GitHubRepositorySummary[] = [];
+  for (let page = 1; ; page += 1) {
+    const answer = await callGitHub(
+      fetcher,
+      {
+        method: "GET",
+        url: `${GITHUB_API}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
+        accept: API_MEDIA_TYPE,
+        bearer: token,
+        body: null,
+      },
+      GitHubInstallationRepositoriesSchema,
+      "GitHubInstallationRepositories",
+    );
+    if (!answer.ok) return answer;
+    for (const repository of answer.value.repositories) {
+      repositories.push({
+        owner: repository.owner.login,
+        name: repository.name,
+        defaultBranch: repository.default_branch,
+        private: repository.private,
+        htmlUrl: repository.html_url,
+      });
+    }
+    const done = answer.value.repositories.length < PAGE_SIZE || repositories.length >= answer.value.total_count;
+    if (done) return { ok: true, value: repositories };
+  }
+};
+
+const issuesUrl = (target: GitHubRepository): string =>
+  `${GITHUB_API}/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/issues`;
+
+export const listOpenIssues = async (
+  fetcher: Fetch,
+  token: string,
+  target: GitHubRepository,
+): Promise<GitHubAnswer<GitHubIssueSummary[]>> => {
+  const issues: GitHubIssueSummary[] = [];
+  for (let page = 1; ; page += 1) {
+    const answer = await callGitHub(
+      fetcher,
+      {
+        method: "GET",
+        url: `${issuesUrl(target)}?state=open&sort=updated&direction=desc&per_page=${PAGE_SIZE}&page=${page}`,
+        accept: API_MEDIA_TYPE,
+        bearer: token,
+        body: null,
+      },
+      GitHubIssueRecordsSchema,
+      "GitHubIssue[]",
+    );
+    if (!answer.ok) return answer;
+    for (const issue of answer.value) {
+      if (issue.pull_request !== undefined) continue;
+      issues.push({
+        issueNumber: issue.number,
+        title: issue.title,
+        htmlUrl: issue.html_url,
+        labels: issue.labels.map((label) => label.name),
+        updatedAt: issue.updated_at,
+      });
+    }
+    if (answer.value.length < PAGE_SIZE) return { ok: true, value: issues };
+  }
+};
+
+export const readIssue = (
+  fetcher: Fetch,
+  token: string,
+  target: GitHubRepository,
+  issueNumber: number,
+): Promise<GitHubAnswer<GitHubIssueRecord>> =>
+  callGitHub(
+    fetcher,
+    {
+      method: "GET",
+      url: `${issuesUrl(target)}/${issueNumber}`,
+      accept: API_MEDIA_TYPE,
+      bearer: token,
+      body: null,
+    },
+    GitHubIssueRecordSchema,
+    "GitHubIssue",
+  );
 
 export interface OAuthClient {
   clientId: string;

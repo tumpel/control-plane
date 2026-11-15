@@ -332,7 +332,7 @@ export class TenantPrebuilds extends TenantSessions {
     return connection;
   }
 
-  async prebuildReadToken(
+  async repositoryReadToken(
     tenantId: string,
     personaId: string,
     repository: GitHubRepository,
