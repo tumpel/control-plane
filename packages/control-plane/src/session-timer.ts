@@ -10,7 +10,10 @@ export type DeadlineName =
   | "SnapshotAnswer"
   | "Teardown"
   | "TeardownAnswer"
-  | "HostOffline";
+  | "HostOffline"
+  | PrebuildDeadlineName;
+
+export type PrebuildDeadlineName = "PrebuildDispatch" | "PrebuildBuild";
 
 export interface Deadline {
   turnId: string;
@@ -21,9 +24,25 @@ export interface ImageFetchDeadline extends Deadline {
   imageDigest: string;
 }
 
-type DeadlineOf<N extends DeadlineName> = N extends "ImageFetch" ? ImageFetchDeadline : Deadline;
+export interface PrebuildDeadline {
+  prebuildId: string;
+  at: number;
+}
+
+type DeadlineOf<N extends DeadlineName> = N extends "ImageFetch"
+  ? ImageFetchDeadline
+  : N extends PrebuildDeadlineName
+    ? PrebuildDeadline
+    : Deadline;
 
 export type DueDeadline = { [N in DeadlineName]: { name: N; deadline: DeadlineOf<N> } }[DeadlineName];
+
+export type SessionDueDeadline = Exclude<DueDeadline, { name: PrebuildDeadlineName }>;
+
+export type PrebuildDueDeadline = Extract<DueDeadline, { name: PrebuildDeadlineName }>;
+
+const isPrebuildDeadline = (due: DueDeadline): due is PrebuildDueDeadline =>
+  due.name === "PrebuildDispatch" || due.name === "PrebuildBuild";
 
 export type DeadlineChanges = { [N in DeadlineName]?: DeadlineOf<N> | null };
 
@@ -41,7 +60,7 @@ export class SessionTimer extends DurableObject<Env> {
   async set(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
     const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, sessionId, deadlines: {} };
     Object.assign(timers.deadlines, changes);
-    for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, Deadline | null][]) {
+    for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, { at: number } | null][]) {
       if (deadline === null) delete timers.deadlines[name];
     }
     await this.save(timers);
@@ -51,14 +70,15 @@ export class SessionTimer extends DurableObject<Env> {
     const timers = await this.ctx.storage.get<Timers>(TIMERS_KEY);
     if (timers === undefined) return;
     const now = Date.now();
-    const due = (Object.entries(timers.deadlines) as [DeadlineName, Deadline][])
+    const due = (Object.entries(timers.deadlines) as [DeadlineName, { at: number }][])
       .map(([name, deadline]) => ({ name, deadline }) as DueDeadline)
       .filter(({ deadline }) => deadline.at <= now);
     for (const { name } of due) delete timers.deadlines[name];
     await this.save(timers);
     const tenant = this.env.TENANT.getByName(timers.tenantId);
     for (const reached of due) {
-      await tenant.deadlineReached(timers.tenantId, timers.sessionId, reached);
+      if (isPrebuildDeadline(reached)) await tenant.prebuildDeadlineReached(timers.tenantId, reached);
+      else await tenant.deadlineReached(timers.tenantId, timers.sessionId, reached);
     }
   }
 

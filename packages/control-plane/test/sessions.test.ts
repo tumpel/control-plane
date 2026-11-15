@@ -59,6 +59,8 @@ const SETTINGS = {
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
   prebuildUploadBudgetSeconds: 60,
+  prebuildDispatchBudgetSeconds: 600,
+  prebuildBuildBudgetSeconds: 3600,
   gitHubActionsIssuer: "https://token.actions.githubusercontent.com",
 };
 

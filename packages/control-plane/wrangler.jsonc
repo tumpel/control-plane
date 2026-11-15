@@ -31,6 +31,8 @@
       "turnTotalBudgetSeconds": 3600,
       "transcriptChunkLines": 64,
       "prebuildUploadBudgetSeconds": 3600,
+      "prebuildDispatchBudgetSeconds": 600,
+      "prebuildBuildBudgetSeconds": 3600,
       "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
     }
   },
@@ -75,6 +77,8 @@
           "turnTotalBudgetSeconds": 3600,
           "transcriptChunkLines": 64,
           "prebuildUploadBudgetSeconds": 3600,
+          "prebuildDispatchBudgetSeconds": 600,
+          "prebuildBuildBudgetSeconds": 3600,
           "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
         }
       },

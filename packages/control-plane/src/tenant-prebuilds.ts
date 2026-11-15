@@ -7,7 +7,10 @@ import {
   PrebuildSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { type GitHubRepository, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
+import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
+import { type RunEvent, runOutcome } from "./github-actions.ts";
+import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
+import { settingsOf } from "./settings";
 import { TenantSessions } from "./tenant-sessions";
 
 export type Prebuild = z.infer<typeof PrebuildSchema>;
@@ -33,12 +36,41 @@ export interface PrebuildKey {
   guestImageDigest: string;
 }
 
+export interface PrebuildRun {
+  runId: number;
+  headSha: string;
+}
+
 export interface PrebuildDispatch {
+  prebuildId: string;
   personaId: string;
   key: PrebuildKey;
   defaultBranch: string;
   provider: BuildProvider;
+  run: PrebuildRun;
   logUrl: string;
+}
+
+export type CallerWorkflow = { kind: "Connected"; callerWorkflow: string } | { kind: "NotConnected" };
+
+export type RecordedRun = { kind: "Run"; run: PrebuildRun } | { kind: "NoRun" };
+
+export type BuildingRecorded =
+  | { kind: "Building" }
+  | { kind: "NotDispatched" }
+  | { kind: "OtherCommit"; dispatchedSha: string };
+
+export type DispatchToken =
+  | { kind: "Token"; token: string }
+  | { kind: "NoInstallation" }
+  | { kind: "Refused"; detail: string };
+
+type PrebuildFailurePhase = PrebuildFailure["phase"];
+
+interface FailureReport {
+  phase: PrebuildFailurePhase;
+  detail: string;
+  fix: string;
 }
 
 export interface PrebuildLayerUpload {
@@ -49,11 +81,15 @@ export interface PrebuildLayerUpload {
 export interface UploadTarget {
   prebuild: Prebuild;
   defaultBranch: string;
-  callerWorkflow: string | null;
+  callerWorkflow: CallerWorkflow;
+  run: RecordedRun;
   upload: PrebuildLayerUpload | null;
 }
 
-export type UploadRecorded = { kind: "Recorded"; prebuild: Prebuild } | { kind: "NotUploading"; prebuild: Prebuild };
+export type UploadRecorded =
+  | { kind: "Recorded"; prebuild: Prebuild }
+  | { kind: "NotUploading"; prebuild: Prebuild }
+  | { kind: "OtherLayer"; prebuild: Prebuild; recorded: PrebuildLayerUpload };
 
 const CONNECTION_TABLES: Record<BuildProvider, string> = {
   GitHubActions: "github_actions_connections",
@@ -181,36 +217,218 @@ export class TenantPrebuilds extends TenantSessions {
     return row === undefined ? null : toPrebuild(tenantId, row);
   }
 
-  recordDispatchedPrebuild(tenantId: string, dispatch: PrebuildDispatch, now: number): Prebuild {
-    const prebuildId = crypto.randomUUID();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-      provider, state, started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
-      prebuildId,
-      dispatch.personaId,
-      dispatch.key.repository,
-      dispatch.defaultBranch,
-      dispatch.key.inputDigest,
-      dispatch.key.guestImageDigest,
-      dispatch.provider,
-      new Date(now).toISOString(),
-      dispatch.logUrl,
-      now,
-      now,
-    );
+  async recordDispatchedPrebuild(tenantId: string, dispatch: PrebuildDispatch, now: number): Promise<Prebuild> {
+    const { prebuildId } = dispatch;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
+        provider, state, started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+        prebuildId,
+        dispatch.personaId,
+        dispatch.key.repository,
+        dispatch.defaultBranch,
+        dispatch.key.inputDigest,
+        dispatch.key.guestImageDigest,
+        dispatch.provider,
+        new Date(now).toISOString(),
+        dispatch.logUrl,
+        now,
+        now,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO prebuild_runs (prebuild_id, run_id, head_sha, created_at) VALUES (?, ?, ?, ?)",
+        prebuildId,
+        dispatch.run.runId,
+        dispatch.run.headSha,
+        now,
+      );
+    });
+    await this.prebuildTimers(tenantId, prebuildId, {
+      PrebuildDispatch: { prebuildId, at: now + settingsOf(this.env).prebuildDispatchBudgetSeconds * 1000 },
+    });
     const prebuild = this.getPrebuild(tenantId, prebuildId);
     if (prebuild === null) throw new Error(`prebuild ${prebuildId} was written and then not found`);
     return prebuild;
   }
 
-  recordPrebuildBuilding(prebuildId: string, now: number): boolean {
-    return (
-      this.ctx.storage.sql.exec(
-        "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
-        now,
+  private recordedRun(prebuildId: string): RecordedRun {
+    const [row] = this.ctx.storage.sql
+      .exec<{ run_id: number; head_sha: string }>(
+        "SELECT run_id, head_sha FROM prebuild_runs WHERE prebuild_id = ?",
         prebuildId,
-      ).rowsWritten > 0
+      )
+      .toArray();
+    return row === undefined ? { kind: "NoRun" } : { kind: "Run", run: { runId: row.run_id, headSha: row.head_sha } };
+  }
+
+  private prebuildTimers(tenantId: string, prebuildId: string, changes: DeadlineChanges): Promise<void> {
+    return this.env.SESSION_TIMER.getByName(prebuildId).set(tenantId, prebuildId, changes);
+  }
+
+  private async failPrebuild(
+    tenantId: string,
+    prebuildId: string,
+    from: readonly string[],
+    report: FailureReport,
+    logUrl: string,
+    now: number,
+  ): Promise<boolean> {
+    const failed = this.ctx.storage.transactionSync(() => {
+      const placeholders = from.map(() => "?").join(", ");
+      const moved = this.ctx.storage.sql.exec(
+        `UPDATE prebuilds SET state = 'Failed', updated_at = ?, log_url = ?
+        WHERE prebuild_id = ? AND state IN (${placeholders})`,
+        now,
+        logUrl,
+        prebuildId,
+        ...from,
+      ).rowsWritten;
+      if (moved === 0) return false;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO prebuild_failures (prebuild_id, phase, detail, fix, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        prebuildId,
+        report.phase,
+        report.detail,
+        report.fix,
+        new Date(now).toISOString(),
+        now,
+      );
+      return true;
+    });
+    if (failed) await this.prebuildTimers(tenantId, prebuildId, { PrebuildDispatch: null, PrebuildBuild: null });
+    return failed;
+  }
+
+  async recordPrebuildBuilding(
+    tenantId: string,
+    prebuildId: string,
+    run: PrebuildRun,
+    now: number,
+  ): Promise<BuildingRecorded> {
+    const recorded = this.recordedRun(prebuildId);
+    const prebuild = this.getPrebuild(tenantId, prebuildId);
+    if (recorded.kind === "NoRun" || recorded.run.runId !== run.runId || prebuild?.status.state !== "Dispatched") {
+      return { kind: "NotDispatched" };
+    }
+    if (recorded.run.headSha !== run.headSha) {
+      await this.failPrebuild(
+        tenantId,
+        prebuildId,
+        ["Dispatched"],
+        {
+          phase: "Dispatch",
+          detail: `run ${run.runId} started on commit ${run.headSha}, and the start read the inputs of ${recorded.run.headSha}: the default branch moved between the start and the run`,
+          fix: "Start the prebuild again, so it reads the inputs of the commit the run builds",
+        },
+        prebuild.logUrl,
+        now,
+      );
+      return { kind: "OtherCommit", dispatchedSha: recorded.run.headSha };
+    }
+    const moved = this.ctx.storage.sql.exec(
+      "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
+      now,
+      prebuildId,
+    ).rowsWritten;
+    if (moved === 0) return { kind: "NotDispatched" };
+    await this.prebuildTimers(tenantId, prebuildId, {
+      PrebuildDispatch: null,
+      PrebuildBuild: { prebuildId, at: now + settingsOf(this.env).prebuildBuildBudgetSeconds * 1000 },
+    });
+    return { kind: "Building" };
+  }
+
+  async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
+    const [row] = this.ctx.storage.sql
+      .exec<{ prebuild_id: string }>("SELECT prebuild_id FROM prebuild_runs WHERE run_id = ?", event.runId)
+      .toArray();
+    if (row === undefined) return;
+    const prebuildId = row.prebuild_id;
+    const outcome = runOutcome(event);
+    if (outcome.kind === "Started") {
+      await this.recordPrebuildBuilding(tenantId, prebuildId, { runId: event.runId, headSha: event.headSha }, now);
+      return;
+    }
+    if (outcome.kind === "Failed") {
+      await this.failPrebuild(
+        tenantId,
+        prebuildId,
+        ["Dispatched", "Building"],
+        {
+          phase: "Build",
+          detail: `run ${event.runId} ended ${outcome.conclusion} before the layer upload completed; its log is at ${event.htmlUrl}`,
+          fix: "Fix what the run's log names in the devcontainer or its lifecycle commands, then start the prebuild again with tumpel prebuild start --rebuild",
+        },
+        event.htmlUrl,
+        now,
+      );
+      return;
+    }
+    if (outcome.kind === "Succeeded") {
+      await this.failPrebuild(
+        tenantId,
+        prebuildId,
+        ["Dispatched", "Building"],
+        {
+          phase: "Upload",
+          detail: `run ${event.runId} succeeded and never completed the layer upload; its log is at ${event.htmlUrl}`,
+          fix: "Call the reusable workflow from the caller workflow unchanged, so its upload job runs, then start the prebuild again with tumpel prebuild start --rebuild",
+        },
+        event.htmlUrl,
+        now,
+      );
+    }
+  }
+
+  async prebuildDeadlineReached(tenantId: string, due: PrebuildDueDeadline): Promise<void> {
+    const { prebuildId } = due.deadline;
+    const prebuild = this.getPrebuild(tenantId, prebuildId);
+    if (prebuild === null) return;
+    const settings = settingsOf(this.env);
+    const now = Date.now();
+    if (due.name === "PrebuildDispatch") {
+      await this.failPrebuild(
+        tenantId,
+        prebuildId,
+        ["Dispatched"],
+        {
+          phase: "Dispatch",
+          detail: `the run GitHub Actions accepted for prebuild ${prebuildId} did not start within prebuildDispatchBudgetSeconds ${settings.prebuildDispatchBudgetSeconds}; see ${prebuild.logUrl}`,
+          fix: "Check that the repository's Actions are enabled and a runner is free, and that the GitHub App delivers workflow_run events, then start the prebuild again with tumpel prebuild start --rebuild",
+        },
+        prebuild.logUrl,
+        now,
+      );
+      return;
+    }
+    const [upload] = this.ctx.storage.sql
+      .exec("SELECT 1 FROM prebuild_uploads WHERE prebuild_id = ?", prebuildId)
+      .toArray();
+    await this.failPrebuild(
+      tenantId,
+      prebuildId,
+      ["Building"],
+      upload === undefined
+        ? {
+            phase: "Build",
+            detail: `prebuild ${prebuildId} built for prebuildBuildBudgetSeconds ${settings.prebuildBuildBudgetSeconds} without starting its layer upload; see ${prebuild.logUrl}`,
+            fix: "Make the devcontainer's lifecycle commands finish sooner, then start the prebuild again with tumpel prebuild start --rebuild",
+          }
+        : {
+            phase: "Upload",
+            detail: `prebuild ${prebuildId} started its layer upload and did not complete it within prebuildBuildBudgetSeconds ${settings.prebuildBuildBudgetSeconds}; see ${prebuild.logUrl}`,
+            fix: "Keep the layer smaller or check the runner's bandwidth, then start the prebuild again with tumpel prebuild start --rebuild",
+          },
+      prebuild.logUrl,
+      now,
     );
+  }
+
+  async dispatchToken(tenantId: string, repository: GitHubRepository, now: number): Promise<DispatchToken> {
+    const minted: Minted = await this.repositoryToken(tenantId, repository, now);
+    if (minted.kind === "Minted") return { kind: "Token", token: minted.token };
+    if (minted.kind === "NoToken") return { kind: "NoInstallation" };
+    return { kind: "Refused", detail: minted.detail };
   }
 
   uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {
@@ -222,7 +440,11 @@ export class TenantPrebuilds extends TenantSessions {
     return {
       prebuild: toPrebuild(tenantId, row),
       defaultBranch: row.default_branch,
-      callerWorkflow: connection?.caller_workflow ?? null,
+      callerWorkflow:
+        connection === null
+          ? { kind: "NotConnected" }
+          : { kind: "Connected", callerWorkflow: connection.caller_workflow },
+      run: this.recordedRun(prebuildId),
       upload:
         row.upload_layer_digest === null || row.upload_layer_size_bytes === null
           ? null
@@ -231,31 +453,44 @@ export class TenantPrebuilds extends TenantSessions {
   }
 
   startPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {
-    const recorded = this.ctx.storage.transactionSync(() => {
+    const recorded = this.ctx.storage.transactionSync((): PrebuildLayerUpload | "Recorded" | "NotUploading" => {
       const [building] = this.ctx.storage.sql
         .exec("SELECT 1 FROM prebuilds WHERE prebuild_id = ? AND state = 'Building'", prebuildId)
         .toArray();
-      if (building === undefined) return false;
+      if (building === undefined) return "NotUploading";
+      const [held] = this.ctx.storage.sql
+        .exec<{ layer_digest: string; layer_size_bytes: number }>(
+          "SELECT layer_digest, layer_size_bytes FROM prebuild_uploads WHERE prebuild_id = ?",
+          prebuildId,
+        )
+        .toArray();
+      if (held !== undefined) {
+        const same = held.layer_digest === upload.layerDigest && held.layer_size_bytes === upload.layerSizeBytes;
+        return same ? "Recorded" : { layerDigest: held.layer_digest, layerSizeBytes: held.layer_size_bytes };
+      }
       this.ctx.storage.sql.exec(
-        `INSERT INTO prebuild_uploads (prebuild_id, layer_digest, layer_size_bytes, created_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT (prebuild_id) DO UPDATE SET layer_digest = excluded.layer_digest,
-        layer_size_bytes = excluded.layer_size_bytes, created_at = excluded.created_at`,
+        "INSERT INTO prebuild_uploads (prebuild_id, layer_digest, layer_size_bytes, created_at) VALUES (?, ?, ?, ?)",
         prebuildId,
         upload.layerDigest,
         upload.layerSizeBytes,
         now,
       );
-      return true;
+      return "Recorded";
     });
-    return this.uploadRecorded(tenantId, prebuildId, recorded);
+    if (typeof recorded === "object") {
+      const prebuild = this.getPrebuild(tenantId, prebuildId);
+      if (prebuild === null) throw new Error(`prebuild ${prebuildId} is gone; the upload checked it a moment ago`);
+      return { kind: "OtherLayer", prebuild, recorded };
+    }
+    return this.uploadRecorded(tenantId, prebuildId, recorded === "Recorded");
   }
 
-  completePrebuildUpload(
+  async completePrebuildUpload(
     tenantId: string,
     prebuildId: string,
     upload: PrebuildLayerUpload,
     now: number,
-  ): UploadRecorded {
+  ): Promise<UploadRecorded> {
     const moved = this.ctx.storage.sql.exec(
       `UPDATE prebuilds SET state = 'Converting', updated_at = ? WHERE prebuild_id = ? AND state = 'Building'
       AND EXISTS (SELECT 1 FROM prebuild_uploads WHERE prebuild_id = ? AND layer_digest = ? AND layer_size_bytes = ?)`,
@@ -265,6 +500,7 @@ export class TenantPrebuilds extends TenantSessions {
       upload.layerDigest,
       upload.layerSizeBytes,
     ).rowsWritten;
+    if (moved > 0) await this.prebuildTimers(tenantId, prebuildId, { PrebuildBuild: null });
     return this.uploadRecorded(tenantId, prebuildId, moved > 0);
   }
 

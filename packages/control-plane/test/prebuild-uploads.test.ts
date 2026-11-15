@@ -21,6 +21,8 @@ const ACCESS_KID = "access-key";
 const JOB_KID = "github-job-key";
 const EMAIL = "uploads@example.test";
 const CALLER_WORKFLOW = ".github/workflows/tumpel-prebuild.yml";
+const HEAD_SHA = "c".repeat(40);
+const RUN = { runId: 42, headSha: HEAD_SHA };
 
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = rsa();
@@ -53,7 +55,7 @@ let personaId: string;
 type Store = { put(key: string, value: Uint8Array): Promise<unknown> };
 type TenantStub = {
   recordDispatchedPrebuild(tenantId: string, dispatch: unknown, now: number): Promise<unknown>;
-  recordPrebuildBuilding(prebuildId: string, now: number): Promise<boolean>;
+  recordPrebuildBuilding(tenantId: string, prebuildId: string, run: unknown, now: number): Promise<{ kind: string }>;
 };
 type Bindings = { STORE: Store; TENANT: { getByName(name: string): TenantStub } };
 
@@ -87,6 +89,7 @@ const jobToken = (overrides: Record<string, unknown> = {}): string =>
       event_name: "workflow_dispatch",
       job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/tags/v1",
       run_id: "42",
+      sha: HEAD_SHA,
       ...overrides,
     },
     job.privateKey,
@@ -128,6 +131,8 @@ before(async () => {
             turnTotalBudgetSeconds: 3600,
             transcriptChunkLines: 64,
             prebuildUploadBudgetSeconds: 900,
+            prebuildDispatchBudgetSeconds: 600,
+            prebuildBuildBudgetSeconds: 3600,
             gitHubActionsIssuer: githubIssuer,
           },
         },
@@ -179,7 +184,9 @@ const dispatched = async (owner: string) => {
     await env.TENANT.getByName(owner).recordDispatchedPrebuild(
       owner,
       {
+        prebuildId: crypto.randomUUID(),
         personaId,
+        run: RUN,
         key: { repository: "https://github.com/acme/app", inputDigest: digest, guestImageDigest: digest },
         defaultBranch: "main",
         provider: "GitHubActions",
@@ -196,7 +203,7 @@ const refusal = async (path: string, body: unknown, token: string | null, status
   return ProblemSchema.parse(await response.json());
 };
 
-test("a build job exchanges its GitHub token for one checked layer upload, and completing it moves the prebuild to Converting", async () => {
+test("a build job of the dispatched run exchanges its GitHub token for one checked layer upload, and completing it moves the prebuild to Converting", async () => {
   const prebuild = await dispatched(tenantId);
   assert.equal(prebuild.status.state, "Dispatched");
   const layer = new TextEncoder().encode("layer bytes");
@@ -206,7 +213,13 @@ test("a build job exchanges its GitHub token for one checked layer upload, and c
 
   assert.equal((await refusal(uploadsPath, exchange, jobToken(), 409)).code, "PrebuildNotUploading");
   const env = await server.getWorker<Bindings>().getEnv();
-  assert.ok(await env.TENANT.getByName(tenantId).recordPrebuildBuilding(prebuild.prebuildId, Date.now()));
+  const building = await env.TENANT.getByName(tenantId).recordPrebuildBuilding(
+    tenantId,
+    prebuild.prebuildId,
+    RUN,
+    Date.now(),
+  );
+  assert.equal(building.kind, "Building");
 
   const unknown = await refusal(uploadsPath, exchange, null, 401);
   assert.equal(unknown.code, "JobTokenRefused");
@@ -227,6 +240,8 @@ test("a build job exchanges its GitHub token for one checked layer upload, and c
     [{ workflow_ref: "Acme/App/.github/workflows/ci.yml@refs/heads/main" }, "workflow_ref"],
     [{ ref: "refs/heads/feature", workflow_ref: `Acme/App/${CALLER_WORKFLOW}@refs/heads/feature` }, "ref"],
     [{ event_name: "push" }, "event_name"],
+    [{ run_id: "43" }, "run_id"],
+    [{ sha: "d".repeat(40) }, "sha"],
   ];
   for (const [claims, check] of mismatches) {
     const problem = await refusal(uploadsPath, exchange, jobToken(claims), 403);
@@ -249,6 +264,12 @@ test("a build job exchanges its GitHub token for one checked layer upload, and c
   assert.equal(url.searchParams.get("X-Tumpel-Length"), String(layer.length));
   const lifetime = Date.parse(grant.uploadExpiresAt) - Date.now();
   assert.ok(lifetime > 890_000 && lifetime <= 900_000, `the URL lives the upload budget, not ${lifetime} ms`);
+  const repeated = await send("POST", uploadsPath, exchange, asJob(jobToken()));
+  assert.equal(repeated.status, 200, await repeated.clone().text());
+  const other = { ...exchange, layerSizeBytes: layer.length + 1 };
+  assert.equal((await refusal(uploadsPath, other, jobToken(), 409)).code, "Conflict");
+  const oversized = { ...exchange, layerSizeBytes: 5 * 2 ** 30 + 1 };
+  assert.equal((await refusal(uploadsPath, oversized, jobToken(), 400)).code, "InvalidRequest");
 
   assert.equal((await refusal(`${uploadsPath}/complete`, completion, jobToken(), 409)).code, "LayerNotUploaded");
   await env.STORE.put(`${tenantId}/prebuilds/${prebuild.prebuildId}/layers/${sha256(layer)}`, layer);

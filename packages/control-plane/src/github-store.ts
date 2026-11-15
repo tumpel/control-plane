@@ -177,3 +177,11 @@ export const unlinkTenant = async (db: D1Database, tenantId: string): Promise<vo
 export const unlinkInstallation = async (db: D1Database, installationId: number): Promise<void> => {
   await db.prepare("DELETE FROM github_installations WHERE installation_id = ?").bind(installationId).run();
 };
+
+export const tenantOfInstallation = async (db: D1Database, installationId: number): Promise<string | null> => {
+  const row = await db
+    .prepare("SELECT tenant_id FROM github_installations WHERE installation_id = ?")
+    .bind(installationId)
+    .first<{ tenant_id: string }>();
+  return row?.tenant_id ?? null;
+};

@@ -217,7 +217,9 @@ test("the latest listing answers the newest prebuild of each repository, by repo
       await stub.recordDispatchedPrebuild(
         tenant.tenantId,
         {
+          prebuildId: crypto.randomUUID(),
           personaId: persona.personaId,
+          run: { runId: at + seed.charCodeAt(0), headSha: "f".repeat(40) },
           key: { repository, inputDigest: seed.repeat(64), guestImageDigest: "c".repeat(64) },
           defaultBranch: "main",
           provider: "GitHubActions",

@@ -66,7 +66,7 @@ const claimOf = (claims: Record<string, unknown>, name: string): string | null =
 };
 
 const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repository: string): Response | null => {
-  const { prebuild, defaultBranch, callerWorkflow } = target;
+  const { prebuild, defaultBranch, callerWorkflow, run } = target;
   if (prebuild.provider !== "GitHubActions") {
     return tokenMismatch(
       "provider",
@@ -74,7 +74,7 @@ const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repos
       "Upload only the layer of a GitHub Actions prebuild with its job token",
     );
   }
-  if (callerWorkflow === null) {
+  if (callerWorkflow.kind === "NotConnected") {
     return tokenMismatch(
       "connection",
       "the tenant has no GitHub Actions connection",
@@ -99,12 +99,35 @@ const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repos
     );
   }
   const workflow = claimOf(claims, "workflow_ref");
-  const expected = `${repository}/${callerWorkflow}@${expectedRef}`;
-  if (workflow === expected) return null;
+  const expected = `${repository}/${callerWorkflow.callerWorkflow}@${expectedRef}`;
+  if (workflow !== expected) {
+    return tokenMismatch(
+      "workflow_ref",
+      `the token comes from workflow ${workflow ?? "(none)"}, and the tenant's GitHub Actions connection names ${expected}`,
+      "Run the upload from the caller workflow the connection names, or reconnect with tumpel github-actions start --caller-workflow",
+    );
+  }
+  if (run.kind === "NoRun") {
+    return tokenMismatch(
+      "run_id",
+      `prebuild ${prebuild.prebuildId} recorded no GitHub Actions run`,
+      "Start a new prebuild with tumpel prebuild start --rebuild",
+    );
+  }
+  const runId = claimOf(claims, "run_id");
+  if (runId !== String(run.run.runId)) {
+    return tokenMismatch(
+      "run_id",
+      `the token comes from run ${runId ?? "(none)"}, and prebuild ${prebuild.prebuildId} dispatched run ${run.run.runId}`,
+      "Upload only from the run the prebuild dispatched",
+    );
+  }
+  const sha = claimOf(claims, "sha");
+  if (sha === run.run.headSha) return null;
   return tokenMismatch(
-    "workflow_ref",
-    `the token comes from workflow ${workflow ?? "(none)"}, and the tenant's GitHub Actions connection names ${expected}`,
-    "Run the upload from the caller workflow the connection names, or reconnect with tumpel github-actions start --caller-workflow",
+    "sha",
+    `the token comes from a run of commit ${sha ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${run.run.headSha}`,
+    "Upload only from the run the prebuild dispatched, on the commit it read",
   );
 };
 
@@ -132,6 +155,14 @@ const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: 
   const { prebuildId } = binding.prebuild;
   const recorded = await env.TENANT.getByName(tenantId).startPrebuildUpload(tenantId, prebuildId, upload, Date.now());
   if (recorded.kind === "NotUploading") return notUploading(recorded.prebuild);
+  if (recorded.kind === "OtherLayer") {
+    return problem(409, {
+      code: "Conflict",
+      title: "Another layer already started",
+      detail: `prebuild ${prebuildId} recorded layer ${recorded.recorded.layerDigest} of ${recorded.recorded.layerSizeBytes} bytes, and this start names ${upload.layerDigest} of ${upload.layerSizeBytes} bytes`,
+      fix: "Upload the layer the first start named, or start a new prebuild with tumpel prebuild start --rebuild",
+    });
+  }
   const signer = signerOf(env, env.R2_BUCKET_NAME, env.R2_ACCESS_KEY_ID, env.R2_SECRET_ACCESS_KEY);
   const seconds = settingsOf(env).prebuildUploadBudgetSeconds;
   const now = Date.now();
@@ -140,7 +171,7 @@ const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: 
       prebuildId,
       tenantId,
       sha256: upload.layerDigest,
-      url: await signer.presignCheckedSized(
+      url: await signer.presignChecked(
         prebuildLayerKey(tenantId, prebuildId, upload.layerDigest),
         upload.layerDigest,
         upload.layerSizeBytes,
@@ -173,7 +204,7 @@ const complete = async (env: Env, binding: UploadTarget, tenantId: string): Prom
     upload,
     Date.now(),
   );
-  if (recorded.kind === "NotUploading") return notUploading(recorded.prebuild);
+  if (recorded.kind !== "Recorded") return notUploading(recorded.prebuild);
   return json(recorded.prebuild);
 };
 
