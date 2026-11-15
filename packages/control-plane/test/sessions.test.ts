@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   ChannelProtocol,
   ClaudeSetupSchema,
+  CompactTranscriptPageSchema,
   CredentialHandoverSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
@@ -19,6 +20,7 @@ import {
   OAuthTokenSchema,
   PersonaSchema,
   ProblemSchema,
+  RawTranscriptPageSchema,
   ReportedHostUsageSchema,
   SecretSetSchema,
   SessionSchema,
@@ -27,13 +29,12 @@ import {
   StartedSessionSchema,
   StopFailureSchema,
   SupervisorHostKeySchema,
-  TranscriptPageSchema,
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import { z } from "zod";
+import type { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../src/channel/protocol.ts";
 import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 
@@ -87,13 +88,6 @@ type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
 type StoredTimerStub = { store(timers: unknown, at: number): Promise<void> };
 type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
-
-const CompactPageSchema = z.object({
-  sessionId: z.string(),
-  cursor: z.number(),
-  finished: z.boolean(),
-  turns: z.array(z.object({ turnId: z.string(), lines: z.array(z.object({ lineSeq: z.number(), text: z.string() })) })),
-});
 
 const IMAGE_DIGEST = "b".repeat(64);
 const KERNEL_DIGEST = "c".repeat(64);
@@ -410,7 +404,7 @@ const readAll = async (sessionId: string, turnId: string, limit: number) => {
     const page = await tool(
       "tumpel_transcript_read",
       { sessionId, turnId, after: cursor, limit },
-      TranscriptPageSchema,
+      RawTranscriptPageSchema,
     );
     if (page.lines.length === 0) {
       assert.equal(page.cursor, cursor);
@@ -650,7 +644,11 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     (turn) => turn.lineCount === 3,
   );
   assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
-  const chunked = await tool("tumpel_transcript_read", { sessionId, compact: true, limit: 10 }, CompactPageSchema);
+  const chunked = await tool(
+    "tumpel_transcript_read",
+    { sessionId, compact: true, limit: 10 },
+    CompactTranscriptPageSchema,
+  );
   assert.equal(chunked.sessionId, sessionId);
   assert.deepEqual(chunked.turns, [{ turnId, lines: [{ lineSeq: 2, text: "on it" }] }]);
   assert.equal(chunked.cursor, 2);
@@ -658,7 +656,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   const pending = await tool(
     "tumpel_transcript_read",
     { sessionId, compact: true, limit: 10, after: chunked.cursor },
-    CompactPageSchema,
+    CompactTranscriptPageSchema,
   );
   assert.deepEqual(pending.turns, [{ turnId, lines: [{ lineSeq: 3, text: "[Bash] npm test" }] }]);
   assert.equal(pending.cursor, 3);
@@ -673,13 +671,17 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.equal(completed.lineCount, 3);
   assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
   assert.deepEqual(await readAll(sessionId, turnId, 1), expected);
-  const first = await tool("tumpel_transcript_read", { sessionId, limit: 1 }, TranscriptPageSchema);
+  const first = await tool("tumpel_transcript_read", { sessionId, limit: 1 }, RawTranscriptPageSchema);
   assert.equal(first.cursor, 1);
   assert.equal(first.finished, false);
-  const last = await tool("tumpel_transcript_read", { sessionId, after: 2 }, TranscriptPageSchema);
+  const last = await tool("tumpel_transcript_read", { sessionId, after: 2 }, RawTranscriptPageSchema);
   assert.equal(last.cursor, 3);
   assert.equal(last.finished, true);
-  const pastDropped = await tool("tumpel_transcript_read", { sessionId, compact: true, limit: 1 }, CompactPageSchema);
+  const pastDropped = await tool(
+    "tumpel_transcript_read",
+    { sessionId, compact: true, limit: 1 },
+    CompactTranscriptPageSchema,
+  );
   assert.deepEqual(pastDropped.turns, [{ turnId, lines: [{ lineSeq: 2, text: "on it" }] }]);
   assert.equal(pastDropped.cursor, 2);
 

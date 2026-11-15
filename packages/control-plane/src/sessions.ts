@@ -1,5 +1,6 @@
 import { type CredentialRefusal, checkModelCredential, credentialProblem } from "@tumpel/api/credentials";
 import {
+  type CompactTranscriptTurnSchema,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
@@ -38,6 +39,7 @@ import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
 import { compactorOf, DEFAULT_PAGE_BYTES, decodeLines, pageOf, type TranscriptLine } from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
+type CompactTranscriptTurn = z.infer<typeof CompactTranscriptTurnSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
 export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
 export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
@@ -444,6 +446,16 @@ const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLi
   return decodeLines(await object.text());
 };
 
+const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
+  const turns: CompactTranscriptTurn[] = [];
+  for (const { turnId, lineSeq, text } of lines) {
+    const last = turns.at(-1);
+    if (last?.turnId === turnId) last.lines.push({ lineSeq, text });
+    else turns.push({ turnId, lines: [{ lineSeq, text }] });
+  }
+  return turns;
+};
+
 export const readTranscript = async (
   env: Env,
   caller: Caller,
@@ -477,12 +489,21 @@ export const readTranscript = async (
   for (;;) {
     const page = pageOf(await linesOf(env, read), after, compactor, maxBytes);
     if (page.lines.length > 0 || page.cursor === after || page.cursor >= read.lastLineSeq) {
+      const { sessionState } = read;
+      const finished = !read.inFlight && page.cursor >= read.lastLineSeq;
+      if (compactor === null) {
+        return ok(
+          TranscriptPageSchema.parse({ form: "Raw", sessionState, lines: page.lines, cursor: page.cursor, finished }),
+        );
+      }
       return ok(
         TranscriptPageSchema.parse({
-          sessionState: read.sessionState,
-          lines: page.lines,
+          form: "Compact",
+          sessionId,
+          sessionState,
+          turns: byTurn(page.lines),
           cursor: page.cursor,
-          finished: !read.inFlight && page.cursor >= read.lastLineSeq,
+          finished,
         }),
       );
     }
