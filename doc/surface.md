@@ -17,7 +17,18 @@ session; `session get` also prints the session's stop failures.
 
 `tumpel_secret_set_create` and `_update` take key names and `valueFrom.env` names only and write
 nothing: the server cannot read your environment, so they return the config entry for
-`tumpel config apply`, which writes the values.
+`tumpel config apply`, which writes the values. `tumpel_secret_set_set_member` writes nothing either:
+it returns the `tumpel secret-set set-member` command that writes one member.
+
+Every value the CLI writes is a flag, a `--file <path>`, or, for a secret value, stdin: one value per
+`--stdin` invocation, never a flag value and never echoed. `secret-set create --name` makes an empty
+set, `secret-set set-member` writes one member and keeps the rest, `secret-set remove-member` drops one,
+and `persona create` and `persona update` take `--name`, `--harness`, `--secret-set-id` and a
+`--persona-file <path>=<local file>` per file instead of a JSON file:
+
+```sh
+gh auth token | tumpel secret-set set-member <secretSetId> --kind Variable --name GITHUB_TOKEN --stdin
+```
 
 | Operation                            | MCP tool                          | CLI command                       |
 | ------------------------------------ | --------------------------------- | --------------------------------- |
@@ -72,6 +83,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `SecretSets_delete`                  | `tumpel_secret_set_delete`        | `tumpel secret-set delete`        |
 | `SecretSets_get`                     | `tumpel_secret_set_get`           | `tumpel secret-set get`           |
 | `SecretSets_list`                    | `tumpel_secret_set_list`          | `tumpel secret-set list`          |
+| `SecretSets_removeMember`            | `tumpel_secret_set_remove_member` | `tumpel secret-set remove-member` |
+| `SecretSets_setMember`               | `tumpel_secret_set_set_member`    | `tumpel secret-set set-member`    |
 | `SecretSets_update`                  | `tumpel_secret_set_update`        | `tumpel secret-set update`        |
 | `Sessions_archive`                   | `tumpel_session_archive`          | `tumpel session archive`          |
 | `Sessions_get`                       | `tumpel_session_get`              | `tumpel session get`              |

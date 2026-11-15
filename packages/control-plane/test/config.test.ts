@@ -83,10 +83,11 @@ interface Finished {
   stderr: string;
 }
 
-const tumpel = (args: string[], extra: Record<string, string> = {}): Promise<Finished> => {
+const tumpel = (args: string[], extra: Record<string, string> = {}, input = ""): Promise<Finished> => {
   const child = spawn(TUMPEL, args, {
     env: { PATH: process.env.PATH ?? "", HOME: scratch, TUMPEL_ENV_FILE: envFile, ...extra },
   });
+  child.stdin.end(input);
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => {
@@ -348,4 +349,62 @@ test("a persona file at a path its harness does not read is refused, and a store
   const missing = await put([{ source: "Stored", path: ".claude/CLAUDE.md", digest: "f".repeat(64), sizeBytes: 2 }]);
   assert.equal(missing.status, 422);
   assert.equal(ProblemSchema.parse(await missing.json()).title, "Persona file not uploaded");
+});
+
+test("secret-set set-member writes one member from stdin and keeps the rest, and remove-member drops one", async () => {
+  const created = await tumpel(["secret-set", "create", "--name", "piped"]);
+  assert.equal(created.code, 0, created.stderr);
+  const { secretSetId } = SecretSetSchema.parse(JSON.parse(created.stdout));
+  const key = ["--kind", "ApiKey", "--name", "ANTHROPIC_API_KEY", "--provider", "Anthropic"];
+
+  const asArgument = await tumpel(["secret-set", "set-member", secretSetId, ...key]);
+  assert.equal(asArgument.code, 1);
+  assert.match(asArgument.stderr, /--stdin/);
+
+  const keyed = await tumpel(["secret-set", "set-member", secretSetId, ...key, "--stdin"], {}, `${SECRET}\n`);
+  assert.equal(keyed.code, 0, keyed.stderr);
+  const token = ["--kind", "Variable", "--name", "DEPLOY_TOKEN"];
+  const both = await tumpel(["secret-set", "set-member", secretSetId, ...token, "--stdin"], {}, SECRET);
+  assert.equal(both.code, 0, both.stderr);
+  assert.ok(!`${keyed.stdout}${keyed.stderr}${both.stdout}${both.stderr}`.includes(SECRET));
+  assert.deepEqual(
+    SecretSetSchema.parse(JSON.parse(both.stdout)).keys.map((member) => [member.kind, member.name]),
+    [
+      ["ApiKey", "ANTHROPIC_API_KEY"],
+      ["Variable", "DEPLOY_TOKEN"],
+    ],
+  );
+
+  const removed = await tumpel(["secret-set", "remove-member", secretSetId, "ANTHROPIC_API_KEY"]);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.deepEqual(
+    SecretSetSchema.parse(JSON.parse(removed.stdout)).keys.map((member) => member.name),
+    ["DEPLOY_TOKEN"],
+  );
+  const missing = await tumpel(["secret-set", "remove-member", secretSetId, "ANTHROPIC_API_KEY"]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /no member ANTHROPIC_API_KEY/);
+
+  writeLocal(join(scratch, "piped", "CLAUDE.md"), REVIEWER_MEMORY);
+  const persona = await tumpel([
+    "persona",
+    "create",
+    "--name",
+    "Piped",
+    "--harness",
+    "ClaudeCode",
+    "--secret-set-id",
+    secretSetId,
+    "--persona-file",
+    `.claude/CLAUDE.md=${join(scratch, "piped", "CLAUDE.md")}`,
+  ]);
+  assert.equal(persona.code, 0, persona.stderr);
+  const { personaId } = PersonaSchema.parse(JSON.parse(persona.stdout));
+  const renamed = await tumpel(["persona", "update", personaId, "--name", "Piped again"]);
+  assert.equal(renamed.code, 0, renamed.stderr);
+  const kept = PersonaSchema.parse(JSON.parse(renamed.stdout));
+  assert.deepEqual(
+    [kept.name, kept.secretSetId, kept.files.map((held) => [held.path, held.digest])],
+    ["Piped again", secretSetId, [[".claude/CLAUDE.md", sha256(REVIEWER_MEMORY)]]],
+  );
 });

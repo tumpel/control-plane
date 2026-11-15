@@ -1,4 +1,5 @@
 import {
+  ApiKeyMemberSchema,
   ConfigApiKeySchema,
   ConfigSecretSetSchema,
   ConfigSecretValueSchema,
@@ -26,12 +27,15 @@ import {
   PrebuildPathSchema,
   PrebuildStartSchema,
   ProblemSchema,
+  SecretMemberPathSchema,
   SecretSetPathSchema,
+  SecretVariableMemberSchema,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
   SessionStartSchema,
   SnapshotPathSchema,
+  SubscriptionTokenMemberSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
   TranscriptQuerySchema,
@@ -54,7 +58,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections or tumpel config apply on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_tenants lists every tenant you belong to, tumpel_member_* and tumpel_invitation_* list, invite and remove the people of the tenant, tumpel_host_* add, label and retire machines and their enrolment tokens, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names, remove a member and draft config entries and set-member commands, since secret values never pass through MCP: they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. tumpel_devices_* list and sign out your devices. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run, tumpel_connection_list lists every connection with its state, tumpel_oauth_grant_list lists the clients signed in as you and tumpel_oauth_grant_revoke signs one out, tumpel_config_plan and tumpel_config_apply make the tenant match a tenant config, tumpel_github_actions_* and tumpel_namespace_* connect the tenant's own build provider accounts, and tumpel_prebuild_* start and read the prebuilds that install a repository's dependencies ahead of its sessions. tumpel_session_start runs a session on an online host, tumpel_github_list_repositories and tumpel_github_list_issues find an issue and tumpel_session_start_from_issue starts a session that works it into a draft pull request, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -77,7 +81,7 @@ interface ToolDefinition {
   description: string;
   input: z.ZodObject;
   request: { method: Method; path: string } | null;
-  answer: "rest" | "configSecretSet";
+  answer: "rest" | "configSecretSet" | "memberCommand";
 }
 
 const NO_ARGUMENTS = z.object({});
@@ -93,14 +97,30 @@ const KEY_NAMES_ONLY = ConfigSecretSetSchema.extend({
 }).strict();
 
 const KEY_NAMES_RULE =
-  "Secret values never pass through MCP; they arrive through the dashboard, the OAuth connections or tumpel config apply on the CLI. This tool writes nothing: each member names its kind (Variable, ApiKey, or SubscriptionToken with its expiresAt), a provider for a credential, and only the environment variable (valueFrom.env) its value is read from, which the server cannot resolve. Returns the ConfigSecretSet entry to put in secretSets of the tenant config file; export each named variable on your machine and run tumpel config apply <file>, which writes the values.";
+  "Secret values never pass through MCP; they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI. This tool writes nothing: each member names its kind (Variable, ApiKey, or SubscriptionToken with its expiresAt), a provider for a credential, and only the environment variable (valueFrom.env) its value is read from, which the server cannot resolve. Returns the ConfigSecretSet entry to put in secretSets of the tenant config file; export each named variable on your machine and run tumpel config apply <file>, which writes the values.";
+
+const MEMBER_WITHOUT_VALUE = SecretSetPathSchema.extend({
+  member: z.discriminatedUnion("kind", [
+    SecretVariableMemberSchema.strict(),
+    ApiKeyMemberSchema.strict(),
+    SubscriptionTokenMemberSchema.strict(),
+  ]),
+}).strict();
+
+const memberCommand = (args: z.infer<typeof MEMBER_WITHOUT_VALUE>): string => {
+  const { member } = args;
+  const flags = [`--kind ${member.kind}`, `--name ${member.name}`];
+  if (member.kind !== "Variable") flags.push(`--provider ${member.provider}`);
+  if (member.kind === "SubscriptionToken") flags.push(`--expires-at ${member.expiresAt}`);
+  return `Secret values never pass through MCP and this tool writes nothing. Pipe the value of ${member.name} into this command on your machine: tumpel secret-set set-member ${args.secretSetId} ${flags.join(" ")} --stdin`;
+};
 
 const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
   secretValues: z
     .array(ConfigSecretValueSchema.pick({ env: true }).strict())
     .max(
       0,
-      "secret values never pass through MCP; they arrive through the dashboard, the OAuth connections or tumpel config apply on the CLI",
+      "secret values never pass through MCP; they arrive through the dashboard, the OAuth connections, tumpel config apply or tumpel secret-set set-member --stdin on the CLI",
     ),
 });
 
@@ -484,6 +504,21 @@ export const TOOLS: ToolDefinition[] = [
     request: { method: "GET", path: "/v1/secret-sets/{secretSetId}" },
     answer: "configSecretSet",
   },
+  {
+    name: "tumpel_secret_set_set_member",
+    description:
+      "Draft the write of one member of an existing secret set, by its kind, name, provider and expiresAt; the set must exist. Secret values never pass through MCP and this tool writes nothing. Returns the tumpel secret-set set-member command that reads the value on stdin and writes it, keeping every other member.",
+    input: MEMBER_WITHOUT_VALUE,
+    request: { method: "GET", path: "/v1/secret-sets/{secretSetId}" },
+    answer: "memberCommand",
+  },
+  rest(
+    "tumpel_secret_set_remove_member",
+    "DELETE",
+    "/v1/secret-sets/{secretSetId}/members/{name}",
+    SecretMemberPathSchema,
+    "Delete one member of a secret set and its stored value; every other member keeps its value. Returns the SecretSet of DELETE /v1/secret-sets/{secretSetId}/members/{name}.",
+  ),
   rest(
     "tumpel_secret_set_delete",
     "DELETE",
@@ -643,6 +678,7 @@ const runTool = async (
       return { ok: true, text: text || `${tool.request.method} ${tool.request.path} answered ${answer.status}` };
     }
   }
+  if (tool.answer === "memberCommand") return { ok: true, text: memberCommand(MEMBER_WITHOUT_VALUE.parse(args)) };
   const entry = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "secretSetId"));
   return { ok: true, text: JSON.stringify(ConfigSecretSetSchema.parse(entry)) };
 };
