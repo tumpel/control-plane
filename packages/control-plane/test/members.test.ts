@@ -260,8 +260,8 @@ test("a Member is refused the member and connection operations of an Owner", asy
 
 test("an Owner removes one GitHub installation, keeping the tenant's others and refusing another tenant's", async () => {
   const env = await server.getWorker<{ DB: Database }>().getEnv();
-  const link = `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type,
-    repository_selection, status, created_at, updated_at) VALUES (?, ?, ?, 'Organization', 'All', 'Active', ?, ?)`;
+  const link = `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at,
+    updated_at) VALUES (?, ?, ?, 'Active', ?, ?)`;
   await env.DB.prepare(link).bind(901, acme, "acme", Date.now(), Date.now()).run();
   await env.DB.prepare(link).bind(903, acme, "acme-tools", Date.now(), Date.now()).run();
   await env.DB.prepare(link).bind(902, bobco, "bobco", Date.now(), Date.now()).run();

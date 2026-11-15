@@ -86,7 +86,6 @@ export const GitHubAppConversionSchema = z.object({
 export const GitHubInstallationRecordSchema = z.object({
   id: GitHubIdSchema,
   account: z.object({ login: GitHubLoginSchema, type: z.enum(["User", "Organization"]) }),
-  repository_selection: z.enum(["all", "selected"]),
 });
 
 export const GitHubInstallationChoiceStateSchema = z.object({
@@ -131,12 +130,6 @@ export const GitHubErrorSchema = z.object({
 export const GitHubInstallationEventSchema = z.object({
   action: z.string(),
   installation: GitHubInstallationRecordSchema,
-});
-
-export const GitHubInstallationRepositoriesEventSchema = z.object({
-  action: z.string(),
-  installation: GitHubInstallationRecordSchema,
-  repository_selection: z.enum(["all", "selected"]),
 });
 
 export const GitHubInstallationRepositoriesSchema = z.object({

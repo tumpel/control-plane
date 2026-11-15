@@ -1,6 +1,5 @@
 import {
   GitHubConnectionSchema,
-  GitHubInstallationPathSchema,
   GitHubInstallationSchema,
   GitHubInstallStartSchema,
   GitHubIssueSchema,
@@ -33,6 +32,7 @@ import {
   STATE_KEY_PURPOSE,
   STATE_TTL_MS,
   signState,
+  uncovered,
   verifyInstaller,
   verifyWebhookSignature,
   WEBHOOK_PATH,
@@ -41,7 +41,6 @@ import {
   GitHubInstallationChoiceQuerySchema,
   GitHubInstallationChoiceStateSchema,
   GitHubInstallationEventSchema,
-  GitHubInstallationRepositoriesEventSchema,
   GitHubInstallStateSchema,
   GitHubManifestCallbackSchema,
   GitHubManifestStateSchema,
@@ -52,10 +51,12 @@ import {
 import {
   appKey,
   type GitHubInstallation,
+  installationOn,
   installationsOf,
   linkInstallation,
   oauthClient,
   refreshInstallation,
+  setInstallationStatus,
   storeApp,
   storedApp,
   tenantOfInstallation,
@@ -151,11 +152,15 @@ const noInstallation = (installationId: string): Response =>
 const handleDelete = async (caller: Caller, env: Env, installationText: string): Promise<Response> => {
   const refused = ownerRequired(caller, "gitHubConnections.delete");
   if (refused) return refused;
-  const path = GitHubInstallationPathSchema.safeParse({
-    installationId: /^[1-9][0-9]{0,15}$/.test(installationText) ? Number(installationText) : null,
-  });
-  if (!path.success) return noInstallation(installationText);
-  if (!(await unlinkTenantInstallation(env.DB, caller.tenantId, path.data.installationId))) {
+  if (!/^[1-9][0-9]{0,15}$/.test(installationText)) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Not an installation id",
+      detail: `${installationText} is not a GitHub installation id, which is a positive whole number`,
+      fix: "List the installations with tumpel github list and pass an installationId it prints",
+    });
+  }
+  if (!(await unlinkTenantInstallation(env.DB, caller.tenantId, Number(installationText)))) {
     return noInstallation(installationText);
   }
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
@@ -229,16 +234,16 @@ const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, n
       fix: "List the repositories with tumpel github list-repositories and pass an owner and name it prints",
     });
   }
-  const access = await installationAccess(caller, url, env);
-  if (!access.ok) return access.response;
-  const minted = await mintInstallationToken(
-    fetcher,
-    env.GITHUB_API_ORIGIN,
-    access.app,
-    access.installations,
-    path.data,
-    Date.now(),
-  );
+  const app = await appKey(env.DB, keyStoreOf(env));
+  if (app === null) return appMissing(url.origin);
+  const installation = await installationOn(env.DB, caller.tenantId, path.data.owner);
+  const minted =
+    installation === null
+      ? uncovered(
+          (await installationsOf(env.DB, caller.tenantId)).map(({ accountLogin }) => accountLogin),
+          path.data,
+        )
+      : await mintInstallationToken(fetcher, env.GITHUB_API_ORIGIN, app, installation, path.data, Date.now());
   if (minted.kind === "NoToken") return notConnected();
   if (minted.kind !== "Minted") return unreadable(minted.detail);
   return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, path.data), GitHubIssueSchema);
@@ -605,21 +610,6 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
   return noContent;
 };
 
-const handleInstallationRepositories = async (env: Env, body: ArrayBuffer, noContent: Response): Promise<Response> => {
-  const delivery = GitHubInstallationRepositoriesEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
-  if (!delivery.success) {
-    return problem(400, {
-      code: "InvalidRequest",
-      title: "Not an installation_repositories event",
-      detail: `the installation_repositories delivery does not parse: ${issues(delivery.error)}`,
-      fix: "Send installation_repositories events in the shape GitHub documents, with an installation and a repository_selection",
-    });
-  }
-  const { installation, repository_selection: selection } = delivery.data;
-  await refreshInstallation(env.DB, installation, selection, null, Date.now());
-  return noContent;
-};
-
 export const handleGitHubWebhook = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   if (request.method !== "POST" || url.pathname !== WEBHOOK_PATH) return null;
   const secret = await webhookSecret(env.DB, keyStoreOf(env));
@@ -643,7 +633,6 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   const event = request.headers.get("x-github-event");
   if (event === "workflow_run") return handleWorkflowRun(env, body, noContent);
-  if (event === "installation_repositories") return handleInstallationRepositories(env, body, noContent);
   if (event !== "installation") return noContent;
   const delivery = GitHubInstallationEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
   if (!delivery.success) {
@@ -659,7 +648,9 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
     await unlinkInstallation(env.DB, installation.id);
     return noContent;
   }
-  const status = action === "suspend" ? "Suspended" : action === "unsuspend" ? "Active" : null;
-  await refreshInstallation(env.DB, installation, installation.repository_selection, status, Date.now());
+  const now = Date.now();
+  await refreshInstallation(env.DB, installation, now);
+  if (action === "suspend") await setInstallationStatus(env.DB, installation.id, "Suspended", now);
+  if (action === "unsuspend") await setInstallationStatus(env.DB, installation.id, "Active", now);
   return noContent;
 };

@@ -139,29 +139,21 @@ type InstallationRow = {
   installation_id: number;
   tenant_id: string;
   account_login: string;
-  account_type: GitHubInstallation["accountType"];
-  repository_selection: GitHubInstallation["repositorySelection"];
   status: GitHubInstallation["status"];
   created_at: number;
   updated_at: number;
 };
 
-const INSTALLATION_COLUMNS =
-  "installation_id, tenant_id, account_login, account_type, repository_selection, status, created_at, updated_at";
+const INSTALLATION_COLUMNS = "installation_id, tenant_id, account_login, status, created_at, updated_at";
 
 const toInstallation = (row: InstallationRow): GitHubInstallation => ({
   installationId: row.installation_id,
   tenantId: row.tenant_id,
   accountLogin: row.account_login,
-  accountType: row.account_type,
-  repositorySelection: row.repository_selection,
   status: row.status,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
-
-export const repositorySelectionOf = (selection: "all" | "selected"): GitHubInstallation["repositorySelection"] =>
-  selection === "all" ? "All" : "Selected";
 
 export const installationsOf = async (db: D1Database, tenantId: string): Promise<GitHubInstallation[]> => {
   const { results } = await db
@@ -171,6 +163,20 @@ export const installationsOf = async (db: D1Database, tenantId: string): Promise
     .bind(tenantId)
     .all<InstallationRow>();
   return results.map(toInstallation);
+};
+
+export const installationOn = async (
+  db: D1Database,
+  tenantId: string,
+  accountLogin: string,
+): Promise<GitHubInstallation | null> => {
+  const row = await db
+    .prepare(
+      `SELECT ${INSTALLATION_COLUMNS} FROM github_installations WHERE tenant_id = ? AND account_login = ? COLLATE NOCASE`,
+    )
+    .bind(tenantId, accountLogin)
+    .first<InstallationRow>();
+  return row === null ? null : toInstallation(row);
 };
 
 const installationRow = (db: D1Database, installationId: number): Promise<InstallationRow | null> =>
@@ -189,21 +195,11 @@ export const linkInstallation = async (
 ): Promise<Linked> => {
   await db
     .prepare(
-      `INSERT INTO github_installations (${INSTALLATION_COLUMNS}) VALUES (?, ?, ?, ?, ?, 'Active', ?, ?)
-      ON CONFLICT (installation_id) DO UPDATE SET account_login = excluded.account_login,
-        account_type = excluded.account_type, repository_selection = excluded.repository_selection,
-        updated_at = excluded.updated_at
+      `INSERT INTO github_installations (${INSTALLATION_COLUMNS}) VALUES (?, ?, ?, 'Active', ?, ?)
+      ON CONFLICT (installation_id) DO UPDATE SET account_login = excluded.account_login, updated_at = excluded.updated_at
       WHERE github_installations.tenant_id = excluded.tenant_id`,
     )
-    .bind(
-      record.id,
-      tenantId,
-      record.account.login,
-      record.account.type,
-      repositorySelectionOf(record.repository_selection),
-      now,
-      now,
-    )
+    .bind(record.id, tenantId, record.account.login, now, now)
     .run();
   const row = await installationRow(db, record.id);
   return row === null || row.tenant_id !== tenantId
@@ -230,16 +226,23 @@ export const unlinkInstallation = async (db: D1Database, installationId: number)
 export const refreshInstallation = async (
   db: D1Database,
   record: GitHubInstallationRecord,
-  repositorySelection: "all" | "selected",
-  status: GitHubInstallation["status"] | null,
   now: number,
 ): Promise<void> => {
   await db
-    .prepare(
-      `UPDATE github_installations SET account_login = ?, account_type = ?, repository_selection = ?,
-        status = COALESCE(?, status), updated_at = ? WHERE installation_id = ?`,
-    )
-    .bind(record.account.login, record.account.type, repositorySelectionOf(repositorySelection), status, now, record.id)
+    .prepare("UPDATE github_installations SET account_login = ?, updated_at = ? WHERE installation_id = ?")
+    .bind(record.account.login, now, record.id)
+    .run();
+};
+
+export const setInstallationStatus = async (
+  db: D1Database,
+  installationId: number,
+  status: GitHubInstallation["status"],
+  now: number,
+): Promise<void> => {
+  await db
+    .prepare("UPDATE github_installations SET status = ?, updated_at = ? WHERE installation_id = ?")
+    .bind(status, now, installationId)
     .run();
 };
 

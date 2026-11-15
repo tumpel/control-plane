@@ -245,8 +245,8 @@ before(async () => {
     )
     .run();
   await env.DB.prepare(
-    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, repository_selection,
-    status, created_at, updated_at) VALUES (?, ?, ?, 'Organization', 'Selected', 'Active', ?, ?)`,
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'Active', ?, ?)`,
   )
     .bind(INSTALLATION_ID, tenantId, "acme", Date.now(), Date.now())
     .run();
@@ -411,28 +411,22 @@ const installations = async () =>
     await (await send("GET", "/v1/github-connection/installations", undefined, bearer)).json(),
   );
 
-test("a tenant holds an installation per account, a repositories change updates only that one, and an uninstall drops only that one", async () => {
+test("a tenant holds an installation per account, a suspension changes only that one, and an uninstall drops only that one", async () => {
   const env = await server.getWorker<Bindings>().getEnv();
   await env.DB.prepare(
-    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, repository_selection,
-    status, created_at, updated_at) VALUES (?, ?, ?, 'User', 'Selected', 'Active', ?, ?)`,
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'Active', ?, ?)`,
   )
     .bind(INSTALLATION_ID + 1, tenantId, "octo", Date.now(), Date.now())
     .run();
-  const octo = { id: INSTALLATION_ID + 1, account: { login: "octo", type: "User" }, repository_selection: "all" };
+  const octo = { id: INSTALLATION_ID + 1, account: { login: "octo", type: "User" } };
 
-  await signedDelivery("installation_repositories", {
-    action: "added",
-    installation: octo,
-    repository_selection: "all",
-    repositories_added: [],
-    repositories_removed: [],
-  });
+  await signedDelivery("installation", { action: "suspend", installation: octo });
   assert.deepEqual(
-    (await installations()).map(({ accountLogin, repositorySelection }) => [accountLogin, repositorySelection]),
+    (await installations()).map(({ accountLogin, status }) => [accountLogin, status]),
     [
-      ["acme", "Selected"],
-      ["octo", "All"],
+      ["acme", "Active"],
+      ["octo", "Suspended"],
     ],
   );
 
@@ -445,29 +439,17 @@ test("a tenant holds an installation per account, a repositories change updates 
 
 test("connecting another account from Tumpel adds its installation and keeps the one the tenant held", async () => {
   const db = (await server.getWorker<{ DB: Parameters<typeof linkInstallation>[0] }>().getEnv()).DB;
-  const kattebak = {
-    id: 91,
-    account: { login: "kattebak", type: "User" as const },
-    repository_selection: "all" as const,
-  };
-  const tumpel = {
-    id: 92,
-    account: { login: "tumpel", type: "Organization" as const },
-    repository_selection: "selected" as const,
-  };
+  const kattebak = { id: 91, account: { login: "kattebak", type: "User" as const } };
+  const tumpel = { id: 92, account: { login: "tumpel", type: "Organization" as const } };
   assert.equal((await linkInstallation(db, tenantId, kattebak, Date.now())).kind, "Linked");
   assert.equal((await linkInstallation(db, tenantId, tumpel, Date.now())).kind, "Linked");
   assert.equal((await linkInstallation(db, tenantId, kattebak, Date.now())).kind, "Linked");
-  const held = (await installations()).map(({ installationId, accountType, repositorySelection }) => [
-    installationId,
-    accountType,
-    repositorySelection,
-  ]);
+  const held = (await installations()).map(({ installationId, accountLogin }) => [installationId, accountLogin]);
   assert.deepEqual(
     held.filter(([installationId]) => installationId === 91 || installationId === 92),
     [
-      [91, "User", "All"],
-      [92, "Organization", "Selected"],
+      [91, "kattebak"],
+      [92, "tumpel"],
     ],
   );
   assert.equal((await linkInstallation(db, "another-tenant", tumpel, Date.now())).kind, "OtherTenant");

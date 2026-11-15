@@ -45,8 +45,9 @@ import {
   REPOSITORY_TOKEN,
   type RepositoryCredentialSource,
   repositoryCredential,
+  uncovered,
 } from "./github.ts";
-import { appKey, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
+import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import { type Host, hostOf } from "./hosts";
 import type { Env } from "./index";
@@ -497,19 +498,22 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   protected async repositoryToken(tenantId: string, repository: GitHubRepository, now: number): Promise<Minted> {
-    const installations = await installationsOf(this.env.DB, tenantId);
-    if (installations.length === 0) return { kind: "NoToken" };
+    const installation = await installationOn(this.env.DB, tenantId, repository.owner);
+    if (installation === null) {
+      const accounts = (await installationsOf(this.env.DB, tenantId)).map(({ accountLogin }) => accountLogin);
+      return uncovered(accounts, repository);
+    }
     const app = await appKey(this.env.DB, keyStoreOf(this.env));
     if (app === null) {
       throw new Error(
-        `tenant ${tenantId} holds GitHub installations ${installations.map((installation) => installation.installationId).join(", ")}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
+        `tenant ${tenantId} holds GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
       );
     }
     return mintInstallationToken(
       (url, init) => fetch(url, init),
       this.env.GITHUB_API_ORIGIN,
       app,
-      installations,
+      installation,
       repository,
       now,
     );
