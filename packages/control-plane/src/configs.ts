@@ -611,7 +611,7 @@ export const planConfig = async (body: PlanRequest, call: Call): Promise<Respons
       config: body.config,
       files: digestFiles(body.files),
       expiryValues: body.expiryValues,
-      secretEnvs: new Set((body.secretValues ?? []).map((each) => each.env)),
+      secretEnvs: new Set(body.secretValues.map((each) => each.env)),
     },
     live.value,
   );
