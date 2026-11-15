@@ -73,7 +73,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
       { kind: "ApiKey", variable: "ANTHROPIC_API_KEY" },
       { kind: "SubscriptionToken", variable: "ANTHROPIC_OAUTH_TOKEN" },
     ],
-    providerRoutes: [],
+    providerRoutes: [{ provider: "OpenRouter", variables: [{ source: "Credential", name: "OPENROUTER_API_KEY" }] }],
     personaFilePaths: [".pi/agent/settings.json", ".pi/agent/models.json", ".pi/agent/AGENTS.md"],
     installRecipe: "npm:@earendil-works/pi-coding-agent@1.5.2",
   },
