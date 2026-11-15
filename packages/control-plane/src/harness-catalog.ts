@@ -9,11 +9,6 @@ const CODEX_VERSION = "0.50.0";
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
 
-const archiveRecipe = (url: (nodeArch: string) => string, digests: { amd64: string; arm64: string }): string =>
-  [`archive:amd64:${url("x64")}#sha256=${digests.amd64}`, `archive:arm64:${url("arm64")}#sha256=${digests.arm64}`].join(
-    " ",
-  );
-
 export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEntrySchema.array().parse([
   {
     harness: "ClaudeCode",
@@ -30,7 +25,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
       },
     ],
     personaFilePaths: [".claude/settings.json", ".claude/CLAUDE.md", ".claude.json"],
-    installRecipe: `npm:@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
+    installRecipe: { kind: "Npm", package: "@anthropic-ai/claude-code", packageVersion: CLAUDE_CODE_VERSION },
   },
   {
     harness: "Codex",
@@ -46,7 +41,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
       },
     ],
     personaFilePaths: [],
-    installRecipe: `npm:@openai/codex@${CODEX_VERSION}`,
+    installRecipe: { kind: "Npm", package: "@openai/codex", packageVersion: CODEX_VERSION },
   },
   {
     harness: "OpenCode",
@@ -58,14 +53,22 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
       { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [] },
     ],
     personaFilePaths: [".config/opencode/opencode.json", ".config/opencode/AGENTS.md"],
-    installRecipe: archiveRecipe(
-      (nodeArch) =>
-        `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${nodeArch}.tar.gz`,
-      {
-        amd64: "588310a336fa3b9df36b3f0225b26f679d453efaad0cf3d66c3651ef3ec1647a",
-        arm64: "fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b",
-      },
-    ),
+    installRecipe: {
+      kind: "Archive",
+      archives: [
+        {
+          architecture: "Amd64",
+          url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz`,
+          sha256: "588310a336fa3b9df36b3f0225b26f679d453efaad0cf3d66c3651ef3ec1647a",
+        },
+        {
+          architecture: "Arm64",
+          url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64.tar.gz`,
+          sha256: "fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b",
+        },
+      ],
+      stripComponents: 0,
+    },
   },
   {
     harness: "PiDev",
@@ -77,13 +80,22 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
       { provider: "OpenRouter", kind: "ApiKey", variable: "OPENROUTER_API_KEY", fixed: [] },
     ],
     personaFilePaths: [".pi/agent/settings.json", ".pi/agent/models.json", ".pi/agent/AGENTS.md"],
-    installRecipe: archiveRecipe(
-      (nodeArch) => `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-${nodeArch}.tar.gz`,
-      {
-        amd64: "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5",
-        arm64: "42805cd5615952fcbbfc9c56b04f8feb84395134952e169a6cdc8d7676975666",
-      },
-    ),
+    installRecipe: {
+      kind: "Archive",
+      archives: [
+        {
+          architecture: "Amd64",
+          url: `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-x64.tar.gz`,
+          sha256: "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5",
+        },
+        {
+          architecture: "Arm64",
+          url: `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-arm64.tar.gz`,
+          sha256: "42805cd5615952fcbbfc9c56b04f8feb84395134952e169a6cdc8d7676975666",
+        },
+      ],
+      stripComponents: 1,
+    },
   },
 ]);
 
