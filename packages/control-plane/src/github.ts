@@ -99,6 +99,19 @@ export const manifestAction = (organization: string, state: string): string => {
   return `${base}?state=${encodeURIComponent(state)}`;
 };
 
+export type ReturnCheck = { ok: true; returnUrl: string | undefined } | { ok: false; detail: string };
+
+export const dashboardReturn = (returnUrl: string | null, dashboardOrigin: string | undefined): ReturnCheck => {
+  if (returnUrl === null) return { ok: true, returnUrl: undefined };
+  if (!dashboardOrigin) return { ok: false, detail: "this control plane has no DASHBOARD_ORIGIN to return to" };
+  if (!URL.canParse(returnUrl)) return { ok: false, detail: `returnUrl ${returnUrl} is not a URL` };
+  const parsed = new URL(returnUrl);
+  if (parsed.origin !== dashboardOrigin) {
+    return { ok: false, detail: `returnUrl ${returnUrl} is not on the dashboard's origin ${dashboardOrigin}` };
+  }
+  return { ok: true, returnUrl: parsed.href };
+};
+
 export const installUrl = (slug: string, state: string): string =>
   `${GITHUB_WEB}/apps/${encodeURIComponent(slug)}/installations/new?state=${encodeURIComponent(state)}`;
 

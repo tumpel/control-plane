@@ -9,6 +9,7 @@ import {
   botUserId,
   commitIdentity,
   convertManifest,
+  dashboardReturn,
   type Fetch,
   importAppKey,
   listInstallationRepositories,
@@ -135,6 +136,25 @@ test("a signed state reads back until it expires, and not when tampered with or 
 
   const wrongStep = await readState(key, state, GitHubManifestStateSchema, now);
   assert.ok(!wrongStep.ok && /another step/.test(wrongStep.reason));
+});
+
+test("an install returns only to a page on the dashboard's origin", () => {
+  const dashboard = "https://app.tumpel.test";
+  assert.deepEqual(dashboardReturn(null, dashboard), { ok: true, returnUrl: undefined });
+  assert.deepEqual(dashboardReturn(`${dashboard}/t/tnt_1/setup/github?from=github`, dashboard), {
+    ok: true,
+    returnUrl: `${dashboard}/t/tnt_1/setup/github?from=github`,
+  });
+  for (const elsewhere of [
+    "https://evil.test/t/tnt_1/setup/github",
+    "https://app.tumpel.test.evil.test/",
+    "http://app.tumpel.test/t/tnt_1",
+    "//evil.test/x",
+    "javascript:alert(1)",
+  ]) {
+    assert.equal(dashboardReturn(elsewhere, dashboard).ok, false, elsewhere);
+  }
+  assert.equal(dashboardReturn(`${dashboard}/t`, "").ok, false);
 });
 
 test("a webhook signature matches GitHub's documented example and nothing else", async () => {

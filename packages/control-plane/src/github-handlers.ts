@@ -14,6 +14,7 @@ import {
   appManifest,
   botUserId,
   convertManifest,
+  dashboardReturn,
   type Fetch,
   GITHUB_WEB,
   type GitHubAnswer,
@@ -54,7 +55,7 @@ import {
   unlinkTenant,
   webhookSecret,
 } from "./github-store.ts";
-import { json, problem } from "./http";
+import { json, problem, seeOther } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
@@ -105,6 +106,15 @@ const handleConnection = async (caller: Caller, url: URL, env: Env): Promise<Res
 const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
   const refused = ownerRequired(caller, "gitHubConnections.start");
   if (refused) return refused;
+  const back = dashboardReturn(url.searchParams.get("returnUrl"), env.DASHBOARD_ORIGIN);
+  if (!back.ok) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Return URL refused",
+      detail: `gitHubConnections.start refused the return URL: ${back.detail}`,
+      fix: `Leave returnUrl out, or name a page on ${env.DASHBOARD_ORIGIN || "the dashboard"}`,
+    });
+  }
   const app = await storedApp(env.DB);
   if (app === null) return appMissing(url.origin);
   const expiresAt = expiry(Date.now());
@@ -112,6 +122,7 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
     purpose: "Installation",
     tenantId: caller.tenantId,
     expiresAt,
+    ...(back.returnUrl === undefined ? {} : { returnUrl: back.returnUrl }),
   });
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state), expiresAt }));
 };
@@ -288,6 +299,11 @@ const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
     return messagePage(400, "Nothing to connect", "GitHub sent no setup action. Run tumpel github start again.");
   }
   if (action.data.setup_action === "request") {
+    const requested =
+      action.data.state === undefined
+        ? null
+        : await readState(await stateKey(env), action.data.state, GitHubInstallStateSchema, Date.now());
+    if (requested?.ok === true && requested.claims.returnUrl !== undefined) return seeOther(requested.claims.returnUrl);
     return messagePage(
       202,
       "Installation requested",
@@ -333,6 +349,7 @@ const handleInstalled = async (url: URL, env: Env): Promise<Response> => {
       `The installation on ${record.account.login} is linked to another tenant. Each installation serves one tenant; uninstall it there first.`,
     );
   }
+  if (state.claims.returnUrl !== undefined) return seeOther(state.claims.returnUrl);
   return linkPage(
     200,
     "GitHub connected",

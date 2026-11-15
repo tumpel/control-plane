@@ -15,6 +15,7 @@ export const GitHubInstallStateSchema = z.object({
   purpose: z.literal("Installation"),
   tenantId: TenantIdSchema,
   expiresAt: OffsetDateTimeSchema,
+  returnUrl: z.string().url().optional(),
 });
 
 export const GitHubManifestCallbackSchema = z.object({
@@ -24,6 +25,7 @@ export const GitHubManifestCallbackSchema = z.object({
 
 export const GitHubSetupActionSchema = z.object({
   setup_action: z.enum(["install", "update", "request"]),
+  state: z.string().min(1).optional(),
 });
 
 export const GitHubSetupCallbackSchema = z.object({
