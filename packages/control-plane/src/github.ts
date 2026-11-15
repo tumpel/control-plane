@@ -1,15 +1,17 @@
+import type { RepositoryCredentialSourceSchema } from "@tumpel/api/schemas";
+import type { z } from "zod";
+import type { DispatchVariable } from "./dispatch-variables.ts";
 import {
   GitHubAppConversionSchema,
   type GitHubAppManifestSchema,
   GitHubErrorSchema,
-  GitHubInstallationRecordSchema,
+  type GitHubInstallationRecordSchema,
   GitHubInstallationTokenSchema,
   type GitHubInstallStateSchema,
   type GitHubManifestStateSchema,
-  type RepositoryCredentialSourceSchema,
-} from "@tumpel/api/schemas";
-import type { z } from "zod";
-import type { DispatchVariable } from "./dispatch-variables.ts";
+  GitHubUserInstallationsSchema,
+  GitHubUserTokenSchema,
+} from "./github-schemas.ts";
 
 export type GitHubAppManifest = z.infer<typeof GitHubAppManifestSchema>;
 export type GitHubAppConversion = z.infer<typeof GitHubAppConversionSchema>;
@@ -28,6 +30,8 @@ export const STATE_KEY_PURPOSE = "tumpel-github-state-v1";
 export const STATE_TTL_MS = 3_600_000;
 export const GITHUB_TIMEOUT_MS = 10_000;
 const API_VERSION = "2022-11-28";
+const API_MEDIA_TYPE = "application/vnd.github+json";
+const JSON_MEDIA_TYPE = "application/json";
 const APP_NAME_LIMIT = 34;
 
 const encoder = new TextEncoder();
@@ -61,10 +65,11 @@ export const appManifest = (origin: string): GitHubAppManifest => ({
   description: "Tumpel boxes clone, push and open pull requests with a short-lived token of this App.",
   hook_attributes: { url: `${origin}${WEBHOOK_PATH}`, active: true },
   redirect_url: `${origin}${APP_CREATED_PATH}`,
+  callback_urls: [`${origin}${APP_INSTALLED_PATH}`],
   setup_url: `${origin}${APP_INSTALLED_PATH}`,
-  setup_on_update: false,
+  setup_on_update: true,
   public: false,
-  request_oauth_on_install: false,
+  request_oauth_on_install: true,
   default_permissions: {
     contents: "write",
     pull_requests: "write",
@@ -159,7 +164,7 @@ export const appJwt = async (clientId: string, privateKey: CryptoKey, now: numbe
 
 export type GitHubAnswer<T> = { ok: true; value: T } | { ok: false; status: number; detail: string };
 
-const parseJson = (text: string): unknown => {
+export const parseJson = (text: string): unknown => {
   try {
     return JSON.parse(text);
   } catch {
@@ -171,19 +176,20 @@ const failed = (error: unknown): Error => (error instanceof Error ? error : new 
 
 export const callGitHub = async <T>(
   fetcher: Fetch,
-  request: { method: "GET" | "POST"; path: string; bearer: string | null; body: unknown },
+  request: { method: "GET" | "POST"; url: string; accept: string; bearer: string | null; body: unknown },
   schema: z.ZodType<T>,
   answerName: string,
 ): Promise<GitHubAnswer<T>> => {
-  const { method, path, bearer, body } = request;
+  const { method, url, accept, bearer, body } = request;
+  const path = url.replace(/\?.*$/, "");
   const headers: Record<string, string> = {
-    accept: "application/vnd.github+json",
+    accept,
     "x-github-api-version": API_VERSION,
     "user-agent": "tumpel",
   };
   if (bearer !== null) headers.authorization = `Bearer ${bearer}`;
   if (body !== null) headers["content-type"] = "application/json";
-  const response = await fetcher(`${GITHUB_API}${path}`, {
+  const response = await fetcher(url, {
     method,
     headers,
     body: body === null ? null : JSON.stringify(body),
@@ -237,10 +243,13 @@ export const githubRepository = (repository: string): GitHubRepository | null =>
 export type Minted =
   | { kind: "Minted"; token: string; expiresAt: string }
   | { kind: "NoToken" }
+  | { kind: "Outside"; detail: string }
   | { kind: "Refused"; detail: string };
 
 const installationSettings = (installationId: number): string =>
   `${GITHUB_WEB}/settings/installations/${installationId}`;
+
+const OUTSIDE_STATUSES = [404, 422];
 
 export const mintInstallationToken = async (
   fetcher: Fetch,
@@ -254,15 +263,16 @@ export const mintInstallationToken = async (
   const { installationId, accountLogin } = installation;
   if (target.owner.toLowerCase() !== accountLogin.toLowerCase()) {
     return {
-      kind: "Refused",
-      detail: `${repository} belongs to ${target.owner}, and the tenant's GitHub App installation covers repositories of ${accountLogin} only; start the session on a repository of ${accountLogin}, or install the App on ${target.owner} with tumpel github start`,
+      kind: "Outside",
+      detail: `${repository} belongs to ${target.owner}, and the tenant's GitHub App installation covers repositories of ${accountLogin} only; start the session on a repository of ${accountLogin}, install the App on ${target.owner} with tumpel github start, or add a GITHUB_TOKEN for ${target.owner} to the persona's secret set`,
     };
   }
   const answer = await callGitHub(
     fetcher,
     {
       method: "POST",
-      path: `/app/installations/${installationId}/access_tokens`,
+      url: `${GITHUB_API}/app/installations/${installationId}/access_tokens`,
+      accept: API_MEDIA_TYPE,
       bearer: await appJwt(app.clientId, app.privateKey, now),
       body: { repositories: [target.name] },
     },
@@ -270,35 +280,86 @@ export const mintInstallationToken = async (
     "GitHubInstallationToken",
   );
   if (answer.ok) return { kind: "Minted", token: answer.value.token, expiresAt: answer.value.expires_at };
+  if (OUTSIDE_STATUSES.includes(answer.status)) {
+    return {
+      kind: "Outside",
+      detail: `${answer.detail}; add ${target.owner}/${target.name} to the installation at ${installationSettings(installationId)}, install the App again with tumpel github start, or add a GITHUB_TOKEN to the persona's secret set, then send the turn again`,
+    };
+  }
   return {
     kind: "Refused",
-    detail: `${answer.detail}; add ${target.owner}/${target.name} to the installation at ${installationSettings(installationId)}, or install the App again with tumpel github start, then send the turn again`,
+    detail: `${answer.detail}; send the turn again once GitHub answers, and check https://www.githubstatus.com if it keeps failing`,
   };
 };
 
-export const readInstallation = async (
+export interface OAuthClient {
+  clientId: string;
+  clientSecret: string;
+}
+
+export type Installer =
+  | { kind: "Installer"; installation: GitHubInstallationRecord }
+  | { kind: "NotInstaller"; detail: string }
+  | { kind: "Failed"; detail: string };
+
+export const verifyInstaller = async (
   fetcher: Fetch,
-  app: AppKey,
+  client: OAuthClient,
+  code: string,
   installationId: number,
-  now: number,
-): Promise<GitHubAnswer<GitHubInstallationRecord>> => {
-  return callGitHub(
+): Promise<Installer> => {
+  const exchanged = await callGitHub(
+    fetcher,
+    {
+      method: "POST",
+      url: `${GITHUB_WEB}/login/oauth/access_token`,
+      accept: JSON_MEDIA_TYPE,
+      bearer: null,
+      body: { client_id: client.clientId, client_secret: client.clientSecret, code },
+    },
+    GitHubUserTokenSchema,
+    "GitHubUserToken",
+  );
+  if (!exchanged.ok) return { kind: "Failed", detail: exchanged.detail };
+  if ("error" in exchanged.value) {
+    return {
+      kind: "Failed",
+      detail: `GitHub refused the authorization code with ${exchanged.value.error}: ${exchanged.value.error_description}`,
+    };
+  }
+  const listed = await callGitHub(
     fetcher,
     {
       method: "GET",
-      path: `/app/installations/${installationId}`,
-      bearer: await appJwt(app.clientId, app.privateKey, now),
+      url: `${GITHUB_API}/user/installations?per_page=100`,
+      accept: API_MEDIA_TYPE,
+      bearer: exchanged.value.access_token,
       body: null,
     },
-    GitHubInstallationRecordSchema,
-    "GitHubInstallationRecord",
+    GitHubUserInstallationsSchema,
+    "GitHubUserInstallations",
   );
+  if (!listed.ok) return { kind: "Failed", detail: listed.detail };
+  const installation = listed.value.installations.find((candidate) => candidate.id === installationId);
+  if (installation === undefined) {
+    return {
+      kind: "NotInstaller",
+      detail: `installation ${installationId} is not among the installations of this stage's GitHub App that the GitHub account you authorized can access`,
+    };
+  }
+  return { kind: "Installer", installation };
 };
 
 export const convertManifest = async (fetcher: Fetch, code: string): Promise<GitHubAnswer<GitHubAppConversion>> => {
   return callGitHub(
     fetcher,
-    { method: "POST", path: `/app-manifests/${encodeURIComponent(code)}/conversions`, bearer: null, body: null },
+    {
+      method: "POST",
+      url: `${GITHUB_API}/app-manifests/${encodeURIComponent(code)}/conversions`,
+      accept: API_MEDIA_TYPE,
+      bearer: null,
+      body: null,
+    },
     GitHubAppConversionSchema,
     "GitHubAppConversion",
   );
@@ -307,13 +368,17 @@ export const convertManifest = async (fetcher: Fetch, code: string): Promise<Git
 const hexBytes = (hex: string): Uint8Array<ArrayBuffer> =>
   Uint8Array.from(hex.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16));
 
-export const verifyWebhookSignature = async (secret: string, body: string, header: string | null): Promise<boolean> => {
+export const verifyWebhookSignature = async (
+  secret: string,
+  body: ArrayBuffer,
+  header: string | null,
+): Promise<boolean> => {
   const hex = /^sha256=([0-9a-f]{64})$/.exec(header ?? "")?.[1];
   if (hex === undefined) return false;
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "verify",
   ]);
-  return crypto.subtle.verify("HMAC", key, hexBytes(hex), encoder.encode(body));
+  return crypto.subtle.verify("HMAC", key, hexBytes(hex), body);
 };
 
 export const signState = async (key: CryptoKey, claims: GitHubState): Promise<string> => {
@@ -365,4 +430,16 @@ export const withRepositoryToken = (
     ],
     source: "GitHubApp",
   };
+};
+
+export type RepositoryCredential =
+  | { kind: "Ready"; variables: DispatchVariable[]; source: RepositoryCredentialSource }
+  | { kind: "Refused"; detail: string };
+
+export const repositoryCredential = (variables: DispatchVariable[], minted: Minted): RepositoryCredential => {
+  if (minted.kind === "Refused") return { kind: "Refused", detail: minted.detail };
+  if (minted.kind === "Minted") return { kind: "Ready", ...withRepositoryToken(variables, minted.token) };
+  const holdsToken = variables.some((variable) => variable.name === REPOSITORY_TOKEN);
+  if (minted.kind === "Outside" && !holdsToken) return { kind: "Refused", detail: minted.detail };
+  return { kind: "Ready", ...withRepositoryToken(variables, null) };
 };
