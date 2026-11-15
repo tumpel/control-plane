@@ -220,8 +220,16 @@ const connectorCallers = new WeakMap<Request, Caller>();
 const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
   const connector = connectorCallers.get(request);
   if (connector !== undefined) return connector;
-  const caller = await callerForDeviceToken(env.DB, bearerOf(request), Date.now());
-  return caller ?? signedOut("this device token is missing, unknown or revoked", "Run tumpel login");
+  const token = bearerOf(request);
+  const now = Date.now();
+  const caller = (await callerForDeviceToken(env.DB, token, now)) ?? (await callerForAccessToken(env.DB, token, now));
+  return (
+    caller ??
+    signedOut(
+      "this device or access token is missing, unknown, expired or revoked",
+      "Run tumpel login, or sign the dashboard in again",
+    )
+  );
 };
 
 const handleWhoami = async (request: Request, env: Env): Promise<Response> => {
@@ -791,6 +799,22 @@ const corsHeaders = (request: Request): Record<string, string> => {
   };
 };
 
+const dashboardOrigin = (url: URL): string | null =>
+  url.hostname.startsWith("api.") ? `https://app.${url.hostname.slice("api.".length)}` : null;
+
+const dashboardCors = (request: Request, url: URL): Record<string, string> | null => {
+  const origin = request.headers.get("origin");
+  if (origin === null || origin !== dashboardOrigin(url)) return null;
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "access-control-allow-headers": "authorization, content-type, accept",
+    "access-control-expose-headers": "www-authenticate",
+    "access-control-max-age": "86400",
+    vary: "origin",
+  };
+};
+
 const withHeaders = (answer: Response, extra: Record<string, string>): Response => {
   if (Object.keys(extra).length === 0) return answer;
   const headers = new Headers(answer.headers);
@@ -1088,6 +1112,12 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
 
 export default {
   async fetch(request, env): Promise<Response> {
-    return dispatch(request, new URL(request.url), env);
+    const url = new URL(request.url);
+    const dashboard = dashboardCors(request, url);
+    if (dashboard === null) return dispatch(request, url, env);
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: { ...dashboard, "cache-control": "no-store" } });
+    }
+    return withHeaders(await dispatch(request, url, env), dashboard);
   },
 } satisfies ExportedHandler<Env>;
