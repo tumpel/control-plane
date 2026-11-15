@@ -39,7 +39,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection, and tumpel_release_current reads the supervisor and guest images hosts run. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -179,6 +179,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/harnesses/pins/{harness}",
     HarnessPathSchema,
     "Remove the tenant's pin for a harness. Calls DELETE /v1/harnesses/pins/{harness}.",
+  ),
+  rest(
+    "tumpel_release_current",
+    "GET",
+    "/v1/releases/current",
+    NO_ARGUMENTS,
+    "Read the current release: releaseVersion, commit, channelProtocolVersion, the supervisor binary of each architecture and the guest image of each harness version and architecture. Returns the ReleaseManifest of GET /v1/releases/current; a session is placed only on a host whose architecture has an image of its harness version here.",
   ),
   rest(
     "tumpel_persona_create",

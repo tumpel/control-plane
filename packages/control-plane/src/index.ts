@@ -21,6 +21,7 @@ import {
   PersonaPathSchema,
   PersonaSchema,
   PersonaUpdateSchema,
+  ReleaseSupervisorPathSchema,
   SecretSetCreateSchema,
   SecretSetPathSchema,
   SecretSetSchema,
@@ -104,7 +105,8 @@ import {
   signUpPage,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
-import { type SignerEnv, signerOf } from "./presign";
+import { type ReleaseSignerEnv, releaseSignerOf, type SignerEnv, signerOf } from "./presign";
+import { currentRelease, supervisorKey } from "./releases";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
 import type { PersonaWrite, Tenant } from "./tenant";
@@ -113,12 +115,13 @@ export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 
-export interface Env extends SignerEnv {
+export interface Env extends SignerEnv, ReleaseSignerEnv {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   STORE: R2Bucket;
+  RELEASES: R2Bucket;
   TUMPEL_SETTINGS: unknown;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
@@ -548,6 +551,55 @@ const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promi
   return json(await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId));
 };
 
+const SUPERVISOR_DOWNLOAD_SECONDS = 300;
+const SUPERVISOR_PATH = /^\/v1\/releases\/supervisor\/([^/]+)$/;
+
+const noRelease = (): Response =>
+  problem(404, {
+    code: "NoRelease",
+    title: "No release published",
+    detail: "the release bucket of this stage holds no current.json",
+    fix: "Publish a release with the release workflow, then try again",
+  });
+
+const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Promise<Response> => {
+  const release = await currentRelease(env.RELEASES, Date.now());
+  return release.kind === "Published" ? json(release.manifest) : noRelease();
+};
+
+const handleSupervisorDownload = async (url: URL, env: Env): Promise<Response | null> => {
+  const matched = SUPERVISOR_PATH.exec(url.pathname);
+  if (matched?.[1] === undefined) return null;
+  const parsed = ReleaseSupervisorPathSchema.safeParse({ architecture: decodeURIComponent(matched[1]) });
+  if (!parsed.success) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Unknown architecture",
+      detail: `releases.supervisor refused the path: ${issues(parsed.error)}`,
+      fix: "Ask for Amd64 or Arm64, the architecture tumpel-supervisor enrol reports",
+    });
+  }
+  const { architecture } = parsed.data;
+  const release = await currentRelease(env.RELEASES, Date.now());
+  if (release.kind === "Unpublished") return noRelease();
+  const supervisor = release.manifest.supervisors.find((each) => each.architecture === architecture);
+  if (supervisor === undefined) {
+    return problem(404, {
+      code: "NotFound",
+      title: "No supervisor for this architecture",
+      detail: `release ${release.manifest.releaseVersion} carries supervisors for ${release.manifest.supervisors.map((each) => each.architecture).join(", ")}, not ${architecture}`,
+      fix: "Run the host on one of those architectures, or publish a release that builds the supervisor for it",
+    });
+  }
+  const location = await releaseSignerOf(env).presign(
+    "GET",
+    supervisorKey(supervisor),
+    SUPERVISOR_DOWNLOAD_SECONDS,
+    new Date(),
+  );
+  return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
+};
+
 const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/labels)?$/;
 
 const handleHost = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
@@ -941,6 +993,7 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,
+  "GET /v1/releases/current": handleCurrentRelease,
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`OPTIONS ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
@@ -988,6 +1041,10 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (github) return github;
   const host = await handleHost(request, url, env);
   if (host) return host;
+  if (request.method === "GET") {
+    const download = await handleSupervisorDownload(url, env);
+    if (download) return download;
+  }
   return problem(404, {
     code: "NotFound",
     title: "No such route",
