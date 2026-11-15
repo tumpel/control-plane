@@ -1678,3 +1678,38 @@ test("two sessions started at once on two equal hosts land on different hosts, s
   assert.deepEqual(placed.toSorted(), [first.id, second.id].toSorted());
   for (const side of sides) side.close();
 });
+
+test("a turn a host refuses HostUpdating is offered to another host at once", async () => {
+  const first = await enrol("updating-1");
+  const second = await enrol("updating-2");
+  const sides = new Map([
+    [first.id, await HostSide.connect(first.id, first.key, 32)],
+    [second.id, await HostSide.connect(second.id, second.key, 32)],
+  ]);
+  const side = (id: string): HostSide => {
+    const found = sides.get(id);
+    if (found === undefined) throw new Error(`no host side for ${id}`);
+    return found;
+  };
+  await hostState(first.id, "Online");
+  await hostState(second.id, "Online");
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during a swap" }, bearer);
+  assert.equal(response.status, 200, await response.clone().text());
+  const started = StartedSessionSchema.parse(await response.json());
+  const refusing = started.session.hostId;
+  const taking = refusing === first.id ? second.id : first.id;
+  assert.equal((await side(refusing).next("TurnOffer")).turnId, started.turn.turnId);
+  side(refusing).send({
+    type: "TurnFailed",
+    turnId: started.turn.turnId,
+    reason: "HostUpdating",
+    detail: "this host is swapping to a new supervisor binary",
+    failedAt: new Date().toISOString(),
+  });
+  const moved = await side(taking).next("TurnOffer");
+  assert.equal(moved.turnId, started.turn.turnId);
+  const session = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
+  assert.deepEqual({ hostId: session.hostId, boxId: session.boxId }, { hostId: taking, boxId: moved.boxId });
+  assert.equal((await getJson(`/v1/turns/${started.turn.turnId}`, TurnSchema)).state, "Offered");
+  for (const side of sides.values()) side.close();
+});

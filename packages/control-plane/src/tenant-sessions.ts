@@ -47,7 +47,7 @@ import {
 } from "./github.ts";
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
-import { type HostRecord, hostOf } from "./hosts";
+import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
@@ -56,6 +56,7 @@ import { signerOf } from "./presign";
 import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
+import { why } from "./sessions";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
@@ -885,6 +886,56 @@ export class TenantSessions extends DurableObject<Env> {
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
+  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow, refusal: string): Promise<void> {
+    const now = Date.now();
+    const fail = (consequence: string): Promise<void> =>
+      this.failTurn(
+        tenantId,
+        turn.turn_id,
+        "HostUpdating",
+        `host ${session.host_id} refused turn ${turn.turn_id} (${refusal}), and ${consequence}; send the turn again once the host is back online`,
+        iso(now),
+      );
+    const missingTurnIds = this.unsnapshottedTurns(session.session_id);
+    if (missingTurnIds.length > 0) {
+      return fail(
+        `turns ${missingTurnIds.join(", ")} of session ${session.session_id} have no snapshot, so no other host can restore the session`,
+      );
+    }
+    const hosts = (await listHosts(this.env.DB, tenantId)).filter((host) => host.hostId !== session.host_id);
+    const image = await this.imageAvailability(session.harness, session.harness_version, now);
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image);
+    if (placement.kind === "Refused") {
+      return fail(
+        placement.hosts.length === 0
+          ? "the tenant has no other host"
+          : `no other host can take it: ${placement.hosts.map(why).join(", ")}`,
+      );
+    }
+    const hostId = placement.host.hostId;
+    const boxId = crypto.randomUUID();
+    this.settleSnapshotRequests(session, hostId, iso(now));
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        "UPDATE sessions SET host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
+        hostId,
+        boxId,
+        now,
+        session.session_id,
+      );
+      sql.exec(
+        "UPDATE turns SET host_id = ?, box_id = ?, updated_at = ? WHERE turn_id = ?",
+        hostId,
+        boxId,
+        now,
+        turn.turn_id,
+      );
+    });
+    await this.timers(tenantId, session.session_id, { SnapshotAnswer: null });
+    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
+  }
+
   private runTurn(session: SessionRow, hostId: string, boxId: string, prompt: string, now: number): TurnRow {
     return this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
@@ -1683,6 +1734,9 @@ export class TenantSessions extends DurableObject<Env> {
       });
     }
     if (message.type === "TurnFailed") {
+      if (message.reason === "HostUpdating" && turn.state === "Offered") {
+        return this.offerElsewhere(tenantId, session, turn, message.detail);
+      }
       const detail =
         message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
       return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
