@@ -22,11 +22,12 @@ import type { CircleCICredentialRow } from "./circleci-oauth.ts";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
 import {
+  commitCallerWorkflow,
   type Dispatched,
   dispatchCallerWorkflow,
   type RunEvent,
+  readCallerWorkflow,
   runPage,
-  syncCallerWorkflow,
   workflowPage,
 } from "./github-actions.ts";
 import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
@@ -198,7 +199,7 @@ export type StartedGitHubActions =
   | { kind: "CallerRefused"; detail: string }
   | Exclude<Dispatched, { kind: "Dispatched" }>;
 
-type Recorded = { kind: "Recorded" } | { kind: "Held"; prebuild: Prebuild } | StartedGitHubActions;
+type Recorded = { kind: "Recorded" } | StartedGitHubActions;
 
 type PrebuildFailurePhase = PrebuildFailure["phase"];
 
@@ -367,11 +368,6 @@ export class TenantPrebuilds extends TenantSessions {
       )
       .toArray();
     return row === undefined ? null : toPrebuild(tenantId, row);
-  }
-
-  async recordPrebuildCommit(tenantId: string, commit: PrebuildCommit, now: number): Promise<Prebuild> {
-    this.writePrebuildCommit(commit, now);
-    return this.armDispatch(tenantId, commit.prebuildId, now);
   }
 
   private writePrebuildCommit(commit: PrebuildCommit, now: number): void {
@@ -610,13 +606,16 @@ export class TenantPrebuilds extends TenantSessions {
     const settings = settingsOf(this.env);
     const now = Date.now();
     if (due.name === "PrebuildDispatch") {
+      const { head_sha: headSha } = this.ctx.storage.sql
+        .exec<{ head_sha: string }>("SELECT head_sha FROM prebuilds WHERE prebuild_id = ?", prebuildId)
+        .one();
       await this.failPrebuild(
         tenantId,
         prebuildId,
         ["Dispatched"],
         {
           phase: "Dispatch",
-          detail: `the run GitHub Actions accepted for prebuild ${prebuildId} did not start within prebuildDispatchBudgetSeconds ${settings.prebuildDispatchBudgetSeconds}; see ${prebuild.logUrl}`,
+          detail: `no run of commit ${headSha} started for prebuild ${prebuildId} within prebuildDispatchBudgetSeconds ${settings.prebuildDispatchBudgetSeconds}; see ${prebuild.logUrl}`,
           fix: "Check that the repository's Actions are enabled and a runner is free, and that the GitHub App delivers workflow_run events, then start the prebuild again with rebuild set",
         },
         prebuild.logUrl,
@@ -661,28 +660,35 @@ export class TenantPrebuilds extends TenantSessions {
     const described = await readDefaultBranch(fetcher, api, target, minted.token);
     if (described.kind === "Unreadable") return described;
     const { branch } = described;
+    const caller = { path: callerWorkflow, apiOrigin: start.apiOrigin, branch };
+    const read = await readCallerWorkflow(fetcher, api, minted, target, caller);
+    if (read.kind === "PermissionMissing") return read;
+    if (read.kind === "Refused") return { kind: "CallerRefused", detail: read.detail };
+    const inputs = await readInputs(fetcher, api, target, minted.token, branch);
+    if (inputs.kind === "Unreadable") return inputs;
+    const key = {
+      repository: start.repository,
+      inputDigest: await inputDigest(inputs.files),
+      guestImageDigest: start.guestImageDigest,
+    };
+    if (read.kind === "Current" && !start.rebuild) {
+      const held = this.heldPrebuild(tenantId, key);
+      if (held !== null) return { kind: "Started", prebuild: held };
+    }
     const recorded = await this.ctx.blockConcurrencyWhile(async (): Promise<Recorded> => {
-      const caller = await syncCallerWorkflow(fetcher, api, minted, target, {
-        path: callerWorkflow,
-        apiOrigin: start.apiOrigin,
-        branch,
-      });
-      if (caller.kind === "PermissionMissing") return caller;
-      if (caller.kind === "Refused") return { kind: "CallerRefused", detail: caller.detail };
-      const ref = caller.kind === "Committed" ? caller.commitSha : branch;
-      const inputs = await readInputs(fetcher, api, target, minted.token, { branch, ref });
-      if (inputs.kind === "Unreadable") return inputs;
-      const key = {
-        repository: start.repository,
-        inputDigest: await inputDigest(inputs.files),
-        guestImageDigest: start.guestImageDigest,
-      };
-      if (caller.kind === "Current") {
-        const held = start.rebuild ? null : this.heldPrebuild(tenantId, key);
-        if (held !== null) return { kind: "Held", prebuild: held };
-        const dispatched = await dispatchCallerWorkflow(fetcher, api, minted.token, target, { callerWorkflow, ref });
+      const committed =
+        read.kind === "Stale"
+          ? await commitCallerWorkflow(fetcher, api, minted.token, target, { ...caller, file: read.file })
+          : null;
+      if (committed?.kind === "Refused") return { kind: "CallerRefused", detail: committed.detail };
+      if (committed === null) {
+        const dispatched = await dispatchCallerWorkflow(fetcher, api, minted.token, target, {
+          callerWorkflow,
+          ref: branch,
+        });
         if (dispatched.kind !== "Dispatched") return dispatched;
       }
+      const headSha = committed === null ? inputs.headSha : committed.commitSha;
       this.writePrebuildCommit(
         {
           prebuildId: start.prebuildId,
@@ -690,7 +696,7 @@ export class TenantPrebuilds extends TenantSessions {
           key,
           configSource: inputs.configSource,
           defaultBranch: branch,
-          headSha: inputs.headSha,
+          headSha,
           rootfsKey: start.rootfsKey,
           logUrl: workflowPage(target, callerWorkflow),
         },
@@ -698,7 +704,6 @@ export class TenantPrebuilds extends TenantSessions {
       );
       return { kind: "Recorded" };
     });
-    if (recorded.kind === "Held") return { kind: "Started", prebuild: recorded.prebuild };
     if (recorded.kind !== "Recorded") return recorded;
     return { kind: "Started", prebuild: await this.armDispatch(tenantId, start.prebuildId, now) };
   }

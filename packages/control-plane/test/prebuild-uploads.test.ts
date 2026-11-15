@@ -22,6 +22,7 @@ import { generateDataKey, seal } from "../src/envelope.ts";
 import { callerWorkflowExample } from "../src/github-actions.ts";
 import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
+import { rootfsKey } from "../src/releases.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 const ACCESS_AUD = "tumpel-prebuild-uploads-e2e";
@@ -31,6 +32,8 @@ const EMAIL = "uploads@example.test";
 const CALLER_WORKFLOW = ".github/workflows/tumpel-prebuild.yml";
 const HEAD_SHA = "c".repeat(40);
 const COMMIT_SHA = "8".repeat(40);
+const FRESH_HEAD = "9".repeat(40);
+const API_ORIGIN = "https://api.tumpel.test";
 const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
 const WEBHOOK_SECRET = "prebuild-uploads-webhook-secret";
 const INSTALLATION_ID = 77;
@@ -38,7 +41,9 @@ const BUDGET_SECONDS = 900;
 const TREE_SHA = "1".repeat(40);
 const DISPATCHED_RUN = 9001;
 const PUSHED_RUN = 9002;
-const ROOTFS_KEY = "images/claude-code/1.0.0/amd64/rootfs/rootfs-digest";
+const [RELEASE_IMAGE] = CLAUDE_CODE_AMD64_RELEASE.images;
+if (RELEASE_IMAGE === undefined) throw new Error("the release fixture lists no image");
+const ROOTFS_KEY = rootfsKey(RELEASE_IMAGE);
 
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = rsa();
@@ -72,7 +77,6 @@ let nextRun = 500;
 
 type Store = { put(key: string, value: Uint8Array | string): Promise<unknown> };
 type TenantStub = {
-  recordPrebuildCommit(tenantId: string, commit: unknown, now: number): Promise<unknown>;
   prebuildDeadlineReached(tenantId: string, due: unknown): Promise<void>;
 };
 type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
@@ -120,6 +124,8 @@ const readInputsAs = (token: string) =>
   fetch(`${origin}/v1/prebuild-inputs`, { method: "POST", headers: asJob(token) });
 
 let earlyInputs: Promise<Response> | null = null;
+let branchHead = HEAD_SHA;
+let runOnDispatch = true;
 const gitHubCalls: string[] = [];
 
 const reply = (response: ServerResponse, status: number, body: unknown) => {
@@ -142,22 +148,22 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
       permissions: { actions: "write", contents: "write", workflows: "write" },
     });
   }
-  if (path === "/repos/acme/app" || path === "/repos/acme/fresh")
-    return reply(response, 200, { default_branch: "main" });
-  if (path === "/repos/acme/app/commits/main") {
-    return reply(response, 200, { sha: HEAD_SHA, commit: { tree: { sha: TREE_SHA } } });
+  if (/^\/repos\/acme\/(app|fresh|web)$/.test(path)) return reply(response, 200, { default_branch: "main" });
+  if (/^\/repos\/acme\/(app|web)\/commits\/main$/.test(path)) {
+    return reply(response, 200, { sha: branchHead, commit: { tree: { sha: TREE_SHA } } });
   }
-  if (path === `/repos/acme/fresh/commits/${COMMIT_SHA}`) {
-    return reply(response, 200, { sha: COMMIT_SHA, commit: { tree: { sha: TREE_SHA } } });
+  if (path === "/repos/acme/fresh/commits/main") {
+    return reply(response, 200, { sha: FRESH_HEAD, commit: { tree: { sha: TREE_SHA } } });
   }
-  if (path === `/repos/acme/app/git/trees/${TREE_SHA}` || path === `/repos/acme/fresh/git/trees/${TREE_SHA}`) {
+  if (/^\/repos\/acme\/(app|fresh|web)\/git\/trees\//.test(path) && path.endsWith(TREE_SHA)) {
     return reply(response, 200, { tree: [{ path: "package-lock.json", type: "blob", sha: "2".repeat(40) }] });
   }
-  if (path === "/repos/acme/app/contents/.github/workflows/tumpel-prebuild.yml?ref=main") {
+  if (/^\/repos\/acme\/(app|web)\/contents\/\.github\/workflows\/tumpel-prebuild\.yml\?ref=main$/.test(path)) {
+    const example = callerWorkflowExample({ path: CALLER_WORKFLOW, apiOrigin: API_ORIGIN, branch: "main" });
     return reply(response, 200, {
       sha: "3".repeat(40),
       encoding: "base64",
-      content: Buffer.from(callerWorkflowExample({ path: CALLER_WORKFLOW, apiOrigin: origin })).toString("base64"),
+      content: Buffer.from(example).toString("base64"),
     });
   }
   if (request.method === "PUT" && path === "/repos/acme/fresh/contents/.github/workflows/tumpel-prebuild.yml") {
@@ -173,7 +179,11 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
     await new Promise((resolve) => setTimeout(resolve, 500));
     return reply(response, 201, { commit: { sha: COMMIT_SHA } });
   }
-  if (request.method === "POST" && path === "/repos/acme/app/actions/workflows/tumpel-prebuild.yml/dispatches") {
+  if (
+    request.method === "POST" &&
+    /^\/repos\/acme\/(app|web)\/actions\/workflows\/tumpel-prebuild\.yml\/dispatches$/.test(path)
+  ) {
+    if (!runOnDispatch) return reply(response, 204, null);
     earlyInputs = readInputsAs(jobToken({ run_id: String(DISPATCHED_RUN) }));
     await new Promise((resolve) => setTimeout(resolve, 500));
     return reply(response, 204, null);
@@ -205,6 +215,7 @@ before(async () => {
           ACCESS_AUD,
           R2_STUB_ORIGIN: "https://r2.example.test",
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          API_ORIGIN,
           GITHUB_API_ORIGIN: `${keysOrigin}/api`,
           SECRETS_KEK,
           TUMPEL_SETTINGS: {
@@ -295,28 +306,17 @@ after(async () => {
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
-const recordCommit = async (headSha: string) => {
-  const env = await server.getWorker<Bindings>().getEnv();
-  return PrebuildSchema.parse(
-    await env.TENANT.getByName(tenantId).recordPrebuildCommit(
-      tenantId,
-      {
-        prebuildId: crypto.randomUUID(),
-        personaId,
-        key: {
-          repository: "https://github.com/acme/app",
-          inputDigest: "a".repeat(64),
-          guestImageDigest: "b".repeat(64),
-        },
-        configSource: "Default",
-        defaultBranch: "main",
-        headSha,
-        rootfsKey: ROOTFS_KEY,
-        logUrl: `https://github.com/acme/app/actions/workflows/tumpel-prebuild.yml`,
-      },
-      Date.now(),
-    ),
-  );
+const startOn = (repository: string) =>
+  send("POST", "/v1/prebuilds", { repository, personaId, provider: "GitHubActions", rebuild: true }, bearer);
+
+const startAt = async (headSha: string, repository = "https://github.com/acme/app") => {
+  branchHead = headSha;
+  runOnDispatch = false;
+  const response = await startOn(repository);
+  branchHead = HEAD_SHA;
+  runOnDispatch = true;
+  assert.equal(response.status, 200, await response.clone().text());
+  return PrebuildSchema.parse(await response.json());
 };
 
 const refusal = async (path: string, body: unknown, token: string | null, status: number) => {
@@ -326,7 +326,7 @@ const refusal = async (path: string, body: unknown, token: string | null, status
 };
 
 test("the run at the recorded commit reads its inputs with its job token, which takes the prebuild for that run and moves it to Building, and a job of that run uploads one checked layer and completes it to Converting", async () => {
-  const prebuild = await recordCommit(HEAD_SHA);
+  const prebuild = await startAt(HEAD_SHA);
   assert.equal(prebuild.status.state, "Dispatched");
   const unbound = { tenantId, layerDigest: "f".repeat(64), layerSizeBytes: 1 };
   const unboundPath = `/v1/prebuilds/${prebuild.prebuildId}/uploads`;
@@ -449,7 +449,7 @@ test("the run at the recorded commit reads its inputs with its job token, which 
 const dispatchedRun = async () => {
   nextRun += 1;
   const headSha = nextRun.toString(16).padStart(40, "0");
-  return { prebuild: await recordCommit(headSha), runId: nextRun, headSha };
+  return { prebuild: await startAt(headSha), runId: nextRun, headSha };
 };
 
 const signedDelivery = async (event: string, payload: unknown) => {
@@ -604,7 +604,9 @@ test("a run that never starts fails in phase Dispatch, and a build past its budg
   const unstarted = await readPrebuild(waiting.prebuild.prebuildId);
   assert.ok(unstarted.status.state === "Failed");
   assert.equal(unstarted.status.phase, "Dispatch");
-  assert.match((await failure(waiting.prebuild.prebuildId)).detail, /prebuildDispatchBudgetSeconds 900/);
+  const unstartedDetail = (await failure(waiting.prebuild.prebuildId)).detail;
+  assert.match(unstartedDetail, /prebuildDispatchBudgetSeconds 900/);
+  assert.match(unstartedDetail, new RegExp(`no run of commit ${waiting.headSha}`));
   const overdue = await readPrebuild(building.prebuild.prebuildId);
   assert.ok(overdue.status.state === "Failed");
   assert.equal(overdue.status.phase, "Build");
@@ -617,9 +619,6 @@ const takeEarlyInputs = (): Promise<Response> => {
   if (early === null) throw new Error("the fake GitHub began no run");
   return early;
 };
-
-const startOn = (repository: string) =>
-  send("POST", "/v1/prebuilds", { repository, personaId, provider: "GitHubActions", rebuild: true }, bearer);
 
 test("a start with a current caller workflow dispatches it with no inputs, and a run that reads its inputs before GitHub answers the dispatch finds the prebuild", async () => {
   const response = await startOn("https://github.com/acme/app");
@@ -643,7 +642,23 @@ test("a start on a repository without the caller workflow commits it, starts no 
   const early = await takeEarlyInputs();
   assert.equal(early.status, 200, await early.clone().text());
   assert.equal(PrebuildJobInputsSchema.parse(await early.json()).prebuildId, started.prebuildId);
-  assert.ok(gitHubCalls.includes(`GET /repos/acme/fresh/commits/${COMMIT_SHA}`), gitHubCalls.join("\n"));
+  assert.ok(gitHubCalls.includes("GET /repos/acme/fresh/commits/main"), gitHubCalls.join("\n"));
   assert.ok(!gitHubCalls.some((call) => call.endsWith("/dispatches")), gitHubCalls.join("\n"));
   assert.equal((await readPrebuild(started.prebuildId)).status.state, "Building");
+});
+
+test("the latest listing answers the newest prebuild of each repository, by repository", async () => {
+  await startAt("a".repeat(40), "https://github.com/acme/web");
+  await startAt("b".repeat(40), "https://github.com/acme/web");
+  const app = await startAt("d".repeat(40));
+  const web = await startAt("e".repeat(40), "https://github.com/acme/web");
+  const latest = PrebuildSchema.array().parse(
+    await (await send("GET", "/v1/prebuilds/latest", undefined, bearer)).json(),
+  );
+  assert.deepEqual(
+    latest
+      .filter((prebuild) => prebuild.repository === app.repository || prebuild.repository === web.repository)
+      .map((prebuild) => prebuild.prebuildId),
+    [app.prebuildId, web.prebuildId],
+  );
 });

@@ -23,6 +23,7 @@ import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { issuerSubject } from "./issuer.ts";
 import { ownerRequired } from "./members";
+import { apiOriginOf } from "./settings";
 import type { BuildProvider, CircleCIRow, NamespaceRow } from "./tenant-prebuilds";
 
 export type ConnectionSummary = z.infer<typeof ConnectionSummarySchema>;
@@ -147,7 +148,9 @@ const circleCILink = (env: Env, tenantId: string, row: CircleCIRow | null): unkn
   });
 };
 
-const readLink = async (env: Env, caller: Caller, provider: BuildProvider, apiOrigin: string): Promise<unknown> => {
+const EXAMPLE_DEFAULT_BRANCH = "main";
+
+const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Promise<unknown> => {
   const tenant = tenantOf(env, caller);
   const { tenantId } = caller;
   if (provider === "GitHubActions") {
@@ -158,7 +161,8 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider, apiOr
       reusableWorkflow: REUSABLE_WORKFLOW,
       callerWorkflowExample: callerWorkflowExample({
         path: connection?.callerWorkflow ?? DEFAULT_CALLER_WORKFLOW,
-        apiOrigin,
+        apiOrigin: apiOriginOf(env),
+        branch: EXAMPLE_DEFAULT_BRANCH,
       }),
     });
   }
@@ -169,20 +173,14 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider, apiOr
   });
 };
 
-const connect = async (
-  request: Request,
-  env: Env,
-  caller: Caller,
-  provider: BuildProvider,
-  apiOrigin: string,
-): Promise<Response> => {
+const connect = async (request: Request, env: Env, caller: Caller, provider: BuildProvider): Promise<Response> => {
   const tenant = tenantOf(env, caller);
   const now = Date.now();
   if (provider === "GitHubActions") {
     const body = await parseBody(request, GitHubActionsConnectionStartSchema, "gitHubActionsConnections.start");
     if (!body.ok) return body.response;
     await tenant.connectGitHubActions(caller.tenantId, body.value, now);
-    return json(await readLink(env, caller, provider, apiOrigin));
+    return json(await readLink(env, caller, provider));
   }
   if (provider === "CircleCI") {
     const body = await parseBody(request, CircleCIConnectionStartSchema, "circleCIConnections.start");
@@ -197,7 +195,7 @@ const connect = async (
       });
     }
     await tenant.connectCircleCI(body.value, now);
-    return json(await readLink(env, caller, provider, apiOrigin));
+    return json(await readLink(env, caller, provider));
   }
   const body = await parseBody(request, NamespaceConnectionStartSchema, "namespaceConnections.start");
   if (!body.ok) return body.response;
@@ -205,7 +203,7 @@ const connect = async (
     return problem(409, { code: "IssuerMissing", title: "No issuer", ...issuerMissing() });
   }
   await tenant.connectNamespace(body.value, now);
-  return json(await readLink(env, caller, provider, apiOrigin));
+  return json(await readLink(env, caller, provider));
 };
 
 const routeOf = (request: Request, pathname: string): { provider: BuildProvider; action: string } | null => {
@@ -234,7 +232,7 @@ export const handleConnections = async (
   const verb = route.action === "START" ? "start" : "delete";
   const refused = route.action === "GET" ? null : ownerRequired(caller, `${OPERATIONS[route.provider]}.${verb}`);
   if (refused) return refused;
-  if (route.action === "START") return connect(request, env, caller, route.provider, url.origin);
+  if (route.action === "START") return connect(request, env, caller, route.provider);
   if (route.action === "DELETE") {
     const tenant = tenantOf(env, caller);
     const token = route.provider === "CircleCI" ? await tenant.circleCIToken() : null;
@@ -249,5 +247,5 @@ export const handleConnections = async (
     await tenant.deleteBuildConnection(route.provider);
     return noContent();
   }
-  return json(await readLink(env, caller, route.provider, url.origin));
+  return json(await readLink(env, caller, route.provider));
 };

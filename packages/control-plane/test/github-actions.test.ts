@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Fetch } from "../src/github.ts";
-import { callerWorkflowExample, dispatchCallerWorkflow, syncCallerWorkflow } from "../src/github-actions.ts";
+import {
+  callerWorkflowExample,
+  commitCallerWorkflow,
+  dispatchCallerWorkflow,
+  readCallerWorkflow,
+} from "../src/github-actions.ts";
 
 type Call = { url: string; init: RequestInit };
 
@@ -63,7 +68,7 @@ const routed = (routes: Record<string, [number, unknown]>): { fetcher: Fetch; ca
 };
 
 const CONTENTS = "https://api.github.test/repos/acme/app/contents/.github/workflows/tumpel-prebuild.yml";
-const CALLER = { path: ".github/workflows/tumpel-prebuild.yml", apiOrigin: "https://api.tumpel.test" };
+const CALLER = { path: ".github/workflows/tumpel-prebuild.yml", apiOrigin: "https://api.tumpel.test", branch: "trunk" };
 const EXAMPLE = callerWorkflowExample(CALLER);
 const ALL_WRITE = { actions: "write", contents: "write", workflows: "write" };
 const COMMITTED: [number, unknown] = [201, { commit: { sha: "c".repeat(40) } }];
@@ -77,11 +82,17 @@ const file = (text: string): [number, unknown] => [
       .replace(/(.{60})/g, "$1\n"),
   },
 ];
-const sync = (fetcher: Fetch, permissions: Record<string, string>) =>
-  syncCallerWorkflow(fetcher, "https://api.github.test", { token: "t", permissions }, TARGET, {
-    ...CALLER,
-    branch: "trunk",
-  });
+const sync = async (fetcher: Fetch, permissions: Record<string, string>) => {
+  const read = await readCallerWorkflow(
+    fetcher,
+    "https://api.github.test",
+    { token: "t", permissions },
+    TARGET,
+    CALLER,
+  );
+  if (read.kind !== "Stale") return read;
+  return commitCallerWorkflow(fetcher, "https://api.github.test", "t", TARGET, { ...CALLER, file: read.file });
+};
 
 test("a missing caller workflow is committed to the default branch as the current example, which starts its own run on push", async () => {
   const { fetcher, calls } = routed({ [`PUT ${CONTENTS}`]: COMMITTED });
@@ -90,7 +101,10 @@ test("a missing caller workflow is committed to the default branch as the curren
   const body = JSON.parse(String(calls[1]?.init.body));
   const committed = Buffer.from(body.content, "base64").toString();
   assert.equal(committed, EXAMPLE);
-  assert.match(committed, /push:\n {4}paths:\n {6}- \.github\/workflows\/tumpel-prebuild\.yml\n/);
+  assert.match(
+    committed,
+    /push:\n {4}branches:\n {6}- trunk\n {4}paths:\n {6}- \.github\/workflows\/tumpel-prebuild\.yml\n/,
+  );
   assert.match(committed, /apiOrigin: https:\/\/api\.tumpel\.test\n/);
   assert.doesNotMatch(committed, /inputs:/);
   assert.equal(body.branch, "trunk");
