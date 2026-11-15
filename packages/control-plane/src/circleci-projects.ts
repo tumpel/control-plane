@@ -140,11 +140,7 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
     },
     Date.now(),
   );
-  if (added.kind === "Bound") {
-    await deleteCircleCIWebhooks(env, token, [hook.value.id]);
-    return alreadyBound(repository, added.project.projectSlug, added.project.circleCIProjectId);
-  }
-  return json(added.project);
+  return json(added);
 };
 
 const alreadyBound = (repository: string, projectSlug: string, circleCIProjectId: string): Response =>
@@ -161,7 +157,8 @@ const deleteProject = async (env: Env, caller: Caller, raw: string): Promise<Res
   const webhook = path.success
     ? (await tenant.circleCIWebhooks()).find((each) => each.circleCIProjectId === path.data.circleCIProjectId)
     : undefined;
-  if (webhook === undefined) {
+  const token = await tenant.circleCIToken();
+  if (webhook === undefined || token === null) {
     return problem(404, {
       code: "NotFound",
       title: "No such CircleCI project binding",
@@ -169,11 +166,8 @@ const deleteProject = async (env: Env, caller: Caller, raw: string): Promise<Res
       fix: "List the bindings with tumpel circleci project list",
     });
   }
-  const token = await tenant.circleCIToken();
-  if (token !== null) {
-    const refused = await deleteCircleCIWebhooks(env, token, [webhook.webhookId]);
-    if (refused !== null) return refused;
-  }
+  const refused = await deleteCircleCIWebhooks(env, token, [webhook.webhookId]);
+  if (refused !== null) return refused;
   await tenant.deleteCircleCIProject(webhook.circleCIProjectId);
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };

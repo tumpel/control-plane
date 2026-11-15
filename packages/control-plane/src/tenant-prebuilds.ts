@@ -68,10 +68,6 @@ export type DispatchedCircleCI =
   | { kind: "NotConnected" }
   | { kind: "Refused"; detail: string };
 
-export type CircleCIProjectAdded =
-  | { kind: "Added"; project: CircleCIProject }
-  | { kind: "Bound"; project: CircleCIProject };
-
 type CircleCIProjectRow = {
   circleci_project_id: string;
   repository: string;
@@ -134,13 +130,20 @@ export type CallerWorkflow = { kind: "Connected"; callerWorkflow: string } | { k
 
 export type RecordedRun = { kind: "Run"; run: PrebuildRun } | { kind: "NoRun" };
 
-export type CircleCIOrganization = { kind: "Connected"; organizationId: string } | { kind: "NotConnected" };
-
 export type UploadJob = { kind: "Job"; jobId: string } | { kind: "NoJob" };
 
-export type RecordedPipeline =
-  | { kind: "Pipeline"; pipelineId: string; projectId: string; headSha: string; job: UploadJob }
-  | { kind: "NoPipeline" };
+export interface RecordedPipeline {
+  pipelineId: string;
+  projectId: string;
+  headSha: string;
+  job: UploadJob;
+}
+
+export interface CircleCIUploadJob {
+  pipelineId: string;
+  headSha: string;
+  jobId: string;
+}
 
 export type CircleCIJobBound =
   | { kind: "Bound" }
@@ -177,15 +180,25 @@ export interface PrebuildLayerUpload {
   layerSizeBytes: number;
 }
 
-export interface UploadTarget {
+interface UploadTargetOf {
   prebuild: Prebuild;
   defaultBranch: string;
-  callerWorkflow: CallerWorkflow;
-  run: RecordedRun;
-  circleCIOrganization: CircleCIOrganization;
-  pipeline: RecordedPipeline;
   upload: PrebuildLayerUpload | null;
 }
+
+export type GitHubActionsUploadTarget = UploadTargetOf & {
+  provider: "GitHubActions";
+  callerWorkflow: CallerWorkflow;
+  run: PrebuildRun;
+};
+
+export type CircleCIUploadTarget = UploadTargetOf & {
+  provider: "CircleCI";
+  organizationId: string;
+  pipeline: RecordedPipeline;
+};
+
+export type UploadTarget = GitHubActionsUploadTarget | CircleCIUploadTarget;
 
 export type UploadRecorded =
   | { kind: "Recorded"; prebuild: Prebuild }
@@ -371,18 +384,17 @@ export class TenantPrebuilds extends TenantSessions {
     return row === undefined ? { kind: "NoRun" } : { kind: "Run", run: { runId: row.run_id, headSha: row.head_sha } };
   }
 
-  private recordedPipeline(prebuildId: string): RecordedPipeline {
+  private recordedPipeline(prebuildId: string): RecordedPipeline | null {
     const [row] = this.ctx.storage.sql
       .exec<{ pipeline_id: string; project_id: string; head_sha: string; job_id: string | null }>(
-        `SELECT prebuild_pipelines.pipeline_id, circleci_projects.project_id, prebuild_pipelines.head_sha,
-        prebuild_upload_jobs.job_id FROM prebuild_pipelines JOIN circleci_projects USING (circleci_project_id)
-        LEFT JOIN prebuild_upload_jobs USING (prebuild_id) WHERE prebuild_pipelines.prebuild_id = ?`,
+        `SELECT prebuild_pipelines.pipeline_id, prebuild_pipelines.project_id, prebuild_pipelines.head_sha,
+        prebuild_upload_jobs.job_id FROM prebuild_pipelines LEFT JOIN prebuild_upload_jobs USING (prebuild_id)
+        WHERE prebuild_pipelines.prebuild_id = ?`,
         prebuildId,
       )
       .toArray();
-    if (row === undefined) return { kind: "NoPipeline" };
+    if (row === undefined) return null;
     return {
-      kind: "Pipeline",
       pipelineId: row.pipeline_id,
       projectId: row.project_id,
       headSha: row.head_sha,
@@ -588,61 +600,73 @@ export class TenantPrebuilds extends TenantSessions {
       .exec<PrebuildRow>(`${PREBUILD_SELECT} WHERE prebuilds.prebuild_id = ?`, prebuildId)
       .toArray();
     if (row === undefined) return null;
-    const connection = this.connectionRow<{ caller_workflow: string }>("GitHubActions");
-    const circleCI = this.connectionRow<{ organization_id: string }>("CircleCI");
-    return {
+    const common = {
       prebuild: toPrebuild(tenantId, row),
       defaultBranch: row.default_branch,
-      callerWorkflow:
-        connection === null
-          ? { kind: "NotConnected" }
-          : { kind: "Connected", callerWorkflow: connection.caller_workflow },
-      run: this.recordedRun(prebuildId),
-      circleCIOrganization:
-        circleCI === null ? { kind: "NotConnected" } : { kind: "Connected", organizationId: circleCI.organization_id },
-      pipeline: this.recordedPipeline(prebuildId),
       upload:
         row.upload_layer_digest === null || row.upload_layer_size_bytes === null
           ? null
           : { layerDigest: row.upload_layer_digest, layerSizeBytes: row.upload_layer_size_bytes },
     };
+    if (row.provider === "GitHubActions") {
+      const run = this.recordedRun(prebuildId);
+      if (run.kind === "NoRun") return null;
+      const connection = this.connectionRow<{ caller_workflow: string }>("GitHubActions");
+      return {
+        ...common,
+        provider: "GitHubActions",
+        callerWorkflow:
+          connection === null
+            ? { kind: "NotConnected" }
+            : { kind: "Connected", callerWorkflow: connection.caller_workflow },
+        run: run.run,
+      };
+    }
+    if (row.provider !== "CircleCI") return null;
+    const circleCI = this.connectionRow<{ organization_id: string }>("CircleCI");
+    const pipeline = this.recordedPipeline(prebuildId);
+    if (circleCI === null || pipeline === null) return null;
+    return { ...common, provider: "CircleCI", organizationId: circleCI.organization_id, pipeline };
+  }
+
+  private prebuildOf(tenantId: string, prebuildId: string): Prebuild {
+    return toPrebuild(
+      tenantId,
+      this.ctx.storage.sql.exec<PrebuildRow>(`${PREBUILD_SELECT} WHERE prebuilds.prebuild_id = ?`, prebuildId).one(),
+    );
   }
 
   async bindCircleCIUploadJob(
     tenantId: string,
     prebuildId: string,
-    jobId: string,
+    upload: CircleCIUploadJob,
     now: number,
   ): Promise<CircleCIJobBound> {
-    const pipeline = this.recordedPipeline(prebuildId);
-    if (pipeline.kind === "NoPipeline") {
-      throw new Error(`prebuild ${prebuildId} recorded no CircleCI pipeline; the upload checked it a moment ago`);
-    }
-    if (pipeline.job.kind === "NoJob") {
-      const token = await this.circleCIToken();
-      if (token === null)
-        throw new Error(`the CircleCI connection went away while prebuild ${prebuildId} took its upload`);
-      const revision = await readPipelineRevision(
-        (url, init) => fetch(url, init),
-        this.env.CIRCLECI_API_ORIGIN,
-        token,
-        pipeline.pipelineId,
-      );
-      if (!revision.ok) return { kind: "Refused", status: revision.status, detail: revision.detail };
-      if (revision.value !== pipeline.headSha)
-        return this.failMovedRevision(tenantId, prebuildId, pipeline, revision.value, now);
-      this.ctx.storage.sql.exec(
-        "INSERT INTO prebuild_upload_jobs (prebuild_id, job_id, created_at) VALUES (?, ?, ?) ON CONFLICT (prebuild_id) DO NOTHING",
+    const token = await this.circleCIToken();
+    if (token === null)
+      throw new Error(`the CircleCI connection went away while prebuild ${prebuildId} took its upload`);
+    const revision = await readPipelineRevision(
+      (url, init) => fetch(url, init),
+      this.env.CIRCLECI_API_ORIGIN,
+      token,
+      upload.pipelineId,
+    );
+    if (!revision.ok) return { kind: "Refused", status: revision.status, detail: revision.detail };
+    if (revision.value !== upload.headSha)
+      return this.failMovedRevision(tenantId, prebuildId, upload, revision.value, now);
+    const [inserted] = this.ctx.storage.sql
+      .exec<{ job_id: string }>(
+        "INSERT INTO prebuild_upload_jobs (prebuild_id, job_id, created_at) VALUES (?, ?, ?) ON CONFLICT (prebuild_id) DO NOTHING RETURNING job_id",
         prebuildId,
-        jobId,
+        upload.jobId,
         now,
-      );
-    }
-    const [held] = this.ctx.storage.sql
-      .exec<{ job_id: string }>("SELECT job_id FROM prebuild_upload_jobs WHERE prebuild_id = ?", prebuildId)
+      )
       .toArray();
-    if (held === undefined) throw new Error(`prebuild ${prebuildId} recorded its upload job and then lost it`);
-    return held.job_id === jobId ? { kind: "Bound" } : { kind: "OtherJob", jobId: held.job_id };
+    if (inserted !== undefined) return { kind: "Bound" };
+    const held = this.ctx.storage.sql
+      .exec<{ job_id: string }>("SELECT job_id FROM prebuild_upload_jobs WHERE prebuild_id = ?", prebuildId)
+      .one();
+    return held.job_id === upload.jobId ? { kind: "Bound" } : { kind: "OtherJob", jobId: held.job_id };
   }
 
   private async failMovedRevision(
@@ -652,8 +676,7 @@ export class TenantPrebuilds extends TenantSessions {
     revision: string,
     now: number,
   ): Promise<CircleCIJobBound> {
-    const prebuild = this.getPrebuild(tenantId, prebuildId);
-    if (prebuild === null) throw new Error(`prebuild ${prebuildId} is gone; the upload checked it a moment ago`);
+    const prebuild = this.prebuildOf(tenantId, prebuildId);
     await this.failPrebuild(
       tenantId,
       prebuildId,
@@ -666,9 +689,7 @@ export class TenantPrebuilds extends TenantSessions {
       prebuild.logUrl,
       now,
     );
-    const failed = this.getPrebuild(tenantId, prebuildId);
-    if (failed === null) throw new Error(`prebuild ${prebuildId} is gone; it failed a moment ago`);
-    return { kind: "RevisionMoved", prebuild: failed };
+    return { kind: "RevisionMoved", prebuild: this.prebuildOf(tenantId, prebuildId) };
   }
 
   startPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {
@@ -838,9 +859,7 @@ export class TenantPrebuilds extends TenantSessions {
     return row === undefined ? null : toCircleCIProject(tenantId, row);
   }
 
-  async addCircleCIProject(tenantId: string, binding: CircleCIBinding, now: number): Promise<CircleCIProjectAdded> {
-    const held = this.circleCIProjectOf(tenantId, binding.repository);
-    if (held !== null) return { kind: "Bound", project: held };
+  async addCircleCIProject(tenantId: string, binding: CircleCIBinding, now: number): Promise<CircleCIProject> {
     const circleCIProjectId = crypto.randomUUID();
     await this.holdDataKey();
     const sealed = await seal(await this.dataKey(), binding.signingSecret, webhookSecretContext(circleCIProjectId));
@@ -860,7 +879,7 @@ export class TenantPrebuilds extends TenantSessions {
     const project = this.circleCIProjectOf(tenantId, binding.repository);
     if (project === null)
       throw new Error(`the CircleCI binding of ${binding.repository} was written and then not found`);
-    return { kind: "Added", project };
+    return project;
   }
 
   circleCIWebhooks(): CircleCIWebhook[] {
@@ -922,10 +941,11 @@ export class TenantPrebuilds extends TenantSessions {
           now,
         );
         this.ctx.storage.sql.exec(
-          "INSERT INTO prebuild_pipelines (prebuild_id, pipeline_id, circleci_project_id, head_sha, created_at) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO prebuild_pipelines (prebuild_id, pipeline_id, circleci_project_id, project_id, head_sha, created_at) VALUES (?, ?, ?, ?, ?, ?)",
           prebuildId,
           answer.pipelineId,
           project.circleCIProjectId,
+          project.projectId,
           start.headSha,
           now,
         );

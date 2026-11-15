@@ -12,12 +12,13 @@ const parseJson = (text: string): unknown => {
   }
 };
 
-const notFound = (): Response =>
-  problem(404, {
-    code: "NotFound",
-    title: "No such CircleCI binding",
-    detail: "no tenant of this id binds the project this event names",
-    fix: "Send events only from the webhook tumpel circleci project add registered, to the URL it named",
+const forbidden = (): Response =>
+  problem(403, {
+    code: "Forbidden",
+    title: "Signature mismatch",
+    detail:
+      "circleci-signature is missing or holds no v1 HMAC-SHA256 of the body under the signing secret of a binding behind this URL",
+    fix: "Send events from the webhook tumpel circleci project add registered, to the URL it named; delete the binding and add it again to register a new secret",
   });
 
 export const handleCircleCIEvents = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
@@ -35,17 +36,11 @@ export const handleCircleCIEvents = async (request: Request, url: URL, env: Env)
     });
   }
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
-  if (tenant === null) return notFound();
+  if (tenant === null) return forbidden();
   const stub = env.TENANT.getByName(tenantId);
   const secret = await stub.circleCIWebhookSecret(event.data.project.id);
-  if (secret === null) return notFound();
-  if (!(await verifyCircleCISignature(secret, body, request.headers.get("circleci-signature")))) {
-    return problem(403, {
-      code: "Forbidden",
-      title: "Signature mismatch",
-      detail: "circleci-signature is missing or holds no v1 HMAC-SHA256 of the body under the binding's signing secret",
-      fix: "Send events from the webhook tumpel circleci project add registered; delete the binding and add it again to register a new secret",
-    });
+  if (secret === null || !(await verifyCircleCISignature(secret, body, request.headers.get("circleci-signature")))) {
+    return forbidden();
   }
   await stub.circleCIWorkflowCompleted(tenantId, event.data, Date.now());
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });

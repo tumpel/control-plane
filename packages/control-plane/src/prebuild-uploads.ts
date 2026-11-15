@@ -8,12 +8,24 @@ import { circleCIRefused } from "./circleci-projects.ts";
 import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAGS } from "./github-actions";
 import { json, parseBody, problem } from "./http";
 import type { Env } from "./index";
-import { jwtVerifier, unverifiedIssuer, type VerifyJwt } from "./jwt";
+import { type JwtCheck, jwtVerifier, unverifiedIssuer, type VerifiedJwt, type VerifyJwt } from "./jwt";
 import { signerOf } from "./presign";
 import { settingsOf } from "./settings";
-import type { Prebuild, PrebuildLayerUpload, UploadTarget } from "./tenant-prebuilds";
+import type {
+  CircleCIUploadTarget,
+  GitHubActionsUploadTarget,
+  Prebuild,
+  PrebuildLayerUpload,
+  UploadTarget,
+} from "./tenant-prebuilds";
 
-type Bound = { ok: true; tenantId: string; target: UploadTarget } | { ok: false; response: Response };
+type UnboundJob = { kind: "None" } | { kind: "CircleCI"; target: CircleCIUploadTarget; jobId: string };
+
+type Bound =
+  | { ok: true; tenantId: string; target: UploadTarget; unbound: UnboundJob }
+  | { ok: false; response: Response };
+
+type ClaimsBound = { ok: true; jobId: string } | { ok: false; response: Response };
 
 type JobIssuer = { provider: "GitHubActions" } | { provider: "CircleCI"; issuer: string; organizationId: string };
 
@@ -23,6 +35,8 @@ const UPLOADS_PATH = /^\/v1\/prebuilds\/([^/]+)\/uploads(\/complete)?$/;
 const DISPATCH_EVENT = "workflow_dispatch";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CIRCLECI_CLAIM = "oidc.circleci.com";
+const CIRCLECI_VERIFIER_CAP = 64;
+const KEYS_LOADED: ReadonlySet<JwtCheck> = new Set(["kid", "signature", "iss", "aud", "exp", "nbf"]);
 
 export const prebuildLayerKey = (tenantId: string, prebuildId: string, digest: string): string =>
   `${tenantId}/prebuilds/${prebuildId}/layers/${digest}`;
@@ -39,13 +53,20 @@ const verifierFor = (env: Env, audience: string): VerifyJwt => {
 
 const circleCIVerifiers = new Map<string, VerifyJwt>();
 
-const circleCIVerifierFor = (issuer: string, audience: string): VerifyJwt => {
+const rememberCircleCIVerifier = (key: string, verify: VerifyJwt): void => {
+  const oldest = circleCIVerifiers.keys().next();
+  if (circleCIVerifiers.size >= CIRCLECI_VERIFIER_CAP && oldest.done === false) circleCIVerifiers.delete(oldest.value);
+  circleCIVerifiers.set(key, verify);
+};
+
+const verifyCircleCI = async (issuer: string, audience: string, token: string): Promise<VerifiedJwt> => {
   const key = `${issuer} ${audience}`;
   const held = circleCIVerifiers.get(key);
-  if (held !== undefined) return held;
+  if (held !== undefined) return held(token);
   const verify = jwtVerifier(`${issuer}/.well-known/jwks-pub.json`, issuer, audience);
-  circleCIVerifiers.set(key, verify);
-  return verify;
+  const verified = await verify(token);
+  if (verified.ok || KEYS_LOADED.has(verified.check)) rememberCircleCIVerifier(key, verify);
+  return verified;
 };
 
 const jobIssuerOf = (env: Env, token: string): JobIssuer => {
@@ -100,15 +121,12 @@ const isReusableWorkflow = (jobWorkflow: string | null): boolean => {
   return REUSABLE_WORKFLOW_TAGS.test(tag);
 };
 
-const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repository: string): Response | null => {
+const bindClaims = (
+  target: GitHubActionsUploadTarget,
+  claims: Record<string, unknown>,
+  repository: string,
+): Response | null => {
   const { prebuild, defaultBranch, callerWorkflow, run } = target;
-  if (prebuild.provider !== "GitHubActions") {
-    return tokenMismatch(
-      "provider",
-      `prebuild ${prebuild.prebuildId} runs on ${prebuild.provider}, and a GitHub Actions job token uploads only the layer of a GitHub Actions prebuild`,
-      "Upload the layer from the run the prebuild dispatched, with that provider's job token",
-    );
-  }
   if (callerWorkflow.kind === "NotConnected") {
     return tokenMismatch(
       "connection",
@@ -150,26 +168,19 @@ const bindClaims = (target: UploadTarget, claims: Record<string, unknown>, repos
       `Call ${REUSABLE_WORKFLOW} or a release tag v1.x.y from the caller workflow, as tumpel github-actions get shows, then start the prebuild again; a commit SHA pin is refused because its job_workflow_ref names no release tag`,
     );
   }
-  if (run.kind === "NoRun") {
-    return tokenMismatch(
-      "run_id",
-      `prebuild ${prebuild.prebuildId} recorded no GitHub Actions run`,
-      "Start a new prebuild with tumpel prebuild start --rebuild",
-    );
-  }
   const runId = claimOf(claims, "run_id");
-  if (runId !== String(run.run.runId)) {
+  if (runId !== String(run.runId)) {
     return tokenMismatch(
       "run_id",
-      `the token comes from run ${runId ?? "(none)"}, and prebuild ${prebuild.prebuildId} dispatched run ${run.run.runId}`,
+      `the token comes from run ${runId ?? "(none)"}, and prebuild ${prebuild.prebuildId} dispatched run ${run.runId}`,
       "Upload only from the run the prebuild dispatched",
     );
   }
   const sha = claimOf(claims, "sha");
-  if (sha === run.run.headSha) return null;
+  if (sha === run.headSha) return null;
   return tokenMismatch(
     "sha",
-    `the token comes from a run of commit ${sha ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${run.run.headSha}`,
+    `the token comes from a run of commit ${sha ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${run.headSha}`,
     "Upload only from the run the prebuild dispatched, on the commit it read",
   );
 };
@@ -184,66 +195,63 @@ const otherJob = (prebuildId: string, jobId: string, recorded: string): Response
     "Upload and complete from the one upload job of the pipeline the prebuild triggered",
   );
 
-const bindCircleCIClaims = (target: UploadTarget, claims: Record<string, unknown>): Response | null => {
+const bindCircleCIClaims = (target: CircleCIUploadTarget, claims: Record<string, unknown>): ClaimsBound => {
   const { prebuild, defaultBranch, pipeline } = target;
-  if (prebuild.provider !== "CircleCI") {
-    return tokenMismatch(
-      "provider",
-      `prebuild ${prebuild.prebuildId} runs on ${prebuild.provider}, and a CircleCI job token uploads only the layer of a CircleCI prebuild`,
-      "Upload the layer from the run the prebuild dispatched, with that provider's job token",
-    );
-  }
-  if (pipeline.kind === "NoPipeline") {
-    return tokenMismatch(
-      "pipeline-id",
-      `prebuild ${prebuild.prebuildId} recorded no CircleCI pipeline of a bound project`,
-      "Bind the repository with tumpel circleci project add, then start a new prebuild with tumpel prebuild start --rebuild",
-    );
-  }
+  const mismatch = (response: Response): ClaimsBound => ({ ok: false, response });
   const projectId = circleCIClaim(claims, "project-id");
   if (projectId !== pipeline.projectId) {
-    return tokenMismatch(
-      "project-id",
-      `the token comes from project ${projectId ?? "(none)"}, and the repository's binding names project ${pipeline.projectId}`,
-      "Upload only from the pipeline the prebuild triggered, in the project the binding names",
+    return mismatch(
+      tokenMismatch(
+        "project-id",
+        `the token comes from project ${projectId ?? "(none)"}, and the repository's binding names project ${pipeline.projectId}`,
+        "Upload only from the pipeline the prebuild triggered, in the project the binding names",
+      ),
     );
   }
   const pipelineId = circleCIClaim(claims, "pipeline-id");
   if (pipelineId !== pipeline.pipelineId) {
-    return tokenMismatch(
-      "pipeline-id",
-      `the token comes from pipeline ${pipelineId ?? "(none)"}, and prebuild ${prebuild.prebuildId} triggered pipeline ${pipeline.pipelineId}`,
-      "Upload only from the pipeline the prebuild triggered",
+    return mismatch(
+      tokenMismatch(
+        "pipeline-id",
+        `the token comes from pipeline ${pipelineId ?? "(none)"}, and prebuild ${prebuild.prebuildId} triggered pipeline ${pipeline.pipelineId}`,
+        "Upload only from the pipeline the prebuild triggered",
+      ),
     );
   }
   const ref = circleCIClaim(claims, "vcs-ref");
   const expectedRef = `refs/heads/${defaultBranch}`;
   if (ref !== expectedRef) {
-    return tokenMismatch(
-      "vcs-ref",
-      `the token comes from a pipeline on ${ref ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${expectedRef}`,
-      "Upload only from the pipeline the prebuild triggered on the repository's default branch",
+    return mismatch(
+      tokenMismatch(
+        "vcs-ref",
+        `the token comes from a pipeline on ${ref ?? "(none)"}, and prebuild ${prebuild.prebuildId} builds ${expectedRef}`,
+        "Upload only from the pipeline the prebuild triggered on the repository's default branch",
+      ),
     );
   }
   if (claims[`${CIRCLECI_CLAIM}/ssh-rerun`] !== false) {
-    return tokenMismatch(
-      "ssh-rerun",
-      "the token comes from a job rerun with SSH, or names no ssh-rerun, and a rerun with SSH hands a person a shell in the job",
-      "Upload from the pipeline's own run; start a new prebuild with tumpel prebuild start --rebuild instead of rerunning a job with SSH",
+    return mismatch(
+      tokenMismatch(
+        "ssh-rerun",
+        "the token comes from a job rerun with SSH, or names no ssh-rerun, and a rerun with SSH hands a person a shell in the job",
+        "Upload from the pipeline's own run; start a new prebuild with tumpel prebuild start --rebuild instead of rerunning a job with SSH",
+      ),
     );
   }
   const jobId = circleCIClaim(claims, "job-id");
   if (jobId === null) {
-    return tokenMismatch(
-      "job-id",
-      "the token names no job",
-      "Mint the token with circleci run oidc get --aud <api origin> in the orb's upload job",
+    return mismatch(
+      tokenMismatch(
+        "job-id",
+        "the token names no job",
+        "Mint the token with circleci run oidc get --aud <api origin> in the orb's upload job",
+      ),
     );
   }
   if (pipeline.job.kind === "Job" && pipeline.job.jobId !== jobId) {
-    return otherJob(prebuild.prebuildId, jobId, pipeline.job.jobId);
+    return mismatch(otherJob(prebuild.prebuildId, jobId, pipeline.job.jobId));
   }
-  return null;
+  return { ok: true, jobId };
 };
 
 const targetOf = async (env: Env, prebuildId: string, tenantId: string): Promise<UploadTarget | null> => {
@@ -260,18 +268,18 @@ const boundCircleCI = async (
   tenantId: string,
 ): Promise<Bound> => {
   const target = await targetOf(env, prebuildId, tenantId);
-  if (target === null) return { ok: false, response: notFound() };
-  const organization = target.circleCIOrganization;
-  if (organization.kind === "NotConnected" || organization.organizationId !== organizationId) {
+  if (target === null || target.provider !== "CircleCI" || target.organizationId !== organizationId) {
     return { ok: false, response: notFound() };
   }
   const origin = circleCIClaim(claims, "vcs-origin");
   if (origin === null || `https://${origin.toLowerCase()}` !== target.prebuild.repository) {
     return { ok: false, response: notFound() };
   }
-  const mismatch = bindCircleCIClaims(target, claims);
-  if (mismatch !== null) return { ok: false, response: mismatch };
-  return { ok: true, tenantId, target };
+  const claimed = bindCircleCIClaims(target, claims);
+  if (!claimed.ok) return claimed;
+  const unbound: UnboundJob =
+    target.pipeline.job.kind === "Job" ? { kind: "None" } : { kind: "CircleCI", target, jobId: claimed.jobId };
+  return { ok: true, tenantId, target, unbound };
 };
 
 const boundGitHub = async (
@@ -286,12 +294,22 @@ const boundGitHub = async (
   if (repository === null || `https://github.com/${repository.toLowerCase()}` !== target.prebuild.repository) {
     return { ok: false, response: notFound() };
   }
+  if (target.provider !== "GitHubActions") {
+    return {
+      ok: false,
+      response: tokenMismatch(
+        "provider",
+        `prebuild ${target.prebuild.prebuildId} runs on ${target.prebuild.provider}, and a GitHub Actions job token uploads only the layer of a GitHub Actions prebuild`,
+        "Upload the layer from the run the prebuild dispatched, with that provider's job token",
+      ),
+    };
+  }
   const mismatch = bindClaims(target, claims, repository);
   if (mismatch !== null) return { ok: false, response: mismatch };
-  if (target.prebuild.status.state === "Dispatched" && target.run.kind === "Run") {
-    await env.TENANT.getByName(tenantId).recordPrebuildBuilding(tenantId, prebuildId, target.run.run, Date.now());
+  if (target.prebuild.status.state === "Dispatched") {
+    await env.TENANT.getByName(tenantId).recordPrebuildBuilding(tenantId, prebuildId, target.run, Date.now());
   }
-  return { ok: true, tenantId, target };
+  return { ok: true, tenantId, target, unbound: { kind: "None" } };
 };
 
 const bound = (env: Env, job: JobClaims, prebuildId: string, tenantId: string): Promise<Bound> =>
@@ -299,18 +317,21 @@ const bound = (env: Env, job: JobClaims, prebuildId: string, tenantId: string): 
     ? boundCircleCI(env, job.issuer.organizationId, job.claims, prebuildId, tenantId)
     : boundGitHub(env, job.claims, prebuildId, tenantId);
 
-const bindCircleCIJob = async (env: Env, job: JobClaims, binding: UploadTarget, tenantId: string) => {
-  const { prebuild, pipeline } = binding;
-  if (job.issuer.provider !== "CircleCI" || pipeline.kind === "NoPipeline" || pipeline.job.kind === "Job") return null;
-  const jobId = circleCIClaim(job.claims, "job-id");
-  if (jobId === null)
-    throw new Error(`the job token of prebuild ${prebuild.prebuildId} lost its job-id after its check`);
-  const tenant = env.TENANT.getByName(tenantId);
-  const recorded = await tenant.bindCircleCIUploadJob(tenantId, prebuild.prebuildId, jobId, Date.now());
+const bindCircleCIJob = async (env: Env, unbound: UnboundJob, tenantId: string): Promise<Response | null> => {
+  if (unbound.kind === "None") return null;
+  const { target, jobId } = unbound;
+  const { prebuildId } = target.prebuild;
+  const { pipelineId, headSha } = target.pipeline;
+  const recorded = await env.TENANT.getByName(tenantId).bindCircleCIUploadJob(
+    tenantId,
+    prebuildId,
+    { pipelineId, headSha, jobId },
+    Date.now(),
+  );
   if (recorded.kind === "Bound") return null;
-  if (recorded.kind === "OtherJob") return otherJob(prebuild.prebuildId, jobId, recorded.jobId);
+  if (recorded.kind === "OtherJob") return otherJob(prebuildId, jobId, recorded.jobId);
   if (recorded.kind === "RevisionMoved") return notUploading(recorded.prebuild);
-  return circleCIRefused(recorded, `reading pipeline ${pipeline.pipelineId} for the commit it checked out`);
+  return circleCIRefused(recorded, `reading pipeline ${pipelineId} for the commit it checked out`);
 };
 
 const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: PrebuildLayerUpload) => {
@@ -377,9 +398,11 @@ export const handlePrebuildUploads = async (request: Request, url: URL, env: Env
   const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
   if (token === "") return tokenRefused("token", "the request carries no Authorization: Bearer token", url.origin);
   const issuer = jobIssuerOf(env, token);
-  const verify =
-    issuer.provider === "CircleCI" ? circleCIVerifierFor(issuer.issuer, url.origin) : verifierFor(env, url.origin);
-  const verified = await verify(token);
+  const verified =
+    issuer.provider === "CircleCI"
+      ? await verifyCircleCI(issuer.issuer, url.origin, token)
+      : await verifierFor(env, url.origin)(token);
+  if (!verified.ok && verified.check === "keys" && issuer.provider === "CircleCI") return notFound();
   if (!verified.ok) return tokenRefused(verified.check, verified.detail, url.origin);
   const job: JobClaims = { issuer, claims: verified.claims };
   const path = PrebuildPathSchema.safeParse({ prebuildId: decodeURIComponent(route[1] ?? "") });
@@ -396,7 +419,7 @@ export const handlePrebuildUploads = async (request: Request, url: URL, env: Env
   if (!body.ok) return body.response;
   const binding = await bound(env, job, prebuildId, body.value.tenantId);
   if (!binding.ok) return binding.response;
-  const unbound = await bindCircleCIJob(env, job, binding.target, binding.tenantId);
+  const unbound = await bindCircleCIJob(env, binding.unbound, binding.tenantId);
   if (unbound !== null) return unbound;
   const { layerDigest, layerSizeBytes } = body.value;
   return start(env, binding.target, binding.tenantId, { layerDigest, layerSizeBytes });

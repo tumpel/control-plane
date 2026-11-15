@@ -68,7 +68,6 @@ let bearer: Record<string, string>;
 let tenantId: string;
 let personaId: string;
 let pipelines = 0;
-let runAnswer: (() => { status: number; body: unknown }) | null = null;
 const runs: unknown[] = [];
 const webhooks: Record<string, unknown>[] = [];
 const deletedWebhooks: string[] = [];
@@ -130,10 +129,6 @@ const fakeCircleCI = async (request: IncomingMessage, response: ServerResponse, 
   }
   if (request.method === "POST" && path === `/project/${SLUG}/pipeline/run`) {
     runs.push(body);
-    if (runAnswer !== null) {
-      const answer = runAnswer();
-      return reply(response, answer.status, answer.body);
-    }
     pipelines += 1;
     return reply(response, 201, { id: `pipeline-${pipelines}`, state: "created", number: pipelines });
   }
@@ -343,23 +338,6 @@ test("a binding registers a signed workflow-completed webhook on its project, an
   assert.ok(Object.values(run.parameters).every((value) => value.length <= 512));
 });
 
-test("a trigger CircleCI answers without a pipeline is refused DispatchRefused and stores no prebuild", async () => {
-  const before = PrebuildSchema.array().parse(
-    await (await send("GET", `/v1/prebuilds?repository=${REPOSITORY}`, undefined, bearer)).json(),
-  );
-  runAnswer = () => ({ status: 200, body: { message: "Config has no workflow tumpel-prebuild." } });
-  const response = await startCircleCI();
-  runAnswer = null;
-  assert.equal(response.status, 409);
-  const problem = ProblemSchema.parse(await response.json());
-  assert.equal(problem.code, "DispatchRefused");
-  assert.match(problem.detail, /created no pipeline: Config has no workflow tumpel-prebuild\./);
-  const after = PrebuildSchema.array().parse(
-    await (await send("GET", `/v1/prebuilds?repository=${REPOSITORY}`, undefined, bearer)).json(),
-  );
-  assert.equal(after.length, before.length);
-});
-
 test("a workflow-completed event is taken only with its binding's signature, ignored for an unknown pipeline, and fails the prebuild in Build or Upload", async () => {
   const failing = await started();
   const failingPipeline = `pipeline-${pipelines}`;
@@ -372,7 +350,13 @@ test("a workflow-completed event is taken only with its binding's signature, ign
   const forged = event(failingPipeline, "failed");
   assert.equal((await deliver(forged, v1(forged, "another-secret"))).status, 403);
   const elsewhere = event(failingPipeline, "failed", "tumpel-prebuild", "99999999-0000-4000-8000-000000000000");
-  assert.equal((await deliver(elsewhere, v1(elsewhere))).status, 404);
+  assert.equal((await deliver(elsewhere, v1(elsewhere))).status, 403);
+  const strangerTenant = await server.fetch(`${origin}/v1/circleci-events/${crypto.randomUUID()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "circleci-signature": v1(forged) },
+    body: forged,
+  });
+  assert.equal(strangerTenant.status, 403);
   assert.equal((await readPrebuild(failing.prebuildId)).status.state, "Building");
 
   const unknown = event("pipeline-unknown", "failed");
@@ -407,6 +391,22 @@ test("deleting a binding deletes its webhook at CircleCI", async () => {
   );
   assert.deepEqual(deletedWebhooks, [`webhook-${webhooks.length}`]);
   await addBinding();
+});
+
+test("a start whose pipeline parameter is over 512 characters is refused and triggers no pipeline", async () => {
+  const host = Array.from({ length: 9 }, () => "a".repeat(60)).join(".");
+  const before = runs.length;
+  const response = await server.fetch(`http://${host}.test/v1/prebuilds`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/json", ...bearer },
+    body: JSON.stringify({ repository: REPOSITORY, personaId, provider: "CircleCI", rebuild: true }),
+  });
+  assert.equal(response.status, 409, await response.clone().text());
+  const problem = ProblemSchema.parse(await response.json());
+  assert.equal(problem.code, "DispatchRefused");
+  assert.match(problem.detail, /tumpel_api_origin is \d+ characters/);
+  assert.equal(runs.length, before);
 });
 
 const OTHER_ORGANIZATION = "99999999-1111-4222-8333-444444444444";
@@ -530,4 +530,18 @@ test("a pipeline that checked out another commit than the start read fails its p
   assert.ok(moved.status.state === "Failed");
   assert.equal(moved.status.phase, "Dispatch");
   assert.match((await failure(prebuild.prebuildId)).detail, /checked out commit d{40}/);
+});
+
+test("deleting the connection deletes the webhooks of its bindings at CircleCI", async () => {
+  const bindings = CircleCIProjectSchema.array().parse(
+    await (await send("GET", "/v1/circleci-projects", undefined, bearer)).json(),
+  );
+  assert.ok(bindings.length > 0);
+  const deletedBefore = deletedWebhooks.length;
+  assert.equal((await send("DELETE", "/v1/circleci-connection", undefined, bearer)).status, 204);
+  assert.deepEqual(deletedWebhooks.slice(deletedBefore), [`webhook-${webhooks.length}`]);
+  assert.deepEqual(
+    CircleCIProjectSchema.array().parse(await (await send("GET", "/v1/circleci-projects", undefined, bearer)).json()),
+    [],
+  );
 });

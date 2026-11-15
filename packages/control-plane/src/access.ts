@@ -9,6 +9,7 @@ export type Verify = (assertion: string) => Promise<Verification>;
 
 const REASONS: Record<JwtCheck, string> = {
   token: "the JWT is malformed or not signed with RS256",
+  keys: "the identity proxy publishes no signing keys at its certs URL",
   kid: "the JWT is signed by a key the identity proxy does not publish",
   signature: "the JWT signature does not verify",
   iss: "the JWT was issued by another Access team",
