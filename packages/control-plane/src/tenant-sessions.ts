@@ -42,7 +42,7 @@ import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
-import type { DeadlineChanges, DeadlineName } from "./session-timer";
+import type { Deadline, DeadlineChanges, DeadlineName } from "./session-timer";
 import { settingsOf } from "./settings";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
@@ -1555,6 +1555,7 @@ export class TenantSessions extends DurableObject<Env> {
         Claim: null,
         ImageFetch: {
           turnId: turn.turn_id,
+          imageDigest: message.imageDigest,
           at: now + (settings.turnImageFetchBudgetSeconds + settings.turnClaimBudgetSeconds) * 1000,
         },
       });
@@ -1619,7 +1620,8 @@ export class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async deadlineReached(tenantId: string, sessionId: string, name: DeadlineName, turnId: string): Promise<void> {
+  async deadlineReached(tenantId: string, sessionId: string, name: DeadlineName, deadline: Deadline): Promise<void> {
+    const { turnId } = deadline;
     const turn = this.turnRow(turnId);
     const session = this.sessionRow(sessionId);
     if (turn === null || session === null) return;
@@ -1660,7 +1662,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "ImageFetchTimedOut",
-        `host ${session.host_id} started fetching the guest image of turn ${turnId} and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
+        `host ${session.host_id} started fetching guest image ${deadline.imageDigest} for turn ${turnId} and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
         failedAt,
       );
     }

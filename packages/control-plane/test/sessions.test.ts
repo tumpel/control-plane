@@ -951,6 +951,7 @@ test("a turn whose host fetches its image fails ImageFetchTimedOut after the fet
   assert.ok(failed.updatedAt - fetching >= (IMAGE_FETCH_BUDGET_SECONDS + CLAIM_BUDGET_SECONDS) * 1000);
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "ImageFetchTimedOut");
+  assert.match(failure.detail, new RegExp(`guest image ${offer.image.imageDigest} for turn ${offer.turnId}`));
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {

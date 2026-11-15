@@ -15,6 +15,7 @@ export type DeadlineName =
 export interface Deadline {
   turnId: string;
   at: number;
+  imageDigest?: string;
 }
 
 export type DeadlineChanges = Partial<Record<DeadlineName, Deadline | null>>;
@@ -48,7 +49,7 @@ export class SessionTimer extends DurableObject<Env> {
     await this.save(timers);
     const tenant = this.env.TENANT.getByName(timers.tenantId);
     for (const [name, deadline] of due) {
-      await tenant.deadlineReached(timers.tenantId, timers.sessionId, name, deadline.turnId);
+      await tenant.deadlineReached(timers.tenantId, timers.sessionId, name, deadline);
     }
   }
 
