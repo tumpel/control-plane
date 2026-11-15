@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { test } from "node:test";
-import { CloseCode } from "@tumpel/api/schemas";
+import { ChannelProtocol, CloseCode } from "@tumpel/api/schemas";
 import * as control from "../src/channel/control.ts";
 import {
   type ControlEnvelope,
@@ -117,7 +117,7 @@ const setup = (revoked = false) => {
         link.connection = received.connection;
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion = 2) => {
+      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
@@ -169,9 +169,9 @@ test("a Hello on protocol version 1 is refused and the supervisor told to update
   const link = setup().connect();
   await link.hello(undefined, 1);
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
-  assert.match(
-    link.closed?.reason ?? "",
-    /protocol version 1 is not supported; this control plane speaks 2, update the supervisor/,
+  assert.equal(
+    link.closed?.reason,
+    `protocol version 1 is not supported; this control plane speaks ${ChannelProtocol.Version}, update the supervisor`,
   );
   assert.equal(link.connection.phase, "Closed");
 });

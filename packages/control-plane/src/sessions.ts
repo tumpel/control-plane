@@ -9,11 +9,12 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
-import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
+import { HARNESS_CATALOG, IMAGE_ARCHITECTURES, pinnedEntry } from "./harness-catalog";
 import { hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { placeSession, type Unplaceable } from "./placement";
 import { settingsOf } from "./settings";
 import type {
   CredentialHandover,
@@ -105,6 +106,42 @@ export const credentialRefused = (
   });
 };
 
+const why = (refused: Unplaceable): string => {
+  const named = `${refused.host.name} (${refused.host.hostId})`;
+  if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
+  if (refused.reason === "NoUsage") return `${named} has sent no usage on a Heartbeat yet`;
+  if (refused.reason === "NoImage") {
+    return `${named} is ${refused.usage.architecture}, and the guest images are built for ${IMAGE_ARCHITECTURES.join(", ")} only`;
+  }
+  return `${named} runs a turn in all ${refused.usage.boxCapacity} of its box slots`;
+};
+
+const unplaced = (hosts: Unplaceable[]): Refused => {
+  if (hosts.length === 0) {
+    return refuse(409, {
+      code: "NoHostAvailable",
+      title: "No host online",
+      detail: "your tenant has no hosts",
+      fix: "Enrol a host with tumpel host mint-token and start tumpel-supervisor run on it, then start again",
+    });
+  }
+  const detail = hosts.map(why).join(", ");
+  if (hosts.some(({ reason }) => reason === "Full")) {
+    return refuse(409, {
+      code: "PoolExhausted",
+      title: "Every box slot is running a turn",
+      detail: `no host of your tenant has a free box slot: ${detail}`,
+      fix: "Wait for a running turn to finish, raise boxCapacity in runtime.json and rerun tumpel-supervisor install, or enrol another host with tumpel host mint-token, then start again",
+    });
+  }
+  return refuse(409, {
+    code: "NoHostAvailable",
+    title: "No host can take the session",
+    detail: `no host of your tenant can take a session: ${detail}`,
+    fix: `Start tumpel-supervisor run on an ${IMAGE_ARCHITECTURES.join(" or ")} host, or enrol one with tumpel host mint-token, then start again`,
+  });
+};
+
 const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
 
 export const startSession = async (
@@ -146,19 +183,9 @@ export const startSession = async (
       "start again",
     );
   }
-  const hosts = await listHosts(env.DB, caller.tenantId);
-  const host = hosts.find((candidate) => candidate.state === "Online");
-  if (host === undefined) {
-    return refuse(409, {
-      code: "NoHostAvailable",
-      title: "No host online",
-      detail:
-        hosts.length === 0
-          ? "your tenant has no hosts"
-          : `no host of your tenant is online: ${hosts.map((listed) => `${listed.name} (${listed.hostId}) is ${listed.state}`).join(", ")}`,
-      fix: "Start tumpel-supervisor run on a host, or enrol one with tumpel host mint-token, then start again",
-    });
-  }
+  const placement = placeSession(await listHosts(env.DB, caller.tenantId), IMAGE_ARCHITECTURES);
+  if (placement.kind === "Refused") return unplaced(placement.hosts);
+  const { host } = placement;
   const started = await tenant.startSession(
     caller.tenantId,
     {

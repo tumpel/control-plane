@@ -26,6 +26,7 @@ interface HostRow {
   public_key: string;
   supervisor_version: string;
   labels: string;
+  usage: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -33,7 +34,7 @@ interface HostRow {
 const HOST_COLUMNS =
   "host_id, tenant_id, name, state, architecture, cpu_count, memory_bytes, public_key, supervisor_version, created_at, updated_at";
 
-const HOST_SELECT = `${HOST_COLUMNS}, labels`;
+const HOST_SELECT = `${HOST_COLUMNS}, labels, usage`;
 
 const toHost = (row: HostRow): Host =>
   HostSchema.parse({
@@ -47,6 +48,7 @@ const toHost = (row: HostRow): Host =>
     publicKey: row.public_key,
     supervisorVersion: row.supervisor_version,
     labels: JSON.parse(row.labels),
+    ...(row.usage === null ? {} : { usage: JSON.parse(row.usage) }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

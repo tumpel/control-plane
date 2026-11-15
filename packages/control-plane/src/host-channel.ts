@@ -9,6 +9,7 @@ import {
   HEARTBEAT_DEADLINE_MS,
   HEARTBEAT_INTERVAL_MS,
   type HostMessage,
+  type HostUsage,
   type Ledger,
   type LedgerStore,
   type StoredControlMessage,
@@ -137,6 +138,7 @@ export class HostChannel extends DurableObject<Env> {
       await this.ctx.blockConcurrencyWhile(() => this.forward(host.host_id, received));
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
+    if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
     if (connection.phase === "Open" && now - attachment.lastSentAt >= HEARTBEAT_INTERVAL_MS / 2) control.beat(context);
     socket.serializeAttachment(attachment);
     await this.ctx.storage.setAlarm(now + HEARTBEAT_DEADLINE_MS);
@@ -171,6 +173,12 @@ export class HostChannel extends DurableObject<Env> {
     }
     await this.refreshPresence();
     if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + HEARTBEAT_DEADLINE_MS);
+  }
+
+  private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
+    await this.env.DB.prepare("UPDATE hosts SET usage = ? WHERE host_id = ?")
+      .bind(JSON.stringify({ ...usage, heartbeatAt: new Date(now).toISOString() }), hostId)
+      .run();
   }
 
   private async tenantOf(hostId: string): Promise<string> {
