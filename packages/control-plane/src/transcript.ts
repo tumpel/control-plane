@@ -1,5 +1,5 @@
-import { TranscriptLineSchema } from "@tumpel/api/schemas";
-import type { z } from "zod";
+import { type HarnessSchema, TranscriptLineSchema } from "@tumpel/api/schemas";
+import { z } from "zod";
 
 export type TranscriptLine = z.infer<typeof TranscriptLineSchema>;
 
@@ -12,9 +12,10 @@ export interface Chunk {
   offsets: number[];
 }
 
+const encodeLine = (line: TranscriptLine): Uint8Array => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
+
 export const encodeChunk = (lines: TranscriptLine[]): Chunk => {
-  const encoder = new TextEncoder();
-  const encoded = lines.map((line) => encoder.encode(`${JSON.stringify(line)}\n`));
+  const encoded = lines.map(encodeLine);
   const offsets = [0];
   for (const bytes of encoded) offsets.push((offsets.at(-1) ?? 0) + bytes.byteLength);
   const body = new Uint8Array(offsets.at(-1) ?? 0);
@@ -29,16 +30,38 @@ export interface Range {
   length: number;
 }
 
-export const rangeAfter = (lineSeqs: number[], offsets: number[], after: number, limit: number): Range | null => {
+const offsetAt = (offsets: number[], index: number, lines: number): number => {
+  const offset = offsets[index];
+  if (offset === undefined)
+    throw new Error(`a transcript chunk index holds ${lines} lines but ${offsets.length} offsets`);
+  return offset;
+};
+
+export const rangeAfter = (
+  lineSeqs: number[],
+  offsets: number[],
+  after: number,
+  limit: number,
+  maxBytes: number | null,
+): Range | null => {
   const first = lineSeqs.findIndex((lineSeq) => lineSeq > after);
   if (first === -1) return null;
-  const end = Math.min(lineSeqs.length, first + limit);
-  const offset = offsets[first];
-  const until = offsets[end];
-  if (offset === undefined || until === undefined) {
-    throw new Error(`a transcript chunk index holds ${lineSeqs.length} lines but ${offsets.length} offsets`);
+  const offset = offsetAt(offsets, first, lineSeqs.length);
+  let end = Math.min(lineSeqs.length, first + limit);
+  while (maxBytes !== null && end > first + 1 && offsetAt(offsets, end, lineSeqs.length) - offset > maxBytes) end -= 1;
+  return { offset, length: offsetAt(offsets, end, lineSeqs.length) - offset };
+};
+
+export const linesWithin = (lines: TranscriptLine[], maxBytes: number | null): TranscriptLine[] => {
+  if (maxBytes === null) return lines;
+  let bytes = 0;
+  const kept: TranscriptLine[] = [];
+  for (const line of lines) {
+    bytes += encodeLine(line).byteLength;
+    if (kept.length > 0 && bytes > maxBytes) return kept;
+    kept.push(line);
   }
-  return { offset, length: until - offset };
+  return kept;
 };
 
 export const decodeLines = (text: string): TranscriptLine[] =>
@@ -50,59 +73,69 @@ export const decodeLines = (text: string): TranscriptLine[] =>
 export const DEFAULT_PAGE_BYTES = 32768;
 const TOOL_ARGUMENT_CHARS = 120;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+type Harness = z.infer<typeof HarnessSchema>;
+
+const ClaudeCodeAssistantSchema = z.object({
+  type: z.literal("assistant"),
+  message: z.object({
+    content: z.array(
+      z.union([
+        z.object({ type: z.literal("text"), text: z.string() }),
+        z.object({ type: z.literal("tool_use"), name: z.string(), input: z.record(z.string(), z.unknown()) }),
+        z.object({ type: z.string() }),
+      ]),
+    ),
+  }),
+});
 
 const oneLine = (value: string): string => {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length > TOOL_ARGUMENT_CHARS ? `${flat.slice(0, TOOL_ARGUMENT_CHARS)}…` : flat;
 };
 
-const toolCall = (block: Record<string, unknown>): string => {
-  const name = typeof block.name === "string" ? block.name : "tool";
-  const [first] = isRecord(block.input) ? Object.values(block.input) : [];
+const toolCall = (name: string, input: Record<string, unknown>): string => {
+  const [first] = Object.values(input);
   if (first === undefined) return `[${name}]`;
   return `[${name}] ${oneLine(typeof first === "string" ? first : JSON.stringify(first))}`;
 };
 
-export const compactText = (text: string): string | null => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return text;
-  }
-  if (!isRecord(parsed) || parsed.type !== "assistant" || !isRecord(parsed.message)) return null;
-  const content = parsed.message.content;
-  if (!Array.isArray(content)) return null;
-  const parts = content.flatMap((block: unknown): string[] => {
-    if (!isRecord(block)) return [];
-    if (block.type === "text" && typeof block.text === "string" && block.text !== "") return [block.text];
-    if (block.type === "tool_use") return [toolCall(block)];
+const compactClaudeCode = (text: string): string | null => {
+  const assistant = ClaudeCodeAssistantSchema.safeParse(JSON.parse(text));
+  if (!assistant.success) return null;
+  const parts = assistant.data.message.content.flatMap((block): string[] => {
+    if ("text" in block && block.text !== "") return [block.text];
+    if ("name" in block) return [toolCall(block.name, block.input)];
     return [];
   });
   return parts.length === 0 ? null : parts.join("\n");
 };
 
+export type Compactor = (text: string) => string | null;
+
+const COMPACTORS: Partial<Record<Harness, Compactor>> = { ClaudeCode: compactClaudeCode };
+
+export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[harness] ?? null;
+
 export interface Page {
   lines: TranscriptLine[];
-  nextCursor: number;
+  cursor: number;
 }
 
-export const pageOf = (read: TranscriptLine[], after: number, compact: boolean, maxBytes: number): Page => {
+export const pageOf = (read: TranscriptLine[], after: number, compact: Compactor | null, maxBytes: number): Page => {
+  if (compact === null) return { lines: read, cursor: read.at(-1)?.lineSeq ?? after };
   const encoder = new TextEncoder();
   const lines: TranscriptLine[] = [];
   let bytes = 0;
   let previous = after;
   for (const line of read) {
-    const text = compact ? compactText(line.text) : line.text;
+    const text = compact(line.text);
     if (text !== null) {
       const size = encoder.encode(text).byteLength;
-      if (lines.length > 0 && bytes + size > maxBytes) return { lines, nextCursor: previous };
+      if (lines.length > 0 && bytes + size > maxBytes) return { lines, cursor: previous };
       bytes += size;
       lines.push({ ...line, text });
     }
     previous = line.lineSeq;
   }
-  return { lines, nextCursor: previous };
+  return { lines, cursor: previous };
 };
