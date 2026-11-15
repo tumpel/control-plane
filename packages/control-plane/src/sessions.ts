@@ -143,10 +143,13 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
 
 const stranded = (session: Session, hosts: Host[], missingTurnIds: string[]): Refused => {
   const host = hosts.find((listed) => listed.hostId === session.hostId);
+  if (host === undefined) {
+    throw new Error(`session ${session.sessionId} runs on host ${session.hostId}, which its tenant does not list`);
+  }
   return refuse(409, {
     code: "HostOffline",
     title: "Host offline",
-    detail: `session ${session.sessionId} runs on host ${host === undefined ? session.hostId : `${host.name} (${host.hostId})`}, which is ${host?.state ?? "gone"}, and its snapshots miss completed turns ${missingTurnIds.join(", ")}, so it cannot move to another host`,
+    detail: `session ${session.sessionId} runs on host ${host.name} (${host.hostId}), which is ${host.state}, and its snapshots miss completed turns ${missingTurnIds.join(", ")}, so it cannot move to another host`,
     fix: "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
   });
 };

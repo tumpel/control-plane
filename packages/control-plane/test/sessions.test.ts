@@ -141,17 +141,21 @@ const eventually = async <T>(
   }
 };
 
+type Counters = { received: number; sent: number };
+
 class HostSide {
-  private received = 0;
-  private sent = 0;
+  private received: number;
+  private sent: number;
   private readonly inbox: ControlMessage[] = [];
   private readonly waiters: (() => void)[] = [];
   private readonly heartbeat: NodeJS.Timeout;
 
   private readonly socket: WebSocket;
 
-  private constructor(socket: WebSocket) {
+  private constructor(socket: WebSocket, counters: Counters) {
     this.socket = socket;
+    this.received = counters.received;
+    this.sent = counters.sent;
     socket.addEventListener("message", (event) => this.receive(String(event.data)));
     this.heartbeat = setInterval(() => this.beat(), 10_000);
   }
@@ -160,7 +164,12 @@ class HostSide {
     this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE });
   }
 
-  static async connect(id: string, key: KeyObject, boxCapacity = 8): Promise<HostSide> {
+  static async connect(
+    id: string,
+    key: KeyObject,
+    boxCapacity = 8,
+    counters: Counters = { received: 0, sent: 0 },
+  ): Promise<HostSide> {
     const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${id}/channel`);
     const challenge = await new Promise<string>((resolve, reject) => {
       socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
@@ -168,7 +177,7 @@ class HostSide {
     });
     const parsed = ControlEnvelopeSchema.parse(JSON.parse(challenge));
     assert.equal(parsed.type, "Challenge");
-    const side = new HostSide(socket);
+    const side = new HostSide(socket, counters);
     side.raw({
       type: "Hello",
       hostId: id,
@@ -212,6 +221,10 @@ class HostSide {
 
   snapshotRequestsFor(sessionId: string): number {
     return this.inbox.filter((message) => message.type === "SnapshotRequest" && message.sessionId === sessionId).length;
+  }
+
+  counters(): Counters {
+    return { received: this.received, sent: this.sent };
   }
 
   close(): void {
@@ -1000,12 +1013,117 @@ test("a claimed turn fails HostOffline when its host disconnects and does not co
   assert.match(offline.detail, new RegExp(`host box \\(${hostId}\\), which is Offline`));
 });
 
-test("two sessions started at once on two hosts with one free slot each land on different hosts", async () => {
-  const first = await enrol("single-1");
-  const second = await enrol("single-2");
-  const sides = [await HostSide.connect(first.id, first.key, 1), await HostSide.connect(second.id, second.key, 1)];
+const hostState = (id: string, state: string) =>
+  eventually(
+    `host ${id} reading ${state}`,
+    () => getJson(`/v1/hosts/${id}`, HostSchema),
+    (read) => read.state === state,
+  );
+
+test("a session moves off its offline host once a snapshot holds its last completed turn, and the old host's late frames leave its channel working", async () => {
+  const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
+  const first = await enrol("move-from");
+  let from = await HostSide.connect(first.id, first.key, 16);
+  await hostState(first.id, "Online");
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "move me" }, bearer);
+  assert.equal(response.status, 200, await response.clone().text());
+  const started = StartedSessionSchema.parse(await response.json());
+  const { sessionId } = started.session;
+  assert.equal(started.session.hostId, first.id);
+  const offer = await from.next("TurnOffer");
+  from.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  from.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
+  from.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const request = await from.next("SnapshotRequest");
+
+  from.close();
+  await hostState(first.id, "Offline");
+  const stranded = await refused(`/v1/sessions/${sessionId}/turns`, {
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "not yet" }),
+  });
+  assert.equal(stranded.code, "HostOffline");
+  assert.match(
+    stranded.detail,
+    new RegExp(
+      `move-from \\(${first.id}\\), which is Offline, and its snapshots miss completed turns ${offer.turnId},`,
+    ),
+  );
+
+  from = await HostSide.connect(first.id, first.key, 16, from.counters());
+  await hostState(first.id, "Online");
+  await store.put(request.storageKey, '{"entries":[]}');
+  from.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
   await eventually(
-    "both single-slot hosts reading Online",
+    "a stored snapshot",
+    () => getJson(`/v1/sessions/${sessionId}/snapshots`, SnapshotSchema.array()),
+    (snapshots) => snapshots.length === 1,
+  );
+  const unclaimed = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "never claimed" }, bearer);
+  assert.equal(unclaimed.status, 200, await unclaimed.clone().text());
+  const lost = TurnSchema.parse(await unclaimed.json());
+  assert.equal((await from.next("TurnOffer")).turnId, lost.turnId);
+  from.close();
+  await hostState(first.id, "Offline");
+  await eventually(
+    "the unclaimed turn reading Failed",
+    () => getJson(`/v1/turns/${lost.turnId}`, TurnSchema),
+    (turn) => turn.state === "Failed",
+  );
+
+  const second = await enrol("move-to");
+  const to = await HostSide.connect(second.id, second.key, 16);
+  await hostState(second.id, "Online");
+  const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "on the new host" }, bearer);
+  assert.equal(sent.status, 200, await sent.clone().text());
+  const moved = TurnSchema.parse(await sent.json());
+  const session = await getJson(`/v1/sessions/${sessionId}`, SessionSchema);
+  assert.equal(session.hostId, second.id);
+  assert.notEqual(session.boxId, offer.boxId);
+  const movedOffer = await to.next("TurnOffer");
+  assert.equal(movedOffer.turnId, moved.turnId);
+  assert.equal(movedOffer.boxId, session.boxId);
+  assert.deepEqual(
+    movedOffer.snapshots.map((snapshot) => snapshot.snapshotId),
+    [request.snapshotId],
+  );
+
+  from = await HostSide.connect(first.id, first.key, 16, from.counters());
+  await hostState(first.id, "Online");
+  const discard = await from.next("BoxDiscard");
+  assert.deepEqual({ sessionId: discard.sessionId, boxId: discard.boxId }, { sessionId, boxId: offer.boxId });
+  from.send({ type: "TurnClaim", turnId: lost.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  from.send({
+    type: "TurnFailed",
+    turnId: lost.turnId,
+    reason: "HarnessExited",
+    detail: "the late failure of a turn the session left",
+    failedAt: new Date().toISOString(),
+  });
+  from.send({ type: "BoxGone", sessionId, boxId: offer.boxId });
+
+  const next = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "after the move" }, bearer);
+  assert.equal(next.status, 200, await next.clone().text());
+  const after = StartedSessionSchema.parse(await next.json());
+  assert.equal(after.session.hostId, first.id);
+  const afterOffer = await from.next("TurnOffer");
+  from.send({ type: "TurnClaim", turnId: afterOffer.turnId, boxId: afterOffer.boxId, cloneSeconds: CLONE_SECONDS });
+  await eventually(
+    "the turn on the old host reading Running",
+    () => getJson(`/v1/turns/${afterOffer.turnId}`, TurnSchema),
+    (turn) => turn.state === "Running",
+  );
+  assert.equal((await getJson(`/v1/turns/${lost.turnId}/failure`, TurnFailureSchema)).reason, "NotClaimed");
+  from.close();
+  to.close();
+});
+
+test("two sessions started at once on two equal hosts land on different hosts, since each counts the other's turn", async () => {
+  const first = await enrol("equal-1");
+  const second = await enrol("equal-2");
+  const sides = [await HostSide.connect(first.id, first.key, 32), await HostSide.connect(second.id, second.key, 32)];
+  await eventually(
+    "both equal hosts reading Online",
     () => getJson("/v1/hosts", HostSchema.array()),
     (hosts) => [first.id, second.id].every((id) => hosts.find((listed) => listed.hostId === id)?.state === "Online"),
   );
