@@ -44,7 +44,10 @@ export const signUpPage = (email: string): Response =>
 <script>${POST_JSON}
 document.getElementById("signup").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const button = event.target.querySelector("button");
+  button.disabled = true;
   if (await post("/v1/tenants", Object.fromEntries(new FormData(event.target)))) location.reload();
+  else button.disabled = false;
 });</script>`,
   );
 
