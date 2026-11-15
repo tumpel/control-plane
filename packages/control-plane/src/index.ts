@@ -119,6 +119,7 @@ import {
   signUpPage,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { currentRelease, imagesFor, supervisorKey } from "./releases";
@@ -1149,6 +1150,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (resource) return resource;
   const sessions = await handleSessions(request, url, env, deviceCaller);
   if (sessions) return sessions;
+  const uploads = await handlePrebuildUploads(request, url, env);
+  if (uploads) return uploads;
   const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
   if (prebuilds) return prebuilds;
   const connections = await handleConnections(request, url, env, deviceCaller);

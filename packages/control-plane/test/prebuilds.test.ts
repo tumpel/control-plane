@@ -184,7 +184,11 @@ test("the connection list holds one row per provider, and a connected build prov
 
   const namespace = await rest(NamespaceConnectionLinkSchema, "GET", "/v1/namespace-connection");
   assert.equal(namespace.link.state, "NotConfigured");
-  const start = { accountLabel: "acme workspace", audience: "federation.namespaceapis.com" };
+  const start = {
+    accountLabel: "acme workspace",
+    workspaceId: "tenant_123456789ab",
+    audience: "federation.namespaceapis.com",
+  };
   assert.equal((await refused("POST", "/v1/namespace-connection/start", start, 409)).code, "IssuerMissing");
 
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [

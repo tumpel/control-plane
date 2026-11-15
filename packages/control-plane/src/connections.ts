@@ -68,13 +68,14 @@ const namespaceLink = (tenantId: string, issuer: string | null, row: NamespaceRo
   if (issuer === null) return { state: "NotConfigured", ...issuerMissing() };
   const subject = subjectPattern(tenantId);
   if (row === null) return { state: "NotConnected", issuer, subjectPattern: subject };
-  const { namespaceConnectionId, accountLabel, audience, createdAt, updatedAt } = row;
+  const { namespaceConnectionId, accountLabel, workspaceId, audience, createdAt, updatedAt } = row;
   return {
     state: "Connected",
     connection: {
       namespaceConnectionId,
       tenantId,
       accountLabel,
+      workspaceId,
       issuer,
       subjectPattern: subject,
       audience,

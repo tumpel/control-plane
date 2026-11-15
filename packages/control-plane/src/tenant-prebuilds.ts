@@ -20,6 +20,7 @@ export type NamespaceConnectionStart = z.infer<typeof NamespaceConnectionStartSc
 export interface NamespaceRow {
   namespaceConnectionId: string;
   accountLabel: string;
+  workspaceId: string;
   audience: string;
   createdAt: number;
   updatedAt: number;
@@ -32,6 +33,24 @@ export interface PrebuildKey {
   inputDigest: string;
   guestImageDigest: string;
 }
+
+export interface PrebuildDispatch {
+  personaId: string;
+  key: PrebuildKey;
+  provider: BuildProvider;
+  logUrl: string;
+}
+
+export interface PrebuildLayerUpload {
+  layerDigest: string;
+  layerSizeBytes: number;
+}
+
+export type JobBinding =
+  | { provider: "GitHubActions"; callerWorkflow: string }
+  | { provider: "Namespace"; workspaceId: string };
+
+export type UploadRecorded = { kind: "Recorded"; prebuild: Prebuild } | { kind: "NotUploading"; prebuild: Prebuild };
 
 const CONNECTION_TABLES: Record<BuildProvider, string> = {
   GitHubActions: "github_actions_connections",
@@ -53,6 +72,9 @@ type PrebuildRow = {
   layer_digest: string | null;
   layer_size_bytes: number | null;
   layer_finished_at: string | null;
+  upload_layer_digest: string | null;
+  upload_layer_size_bytes: number | null;
+  uploaded_at: string | null;
   failure_phase: string | null;
   failure_finished_at: string | null;
 };
@@ -68,9 +90,12 @@ type FailureRow = {
 const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, input_digest, guest_image_digest, provider, state,
   started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
   prebuild_layers.layer_size_bytes, prebuild_layers.finished_at AS layer_finished_at,
-  prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at
+  prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at,
+  prebuild_uploads.layer_digest AS upload_layer_digest, prebuild_uploads.layer_size_bytes AS upload_layer_size_bytes,
+  prebuild_uploads.uploaded_at
   FROM prebuilds
   LEFT JOIN prebuild_layers USING (prebuild_id)
+  LEFT JOIN prebuild_uploads USING (prebuild_id)
   LEFT JOIN prebuild_failures USING (prebuild_id)`;
 
 const statusOf = (row: PrebuildRow): unknown => {
@@ -80,6 +105,14 @@ const statusOf = (row: PrebuildRow): unknown => {
       layerDigest: row.layer_digest,
       layerSizeBytes: row.layer_size_bytes,
       finishedAt: row.layer_finished_at,
+    };
+  }
+  if (row.state === "Converting") {
+    return {
+      state: row.state,
+      layerDigest: row.upload_layer_digest,
+      layerSizeBytes: row.upload_layer_size_bytes,
+      uploadedAt: row.uploaded_at,
     };
   }
   if (row.state === "Failed") {
@@ -133,6 +166,59 @@ export class TenantPrebuilds extends TenantSessions {
       )
       .toArray();
     return row === undefined ? null : toPrebuild(tenantId, row);
+  }
+
+  recordDispatchedPrebuild(tenantId: string, dispatch: PrebuildDispatch, now: number): Prebuild {
+    const prebuildId = crypto.randomUUID();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO prebuilds (prebuild_id, persona_id, repository, input_digest, guest_image_digest, provider, state,
+      started_at, log_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+      prebuildId,
+      dispatch.personaId,
+      dispatch.key.repository,
+      dispatch.key.inputDigest,
+      dispatch.key.guestImageDigest,
+      dispatch.provider,
+      new Date(now).toISOString(),
+      dispatch.logUrl,
+      now,
+      now,
+    );
+    const prebuild = this.getPrebuild(tenantId, prebuildId);
+    if (prebuild === null) throw new Error(`prebuild ${prebuildId} was written and then not found`);
+    return prebuild;
+  }
+
+  recordPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {
+    const recorded = this.ctx.storage.transactionSync(() => {
+      const moved = this.ctx.storage.sql.exec(
+        "UPDATE prebuilds SET state = 'Converting', updated_at = ? WHERE prebuild_id = ? AND state IN ('Dispatched', 'Building')",
+        now,
+        prebuildId,
+      ).rowsWritten;
+      if (moved === 0) return false;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO prebuild_uploads (prebuild_id, layer_digest, layer_size_bytes, uploaded_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        prebuildId,
+        upload.layerDigest,
+        upload.layerSizeBytes,
+        new Date(now).toISOString(),
+        now,
+      );
+      return true;
+    });
+    const prebuild = this.getPrebuild(tenantId, prebuildId);
+    if (prebuild === null) throw new Error(`prebuild ${prebuildId} is gone; the upload checked it a moment ago`);
+    return recorded ? { kind: "Recorded", prebuild } : { kind: "NotUploading", prebuild };
+  }
+
+  jobBinding(provider: BuildProvider): JobBinding | null {
+    if (provider === "GitHubActions") {
+      const row = this.connectionRow<{ caller_workflow: string }>(provider);
+      return row === null ? null : { provider, callerWorkflow: row.caller_workflow };
+    }
+    const row = this.connectionRow<{ workspace_id: string }>(provider);
+    return row === null ? null : { provider, workspaceId: row.workspace_id };
   }
 
   getPrebuildFailure(tenantId: string, prebuildId: string): PrebuildFailure | null {
@@ -213,6 +299,7 @@ export class TenantPrebuilds extends TenantSessions {
     const row = this.connectionRow<{
       namespace_connection_id: string;
       account_label: string;
+      workspace_id: string;
       audience: string;
       created_at: number;
       updated_at: number;
@@ -221,6 +308,7 @@ export class TenantPrebuilds extends TenantSessions {
     return {
       namespaceConnectionId: row.namespace_connection_id,
       accountLabel: row.account_label,
+      workspaceId: row.workspace_id,
       audience: row.audience,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -229,11 +317,12 @@ export class TenantPrebuilds extends TenantSessions {
 
   connectNamespace(start: NamespaceConnectionStart, now: number): NamespaceRow {
     this.ctx.storage.sql.exec(
-      `INSERT INTO namespace_connections (connection_slot, namespace_connection_id, account_label, audience, created_at, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,
-      audience = excluded.audience, updated_at = excluded.updated_at`,
+      `INSERT INTO namespace_connections (connection_slot, namespace_connection_id, account_label, workspace_id, audience, created_at, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,
+      workspace_id = excluded.workspace_id, audience = excluded.audience, updated_at = excluded.updated_at`,
       crypto.randomUUID(),
       start.accountLabel,
+      start.workspaceId,
       start.audience,
       now,
       now,
