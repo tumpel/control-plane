@@ -557,11 +557,11 @@ type TokenUserRead = { ok: true; user: GitHubUser | null } | { ok: false; respon
 
 const repositoryTokenUser = async (
   env: Env,
-  secrets: readonly z.infer<typeof SecretSetCreateSchema>["secrets"][number][],
+  secrets: readonly { kind: string; name: string; value?: string }[],
   operation: string,
 ): Promise<TokenUserRead> => {
   const token = secrets.find((member) => member.kind === "Variable" && member.name === REPOSITORY_TOKEN);
-  if (token === undefined) return { ok: true, user: null };
+  if (token?.value === undefined) return { ok: true, user: null };
   const read = await tokenUser((url, init) => fetch(url, init), env.GITHUB_API_ORIGIN, token.value);
   if (read.ok) return { ok: true, user: read.value };
   return {
@@ -621,8 +621,23 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
     const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.update");
     if (!githubUser.ok) return githubUser.response;
     const updated = await tenant.updateSecretSet(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
-    if (!updated.ok) return conflict("secretSets.update", body.value.name, updated.constraint);
-    return updated.value === null ? secretSetNotFound(secretSetId) : json(SecretSetSchema.parse(updated.value));
+    if (updated.kind === "Updated") return json(SecretSetSchema.parse(updated.secretSet));
+    if (updated.kind === "SetNotFound") return secretSetNotFound(secretSetId);
+    if (updated.kind === "Conflict") return conflict("secretSets.update", body.value.name, updated.constraint);
+    if (updated.kind === "NoStoredValue") {
+      return problem(422, {
+        code: "InvalidRequest",
+        title: "No stored value to keep",
+        detail: `secretSets.update sent member ${updated.name} without a value, and secret set ${body.value.name} stores no member ${updated.source}`,
+        fix: `Enter a value for ${updated.name}, or send previousName with the name it had before`,
+      });
+    }
+    return problem(422, {
+      code: "InvalidRequest",
+      title: "GitHub token needs its value",
+      detail: `secretSets.update renames member ${updated.source} to ${REPOSITORY_TOKEN} without a value; GitHub checks every new ${REPOSITORY_TOKEN} before it is stored`,
+      fix: `Enter the value of ${REPOSITORY_TOKEN}`,
+    });
   }
   const read = await tenant.getSecretSet(caller.tenantId, secretSetId);
   if (read.kind === "NotFound") return secretSetNotFound(secretSetId);

@@ -4,17 +4,18 @@ import {
   PersonaSchema,
   type SecretSetCreateSchema,
   SecretSetSchema,
+  type SecretSetUpdateSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { migrateDurableObject } from "./durable-migrate";
-import { seal } from "./envelope.ts";
+import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { GitHubReading, InstallRequest } from "./github-accounts.ts";
 import { GitHubReadingSchema } from "./github-schemas.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
-import { storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
+import { type MemberUpdate, memberWith, planUpdate, storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { TenantOpenRouterAuthorizations } from "./tenant-openrouter-authorizations";
 import { memberRows, sealContext } from "./tenant-sessions";
@@ -26,6 +27,7 @@ export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & {
 export type PersonaChange = Omit<PersonaWrite, "harness">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
+export type SecretSetChange = z.infer<typeof SecretSetUpdateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
 
@@ -38,6 +40,13 @@ export type SecretSetDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { ki
 export type SecretSetsRead = { kind: "Read"; secretSets: SecretSet[] } | UnreadableSecretSet;
 
 export type SecretSetRead = { kind: "Found"; secretSet: SecretSet } | { kind: "NotFound" } | UnreadableSecretSet;
+
+export type SecretSetUpdated =
+  | { kind: "Updated"; secretSet: SecretSet }
+  | { kind: "SetNotFound" }
+  | { kind: "Conflict"; constraint: string }
+  | { kind: "NoStoredValue"; name: string; source: string }
+  | { kind: "UncheckedToken"; source: string };
 
 export type SecretMemberSet =
   | { kind: "Set"; secretSet: SecretSet }
@@ -55,7 +64,7 @@ export type PersonaDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind
 
 type SecretMember = SecretSetWrite["secrets"][number];
 
-type SealedMember = { member: SecretMember; sealed: string };
+type SealedMember = { member: MemberUpdate; sealed: string; updatedAt: number };
 
 const UNIQUE_FAILED = "UNIQUE constraint failed: ";
 
@@ -358,12 +367,20 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     return read.secretSet;
   }
 
-  private async sealMembers(secretSetId: string, secrets: readonly SecretMember[]): Promise<SealedMember[]> {
+  private async sealMembers(
+    secretSetId: string,
+    secrets: readonly SecretMember[],
+    now: number,
+  ): Promise<SealedMember[]> {
     if (secrets.length === 0) return [];
     const dataKey = await this.dataKey();
     const sealed: SealedMember[] = [];
     for (const member of secrets) {
-      sealed.push({ member, sealed: await seal(dataKey, member.value, sealContext(secretSetId, member.name)) });
+      sealed.push({
+        member,
+        sealed: await seal(dataKey, member.value, sealContext(secretSetId, member.name)),
+        updatedAt: now,
+      });
     }
     return sealed;
   }
@@ -381,7 +398,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     );
   }
 
-  private writeMember(secretSetId: string, { member, sealed }: SealedMember, now: number): void {
+  private writeMember(secretSetId: string, { member, sealed, updatedAt }: SealedMember): void {
     const sql = this.ctx.storage.sql;
     sql.exec(
       "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -389,7 +406,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
       member.name,
       member.kind,
       sealed,
-      now,
+      updatedAt,
     );
     if (member.kind === "Variable") return;
     sql.exec(
@@ -415,7 +432,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
   ): void {
     this.ctx.storage.sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
     this.writeGitHubUser(secretSetId, githubUser, now);
-    for (const member of secrets) this.writeMember(secretSetId, member, now);
+    for (const member of secrets) this.writeMember(secretSetId, member);
   }
 
   async createSecretSet(
@@ -425,7 +442,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     now: number,
   ): Promise<Written<SecretSet>> {
     const secretSetId = crypto.randomUUID();
-    const sealed = await this.sealMembers(secretSetId, secretSet.secrets);
+    const sealed = await this.sealMembers(secretSetId, secretSet.secrets, now);
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
@@ -445,26 +462,57 @@ export class Tenant extends TenantOpenRouterAuthorizations {
   async updateSecretSet(
     tenantId: string,
     secretSetId: string,
-    secretSet: SecretSetWrite,
+    change: SecretSetChange,
     githubUser: GitHubUser | null,
     now: number,
-  ): Promise<Written<SecretSet | null>> {
-    const sealed = await this.sealMembers(secretSetId, secretSet.secrets);
+  ): Promise<SecretSetUpdated> {
+    if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
+    const plan = planUpdate(memberRows(this.ctx.storage.sql, secretSetId), change.secrets);
+    if (plan.kind !== "Planned") return plan;
+    const dataKey = await this.dataKey();
+    const sealed: SealedMember[] = [];
+    for (const planned of plan.members) {
+      if (planned.kind === "Written") {
+        const { member } = planned;
+        sealed.push({
+          member,
+          sealed: await seal(dataKey, member.value, sealContext(secretSetId, member.name)),
+          updatedAt: now,
+        });
+        continue;
+      }
+      const { update, from } = planned;
+      if (from.name === update.name) {
+        sealed.push({ member: update, sealed: from.sealed, updatedAt: from.updated_at });
+        continue;
+      }
+      const value = await unseal(dataKey, from.sealed, sealContext(secretSetId, from.name));
+      const member = memberWith(update, value);
+      sealed.push({
+        member,
+        sealed: await seal(dataKey, value, sealContext(secretSetId, member.name)),
+        updatedAt: now,
+      });
+    }
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
-        const updated = this.ctx.storage.sql.exec(
+        const sql = this.ctx.storage.sql;
+        const updated = sql.exec(
           "UPDATE secret_sets SET name = ?, updated_at = ? WHERE secret_set_id = ?",
-          secretSet.name,
+          change.name,
           now,
           secretSetId,
         );
         if (updated.rowsWritten === 0) return false;
-        this.writeSecrets(secretSetId, sealed, githubUser, now);
+        sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
+        if (!plan.keepsGitHubUser) this.writeGitHubUser(secretSetId, githubUser, now);
+        for (const member of sealed) this.writeMember(secretSetId, member);
         return true;
       }),
     );
-    if (!written.ok) return written;
-    return { ok: true, value: written.value ? this.rewrittenSecretSet(tenantId, secretSetId) : null };
+    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
+    if (!written.value) return { kind: "SetNotFound" };
+    return { kind: "Updated", secretSet: this.rewrittenSecretSet(tenantId, secretSetId) };
   }
 
   async setSecretMember(
@@ -475,12 +523,12 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     now: number,
   ): Promise<SecretMemberSet> {
     if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
-    const sealed = await this.sealMembers(secretSetId, [member]);
+    const sealed = await this.sealMembers(secretSetId, [member], now);
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const sql = this.ctx.storage.sql;
         sql.exec("DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?", secretSetId, member.name);
-        for (const each of sealed) this.writeMember(secretSetId, each, now);
+        for (const each of sealed) this.writeMember(secretSetId, each);
         if (member.name === REPOSITORY_TOKEN) this.writeGitHubUser(secretSetId, githubUser, now);
         sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
       }),
