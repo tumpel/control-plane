@@ -335,12 +335,12 @@ const planPersonas = (
 const planPersonaDeletes = (desired: ConfigPersona[], live: Live, steps: Step[], problems: string[]): void => {
   const wanted = new Set(desired.map((persona) => persona.name));
   for (const persona of live.personas.filter((each) => !wanted.has(each.name))) {
-    const ran = live.sessions
-      .filter((session) => session.personaId === persona.personaId && session.lastTurnState !== "Failed")
+    const held = live.sessions
+      .filter((session) => session.personaId === persona.personaId && session.state !== "Failed")
       .map((session) => session.sessionId);
-    if (ran.length > 0) {
+    if (held.length > 0) {
       problems.push(
-        `delete persona ${persona.name} (${persona.personaId}) will be refused: it is the persona of session ${ran.join(", ")}, and a persona that completed a turn stays; keep the persona in the config`,
+        `delete persona ${persona.name} (${persona.personaId}) will be refused: it is the persona of session ${held.join(", ")}, and a persona stays while any of its sessions is not Failed; keep the persona in the config`,
       );
       continue;
     }

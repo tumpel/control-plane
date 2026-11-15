@@ -984,9 +984,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   assert.equal(inUse.status, 409);
   assert.match(
     ProblemSchema.parse(await inUse.json()).detail,
-    new RegExp(
-      `persona ${start.personaId} is the persona of session ${sessionId}, which completed a turn or is running one$`,
-    ),
+    new RegExp(`persona ${start.personaId} is the persona of session ${sessionId}, which is not Failed$`),
   );
 
   const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
