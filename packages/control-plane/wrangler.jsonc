@@ -13,9 +13,13 @@
       "migrations_dir": "migrations"
     }
   ],
-  "r2_buckets": [{ "binding": "STORE", "bucket_name": "tumpel-sessions" }],
+  "r2_buckets": [
+    { "binding": "STORE", "bucket_name": "tumpel-sessions" },
+    { "binding": "RELEASES", "bucket_name": "tumpel-releases" }
+  ],
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
+    "RELEASES_BUCKET_NAME": "tumpel-releases",
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -49,9 +53,13 @@
           "migrations_dir": "migrations"
         }
       ],
-      "r2_buckets": [{ "binding": "STORE", "bucket_name": "tumpel-sessions-dev" }],
+      "r2_buckets": [
+        { "binding": "STORE", "bucket_name": "tumpel-sessions-dev" },
+        { "binding": "RELEASES", "bucket_name": "tumpel-releases-dev" }
+      ],
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
+        "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,

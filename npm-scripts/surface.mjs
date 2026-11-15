@@ -16,6 +16,7 @@ const NOUNS = {
   EnrolmentTokens: "host",
   Hosts: "host",
   HarnessCatalog: "harness",
+  Releases: "release",
   Personas: "persona",
   SecretSets: "secret-set",
   GitHubConnections: "github",
@@ -57,14 +58,17 @@ const served = readdirSync(SRC, { recursive: true })
   .map((file) => readFileSync(join(SRC, String(file)), "utf8"))
   .join("\n");
 
+const PUBLIC_READS = new Set(["Releases_current"]);
+
 const RULES = [
   {
     rule: "browser-only: signed in by the identity assertion",
     matches: (op) => op.security.some((scheme) => "IdentityAssertion" in scheme),
   },
   {
-    rule: "OAuth, device-flow and enrolment wire: no principal",
-    matches: (op) => op.security.some((scheme) => Object.keys(scheme).length === 0),
+    rule: "OAuth, device-flow, enrolment and host download wire: no principal",
+    matches: (op) =>
+      !PUBLIC_READS.has(op.operationId) && op.security.some((scheme) => Object.keys(scheme).length === 0),
   },
   {
     rule: "not served yet: no control-plane route",
@@ -114,7 +118,8 @@ const render = (rows, excluded) =>
       .join(", ")}.`,
     "`EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure`,",
     "`Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb",
-    "`stop-failures`. The CLI's `transcript read` takes a turnId and reads that turn's lines of its",
+    "`stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in",
+    "principal reads it too. The CLI's `transcript read` takes a turnId and reads that turn's lines of its",
     "session; `session get` also prints the session's stop failures.",
     "",
     "`tumpel_secret_set_create` and `_update` take key names and `valueFrom.env` names only and write",

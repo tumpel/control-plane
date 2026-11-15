@@ -138,3 +138,27 @@ export const signerOf = (env: SignerEnv): Signer => {
     service: "s3",
   });
 };
+
+export interface ReleaseSignerEnv {
+  RELEASES_BUCKET_NAME: string;
+  R2_ACCOUNT_ID?: string;
+  RELEASES_ACCESS_KEY_ID?: string;
+  RELEASES_SECRET_ACCESS_KEY?: string;
+  R2_STUB_ORIGIN?: string;
+}
+
+export const releaseSignerOf = (env: ReleaseSignerEnv): Signer => {
+  if (env.R2_STUB_ORIGIN) return stubSigner(env.R2_STUB_ORIGIN, env.RELEASES_BUCKET_NAME);
+  const { R2_ACCOUNT_ID, RELEASES_ACCESS_KEY_ID, RELEASES_SECRET_ACCESS_KEY } = env;
+  if (!R2_ACCOUNT_ID || !RELEASES_ACCESS_KEY_ID || !RELEASES_SECRET_ACCESS_KEY) {
+    throw new Error(
+      "R2_ACCOUNT_ID, RELEASES_ACCESS_KEY_ID and RELEASES_SECRET_ACCESS_KEY must all be set to presign release URLs; npm run deploy puts them from the tofu output worker_secrets, as doc/deploy.md describes",
+    );
+  }
+  return r2Signer(R2_ACCOUNT_ID, env.RELEASES_BUCKET_NAME, {
+    accessKeyId: RELEASES_ACCESS_KEY_ID,
+    secretAccessKey: RELEASES_SECRET_ACCESS_KEY,
+    region: "auto",
+    service: "s3",
+  });
+};
