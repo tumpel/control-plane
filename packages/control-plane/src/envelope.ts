@@ -3,13 +3,14 @@ const KEY_BYTES = 32;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const toBase64 = (bytes: Uint8Array): string => {
+export const toBase64 = (bytes: Uint8Array): string => {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
 };
 
-const fromBase64 = (text: string): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
+export const fromBase64 = (text: string): Uint8Array<ArrayBuffer> =>
+  Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
 
 const joined = (iv: Uint8Array, body: ArrayBuffer): string => {
   const bytes = new Uint8Array(iv.byteLength + body.byteLength);
