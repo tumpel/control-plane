@@ -28,7 +28,7 @@ import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./r
 import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
-import { type ChunkReply, sealContext } from "./tenant-sessions";
+import { type ChunkReply, sealContext, type TenantHostMessage } from "./tenant-sessions";
 
 const HARNESS = "ClaudeCode";
 const PROVIDER = "Anthropic";
@@ -374,7 +374,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     await this.claudeSetupTimer(tenantId, row.claude_setup_id, dueAt);
   }
 
-  override async hostMessage(tenantId: string, hostId: string, message: HostMessage): Promise<ChunkReply | null> {
+  override async hostMessage(tenantId: string, hostId: string, message: TenantHostMessage): Promise<ChunkReply | null> {
     if (!isClaudeSetupMessage(message)) return super.hostMessage(tenantId, hostId, message);
     const row = this.claudeSetupRow(message.claudeSetupId);
     if (row === null || row.host_id !== hostId) {

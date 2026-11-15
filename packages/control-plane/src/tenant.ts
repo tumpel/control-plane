@@ -16,6 +16,7 @@ import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
 import { type MemberUpdate, memberWith, planUpdate, storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
+import { recordSupervisorUpdate, type SupervisorUpdateMessage } from "./supervisor-updates";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { TenantOpenRouterAuthorizations } from "./tenant-openrouter-authorizations";
 import { memberRows, sealContext } from "./tenant-sessions";
@@ -143,6 +144,10 @@ export class Tenant extends TenantOpenRouterAuthorizations {
       await this.holdDataKey();
       await this.sealPlaintext();
     });
+  }
+
+  supervisorUpdate(hostId: string, message: SupervisorUpdateMessage, now: number): void {
+    recordSupervisorUpdate(this.ctx.storage.sql, hostId, message, now);
   }
 
   private async sealPlaintext(): Promise<void> {
