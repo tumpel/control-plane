@@ -253,7 +253,7 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION, pinned: false },
     { harness: "Codex", harnessVersion: "0.50.0", pinned: false },
     { harness: "OpenCode", harnessVersion: "1.0.0", pinned: false },
-    { harness: "PiDev", harnessVersion: "0.10.0", pinned: false },
+    { harness: "PiDev", harnessVersion: "1.5.2", pinned: false },
   ]);
 
   const [defaultSet] = await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets");
