@@ -1,14 +1,17 @@
 import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { githubRepository, repositoryUrl } from "./github.ts";
+import { type GitHubRepository, githubRepository, repositoryUrl } from "./github.ts";
+import { dispatchCallerWorkflow } from "./github-actions.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import type { Outcome, Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { inputDigest, readInputs } from "./prebuild-inputs.ts";
-import { currentRelease, imagesFor } from "./releases";
-import type { BuildProvider, Prebuild, PrebuildFailure } from "./tenant-prebuilds";
+import { signerOf } from "./presign";
+import { currentRelease, imagesFor, type ReleaseImage, rootfsKey } from "./releases";
+import { settingsOf } from "./settings";
+import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
 
 export type PrebuildStart = z.infer<typeof PrebuildStartSchema>;
 
@@ -66,12 +69,98 @@ const buildProviderUnavailable = (provider: BuildProvider, repository: string): 
     fix: "Start the prebuild again once the operator deploys a control plane that dispatches to this provider",
   });
 
-const guestImageDigest = async (
+const imageNotReleased = (detail: string): Refused =>
+  refuse(422, {
+    code: "ImageNotReleased",
+    title: "Guest image not in the current release",
+    detail,
+    fix: "Ask the operator to publish the release again with the release workflow, then start the prebuild again",
+  });
+
+const dispatchRefused = (detail: string): Refused =>
+  refuse(409, {
+    code: "DispatchRefused",
+    title: "GitHub refused the dispatch",
+    detail,
+    fix: "Commit the caller workflow the GitHub Actions connection names to the default branch with on: workflow_dispatch, accept the GitHub App's actions write permission, then start the prebuild again",
+  });
+
+export interface Dispatch {
+  prebuildId: string;
+  tenantId: string;
+  personaId: string;
+  key: PrebuildKey;
+  target: GitHubRepository;
+  defaultBranch: string;
+  headSha: string;
+  image: ReleaseImage;
+  apiOrigin: string;
+}
+
+const dispatchGitHubActions = async (env: Env, dispatch: Dispatch, now: number): Promise<Outcome<Prebuild>> => {
+  const { prebuildId, tenantId, target, key, image } = dispatch;
+  const tenant = env.TENANT.getByName(tenantId);
+  const connection = await tenant.gitHubActionsConnection(tenantId);
+  if (connection === null) return noBuildProvider("GitHubActions", key.repository);
+  const token = await tenant.dispatchToken(tenantId, target, now);
+  if (token.kind === "NoInstallation") {
+    return refuse(409, {
+      code: "GitHubNotConnected",
+      title: "GitHub not connected",
+      detail: `your tenant has not installed the stage's GitHub App, and a GitHub Actions prebuild of ${key.repository} dispatches its caller workflow with the App`,
+      fix: "Install it with tumpel github start on the repository's owner, then start the prebuild again",
+    });
+  }
+  if (token.kind === "Refused") return dispatchRefused(token.detail);
+  const rootfs = await rootfsKey(env.RELEASES, image);
+  if (rootfs.kind === "Missing") return imageNotReleased(rootfs.detail);
+  const settings = settingsOf(env);
+  const rootfsUrl = await signerOf(
+    env,
+    env.RELEASES_BUCKET_NAME,
+    env.RELEASES_ACCESS_KEY_ID,
+    env.RELEASES_SECRET_ACCESS_KEY,
+  ).presign(
+    "GET",
+    rootfs.key,
+    settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
+    new Date(now),
+  );
+  const run = await dispatchCallerWorkflow(
+    (url, init) => fetch(url, init),
+    env.GITHUB_API_ORIGIN,
+    token.token,
+    target,
+    {
+      callerWorkflow: connection.callerWorkflow,
+      ref: dispatch.defaultBranch,
+      inputs: { prebuildId, tenantId, apiOrigin: dispatch.apiOrigin, rootfsUrl, imageDigest: image.imageDigest },
+    },
+  );
+  if (!run.ok) return dispatchRefused(`${run.detail}, dispatching ${connection.callerWorkflow} of ${key.repository}`);
+  return ok(
+    await tenant.recordDispatchedPrebuild(
+      tenantId,
+      {
+        prebuildId,
+        personaId: dispatch.personaId,
+        key,
+        defaultBranch: dispatch.defaultBranch,
+        provider: "GitHubActions",
+        run: { runId: run.value.runId, headSha: dispatch.headSha },
+        logUrl: run.value.htmlUrl,
+      },
+      now,
+    ),
+  );
+};
+
+const guestImage = async (
   env: Env,
   harness: string,
   harnessVersion: string,
   now: number,
-): Promise<Outcome<string>> => {
+): Promise<Outcome<ReleaseImage>> => {
   const release = await currentRelease(env.RELEASES, now);
   if (release.kind === "Unpublished") {
     return refuse(409, {
@@ -90,13 +179,14 @@ const guestImageDigest = async (
       fix: `Pin a version tumpel release current lists for ${PREBUILD_ARCHITECTURE} with tumpel harness pin, then start the prebuild again`,
     });
   }
-  return ok(image.imageDigest);
+  return ok(image);
 };
 
 export const startPrebuild = async (
   env: Env,
   caller: Caller,
   start: PrebuildStart,
+  apiOrigin: string,
   now: number,
 ): Promise<Outcome<Prebuild>> => {
   const target = githubRepository(start.repository);
@@ -122,7 +212,7 @@ export const startPrebuild = async (
       fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists, with tumpel config apply",
     });
   }
-  const image = await guestImageDigest(env, entry.harness, entry.harnessVersion, now);
+  const image = await guestImage(env, entry.harness, entry.harnessVersion, now);
   if (!image.ok) return image;
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
@@ -136,12 +226,27 @@ export const startPrebuild = async (
       fix: "Add a .devcontainer/devcontainer.json or commit a lockfile at the repository root, then start the prebuild again",
     });
   }
-  const key = { repository, inputDigest: await inputDigest(inputs.files), guestImageDigest: image.value };
+  const key = { repository, inputDigest: await inputDigest(inputs.files), guestImageDigest: image.value.imageDigest };
   if (!start.rebuild) {
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
   }
-  return buildProviderUnavailable(start.provider, repository);
+  if (start.provider !== "GitHubActions") return buildProviderUnavailable(start.provider, repository);
+  return dispatchGitHubActions(
+    env,
+    {
+      prebuildId: crypto.randomUUID(),
+      tenantId: caller.tenantId,
+      personaId: start.personaId,
+      key,
+      target,
+      defaultBranch: inputs.defaultBranch,
+      headSha: inputs.headSha,
+      image: image.value,
+      apiOrigin,
+    },
+    now,
+  );
 };
 
 const repositoryUnreadable = (detail: string): Refused =>
@@ -204,7 +309,7 @@ export const handlePrebuilds = async (
   if (collection && request.method === "POST") {
     const body = await parseBody(request, PrebuildStartSchema, "prebuilds.start");
     if (!body.ok) return body.response;
-    return answer(await startPrebuild(env, caller, body.value, Date.now()));
+    return answer(await startPrebuild(env, caller, body.value, url.origin, Date.now()));
   }
   if (collection) {
     const query = PrebuildListQuerySchema.safeParse(Object.fromEntries(url.searchParams));

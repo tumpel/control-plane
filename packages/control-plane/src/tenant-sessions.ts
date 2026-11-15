@@ -54,7 +54,7 @@ import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
-import type { DeadlineChanges, DueDeadline } from "./session-timer";
+import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
@@ -1545,6 +1545,7 @@ export class TenantSessions extends DurableObject<Env> {
         url: await signer.presignChecked(
           packKey(tenantId, pack.packDigest),
           pack.packDigest,
+          pack.sizeBytes,
           window.seconds,
           new Date(window.now),
         ),
@@ -1712,7 +1713,7 @@ export class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async deadlineReached(tenantId: string, sessionId: string, due: DueDeadline): Promise<void> {
+  async deadlineReached(tenantId: string, sessionId: string, due: SessionDueDeadline): Promise<void> {
     const { turnId } = due.deadline;
     const { name } = due;
     const turn = this.turnRow(turnId);

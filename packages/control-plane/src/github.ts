@@ -85,7 +85,7 @@ export const appManifest = (origin: string): GitHubAppManifest => ({
     statuses: "write",
     workflows: "write",
     discussions: "write",
-    actions: "read",
+    actions: "write",
   },
   default_events: APP_EVENTS,
 });

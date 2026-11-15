@@ -42,7 +42,7 @@ const GitHubAppPermissionsSchema = z.object({
   statuses: z.literal("write"),
   workflows: z.literal("write"),
   discussions: z.literal("write"),
-  actions: z.literal("read"),
+  actions: z.literal("write"),
 });
 
 export const GitHubAppManifestSchema = z.object({
@@ -131,3 +131,26 @@ export const GitHubIssueRecordSchema = z.object({
 });
 
 export const GitHubIssueRecordsSchema = z.array(GitHubIssueRecordSchema);
+
+export const GitHubWorkflowDispatchSchema = z.object({
+  workflow_run_id: GitHubIdSchema,
+  html_url: z.string().url(),
+});
+
+export const GitHubBranchSchema = z.object({
+  commit: z.object({
+    sha: z.string().regex(/^[0-9a-f]{40}$/),
+    commit: z.object({ tree: z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) }) }),
+  }),
+});
+
+export const GitHubWorkflowRunEventSchema = z.object({
+  action: z.string(),
+  installation: z.object({ id: GitHubIdSchema }),
+  workflow_run: z.object({
+    id: GitHubIdSchema,
+    head_sha: z.string(),
+    html_url: z.string().url(),
+    conclusion: z.string().nullable(),
+  }),
+});

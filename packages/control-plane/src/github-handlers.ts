@@ -39,6 +39,7 @@ import {
   GitHubManifestStateSchema,
   GitHubSetupActionSchema,
   GitHubSetupCallbackSchema,
+  GitHubWorkflowRunEventSchema,
 } from "./github-schemas.ts";
 import {
   appKey,
@@ -47,6 +48,7 @@ import {
   oauthClient,
   storeApp,
   storedApp,
+  tenantOfInstallation,
   unlinkInstallation,
   unlinkTenant,
   webhookSecret,
@@ -353,6 +355,27 @@ export const handleGitHubPage = async (
   return handleInstalled(url, env);
 };
 
+const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Response): Promise<Response> => {
+  const delivery = GitHubWorkflowRunEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
+  if (!delivery.success) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Not a workflow_run event",
+      detail: `the workflow_run delivery does not parse: ${issues(delivery.error)}`,
+      fix: "Send workflow_run events in the shape GitHub documents, with an action, an installation and a workflow_run",
+    });
+  }
+  const { action, installation, workflow_run: run } = delivery.data;
+  const tenantId = await tenantOfInstallation(env.DB, installation.id);
+  if (tenantId === null) return noContent;
+  await env.TENANT.getByName(tenantId).workflowRunReported(
+    tenantId,
+    { action, runId: run.id, headSha: run.head_sha, htmlUrl: run.html_url, conclusion: run.conclusion },
+    Date.now(),
+  );
+  return noContent;
+};
+
 export const handleGitHubWebhook = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   if (request.method !== "POST" || url.pathname !== WEBHOOK_PATH) return null;
   const secret = await webhookSecret(env.DB, keyStoreOf(env));
@@ -374,7 +397,9 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
     });
   }
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
-  if (request.headers.get("x-github-event") !== "installation") return noContent;
+  const event = request.headers.get("x-github-event");
+  if (event === "workflow_run") return handleWorkflowRun(env, body, noContent);
+  if (event !== "installation") return noContent;
   const delivery = GitHubInstallationEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
   if (!delivery.success) {
     return problem(400, {

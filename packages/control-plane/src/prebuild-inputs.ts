@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { callGitHub, type Fetch, type GitHubRepository } from "./github.ts";
+import { GitHubBranchSchema } from "./github-schemas.ts";
 
 export const DEVCONTAINER_DIRECTORY = ".devcontainer";
 export const DEVCONTAINER_FILE = ".devcontainer.json";
@@ -30,7 +31,7 @@ export interface InputFile {
 }
 
 export type Inputs =
-  | { kind: "Read"; files: InputFile[]; defaultBranch: string }
+  | { kind: "Read"; files: InputFile[]; defaultBranch: string; headSha: string }
   | { kind: "Empty"; detail: string }
   | { kind: "Unreadable"; detail: string };
 
@@ -79,7 +80,22 @@ export const readInputs = async (
   const described = await read(fetcher, base, token, RepositorySchema, "repository");
   if (!described.ok) return unreadable(described.detail);
   const branch = described.value.default_branch;
-  const root = await read(fetcher, `${base}/git/trees/${encodeURIComponent(branch)}`, token, TreeSchema, "git tree");
+  const head = await read(
+    fetcher,
+    `${base}/branches/${encodeURIComponent(branch)}`,
+    token,
+    GitHubBranchSchema,
+    "branch",
+  );
+  if (!head.ok) return unreadable(head.detail);
+  const headSha = head.value.commit.sha;
+  const root = await read(
+    fetcher,
+    `${base}/git/trees/${head.value.commit.commit.tree.sha}`,
+    token,
+    TreeSchema,
+    "git tree",
+  );
   if (!root.ok) return unreadable(root.detail);
   const files: InputFile[] = root.value.tree
     .filter((entry) => entry.type === "blob" && countsAtRoot(entry.path))
@@ -104,5 +120,5 @@ export const readInputs = async (
       detail: `${repository} holds no file under .devcontainer/, no .devcontainer.json and none of ${LOCKFILES.join(", ")} at its root on ${branch}, so a prebuild has nothing to install`,
     };
   }
-  return { kind: "Read", files, defaultBranch: branch };
+  return { kind: "Read", files, defaultBranch: branch, headSha };
 };
