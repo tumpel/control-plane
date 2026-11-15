@@ -1463,12 +1463,13 @@ test("a start refuses a repository in no accepted form and stores the accepted f
   assert.equal(offer.repository, "https://github.com/acme/app");
 });
 
-test("a clone failure fails the session, which takes no more turns and archives, and its persona can be deleted", async () => {
+test("a clone failure fails the session, which takes no more turns, frees its persona for a delete and archives", async () => {
   await createPersona("Unclonable", [
     { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
     { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
   ]);
   const start = await sessionStart("Unclonable");
+  const failed: string[] = [];
   for (const cause of ["Refused", "TimedOut", "DirectoryNotEmpty", "Other"] as const) {
     const response = await postJson("/v1/sessions", { ...start, prompt: "clone fails" }, bearer);
     assert.equal(response.status, 200);
@@ -1500,9 +1501,12 @@ test("a clone failure fails the session, which takes no more turns and archives,
       body: JSON.stringify({ prompt: "try again" }),
     });
     assert.equal(send.code, "SessionFailed");
-    assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
+    failed.push(sessionId);
   }
   assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+  for (const sessionId of failed) {
+    assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
+  }
 });
 
 test("a session whose subscription token has expired is refused CredentialExpired at start, and no offer reaches the host", async () => {
