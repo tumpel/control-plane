@@ -3,25 +3,24 @@ import { test } from "node:test";
 import { dispatchVariables, type SecretMember } from "../src/dispatch-variables.ts";
 
 const claudeCode = {
-  provider: "Anthropic" as const,
-  credentialVariables: [
-    { kind: "ApiKey" as const, variable: "ANTHROPIC_API_KEY" },
-    { kind: "SubscriptionToken" as const, variable: "CLAUDE_CODE_OAUTH_TOKEN" },
-  ],
-  providerRoutes: [
+  credentials: [
+    { provider: "Anthropic" as const, kind: "ApiKey" as const, variable: "ANTHROPIC_API_KEY", fixed: [] },
+    {
+      provider: "Anthropic" as const,
+      kind: "SubscriptionToken" as const,
+      variable: "CLAUDE_CODE_OAUTH_TOKEN",
+      fixed: [],
+    },
     {
       provider: "OpenRouter" as const,
-      variables: [
-        { source: "Credential" as const, name: "ANTHROPIC_AUTH_TOKEN" },
-        { source: "Fixed" as const, name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" },
-      ],
+      kind: "ApiKey" as const,
+      variable: "ANTHROPIC_AUTH_TOKEN",
+      fixed: [{ name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" }],
     },
   ],
 };
 const codex = {
-  provider: "OpenAi" as const,
-  credentialVariables: [{ kind: "ApiKey" as const, variable: "OPENAI_API_KEY" }],
-  providerRoutes: [],
+  credentials: [{ provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [] }],
 };
 const NOW = Date.parse("2026-11-14T12:00:00+00:00");
 
@@ -72,16 +71,13 @@ test("a subscription token at or past its expiry refuses the dispatch by name", 
 test("a set without a credential for the harness's provider has nothing to dispatch", () => {
   assert.deepEqual(dispatchVariables(codex, [apiKey, github], NOW), {
     kind: "NoCredential",
-    provider: "OpenAi",
-    supported: ["ApiKey"],
-    routed: [],
+    accepted: codex.credentials,
   });
 });
 
-test("an ApiKey of a provider serving the harness's API lands in the route's variables, whatever the member is named", () => {
+test("an ApiKey of a provider serving the harness's API lands in its variables, and the first accepted credential wins", () => {
   const openRouter: SecretMember = { kind: "ApiKey", name: "API_KEY", provider: "OpenRouter", value: "sk-or" };
-  const stray: SecretMember = { kind: "Variable", name: "ANTHROPIC_API_KEY", value: "stale" };
-  assert.deepEqual(dispatchVariables(claudeCode, [openRouter, stray, github], NOW), {
+  assert.deepEqual(dispatchVariables(claudeCode, [openRouter, github], NOW), {
     kind: "Ready",
     variables: [
       { name: "ANTHROPIC_AUTH_TOKEN", value: "sk-or" },
