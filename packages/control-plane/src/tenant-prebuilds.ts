@@ -852,6 +852,13 @@ export class TenantPrebuilds extends TenantSessions {
       .map((row) => toCircleCIProject(tenantId, row));
   }
 
+  circleCIProjectBoundTo(tenantId: string, projectId: string): CircleCIProject | null {
+    const [row] = this.ctx.storage.sql
+      .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects WHERE project_id = ?", projectId)
+      .toArray();
+    return row === undefined ? null : toCircleCIProject(tenantId, row);
+  }
+
   circleCIProjectOf(tenantId: string, repository: string): CircleCIProject | null {
     const [row] = this.ctx.storage.sql
       .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects WHERE repository = ?", repository)

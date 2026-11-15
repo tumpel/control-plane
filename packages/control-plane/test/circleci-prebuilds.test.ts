@@ -68,6 +68,7 @@ let bearer: Record<string, string>;
 let tenantId: string;
 let personaId: string;
 let pipelines = 0;
+let runAnswer: (() => { status: number; body: unknown }) | null = null;
 const runs: unknown[] = [];
 const webhooks: Record<string, unknown>[] = [];
 const deletedWebhooks: string[] = [];
@@ -129,6 +130,10 @@ const fakeCircleCI = async (request: IncomingMessage, response: ServerResponse, 
   }
   if (request.method === "POST" && path === `/project/${SLUG}/pipeline/run`) {
     runs.push(body);
+    if (runAnswer !== null) {
+      const answer = runAnswer();
+      return reply(response, answer.status, answer.body);
+    }
     pipelines += 1;
     return reply(response, 201, { id: `pipeline-${pipelines}`, state: "created", number: pipelines });
   }
@@ -336,6 +341,38 @@ test("a binding registers a signed workflow-completed webhook on its project, an
   assert.equal(run.parameters.tumpel_api_origin, origin);
   assert.equal(run.parameters.tumpel_image_digest, prebuild.guestImageDigest);
   assert.ok(Object.values(run.parameters).every((value) => value.length <= 512));
+});
+
+test("a trigger CircleCI answers without a pipeline is refused DispatchRefused and stores no prebuild", async () => {
+  const before = PrebuildSchema.array().parse(
+    await (await send("GET", `/v1/prebuilds?repository=${REPOSITORY}`, undefined, bearer)).json(),
+  );
+  runAnswer = () => ({ status: 200, body: { message: "Config has no workflow tumpel-prebuild." } });
+  const response = await startCircleCI();
+  runAnswer = null;
+  assert.equal(response.status, 409);
+  const problem = ProblemSchema.parse(await response.json());
+  assert.equal(problem.code, "DispatchRefused");
+  assert.match(problem.detail, /created no pipeline: Config has no workflow tumpel-prebuild\./);
+  const after = PrebuildSchema.array().parse(
+    await (await send("GET", `/v1/prebuilds?repository=${REPOSITORY}`, undefined, bearer)).json(),
+  );
+  assert.equal(after.length, before.length);
+});
+
+test("a second repository is refused on a project another binding holds, before any webhook", async () => {
+  const hooks = webhooks.length;
+  const response = await send(
+    "POST",
+    "/v1/circleci-projects",
+    { repository: "https://github.com/acme/other.git", projectSlug: SLUG, pipelineDefinitionId: DEFINITION },
+    bearer,
+  );
+  assert.equal(response.status, 409);
+  const problem = ProblemSchema.parse(await response.json());
+  assert.equal(problem.code, "Conflict");
+  assert.equal(problem.title, "Project already bound");
+  assert.equal(webhooks.length, hooks);
 });
 
 test("a workflow-completed event is taken only with its binding's signature, ignored for an unknown pipeline, and fails the prebuild in Build or Upload", async () => {
