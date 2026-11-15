@@ -24,7 +24,7 @@ export type ClaudeSetupBudgets = Pick<
   | "claudeSetupUrlBudgetSeconds"
   | "claudeSetupCodeBudgetSeconds"
   | "claudeSetupMintBudgetSeconds"
-  | "claudeSetupReportBudgetSeconds"
+  | "claudeSetupMintGraceSeconds"
 >;
 
 export type ClaudeSetupEvent =
@@ -47,7 +47,7 @@ const isLive = (state: ClaudeSetupState): state is LivePhase =>
 const START_AGAIN = "start the Claude setup again";
 
 const mintTimedOut = (claudeSetupId: string, budgets: ClaudeSetupBudgets): string =>
-  `Claude Code minted no token for Claude setup ${claudeSetupId} within claudeSetupMintBudgetSeconds ${budgets.claudeSetupMintBudgetSeconds} of the code; ${START_AGAIN}`;
+  `the box of Claude setup ${claudeSetupId} reported nothing within claudeSetupMintBudgetSeconds ${budgets.claudeSetupMintBudgetSeconds} plus claudeSetupMintGraceSeconds ${budgets.claudeSetupMintGraceSeconds} of the code; check that the host is online, then ${START_AGAIN}`;
 
 const timedOut = (claudeSetupId: string, phase: LivePhase, budgets: ClaudeSetupBudgets): ClaudeSetupStep => {
   if (phase === "Starting") {
@@ -90,7 +90,7 @@ export const advance = (
       ? {
           kind: "Advance",
           state: "Minting",
-          dueInSeconds: budgets.claudeSetupMintBudgetSeconds + budgets.claudeSetupReportBudgetSeconds,
+          dueInSeconds: budgets.claudeSetupMintBudgetSeconds + budgets.claudeSetupMintGraceSeconds,
         }
       : {
           kind: "Refuse",
@@ -142,7 +142,7 @@ export const boxEndsAt = (createdAt: number, budgets: ClaudeSetupBudgets): numbe
   (budgets.claudeSetupUrlBudgetSeconds +
     budgets.claudeSetupCodeBudgetSeconds +
     budgets.claudeSetupMintBudgetSeconds +
-    budgets.claudeSetupReportBudgetSeconds) *
+    budgets.claudeSetupMintGraceSeconds) *
     1000;
 
 const statusOf = (row: ClaudeSetupRow): Record<string, unknown> => {

@@ -233,7 +233,7 @@ before(async () => {
             claudeSetupUrlBudgetSeconds: 300,
             claudeSetupCodeBudgetSeconds: 600,
             claudeSetupMintBudgetSeconds: 120,
-            claudeSetupReportBudgetSeconds: 10,
+            claudeSetupMintGraceSeconds: 10,
             gitHubActionsIssuer: githubIssuer,
           },
         },

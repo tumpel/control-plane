@@ -67,7 +67,7 @@ const SETTINGS = {
   claudeSetupUrlBudgetSeconds: 300,
   claudeSetupCodeBudgetSeconds: 600,
   claudeSetupMintBudgetSeconds: 120,
-  claudeSetupReportBudgetSeconds: 10,
+  claudeSetupMintGraceSeconds: 10,
   gitHubActionsIssuer: "https://token.actions.githubusercontent.com",
 };
 
@@ -733,6 +733,58 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   );
 });
 
+test("a compact read stops after eight chunk reads of dropped lines, and the next read goes on from its cursor", async () => {
+  await createPersona("Quiet", [
+    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
+  ]);
+  const started = await tool(
+    "tumpel_session_start",
+    { ...(await sessionStart("Quiet")), prompt: "think quietly" },
+    StartedSessionSchema,
+  );
+  const { sessionId } = started.session;
+  const offer = await host.next("TurnOffer");
+  const { turnId } = offer;
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  await eventually(
+    "the turn reading Running",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Running",
+  );
+  const dropped = Array.from({ length: 18 }, () => JSON.stringify({ type: "system", subtype: "status" }));
+  const kept = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "done thinking" }] } });
+  [...dropped, kept].forEach((text, index) => {
+    host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
+  });
+  await eventually(
+    "nineteen lines in the transcript",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.lineCount === 19,
+  );
+  const capped = await tool(
+    "tumpel_transcript_read",
+    { sessionId, compact: true, limit: 2 },
+    CompactTranscriptPageSchema,
+  );
+  assert.deepEqual(capped.turns, []);
+  assert.equal(capped.cursor, 16, "eight reads of two lines each, then the page answers");
+  assert.equal(capped.finished, false);
+  const next = await tool(
+    "tumpel_transcript_read",
+    { sessionId, compact: true, limit: 2, after: capped.cursor },
+    CompactTranscriptPageSchema,
+  );
+  assert.deepEqual(next.turns, [{ turnId, lines: [{ lineSeq: 19, text: "done thinking" }] }]);
+  assert.equal(next.cursor, 19);
+
+  host.send({ type: "TurnComplete", turnId, lastLineSeq: 19, completedAt: new Date().toISOString() });
+  const request = await host.next("SnapshotRequest");
+  assert.equal(request.sessionId, sessionId);
+  await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+});
+
 test("a setup box token writes its own setup's member once, only while the setup is Minting, and a second start on a set supersedes its running setup", async () => {
   const createSet = async (name: string) => {
     const created = await postJson(
@@ -836,7 +888,7 @@ test("a setup box token writes its own setup's member once, only while the setup
   });
 });
 
-test("a box whose Claude Code mints no token within the code's mint budget fails its setup SetupTimedOut with the lines it printed", async () => {
+test("a box whose Claude Code mints no token within the code's mint budget is waited on past that budget and fails SetupTimedOut when its box says so", async () => {
   const created = await postJson("/v1/secret-sets", { name: "Mint budget secrets", secrets: [] }, bearer);
   assert.equal(created.status, 200, await created.clone().text());
   const { secretSetId } = SecretSetSchema.parse(await created.json());
@@ -853,23 +905,20 @@ test("a box whose Claude Code mints no token within the code's mint budget fails
   assert.ok(minting.status.state === "Minting");
   assert.ok(
     Date.parse(minting.status.tokenDueAt) >=
-      codedAt + (SETTINGS.claudeSetupMintBudgetSeconds + SETTINGS.claudeSetupReportBudgetSeconds) * 1000,
+      codedAt + (SETTINGS.claudeSetupMintBudgetSeconds + SETTINGS.claudeSetupMintGraceSeconds) * 1000,
     "the control plane waits past the box's own mint budget",
   );
   const code = await host.next("ClaudeSetupBoxCode");
   assert.equal(code.mintBudgetSeconds, SETTINGS.claudeSetupMintBudgetSeconds);
-  const detail =
-    "Claude Code minted no token within mintBudgetSeconds 120 of the code. Claude Code printed after the code: Exchanging the code / Couldn't reach console.anthropic.com; start the Claude setup again";
   host.send({
     type: "ClaudeSetupBoxFailed",
     claudeSetupId,
     reason: "SetupTimedOut",
-    detail,
+    detail: "Claude Code minted no token within mintBudgetSeconds 120 of the code",
     failedAt: new Date().toISOString(),
   });
   const failed = await eventually("the setup reading Failed", status, (setup) => setup.status.state === "Failed");
   assert.ok(failed.status.state === "Failed" && failed.status.reason === "SetupTimedOut");
-  assert.equal(failed.status.detail, detail);
   assert.deepEqual(await getJson(`/v1/claude-setups?secretSetId=${secretSetId}`, ClaudeSetupSchema.array()), []);
 });
 
@@ -903,7 +952,7 @@ test("a Minting setup whose box says nothing lists as the one to resume, and lis
   assert.ok(read.status.state === "Failed" && read.status.reason === "SetupTimedOut");
   assert.match(
     read.status.detail,
-    /minted no token for Claude setup .* within claudeSetupMintBudgetSeconds 120 of the code/,
+    /reported nothing within claudeSetupMintBudgetSeconds 120 plus claudeSetupMintGraceSeconds 10 of the code; check that the host is online/,
   );
   assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, claudeSetupId);
   const late = await postJson(

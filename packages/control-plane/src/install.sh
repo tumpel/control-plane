@@ -12,17 +12,13 @@ main() {
 
   [ "$(uname -s)" = Linux ] || fail "tumpel runs on Linux, and this machine runs $(uname -s). Run this command on a Linux machine."
 
+  checksums="@TUMPEL_CLI_SHA256S@"
   case "$(uname -m)" in
-    x86_64)
-      architecture=Amd64
-      expected="@TUMPEL_CLI_SHA256_AMD64@"
-      ;;
-    aarch64)
-      architecture=Arm64
-      expected="@TUMPEL_CLI_SHA256_ARM64@"
-      ;;
+    x86_64) architecture=Amd64 ;;
+    aarch64) architecture=Arm64 ;;
     *) fail "tumpel has no build for $(uname -m) processors. Run this command on an x86_64 Linux machine." ;;
   esac
+  expected=$(printf '%s\n' "$checksums" | sed -n "s/^$architecture //p")
   [ -n "$expected" ] || fail "the current release has no tumpel CLI for $(uname -m) machines. Run this command on an x86_64 Linux machine."
 
   command -v curl >/dev/null 2>&1 || fail "curl is not installed. Install curl, then run this command again."
