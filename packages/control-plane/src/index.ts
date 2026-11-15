@@ -111,6 +111,7 @@ import {
   type Whoami,
   whoamiOf,
 } from "./identity";
+import installScript from "./install.sh";
 import {
   ISSUER_DOCUMENT_HEADERS,
   issuerOf,
@@ -856,6 +857,11 @@ const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Pro
   return release.kind === "Published" ? json(release.manifest) : noRelease();
 };
 
+const handleInstallScript = async (_request: Request, url: URL): Promise<Response> =>
+  new Response(installScript.replaceAll("@TUMPEL_ORIGIN@", url.origin), {
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+  });
+
 const handleReleaseDownload = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   const matched = RELEASE_DOWNLOAD_PATH.exec(url.pathname);
   if (matched?.[1] === undefined || matched[2] === undefined) return null;
@@ -1385,6 +1391,7 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,
   "GET /v1/releases/current": handleCurrentRelease,
+  "GET /v1/releases/install.sh": handleInstallScript,
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),
   [`GET ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),

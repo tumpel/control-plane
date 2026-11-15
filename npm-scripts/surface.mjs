@@ -96,6 +96,7 @@ const ALLOWLIST = {
   Hosts_enrol: "host channel: the supervisor trades its one-time enrolment token for the host's identity",
   Releases_cli: RELEASE_DOWNLOAD,
   Releases_supervisor: RELEASE_DOWNLOAD,
+  Releases_install: "install script a person pipes to sh before the CLI exists",
   PrebuildUploads_start: BUILD_JOB,
   PrebuildUploads_complete: BUILD_JOB,
   CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
