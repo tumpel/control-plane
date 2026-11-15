@@ -30,6 +30,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `CircleCIProjects_delete`            | `tumpel_circleci_project_delete`  | `tumpel circleci project delete`  |
 | `CircleCIProjects_list`              | `tumpel_circleci_project_list`    | `tumpel circleci project list`    |
 | `ClaudeSetups_get`                   | `tumpel_claude_setup_get`         | `tumpel claude-setup get`         |
+| `ClaudeSetups_list`                  | `tumpel_claude_setup_list`        | `tumpel claude-setup list`        |
 | `ClaudeSetups_start`                 | `tumpel_claude_setup_start`       | `tumpel claude-setup start`       |
 | `ClaudeSetups_submitCode`            | `(none)`                          | `tumpel claude-setup submit-code` |
 | `Connections_list`                   | `tumpel_connection_list`          | `tumpel connection list`          |

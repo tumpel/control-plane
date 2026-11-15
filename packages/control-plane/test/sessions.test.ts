@@ -803,8 +803,12 @@ test("a setup box token writes its own setup's member once, only while the setup
   });
 });
 
-test("a Minting setup read past its mint budget reads Failed SetupTimedOut and discards its box even when its alarm never fired", async () => {
-  const created = await postJson("/v1/secret-sets", { name: "Overdue setup secrets", secrets: [] }, bearer);
+test("a Minting setup lists as the one to resume, and read past its mint budget reads and lists Failed SetupTimedOut and discards its box even when its alarm never fired", async () => {
+  const created = await postJson(
+    "/v1/secret-sets",
+    { name: "Overdue setup secrets", secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" }] },
+    bearer,
+  );
   assert.equal(created.status, 200, await created.clone().text());
   const { secretSetId } = SecretSetSchema.parse(await created.json());
   const started = await postJson("/v1/claude-setups", { secretSetId }, bearer);
@@ -822,6 +826,11 @@ test("a Minting setup read past its mint budget reads Failed SetupTimedOut and d
   assert.equal(minting.status.state, "Minting");
   assert.ok(minting.status.state === "Minting" && Date.parse(minting.status.tokenDueAt) > Date.now());
   await host.next("ClaudeSetupBoxCode");
+  const listed = () => getJson(`/v1/claude-setups?secretSetId=${secretSetId}`, ClaudeSetupSchema.array());
+  assert.deepEqual(
+    (await listed()).map((setup) => [setup.claudeSetupId, setup.status.state]),
+    [[claudeSetupId, "Minting"]],
+  );
 
   const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenantId });
   await storage.exec(
@@ -834,6 +843,10 @@ test("a Minting setup read past its mint budget reads Failed SetupTimedOut and d
   assert.equal(read.status.state, "Failed");
   assert.ok(read.status.state === "Failed" && read.status.reason === "SetupTimedOut");
   assert.match(read.status.state === "Failed" ? read.status.detail : "", /minted no token/);
+  assert.deepEqual(
+    (await listed()).map((setup) => setup.status.state),
+    ["Failed"],
+  );
   assert.equal((await host.next("ClaudeSetupBoxDiscard")).claudeSetupId, claudeSetupId);
   const late = await postJson(
     `/v1/claude-setups/${claudeSetupId}/token`,
