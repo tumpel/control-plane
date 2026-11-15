@@ -26,6 +26,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `GitHubActionsConnections_delete`    | `tumpel_github_actions_delete`    | `tumpel github-actions delete`    |
 | `GitHubActionsConnections_get`       | `tumpel_github_actions_get`       | `tumpel github-actions get`       |
 | `GitHubActionsConnections_start`     | `tumpel_github_actions_start`     | `tumpel github-actions start`     |
+| `GitHubConnections_delete`           | `tumpel_github_delete`            | `tumpel github delete`            |
 | `GitHubConnections_get`              | `tumpel_github_get`               | `tumpel github get`               |
 | `GitHubConnections_listIssues`       | `tumpel_github_list_issues`       | `tumpel github list-issues`       |
 | `GitHubConnections_listRepositories` | `tumpel_github_list_repositories` | `tumpel github list-repositories` |

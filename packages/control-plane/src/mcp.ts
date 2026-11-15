@@ -315,6 +315,13 @@ export const TOOLS: ToolDefinition[] = [
     "Get the URL where a person installs the stage's GitHub App for the tenant. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of the installed account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
   ),
   rest(
+    "tumpel_github_delete",
+    "DELETE",
+    "/v1/github-connection",
+    NO_ARGUMENTS,
+    "Disconnect the tenant from its GitHub App installation; turns then use the secret set's GITHUB_TOKEN. Calls DELETE /v1/github-connection. The installation stays on GitHub until a person uninstalls the App there.",
+  ),
+  rest(
     "tumpel_github_list_repositories",
     "GET",
     "/v1/github-connection/repositories",

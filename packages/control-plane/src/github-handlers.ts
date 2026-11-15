@@ -48,6 +48,7 @@ import {
   storeApp,
   storedApp,
   unlinkInstallation,
+  unlinkTenant,
   webhookSecret,
 } from "./github-store.ts";
 import { json, problem } from "./http";
@@ -112,6 +113,13 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state), expiresAt }));
 };
 
+const handleDelete = async (caller: Caller, env: Env): Promise<Response> => {
+  const refused = ownerRequired(caller, "gitHubConnections.delete");
+  if (refused) return refused;
+  await unlinkTenant(env.DB, caller.tenantId);
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+};
+
 const notConnected = (): Response =>
   problem(409, {
     code: "GitHubNotConnected",
@@ -174,12 +182,14 @@ export const handleGitHubConnection = async (
 ): Promise<Response | null> => {
   const starting = url.pathname === START_PATH && request.method === "POST";
   const reading = url.pathname === CONNECTION_PATH && request.method === "GET";
+  const deleting = url.pathname === CONNECTION_PATH && request.method === "DELETE";
   const getting = request.method === "GET";
   const repositories = getting && url.pathname === REPOSITORIES_PATH;
   const issuesOf = getting ? ISSUES_PATH.exec(url.pathname) : null;
-  if (!starting && !reading && !repositories && issuesOf === null) return null;
+  if (!starting && !reading && !deleting && !repositories && issuesOf === null) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
+  if (deleting) return handleDelete(caller, env);
   if (repositories) return handleRepositories(caller, url, env);
   if (issuesOf !== null) {
     return handleIssues(caller, url, env, decodeURIComponent(issuesOf[1] ?? ""), decodeURIComponent(issuesOf[2] ?? ""));

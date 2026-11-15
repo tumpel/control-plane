@@ -29,7 +29,7 @@ const DAVE = "dave@example.test";
 const IDENTITY = { gitAuthorName: "Members", gitAuthorEmail: "members@example.test" };
 
 interface Database {
-  prepare(query: string): { bind(...values: unknown[]): { run(): Promise<unknown> } };
+  prepare(query: string): { bind(...values: unknown[]): { run(): Promise<unknown>; first(): Promise<unknown> } };
 }
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -250,9 +250,23 @@ test("a Member is refused the member and connection operations of an Owner", asy
     await send("POST", "/v1/namespace-connection/start", { accountLabel: "ns", workspaceId: "tenant_ns" }, bob),
     await send("DELETE", "/v1/github-actions-connection", null, bob),
     await send("POST", "/v1/github-connection/start", null, bob),
+    await send("DELETE", "/v1/github-connection", null, bob),
   ];
   for (const refused of refusals) assert.equal((await refusal(refused, 403)).code, "OwnerRequired");
   assert.equal((await call("/v1/connections", { headers: bob })).status, 200);
+});
+
+test("an Owner disconnects GitHub, removing only their own tenant's installation link", async () => {
+  const env = await server.getWorker<{ DB: Database }>().getEnv();
+  const link =
+    "INSERT INTO github_installations (installation_id, tenant_id, account_login, created_at) VALUES (?, ?, ?, ?)";
+  await env.DB.prepare(link).bind(901, acme, "acme", Date.now()).run();
+  await env.DB.prepare(link).bind(902, bobco, "bobco", Date.now()).run();
+  assert.equal((await send("DELETE", "/v1/github-connection", null, owner)).status, 204);
+  const linked = env.DB.prepare("SELECT tenant_id FROM github_installations WHERE installation_id = ?");
+  assert.equal(await linked.bind(901).first(), null);
+  assert.deepEqual(await linked.bind(902).first(), { tenant_id: bobco });
+  assert.equal((await send("DELETE", "/v1/github-connection", null, owner)).status, 204);
 });
 
 test("a device approval or a consent naming a tenant the person does not belong to is refused", async () => {

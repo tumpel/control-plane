@@ -170,6 +170,10 @@ export const linkInstallation = async (
     : { kind: "Linked", installation: linked };
 };
 
+export const unlinkTenant = async (db: D1Database, tenantId: string): Promise<void> => {
+  await db.prepare("DELETE FROM github_installations WHERE tenant_id = ?").bind(tenantId).run();
+};
+
 export const unlinkInstallation = async (db: D1Database, installationId: number): Promise<void> => {
   await db.prepare("DELETE FROM github_installations WHERE installation_id = ?").bind(installationId).run();
 };
