@@ -94,8 +94,8 @@ export const credentialRefused = (
     return refuse(422, {
       code: "NoCredential",
       title: "No provider credential",
-      detail: `${owner} holds no ${refusal.provider} credential, which ${harness} reads`,
-      fix: `Add a ${refusal.supported.join(" or ")} for ${refusal.provider} to that secret set with tumpel config apply, then ${retry}`,
+      detail: `${owner} holds no credential ${harness} reads: a ${refusal.supported.join(" or ")} for ${refusal.provider}${refusal.routed.map((provider) => `, or an ApiKey for ${provider}`).join("")}`,
+      fix: `Add one of those to that secret set with tumpel config apply, then ${retry}`,
     });
   }
   if (refusal.kind === "Unsupported") {
