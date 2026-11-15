@@ -37,6 +37,7 @@ import {
 import type { z } from "zod";
 import { accessVerifier, cachedAccessKeys, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
+import { handleConnections } from "./connections.ts";
 import { randomToken, sameSecret } from "./crypto";
 import {
   approveDeviceCode,
@@ -1179,6 +1180,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (sessions) return sessions;
   const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
   if (prebuilds) return prebuilds;
+  const connections = await handleConnections(request, url, env, deviceCaller);
+  if (connections) return connections;
   const github =
     (await handleGitHubConnection(request, url, env, deviceCaller)) ??
     (await handleGitHubPage(request, url, env, assertedEmail)) ??

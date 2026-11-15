@@ -475,7 +475,7 @@ export class TenantSessions extends DurableObject<Env> {
     return keyStoreOf(this.env).unwrap(wrapped);
   }
 
-  private async members(secretSetId: string): Promise<SecretMember[]> {
+  protected async members(secretSetId: string): Promise<SecretMember[]> {
     const rows = memberRows(this.ctx.storage.sql, secretSetId);
     if (rows.length === 0) return [];
     const dataKey = await this.dataKey();
@@ -487,7 +487,7 @@ export class TenantSessions extends DurableObject<Env> {
     return members;
   }
 
-  private async repositoryToken(tenantId: string, repository: string, now: number): Promise<Minted> {
+  protected async repositoryToken(tenantId: string, repository: string, now: number): Promise<Minted> {
     const installation = await installationOf(this.env.DB, tenantId);
     if (installation === null) return { kind: "NoToken" };
     const app = await appKey(this.env.DB, keyStoreOf(this.env));

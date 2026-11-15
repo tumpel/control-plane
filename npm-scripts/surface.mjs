@@ -26,6 +26,10 @@ const NOUNS = {
   Transcripts: "transcript",
   Snapshots: "snapshot",
   Prebuilds: "prebuild",
+  Connections: "connection",
+  CiDispatchConnections: "ci-dispatch",
+  RemoteBuildKitConnections: "remote-buildkit",
+  EphemeralVmConnections: "ephemeral-vm",
 };
 const VERBS = {
   EnrolmentTokens_mint: "mint-token",

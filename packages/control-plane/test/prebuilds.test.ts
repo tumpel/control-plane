@@ -5,14 +5,17 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CiDispatchConnectionLinkSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
+  EphemeralVmConnectionLinkSchema,
   PersonaSchema,
   PrebuildSchema,
   ProblemSchema,
+  RemoteBuildKitConnectionLinkSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import type { z } from "zod";
+import { z } from "zod";
 
 const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
@@ -118,4 +121,52 @@ test("a prebuild start with no build provider connected is refused NoBuildProvid
   assert.deepEqual(await rest(PrebuildSchema.array(), "GET", `/v1/prebuilds?${query}`), []);
   assert.equal((await refused("GET", "/v1/prebuilds/missing", undefined, 404)).code, "NotFound");
   assert.equal((await refused("GET", "/v1/prebuilds/missing/failure", undefined, 404)).code, "NotFound");
+});
+
+const ConnectionRows = z.array(z.object({ kind: z.string(), state: z.string(), account: z.string().optional() }));
+
+test("the connection list holds one row per kind, and a connected build provider shows its billing account", async () => {
+  assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
+    { kind: "GitHub", state: "NotConfigured" },
+    { kind: "CiDispatch", state: "NotConnected" },
+    { kind: "RemoteBuildKit", state: "NotConfigured" },
+    { kind: "EphemeralVm", state: "NotConnected" },
+  ]);
+
+  const ci = await rest(CiDispatchConnectionLinkSchema, "POST", "/v1/ci-dispatch-connection/start", {
+    accountLabel: "acme on GitHub Actions",
+    callerWorkflow: ".github/workflows/tumpel-prebuild.yml",
+  });
+  assert.equal(ci.link.state, "Connected");
+  assert.deepEqual(await rest(CiDispatchConnectionLinkSchema, "GET", "/v1/ci-dispatch-connection"), ci);
+  assert.equal(
+    (await refused("POST", "/v1/ci-dispatch-connection/start", { accountLabel: "acme", callerWorkflow: "ci.yml" }, 400))
+      .code,
+    "InvalidRequest",
+  );
+
+  const vm = await rest(EphemeralVmConnectionLinkSchema, "POST", "/v1/ephemeral-vm-connection/start", {
+    accountLabel: "acme hosts",
+    hostLabel: "builder",
+  });
+  assert.equal(vm.link.state === "Connected" ? vm.link.connection.hostLabel : "", "builder");
+
+  const remote = await rest(RemoteBuildKitConnectionLinkSchema, "GET", "/v1/remote-buildkit-connection");
+  assert.equal(remote.link.state, "NotConfigured");
+  const start = { accountLabel: "acme workspace", audience: "federation.namespaceapis.com" };
+  assert.equal((await refused("POST", "/v1/remote-buildkit-connection/start", start, 409)).code, "IssuerMissing");
+
+  assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
+    { kind: "GitHub", state: "NotConfigured" },
+    { kind: "CiDispatch", state: "Connected", account: "acme on GitHub Actions" },
+    { kind: "RemoteBuildKit", state: "NotConfigured" },
+    { kind: "EphemeralVm", state: "Connected", account: "acme hosts" },
+  ]);
+
+  assert.equal((await send("DELETE", "/v1/ci-dispatch-connection", undefined, bearer)).status, 204);
+  assert.equal((await send("DELETE", "/v1/ephemeral-vm-connection", undefined, bearer)).status, 204);
+  assert.deepEqual(
+    (await rest(ConnectionRows, "GET", "/v1/connections")).map((row) => row.state),
+    ["NotConfigured", "NotConnected", "NotConfigured", "NotConnected"],
+  );
 });
