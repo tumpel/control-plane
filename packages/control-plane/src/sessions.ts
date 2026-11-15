@@ -127,7 +127,7 @@ const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   }
   const { harness, harnessVersion, architectures } = lacking;
   if (architectures.length === 0) {
-    return `Publish a release that carries a ${harness} ${harnessVersion} guest image with the release workflow, or pin a version tumpel release current lists with tumpel harness pin, then ${retry}`;
+    return `Pin a version tumpel release current lists with tumpel harness pin, or ask the operator, who publishes releases, for one that carries a ${harness} ${harnessVersion} guest image, then ${retry}`;
   }
   return `Start tumpel-supervisor run on an ${architectures.join(" or ")} host, or enrol one with tumpel host mint-token, then ${retry}`;
 };

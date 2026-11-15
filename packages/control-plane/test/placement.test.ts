@@ -3,7 +3,6 @@ import { test } from "node:test";
 import type { HostSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { type ImageAvailability, type Placement, placeSession } from "../src/placement.ts";
-import { imagesFor, type ReleaseRead } from "../src/releases.ts";
 
 type Host = z.infer<typeof HostSchema>;
 
@@ -157,31 +156,6 @@ test("a tenant whose hosts all run a turn in every slot is refused with each hos
 });
 
 test("a host whose architecture has no image of the session's harness version in the current release is refused NoImage", () => {
-  const digest = (char: string): string => char.repeat(64);
-  const s3 = "https://account.r2.cloudflarestorage.com/tumpel-releases";
-  const release: ReleaseRead = {
-    kind: "Published",
-    manifest: {
-      releaseVersion: "0.2.0",
-      commit: "e".repeat(40),
-      channelProtocolVersion: 8,
-      supervisors: [
-        { architecture: "Arm64", url: `${s3}/supervisor/arm64/${digest("a")}`, sha256: digest("a"), sizeBytes: 1 },
-      ],
-      images: [
-        {
-          harness: "ClaudeCode",
-          harnessVersion: "2.0.0",
-          architecture: "Arm64",
-          imageUrl: `${s3}/images/ClaudeCode/2.0.0/arm64/${digest("b")}`,
-          imageDigest: digest("b"),
-          kernelUrl: `${s3}/kernels/arm64/${digest("c")}`,
-          kernelDigest: digest("c"),
-          manifestDigest: digest("d"),
-        },
-      ],
-    },
-  };
   const usage = {
     hostId: HOST.hostId,
     tenantId: "tenant-placement",
@@ -193,15 +167,11 @@ test("a host whose architecture has no image of the session's harness version in
     createdAt: 0,
     updatedAt: 0,
   };
-  const availability = (harnessVersion: string, read: ReleaseRead): ImageAvailability => ({
-    harness: "ClaudeCode",
-    harnessVersion,
-    architectures: imagesFor(read, "ClaudeCode", harnessVersion).map((image) => image.architecture),
-  });
+  const arm: ImageAvailability = { harness: "ClaudeCode", harnessVersion: "2.0.0", architectures: ["Arm64"] };
   const cases: [ImageAvailability, string[]][] = [
-    [availability("2.0.0", release), ["Arm64"]],
-    [availability("1.9.0", release), []],
-    [availability("2.0.0", { kind: "Unpublished" }), []],
+    [arm, ["Arm64"]],
+    [{ harness: "ClaudeCode", harnessVersion: "1.9.0", architectures: [] }, []],
+    [{ harness: "ClaudeCode", harnessVersion: "2.0.0", architectures: [] }, []],
   ];
   for (const [image, architectures] of cases) {
     const placement = placeSession([HOST], [usage], image);
@@ -212,8 +182,5 @@ test("a host whose architecture has no image of the session's harness version in
       [["NoImage", architectures]],
     );
   }
-  assert.equal(
-    placed(placeSession([{ ...HOST, architecture: "Arm64" }], [usage], availability("2.0.0", release))),
-    "base",
-  );
+  assert.equal(placed(placeSession([{ ...HOST, architecture: "Arm64" }], [usage], arm)), "base");
 });

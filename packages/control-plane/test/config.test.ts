@@ -18,6 +18,9 @@ import {
   SecretSetSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
+
+type Bucket = { put(key: string, value: string): Promise<unknown> };
 
 const AUDIENCE = "tumpel-config-e2e";
 const KID = "config-e2e-key";
@@ -153,6 +156,10 @@ after(async () => {
 
 test("tumpel config apply makes the tenant match the file, and a second plan is empty", async () => {
   const hostId = await enrolHost();
+  await (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES.put(
+    "current.json",
+    JSON.stringify(CLAUDE_CODE_AMD64_RELEASE),
+  );
   const file = join(scratch, "tumpel.json");
   const fixture = JSON.parse(readFileSync(FIXTURE, "utf8"));
   writeFileSync(file, JSON.stringify({ ...fixture, hosts: [{ hostId, labels: ["gpu", "region-eu"] }] }));

@@ -105,8 +105,8 @@ import {
   signUpPage,
 } from "./pages";
 import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
-import { type ReleaseSignerEnv, releaseSignerOf, type SignerEnv, signerOf } from "./presign";
-import { currentRelease, supervisorKey } from "./releases";
+import { type SignerEnv, signerOf } from "./presign";
+import { currentRelease, imagesFor, supervisorKey } from "./releases";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
 import type { PersonaWrite, Tenant } from "./tenant";
@@ -115,7 +115,13 @@ export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 
-export interface Env extends SignerEnv, ReleaseSignerEnv {
+export interface Env extends SignerEnv {
+  R2_BUCKET_NAME: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  RELEASES_BUCKET_NAME: string;
+  RELEASES_ACCESS_KEY_ID?: string;
+  RELEASES_SECRET_ACCESS_KEY?: string;
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   HOST: DurableObjectNamespace<HostChannel>;
@@ -399,7 +405,12 @@ const handlePersonaFileUpload = async (request: Request, _url: URL, env: Env): P
   return json(
     PersonaFileUploadSchema.parse({
       ...body.value,
-      uploadUrl: await signerOf(env).presign("PUT", key, UPLOAD_TTL_SECONDS, new Date(now)),
+      uploadUrl: await signerOf(env, env.R2_BUCKET_NAME, env.R2_ACCESS_KEY_ID, env.R2_SECRET_ACCESS_KEY).presign(
+        "PUT",
+        key,
+        UPLOAD_TTL_SECONDS,
+        new Date(now),
+      ),
       uploadExpiresAt: new Date(now + UPLOAD_TTL_SECONDS * 1000).toISOString(),
     }),
   );
@@ -469,6 +480,26 @@ const handlePinsList = async (request: Request, _url: URL, env: Env): Promise<Re
   return json(HarnessPinSchema.array().parse(pins));
 };
 
+const unreleasedPin = async (
+  env: Env,
+  tenantId: string,
+  harness: string,
+  harnessVersion: string,
+): Promise<Response | null> => {
+  const architectures = [...new Set((await listHosts(env.DB, tenantId)).map((host) => host.architecture))];
+  if (architectures.length === 0) return null;
+  const release = await currentRelease(env.RELEASES, Date.now());
+  if (release.kind === "Unpublished") return noRelease();
+  const carried = imagesFor(release, harness, harnessVersion).map((image) => image.architecture);
+  if (architectures.some((architecture) => carried.includes(architecture))) return null;
+  return problem(422, {
+    code: "ImageNotReleased",
+    title: "Harness version not in the current release",
+    detail: `release ${release.manifest.releaseVersion} carries no ${harness} ${harnessVersion} guest image for ${architectures.join(" or ")}, the architectures of your tenant's hosts`,
+    fix: "Pin a version tumpel release current lists for one of those architectures, or ask the operator, who publishes releases, for one that carries it",
+  });
+};
+
 const handlePin = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
@@ -482,6 +513,8 @@ const handlePin = async (request: Request, _url: URL, env: Env): Promise<Respons
       fix: "Pin a version GET /v1/harnesses lists",
     });
   }
+  const unreleased = await unreleasedPin(env, caller.tenantId, body.value.harness, body.value.harnessVersion);
+  if (unreleased !== null) return unreleased;
   const pinned = await env.TENANT.getByName(caller.tenantId).pin(body.value, Date.now());
   return json(HarnessPinSchema.parse(pinned));
 };
@@ -576,7 +609,7 @@ const handleSupervisorDownload = async (url: URL, env: Env): Promise<Response | 
       code: "InvalidRequest",
       title: "Unknown architecture",
       detail: `releases.supervisor refused the path: ${issues(parsed.error)}`,
-      fix: "Ask for Amd64 or Arm64, the architecture tumpel-supervisor enrol reports",
+      fix: "Ask for Amd64 for `uname -m` x86_64, Arm64 for aarch64",
     });
   }
   const { architecture } = parsed.data;
@@ -591,12 +624,12 @@ const handleSupervisorDownload = async (url: URL, env: Env): Promise<Response | 
       fix: "Run the host on one of those architectures, or publish a release that builds the supervisor for it",
     });
   }
-  const location = await releaseSignerOf(env).presign(
-    "GET",
-    supervisorKey(supervisor),
-    SUPERVISOR_DOWNLOAD_SECONDS,
-    new Date(),
-  );
+  const location = await signerOf(
+    env,
+    env.RELEASES_BUCKET_NAME,
+    env.RELEASES_ACCESS_KEY_ID,
+    env.RELEASES_SECRET_ACCESS_KEY,
+  ).presign("GET", supervisorKey(supervisor), SUPERVISOR_DOWNLOAD_SECONDS, new Date());
   return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
 };
 
