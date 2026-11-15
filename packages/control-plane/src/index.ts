@@ -12,6 +12,7 @@ import {
   HealthSchema,
   HostEnrolSchema,
   HostLabelsSchema,
+  IssuerKeyRotationSchema,
   OAuthAuthorizationCodeRequestSchema,
   OAuthClientRegistrationSchema,
   OAuthRefreshTokenRequestSchema,
@@ -65,6 +66,7 @@ import {
 } from "./hosts";
 import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
 import { bearerOf, type Caller, callerForDeviceToken, proofCaller, signUp, whoamiForEmail, whoamiOf } from "./identity";
+import { issuerOf } from "./issuer.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
 import {
   AUTHORIZATION_SERVER_PATH,
@@ -133,6 +135,7 @@ export interface Env extends SignerEnv {
   ACCESS_AUD: string;
   ACCESS_PROOF_COMMON_NAME?: string;
   SECRETS_KEK?: string;
+  ISSUER_HOSTNAME: string;
 }
 
 const DEVICE_PAGE = "/device";
@@ -759,6 +762,24 @@ const handleDeviceDeny = async (request: Request, url: URL, env: Env): Promise<R
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
+const handleIssuerRotate = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const signed = await assertedSigner(request, env);
+  if (!signed.ok) return browserSignedOut(url, signed.reason);
+  const refused = sameOriginJson(request, url);
+  if (refused) return refused;
+  if (signed.kind === "ServiceToken") {
+    const expected = env.ACCESS_PROOF_COMMON_NAME ?? "";
+    if (expected === "" || !sameSecret(signed.commonName, expected)) return notTheProofToken();
+  }
+  const rotation = await issuerOf(env).rotate();
+  return json(
+    IssuerKeyRotationSchema.parse({
+      kid: rotation.kid,
+      retiring: rotation.retiring.map((key) => ({ kid: key.kid, retiresAt: new Date(key.retiresAt).toISOString() })),
+    }),
+  );
+};
+
 const handleDeviceToken = async (request: Request, env: Env): Promise<Response> => {
   const params = await readParams(request);
   if (params.grant_type !== DEVICE_GRANT) {
@@ -1048,6 +1069,7 @@ const ROUTES: Record<string, Route> = {
   "PUT /v1/harnesses/pins": handlePin,
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
+  "POST /v1/issuer-keys/rotate": handleIssuerRotate,
   "POST /v1/hosts/enrol": handleEnrol,
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,

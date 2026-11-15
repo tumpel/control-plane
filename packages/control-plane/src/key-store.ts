@@ -1,5 +1,4 @@
 import { deriveSigningKey, importKeyEncryptionKey, unwrapDataKey, wrapDataKey } from "./envelope.ts";
-import type { Env } from "./index";
 
 export interface KeyStore {
   wrap(dataKey: CryptoKey): Promise<string>;
@@ -13,4 +12,4 @@ export const workersSecretKeyStore = (secret: string | undefined): KeyStore => (
   signingKey: (purpose) => deriveSigningKey(secret, purpose),
 });
 
-export const keyStoreOf = (env: Env): KeyStore => workersSecretKeyStore(env.SECRETS_KEK);
+export const keyStoreOf = (env: { SECRETS_KEK?: string }): KeyStore => workersSecretKeyStore(env.SECRETS_KEK);
