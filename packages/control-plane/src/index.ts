@@ -171,7 +171,15 @@ import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./pe
 import { handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
-import { cliKey, currentRelease, imagesFor, type ReleaseManifest, readRelease, supervisorKey } from "./releases";
+import {
+  cliKey,
+  currentRelease,
+  type HostArchitecture,
+  imagesFor,
+  type ReleaseManifest,
+  readRelease,
+  supervisorKey,
+} from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
@@ -868,10 +876,19 @@ const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Pro
   return json(release.manifest);
 };
 
-const handleInstallScript = async (_request: Request, url: URL): Promise<Response> =>
-  new Response(installScript.replaceAll("@TUMPEL_ORIGIN@", url.origin), {
+const handleInstallScript = async (_request: Request, url: URL, env: Env): Promise<Response> => {
+  const release = await currentRelease(env.RELEASES, Date.now());
+  if (release.kind === "Unpublished") return noRelease();
+  const cliSha256 = (architecture: HostArchitecture): string =>
+    release.manifest.clis.find((cli) => cli.architecture === architecture)?.sha256 ?? "";
+  const script = installScript
+    .replaceAll("@TUMPEL_ORIGIN@", url.origin)
+    .replaceAll("@TUMPEL_CLI_SHA256_AMD64@", cliSha256("Amd64"))
+    .replaceAll("@TUMPEL_CLI_SHA256_ARM64@", cliSha256("Arm64"));
+  return new Response(script, {
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
   });
+};
 
 const handleReleaseDownload = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   const matched = RELEASE_DOWNLOAD_PATH.exec(url.pathname);
