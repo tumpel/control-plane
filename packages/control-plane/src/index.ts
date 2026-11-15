@@ -544,11 +544,7 @@ const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<R
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const revoked = new Set(
-    (await listHosts(env.DB, caller.tenantId)).filter((host) => host.state === "Revoked").map((host) => host.hostId),
-  );
-  const usages = await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId);
-  return json(usages.filter((usage) => !revoked.has(usage.hostId)));
+  return json(await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId));
 };
 
 const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/labels)?$/;

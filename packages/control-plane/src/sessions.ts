@@ -150,7 +150,10 @@ const stranded = (session: Session, hosts: Host[], missingTurnIds: string[]): Re
     code: "HostOffline",
     title: "Host offline",
     detail: `session ${session.sessionId} runs on host ${host.name} (${host.hostId}), which is ${host.state}, and its snapshots miss completed turns ${missingTurnIds.join(", ")}, so it cannot move to another host`,
-    fix: "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
+    fix:
+      host.state === "Revoked"
+        ? "The host was revoked and cannot snapshot those turns; enrol a host with tumpel host mint-token"
+        : "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
   });
 };
 

@@ -192,6 +192,8 @@ test("a host enrols with a one-time token, holds its channel, drops to Offline w
   assert.match(stopped.stderr, /was revoked/);
   assert.equal(existsSync(join(first.dir, "host-key.json")), false);
   assert.equal(await hostState(host.hostId), "Revoked");
+  const usage = await server.fetch(`${origin}/v1/hosts/usage`, { headers: bearer });
+  assert.deepEqual(await usage.json(), []);
 
   const afterRevoke = await supervisor(first.dir, ["run"]).finished;
   assert.equal(afterRevoke.code, 5);
