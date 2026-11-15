@@ -12,6 +12,7 @@ import {
   APP_SETUP_PATH,
   type AppKey,
   appManifest,
+  botUserId,
   convertManifest,
   type Fetch,
   GITHUB_WEB,
@@ -268,7 +269,8 @@ const handleCreated = async (url: URL, env: Env, email: string): Promise<Respons
       `${converted.detail}. A conversion code works once and for an hour; start again at ${APP_SETUP_PATH}.`,
     );
   }
-  const stored = await storeApp(env.DB, keyStoreOf(env), converted.value, Date.now());
+  const bot = await botUserId(fetcher, env.GITHUB_API_ORIGIN, converted.value.slug, null);
+  const stored = await storeApp(env.DB, keyStoreOf(env), converted.value, bot.ok ? bot.value : null, Date.now());
   if (stored.kind === "Exists") return appExists(stored.app.slug, stored.app.htmlUrl);
   return linkPage(
     200,

@@ -4,6 +4,7 @@ import type { DispatchVariable } from "./dispatch-variables.ts";
 import {
   GitHubAppConversionSchema,
   type GitHubAppManifestSchema,
+  GitHubBotUserSchema,
   GitHubErrorSchema,
   type GitHubInstallationRecordSchema,
   GitHubInstallationRepositoriesSchema,
@@ -548,40 +549,41 @@ export interface CommitIdentity {
   gitAuthorEmail: string;
 }
 
-export type CommitIdentityAnswer =
-  | { kind: "Identity"; identity: CommitIdentity }
-  | { kind: "Unresolved"; detail: string };
+export interface GitHubUser {
+  githubUserId: number;
+  login: string;
+}
 
-const noreply = (id: number, login: string): string => `${id}+${login}@users.noreply.github.com`;
+export const commitIdentity = (user: GitHubUser): CommitIdentity => ({
+  gitAuthorName: user.login,
+  gitAuthorEmail: `${user.githubUserId}+${user.login}@users.noreply.github.com`,
+});
 
-const UNPUSHABLE_IDENTITY: CommitIdentity = { gitAuthorName: "Tumpel Agent", gitAuthorEmail: "agent@tumpel.invalid" };
+export const botLogin = (slug: string): string => `${slug}[bot]`;
 
-export const commitIdentity = async (
-  fetcher: Fetch,
-  api: string,
-  installedApp: { appId: number; slug: string } | null,
-  token: string | null,
-  secretSetId: string,
-): Promise<CommitIdentityAnswer> => {
-  if (installedApp !== null) {
-    const bot = `${installedApp.slug}[bot]`;
-    return { kind: "Identity", identity: { gitAuthorName: bot, gitAuthorEmail: noreply(installedApp.appId, bot) } };
-  }
-  if (token === null) return { kind: "Identity", identity: UNPUSHABLE_IDENTITY };
+export const tokenUser = async (fetcher: Fetch, api: string, token: string): Promise<GitHubAnswer<GitHubUser>> => {
   const answer = await callGitHub(
     fetcher,
     { method: "GET", url: `${api}/user`, accept: API_MEDIA_TYPE, bearer: token, body: null },
     GitHubUserSchema,
     "GitHubUser",
   );
-  if (!answer.ok) {
-    return {
-      kind: "Unresolved",
-      detail: `${answer.detail}; the box commits as the GitHub user of the ${REPOSITORY_TOKEN} of secret set ${secretSetId}, so write a valid token with tumpel config apply, or install the GitHub App with tumpel github start, then send the turn again`,
-    };
-  }
-  const { id, login } = answer.value;
-  return { kind: "Identity", identity: { gitAuthorName: login, gitAuthorEmail: noreply(id, login) } };
+  return answer.ok ? { ok: true, value: { githubUserId: answer.value.id, login: answer.value.login } } : answer;
+};
+
+export const botUserId = async (
+  fetcher: Fetch,
+  api: string,
+  slug: string,
+  bearer: string | null,
+): Promise<GitHubAnswer<number>> => {
+  const answer = await callGitHub(
+    fetcher,
+    { method: "GET", url: `${api}/users/${botLogin(slug)}`, accept: API_MEDIA_TYPE, bearer, body: null },
+    GitHubBotUserSchema,
+    "GitHubBotUser",
+  );
+  return answer.ok ? { ok: true, value: answer.value.id } : answer;
 };
 
 export const REPOSITORY_TOKEN = "GITHUB_TOKEN";

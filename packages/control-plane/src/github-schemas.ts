@@ -78,6 +78,10 @@ export const GitHubInstallationRecordSchema = z.object({
   account: GitHubAccountSchema,
 });
 
+export const GitHubBotUserSchema = z.object({
+  id: GitHubIdSchema,
+});
+
 export const GitHubUserSchema = z.object({
   id: GitHubIdSchema,
   login: GitHubLoginSchema,

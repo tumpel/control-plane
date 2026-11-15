@@ -24,6 +24,7 @@ import tenant0023 from "../migrations/tenant/0023_namespace_audience_defined.sql
 import tenant0024 from "../migrations/tenant/0024_session_issue_keys.sql";
 import tenant0025 from "../migrations/tenant/0025_derived_git_identity.sql";
 import tenant0026 from "../migrations/tenant/0026_prebuild_runs.sql";
+import tenant0027 from "../migrations/tenant/0027_secret_set_github_users.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -53,4 +54,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0024_session_issue_keys", sql: tenant0024 },
   { name: "0025_derived_git_identity", sql: tenant0025 },
   { name: "0026_prebuild_runs", sql: tenant0026 },
+  { name: "0027_secret_set_github_users", sql: tenant0027 },
 ];

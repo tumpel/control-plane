@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   CredentialHandoverSchema,
-  type RepositoryCloneFailureCauseSchema,
   SecretSetCreateSchema,
   SecretSetSchema,
   type SessionIssueSchema,
@@ -29,23 +28,25 @@ import {
 import {
   type CredentialRefusal,
   checkCredential,
-  type DispatchVariable,
   dispatchVariables,
   type SecretKey,
   type SecretMember,
 } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
 import {
-  type CommitIdentityAnswer,
+  botLogin,
+  botUserId,
+  type CommitIdentity,
   commitIdentity,
   type GitHubRepository,
   githubRepository,
   type Minted,
   mintInstallationToken,
   REPOSITORY_TOKEN,
+  type RepositoryCredentialSource,
   repositoryCredential,
 } from "./github.ts";
-import { appKey, installationOf, storedApp } from "./github-store.ts";
+import { appKey, installationOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import { type Host, hostOf } from "./hosts";
 import type { Env } from "./index";
@@ -71,6 +72,7 @@ export type IssueOfSession = Omit<SessionIssue, "sessionId">;
 type TurnFailureReason = TurnFailure["reason"];
 type SessionState = Session["state"];
 export type StopFailure = z.infer<typeof StopFailureSchema>;
+type IdentityAnswer = { kind: "Identity"; identity: CommitIdentity } | { kind: "Refused"; detail: string };
 
 export interface NewSession {
   principalId: string;
@@ -439,29 +441,8 @@ export class TenantSessions extends DurableObject<Env> {
     return row.name;
   }
 
-  private cloneFailureDetail(
-    session: SessionRow,
-    turnId: string,
-    cause: z.infer<typeof RepositoryCloneFailureCauseSchema>,
-    hostDetail: string,
-  ): string {
-    const name = this.secretSetName(session);
-    const [handover] = this.ctx.storage.sql
-      .exec<{ variable_names: string }>(
-        "SELECT variable_names FROM credential_handovers WHERE turn_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        turnId,
-      )
-      .toArray();
-    if (handover === undefined) {
-      throw new Error(
-        `host ${session.host_id} reported a clone failure for turn ${turnId}, which no credential was handed over for`,
-      );
-    }
-    const names = CredentialHandoverSchema.shape.variableNames.parse(JSON.parse(handover.variable_names));
-    if (cause !== "Refused" || names.includes("GITHUB_TOKEN")) {
-      return `${hostDetail}. The persona runs on secret set ${name}`;
-    }
-    return `${hostDetail}. A private repository needs a Variable member GITHUB_TOKEN with read and write access in secret set ${name}; add it with tumpel config apply, then send the turn again`;
+  private cloneFailureDetail(session: SessionRow, hostDetail: string): string {
+    return `${hostDetail}. The persona runs on secret set ${this.secretSetName(session)}`;
   }
 
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
@@ -533,20 +514,56 @@ export class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  protected async boxIdentity(
-    tenantId: string,
-    secretSetId: string,
-    variables: DispatchVariable[],
-  ): Promise<CommitIdentityAnswer> {
-    const installed = (await installationOf(this.env.DB, tenantId)) !== null;
-    const app = installed ? await storedApp(this.env.DB) : null;
-    if (installed && app === null) {
-      throw new Error(
-        `tenant ${tenantId} is linked to a GitHub installation, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
-      );
+  private async botIdentity(token: string): Promise<IdentityAnswer> {
+    const app = await storedApp(this.env.DB);
+    if (app === null) {
+      return {
+        kind: "Refused",
+        detail:
+          "the stage's GitHub App was removed after it minted the repository token; create it again at /github/app/setup, install it with tumpel github start, then send the turn again",
+      };
     }
-    const token = variables.find((variable) => variable.name === REPOSITORY_TOKEN)?.value ?? null;
-    return commitIdentity((url, init) => fetch(url, init), this.env.GITHUB_API_ORIGIN, app, token, secretSetId);
+    const login = botLogin(app.slug);
+    if (app.botUserId !== null) {
+      return { kind: "Identity", identity: commitIdentity({ githubUserId: app.botUserId, login }) };
+    }
+    const read = await botUserId((url, init) => fetch(url, init), this.env.GITHUB_API_ORIGIN, app.slug, token);
+    if (!read.ok) {
+      return {
+        kind: "Refused",
+        detail: `${read.detail}; the box commits as ${login}, whose GitHub user id the control plane reads once from GitHub, so send the turn again`,
+      };
+    }
+    await storeBotUserId(this.env.DB, read.value);
+    return { kind: "Identity", identity: commitIdentity({ githubUserId: read.value, login }) };
+  }
+
+  private async commitIdentityOf(
+    minted: Minted,
+    source: RepositoryCredentialSource,
+    secretSetId: string,
+    turnId: string,
+  ): Promise<IdentityAnswer> {
+    if (minted.kind === "Minted") return this.botIdentity(minted.token);
+    if (source === "None") {
+      return {
+        kind: "Refused",
+        detail: `turn ${turnId} has no GitHub credential to clone, commit and push with: no GitHub App installation of the tenant covers its repository and secret set ${secretSetId} holds no ${REPOSITORY_TOKEN}; install the GitHub App with tumpel github start, or add a Variable member ${REPOSITORY_TOKEN} with tumpel config apply, then send the turn again`,
+      };
+    }
+    const [user] = this.ctx.storage.sql
+      .exec<{ github_user_id: number; login: string }>(
+        "SELECT github_user_id, login FROM secret_set_github_users WHERE secret_set_id = ?",
+        secretSetId,
+      )
+      .toArray();
+    if (user === undefined) {
+      return {
+        kind: "Refused",
+        detail: `secret set ${secretSetId} holds a ${REPOSITORY_TOKEN} written before the control plane read its GitHub user; write it again with tumpel config apply, then send the turn again`,
+      };
+    }
+    return { kind: "Identity", identity: commitIdentity({ githubUserId: user.github_user_id, login: user.login }) };
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
@@ -1288,12 +1305,12 @@ export class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", credential.detail, iso(now));
       return { kind: "Withdrawn" };
     }
-    const identity = await this.boxIdentity(tenantId, secretSetId, dispatch.variables);
-    if (identity.kind === "Unresolved") {
-      await this.failTurn(tenantId, turnId, "CommitIdentityUnresolved", identity.detail, iso(now));
+    const { variables, source } = credential;
+    const identity = await this.commitIdentityOf(minted, source, secretSetId, turnId);
+    if (identity.kind === "Refused") {
+      await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", identity.detail, iso(now));
       return { kind: "Withdrawn" };
     }
-    const { variables, source } = credential;
     const handover = {
       credentialHandoverId: crypto.randomUUID(),
       turnId,
@@ -1677,7 +1694,7 @@ export class TenantSessions extends DurableObject<Env> {
       });
     }
     if (message.type === "TurnRepositoryCloneFailed") {
-      const detail = this.cloneFailureDetail(session, turn.turn_id, message.cause, message.detail);
+      const detail = this.cloneFailureDetail(session, message.detail);
       return this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt);
     }
     if (message.type === "TurnFailed") {
