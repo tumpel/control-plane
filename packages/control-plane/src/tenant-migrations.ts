@@ -9,6 +9,7 @@ import tenant0008 from "../migrations/tenant/0008_persona_git_identity.sql";
 import tenant0009 from "../migrations/tenant/0009_stop_failures.sql";
 import tenant0010 from "../migrations/tenant/0010_persona_git_identity_required.sql";
 import tenant0011 from "../migrations/tenant/0011_credential_handover_id.sql";
+import tenant0012 from "../migrations/tenant/0012_repository_credential_source.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -23,4 +24,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0009_stop_failures", sql: tenant0009 },
   { name: "0010_persona_git_identity_required", sql: tenant0010 },
   { name: "0011_credential_handover_id", sql: tenant0011 },
+  { name: "0012_repository_credential_source", sql: tenant0012 },
 ];

@@ -18,6 +18,7 @@ const NOUNS = {
   HarnessCatalog: "harness",
   Personas: "persona",
   SecretSets: "secret-set",
+  GitHubConnections: "github",
   Sessions: "session",
   Turns: "turn",
   Transcripts: "transcript",
