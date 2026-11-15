@@ -10,7 +10,7 @@ import {
 import type { z } from "zod";
 import { type CredentialRefusal, checkCredential } from "./dispatch-variables.ts";
 import { HARNESS_CATALOG, IMAGE_ARCHITECTURES, pinnedEntry } from "./harness-catalog";
-import { hostOf, listHosts, type Outcome, type Refused } from "./hosts";
+import { type Host, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -141,6 +141,16 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
   });
 };
 
+const stranded = (session: Session, hosts: Host[], missingTurnIds: string[]): Refused => {
+  const host = hosts.find((listed) => listed.hostId === session.hostId);
+  return refuse(409, {
+    code: "HostOffline",
+    title: "Host offline",
+    detail: `session ${session.sessionId} runs on host ${host === undefined ? session.hostId : `${host.name} (${host.hostId})`}, which is ${host?.state ?? "gone"}, and its snapshots miss completed turns ${missingTurnIds.join(", ")}, so it cannot move to another host`,
+    fix: "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
+  });
+};
+
 const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
 
 export const startSession = async (
@@ -221,10 +231,11 @@ export const sendTurn = async (
   const session = await tenant.getSession(caller.tenantId, sessionId);
   if (session === null) return sessionNotFound(sessionId);
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
-  const offline = await hostOffline(env, caller, session, "send the turn again");
-  if (offline !== null) return offline;
-  const sent = await tenant.sendTurn(caller.tenantId, sessionId, prompt, now);
+  const hosts = await listHosts(env.DB, caller.tenantId);
+  const sent = await tenant.sendTurn(caller.tenantId, sessionId, prompt, hosts, now);
   if (sent.kind === "Sent") return ok(sent.turn);
+  if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
+  if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
   if (sent.kind === "NotFound") return sessionNotFound(sessionId);
   if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");
   if (sent.kind === "Stopping") {

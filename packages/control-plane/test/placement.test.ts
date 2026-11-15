@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HostSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { type Placement, placeSession } from "../src/placement.ts";
+import { placeSession, placeTurn, type TurnPlacement } from "../src/placement.ts";
 
 type Host = z.infer<typeof HostSchema>;
 
@@ -21,7 +21,7 @@ const HOST: Host = {
   updatedAt: 0,
 };
 
-const placed = (placement: Placement): string => {
+const placed = (placement: TurnPlacement): string => {
   assert.equal(placement.kind, "Placed", JSON.stringify(placement));
   return placement.kind === "Placed" ? placement.host.name : "";
 };
@@ -151,4 +151,46 @@ test("a tenant whose hosts all run a turn in every slot is refused with each hos
     ["arm", "NoImage"],
     ["gone", "NotOnline"],
   ]);
+});
+
+test("a turn of a session whose host is offline moves to another online host when a snapshot holds its last completed turn", () => {
+  const hosts: Host[] = [
+    { ...HOST, hostId: "lost", name: "lost", state: "Offline" },
+    { ...HOST, hostId: "spare", name: "spare" },
+  ];
+  const spare = {
+    hostId: "spare",
+    tenantId: "tenant-placement",
+    boxCapacity: 4,
+    boxesRunning: 1,
+    boxesWarm: 0,
+    loadAverage: 0.5,
+    memoryAvailableMib: 4096,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const placement = placeTurn("lost", hosts, [spare], ["Amd64"], ["turn-1", "turn-2"], new Set(["turn-2"]));
+  assert.equal(placed(placement), "spare");
+});
+
+test("a turn of a session whose host is offline is stranded, naming the completed turns no snapshot holds", () => {
+  const hosts: Host[] = [
+    { ...HOST, hostId: "lost", name: "lost", state: "Offline" },
+    { ...HOST, hostId: "spare", name: "spare" },
+  ];
+  const spare = {
+    hostId: "spare",
+    tenantId: "tenant-placement",
+    boxCapacity: 4,
+    boxesRunning: 0,
+    boxesWarm: 0,
+    loadAverage: 0.5,
+    memoryAvailableMib: 4096,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  assert.deepEqual(placeTurn("lost", hosts, [spare], ["Amd64"], ["turn-1", "turn-2", "turn-3"], new Set(["turn-1"])), {
+    kind: "Stranded",
+    missingTurnIds: ["turn-2", "turn-3"],
+  });
 });
