@@ -5,7 +5,7 @@ import {
   OAuthTokenSchema,
   ProtectedResourceMetadataSchema,
 } from "@tumpel/api/schemas";
-import type { z } from "zod";
+import { z } from "zod";
 import { base64Url, randomToken, sameSecret, sha256Hex } from "./crypto";
 import type { OAuthErrorCode } from "./http";
 import type { Caller, Role } from "./identity";
@@ -476,28 +476,25 @@ export const callerForAccessToken = async (db: D1Database, token: string, now: n
   return row === null ? null : { tenantId: row.tenant_id, principalId: row.principal_id, role: row.role };
 };
 
+const RegisteredRedirects = z.tuple([z.url()], z.url());
+
 export const listGrants = async (db: D1Database, caller: Caller, now: number): Promise<OAuthGrant[]> => {
   const rows = await db
     .prepare(
-      `SELECT c.client_id, c.client_name, c.redirect_uris, MAX(t.created_at) AS last_used_at
+      `SELECT c.client_id, c.client_name, c.redirect_uris, MAX(t.created_at) AS last_issued_at
       FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id
       WHERE t.tenant_id = ? AND t.principal_id = ? AND t.spent = 0 AND t.expires_at > ?
-      GROUP BY c.client_id ORDER BY last_used_at DESC`,
+      GROUP BY c.client_id ORDER BY last_issued_at DESC`,
     )
     .bind(caller.tenantId, caller.principalId, now)
-    .all<{ client_id: string; client_name: string; redirect_uris: string; last_used_at: number }>();
-  return rows.results.flatMap((row) => {
-    const parsed: unknown = JSON.parse(row.redirect_uris);
-    const first = Array.isArray(parsed) ? parsed.find((uri): uri is string => typeof uri === "string") : undefined;
-    const redirect = first === undefined ? null : parsedUrl(first);
-    if (redirect === null) return [];
-    return [
-      OAuthGrantSchema.parse({
-        clientId: row.client_id,
-        clientName: row.client_name,
-        redirectOrigin: redirect.origin,
-        lastUsedAt: row.last_used_at,
-      }),
-    ];
+    .all<{ client_id: string; client_name: string; redirect_uris: string; last_issued_at: number }>();
+  return rows.results.map((row) => {
+    const [first] = RegisteredRedirects.parse(JSON.parse(row.redirect_uris));
+    return OAuthGrantSchema.parse({
+      clientId: row.client_id,
+      clientName: row.client_name,
+      redirectOrigin: new URL(first).origin,
+      lastIssuedAt: row.last_issued_at,
+    });
   });
 };

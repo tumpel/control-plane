@@ -340,7 +340,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/oauth-grants",
     NO_ARGUMENTS,
-    "List the OAuth clients, such as this connector or the dashboard, that hold a live token for you in this tenant. Returns the OAuthGrant[] of GET /v1/oauth-grants: clientId, clientName, redirectOrigin and lastUsedAt.",
+    "List the OAuth clients, such as this connector or the dashboard, that hold a live token for you in this tenant. Returns the OAuthGrant[] of GET /v1/oauth-grants: clientId, clientName, redirectOrigin and lastIssuedAt.",
   ),
   rest(
     "tumpel_config_plan",
