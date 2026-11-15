@@ -100,3 +100,17 @@ export const readCookie = (header: string | null, name: string): string | null =
   }
   return null;
 };
+
+export const appSetupPage = (email: string, manifest: unknown, action: string, owner: string): Response =>
+  page(
+    200,
+    "Create the GitHub App",
+    `<p>Signed in as ${escapeHtml(email)}. This stage has no GitHub App yet. Creating it is a one-time step: GitHub shows the App this manifest describes, owned by ${escapeHtml(owner)}, and sends you back here once it exists.</p>
+<p>It asks for read and write access to contents, pull requests, issues, checks, statuses, workflows and discussions, and read access to actions and metadata. It asks for no administration, members, organization or secrets access.</p>
+<p>To create it under an organization instead, open this page with <code>?organization=&lt;login&gt;</code>.</p>
+<form method="post" action="${escapeHtml(action)}"><input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(manifest))}">
+<button type="submit">Create the GitHub App on GitHub</button></form>`,
+  );
+
+export const linkPage = (status: number, title: string, text: string, href: string, label: string): Response =>
+  page(status, title, `<p>${escapeHtml(text)}</p><p><a href="${escapeHtml(href)}">${escapeHtml(label)}</a></p>`);

@@ -39,7 +39,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
+  "tumpel runs coding harness sessions on machines the user's tenant owns. Every tool calls the tumpel REST API as the signed-in principal: tumpel_whoami names the tenant, tumpel_host_* add, label and retire machines, tumpel_persona_* and tumpel_harness_* shape what runs, and tumpel_secret_set_* read key names and draft config entries, since secret values are written only by tumpel config apply on the CLI. tumpel_github_start answers the URL that connects the tenant's GitHub through the GitHub App, and tumpel_github_get reads the connection. tumpel_session_start runs a session on an online host, tumpel_turn_send sends its next prompt, tumpel_session_stop frees its box, tumpel_session_archive deletes its snapshots, and tumpel_transcript_read reads what the harness wrote, page by page: pass the cursor of the last page as after, and compact true to poll a live turn without tool output.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -222,6 +222,20 @@ export const TOOLS: ToolDefinition[] = [
     request: null,
     answer: "configSecretSet",
   },
+  rest(
+    "tumpel_github_get",
+    "GET",
+    "/v1/github-connection",
+    NO_ARGUMENTS,
+    "Read the tenant's GitHub connection. Returns the GitHubConnection of GET /v1/github-connection: link.state is Connected with its installation, NotConnected, or AppMissing with the setupUrl where a person creates the stage's GitHub App once.",
+  ),
+  rest(
+    "tumpel_github_start",
+    "POST",
+    "/v1/github-connection/start",
+    NO_ARGUMENTS,
+    "Get the URL where a person installs the stage's GitHub App for the tenant. Returns the GitHubInstallStart of POST /v1/github-connection/start: {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of the installed account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
+  ),
   rest(
     "tumpel_secret_set_list",
     "GET",

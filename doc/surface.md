@@ -6,7 +6,7 @@ fails when an operation lacks a tool or a command, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Personas `persona`, SecretSets `secret-set`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`.
+Identity `(none)`, Devices `devices`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`.
 `EnrolmentTokens_mint` takes the verb `mint-token`, `Turns_getFailure` the verb `failure`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. The CLI's `transcript read` takes a turnId and reads that turn's lines of its
@@ -21,6 +21,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Devices_list`                     | `tumpel_devices_list`          | `tumpel devices list`          |
 | `Devices_revoke`                   | `tumpel_devices_revoke`        | `tumpel devices revoke`        |
 | `EnrolmentTokens_mint`             | `tumpel_host_mint_token`       | `tumpel host mint-token`       |
+| `GitHubConnections_get`            | `tumpel_github_get`            | `tumpel github get`            |
+| `GitHubConnections_start`          | `tumpel_github_start`          | `tumpel github start`          |
 | `HarnessCatalog_list`              | `tumpel_harness_list`          | `tumpel harness list`          |
 | `HarnessCatalog_listPins`          | `tumpel_harness_list_pins`     | `tumpel harness list-pins`     |
 | `HarnessCatalog_pin`               | `tumpel_harness_pin`           | `tumpel harness pin`           |
@@ -59,4 +61,4 @@ nothing: the server cannot read your environment, so they return the config entr
 Excluded by rule:
 
 - browser-only: signed in by the identity assertion: `DeviceFlow_approve`, `DeviceFlow_deny`, `Tenants_signUp`.
-- OAuth, device-flow and enrolment wire: no principal: `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`.
+- OAuth, device-flow and enrolment wire: no principal: `WellKnown_authorizationServer`, `WellKnown_authorizationServerForMcp`, `WellKnown_protectedResource`, `WellKnown_protectedResourceForMcp`, `GitHubWebhooks_receive`, `health`, `OAuth_authorize`, `OAuth_register`, `OAuth_token`, `DeviceFlow_start`, `DeviceFlow_token`, `Hosts_enrol`.

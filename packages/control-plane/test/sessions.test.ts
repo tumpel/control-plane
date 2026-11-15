@@ -448,13 +448,16 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
 
   const handovers = await tool("tumpel_session_handovers", { sessionId }, CredentialHandoverSchema.array());
   assert.deepEqual(
-    handovers.map(({ sessionId: session, turnId: turn, hostId: host, boxId, variableNames }) => ({
-      session,
-      turn,
-      host,
-      boxId,
-      variableNames,
-    })),
+    handovers.map(
+      ({ sessionId: session, turnId: turn, hostId: host, boxId, variableNames, repositoryCredentialSource }) => ({
+        session,
+        turn,
+        host,
+        boxId,
+        variableNames,
+        repositoryCredentialSource,
+      }),
+    ),
     [
       {
         session: sessionId,
@@ -462,6 +465,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
         host: hostId,
         boxId: offer.boxId,
         variableNames: ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"],
+        repositoryCredentialSource: "SecretSet",
       },
     ],
   );

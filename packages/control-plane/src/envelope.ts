@@ -25,14 +25,28 @@ const split = (sealed: string): { iv: Uint8Array<ArrayBuffer>; body: Uint8Array<
 
 const freshIv = (): Uint8Array<ArrayBuffer> => crypto.getRandomValues(new Uint8Array(IV_BYTES));
 
-export const importKeyEncryptionKey = async (base64: string | undefined): Promise<CryptoKey> => {
+const keyBytes = (base64: string | undefined): Uint8Array<ArrayBuffer> => {
   const bytes = base64 === undefined || base64 === "" ? new Uint8Array() : fromBase64(base64);
   if (bytes.byteLength !== KEY_BYTES) {
     throw new Error(
       "SECRETS_KEK is not 32 bytes of base64; the Worker secret comes from the worker_secrets output of packages/control-plane/infra, which npm run deploy sets",
     );
   }
-  return crypto.subtle.importKey("raw", bytes, { name: "AES-GCM" }, false, ["wrapKey", "unwrapKey"]);
+  return bytes;
+};
+
+export const importKeyEncryptionKey = async (base64: string | undefined): Promise<CryptoKey> =>
+  crypto.subtle.importKey("raw", keyBytes(base64), { name: "AES-GCM" }, false, ["wrapKey", "unwrapKey"]);
+
+export const deriveSigningKey = async (base64: string | undefined, purpose: string): Promise<CryptoKey> => {
+  const root = await crypto.subtle.importKey("raw", keyBytes(base64), "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(), info: encoder.encode(purpose) },
+    root,
+    { name: "HMAC", hash: "SHA-256", length: 256 },
+    false,
+    ["sign", "verify"],
+  );
 };
 
 export const generateDataKey = (): Promise<CryptoKey> =>
@@ -74,15 +88,19 @@ export const seal = async (dataKey: CryptoKey, plaintext: string, context: strin
   return joined(iv, body);
 };
 
-export const unseal = async (dataKey: CryptoKey, sealed: string, context: string): Promise<string> => {
+const RESEAL_SECRET_SET = "write the secret set again with tumpel config apply --rewrite-secrets";
+
+export const unseal = async (
+  dataKey: CryptoKey,
+  sealed: string,
+  context: string,
+  fix: string = RESEAL_SECRET_SET,
+): Promise<string> => {
   const { iv, body } = split(sealed);
   const plaintext = await crypto.subtle
     .decrypt({ name: "AES-GCM", iv, additionalData: encoder.encode(context) }, dataKey, body)
     .catch((error: unknown) => {
-      throw new Error(
-        `secret ${context} does not decrypt with the tenant's data key; write the secret set again with tumpel config apply --rewrite-secrets`,
-        { cause: error },
-      );
+      throw new Error(`secret ${context} does not decrypt with its data key; ${fix}`, { cause: error });
     });
   return decoder.decode(plaintext);
 };

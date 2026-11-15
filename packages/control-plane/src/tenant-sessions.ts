@@ -30,6 +30,8 @@ import {
   type SecretMember,
 } from "./dispatch-variables.ts";
 import { generateDataKey, unseal } from "./envelope.ts";
+import { type Minted, mintInstallationToken, withRepositoryToken } from "./github.ts";
+import { appCredentials, installationOf } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
@@ -134,6 +136,7 @@ type HandoverRow = {
   host_id: string;
   box_id: string;
   variable_names: string;
+  repository_credential_source: string;
   created_at: number;
 };
 
@@ -252,6 +255,7 @@ const toHandover = (tenantId: string, row: HandoverRow): CredentialHandover =>
     hostId: row.host_id,
     boxId: row.box_id,
     variableNames: JSON.parse(row.variable_names),
+    repositoryCredentialSource: row.repository_credential_source,
     createdAt: row.created_at,
   });
 
@@ -444,6 +448,18 @@ export class TenantSessions extends DurableObject<Env> {
       members.push(toMember(row, value));
     }
     return members;
+  }
+
+  private async repositoryToken(tenantId: string, repository: string, now: number): Promise<Minted> {
+    const installation = await installationOf(this.env.DB, tenantId);
+    if (installation === null) return { kind: "NoToken" };
+    const app = await appCredentials(this.env.DB, keyStoreOf(this.env));
+    if (app === null) {
+      throw new Error(
+        `tenant ${tenantId} is linked to GitHub installation ${installation.installationId}, and the stage holds no GitHub App; create it again at /github/app/setup and install it with tumpel github start`,
+      );
+    }
+    return mintInstallationToken((url, init) => fetch(url, init), app, installation, repository, now);
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
@@ -788,7 +804,8 @@ export class TenantSessions extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec<HandoverRow>(
         `SELECT credential_handovers.credential_handover_id, turns.session_id, credential_handovers.turn_id,
-          credential_handovers.host_id, turns.box_id, credential_handovers.variable_names, credential_handovers.created_at
+          credential_handovers.host_id, turns.box_id, credential_handovers.variable_names,
+          credential_handovers.repository_credential_source, credential_handovers.created_at
         FROM credential_handovers JOIN turns USING (turn_id)
         WHERE turns.session_id = ? ORDER BY credential_handovers.created_at, credential_handovers.rowid`,
         sessionId,
@@ -904,20 +921,30 @@ export class TenantSessions extends DurableObject<Env> {
       );
       return { kind: "Withdrawn" };
     }
+    const minted = await this.repositoryToken(tenantId, session.repository, now);
+    if (minted.kind === "Refused") {
+      await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", minted.detail, iso(now));
+      return { kind: "Withdrawn" };
+    }
+    const { variables, source } = withRepositoryToken(
+      dispatch.variables,
+      minted.kind === "Minted" ? minted.token : null,
+    );
     const settings = settingsOf(this.env);
     const handover = {
       credentialHandoverId: crypto.randomUUID(),
       turnId,
       hostId,
-      variableNames: dispatch.variables.map((variable) => variable.name),
+      variableNames: variables.map((variable) => variable.name),
       createdAt: now,
     };
     this.ctx.storage.sql.exec(
-      "INSERT INTO credential_handovers (credential_handover_id, turn_id, host_id, variable_names, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO credential_handovers (credential_handover_id, turn_id, host_id, variable_names, repository_credential_source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       handover.credentialHandoverId,
       handover.turnId,
       handover.hostId,
       JSON.stringify(handover.variableNames),
+      source,
       handover.createdAt,
     );
     const stored = this.ctx.storage.sql
@@ -933,7 +960,7 @@ export class TenantSessions extends DurableObject<Env> {
       credential: {
         credentialHandoverId: handover.credentialHandoverId,
         expiresAt: iso(now + settings.dispatchGrantTtlSeconds * 1000),
-        variables: dispatch.variables,
+        variables,
       },
       lastLineSeq: session.last_line_seq,
       snapshots,
