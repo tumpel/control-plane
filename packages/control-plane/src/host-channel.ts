@@ -135,7 +135,10 @@ export class HostChannel extends DurableObject<Env> {
     attachment.connection = connection;
     if (event.kind === "Message") {
       const { message: received } = event;
-      await this.ctx.blockConcurrencyWhile(() => this.forward(host.host_id, received));
+      await this.ctx.blockConcurrencyWhile(async () => {
+        const reply = await this.forward(host.host_id, received);
+        if (reply !== null) await control.send(attachment.connection, reply, context);
+      });
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
@@ -191,9 +194,9 @@ export class HostChannel extends DurableObject<Env> {
     return row.tenant_id;
   }
 
-  private async forward(hostId: string, message: HostMessage): Promise<void> {
+  private async forward(hostId: string, message: HostMessage): Promise<StoredControlMessage | null> {
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).hostMessage(tenantId, hostId, message);
+    return this.env.TENANT.getByName(tenantId).hostMessage(tenantId, hostId, message);
   }
 
   private host(): HostRow | null {
