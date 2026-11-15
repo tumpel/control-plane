@@ -4,17 +4,19 @@ import type { z } from "zod";
 export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
 export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSchema>;
 
+export const CLAUDE_CODE_VERSION = "2.1.325";
+
 export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEntrySchema.array().parse([
   {
     harness: "ClaudeCode",
-    harnessVersion: "2.0.0",
+    harnessVersion: CLAUDE_CODE_VERSION,
     provider: "Anthropic",
     credentialVariables: [
       { kind: "ApiKey", variable: "ANTHROPIC_API_KEY" },
       { kind: "SubscriptionToken", variable: "CLAUDE_CODE_OAUTH_TOKEN" },
     ],
     personaFilePaths: [".claude/settings.json", ".claude/CLAUDE.md", ".claude.json"],
-    installRecipe: "npm:@anthropic-ai/claude-code@2.0.0",
+    installRecipe: `npm:@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
   },
   {
     harness: "Codex",

@@ -19,6 +19,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
@@ -241,7 +242,7 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   const versions = EffectiveHarnessVersionSchema.array().parse(await getJson("/v1/harnesses/pins"));
   assert.deepEqual(
     versions.filter((row) => row.pinned).map((pin) => [pin.harness, pin.harnessVersion]),
-    [["ClaudeCode", "2.0.0"]],
+    [["ClaudeCode", CLAUDE_CODE_VERSION]],
   );
   assert.deepEqual(HostSchema.parse(await getJson(`/v1/hosts/${hostId}`)).labels, ["gpu", "region-eu"]);
 

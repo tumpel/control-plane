@@ -23,6 +23,7 @@ import {
 } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
+import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
@@ -249,7 +250,7 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   assert.equal(ProblemSchema.parse(await unreleased.json()).code, "ImageNotReleased");
   await toolDone("tumpel_harness_unpin", { harness: entry.harness });
   assert.deepEqual(await rest(EffectiveHarnessVersionSchema.array(), "GET", "/v1/harnesses/pins"), [
-    { harness: "ClaudeCode", harnessVersion: "2.0.0", pinned: false },
+    { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION, pinned: false },
     { harness: "Codex", harnessVersion: "0.50.0", pinned: false },
     { harness: "OpenCode", harnessVersion: "1.0.0", pinned: false },
     { harness: "PiDev", harnessVersion: "0.10.0", pinned: false },

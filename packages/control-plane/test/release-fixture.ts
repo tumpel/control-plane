@@ -1,4 +1,5 @@
 import { ChannelProtocol } from "@tumpel/api/schemas";
+import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import type { ReleaseManifest } from "../src/releases.ts";
 
 export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
@@ -10,7 +11,7 @@ export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
   images: [
     {
       harness: "ClaudeCode",
-      harnessVersion: "2.0.0",
+      harnessVersion: CLAUDE_CODE_VERSION,
       architecture: "Amd64",
       imageDigest: "b".repeat(64),
       kernelDigest: "c".repeat(64),
