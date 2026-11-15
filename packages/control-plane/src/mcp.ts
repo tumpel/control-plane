@@ -347,7 +347,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/tenant-config/plan",
     TenantConfigPlanRequestSchema,
-    "Plan the changes that make the tenant match a TenantConfig, and change nothing. Send the config, the sha256 digest and sizeBytes of each persona file by its from path, and the expiresAt of each expiry variable. A persona, secret set or pin the config leaves out is deleted. Returns the ConfigPlan of POST /v1/tenant-config/plan: each change with its action, resource, name and description.",
+    "Plan the changes that make the tenant match a TenantConfig, and change nothing. Send the config, the sha256 digest and sizeBytes of each persona file by its from path, the expiresAt of each expiry variable, and in secretValues the names of the variables apply will send, never their values; an empty list keeps every kept secret set as it is. A persona, secret set or pin the config leaves out is deleted. Returns the ConfigPlan of POST /v1/tenant-config/plan: each change with its action, resource, name and description.",
   ),
   rest(
     "tumpel_config_apply",
