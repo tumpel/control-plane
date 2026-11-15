@@ -468,7 +468,7 @@ const personaWrite = async (
     const refused = credentialRefused(credential, `secret set ${secretSet.name}`, body.harness, `repeat ${operation}`);
     return { ok: false, response: problem(refused.status, refused.problem) };
   }
-  const checked = await checkFiles(entry, body.files, operation);
+  const checked = await checkFiles(entry, body.files ?? [], operation);
   if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
   const stored = await storeFiles(env.STORE, caller.tenantId, checked.files, operation);
   if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };

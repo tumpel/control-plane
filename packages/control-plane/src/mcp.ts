@@ -548,7 +548,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/prebuilds",
     PrebuildListQuerySchema,
-    "List the prebuilds of one repository, newest first.",
+    "List the prebuilds of one repository, or of the whole tenant when repository is left out, newest first.",
   ),
   rest(
     "tumpel_prebuild_list_latest",

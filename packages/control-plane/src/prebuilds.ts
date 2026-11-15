@@ -300,7 +300,12 @@ const repositoryUnreadable = (detail: string): Refused =>
     fix: "Give the GitHub App installation or the persona's GITHUB_TOKEN read access to the repository, then start the prebuild again",
   });
 
-export const listPrebuilds = async (env: Env, caller: Caller, repository: string): Promise<Outcome<Prebuild[]>> => {
+export const listPrebuilds = async (
+  env: Env,
+  caller: Caller,
+  repository: string | undefined,
+): Promise<Outcome<Prebuild[]>> => {
+  if (repository === undefined) return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, null));
   const target = githubRepository(repository);
   if (target === null) return notGitHub(repository);
   return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, repositoryUrl(target)));

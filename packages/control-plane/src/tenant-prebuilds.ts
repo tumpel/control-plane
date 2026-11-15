@@ -305,10 +305,10 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
   });
 
 export class TenantPrebuilds extends TenantSessions {
-  listPrebuilds(tenantId: string, repository: string): Prebuild[] {
+  listPrebuilds(tenantId: string, repository: string | null): Prebuild[] {
     return this.ctx.storage.sql
       .exec<PrebuildRow>(
-        `${PREBUILD_SELECT} WHERE repository = ? ORDER BY prebuilds.created_at DESC, prebuilds.rowid DESC`,
+        `${PREBUILD_SELECT} WHERE ?1 IS NULL OR repository = ?1 ORDER BY prebuilds.created_at DESC, prebuilds.rowid DESC`,
         repository,
       )
       .toArray()
