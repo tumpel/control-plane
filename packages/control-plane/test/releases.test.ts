@@ -86,7 +86,7 @@ test("current.json parses against ReleaseManifest, keeps its channel protocol ve
   assert.match(refused("{"), /current\.json in the release bucket is not JSON/);
   assert.match(
     refused(JSON.stringify({ ...RELEASE, commit: "main" })),
-    /does not match ReleaseManifest in packages\/api\/release\.tsp: commit/,
+    /does not match ReleaseManifest in typespec\/lib\/release\.tsp: commit/,
   );
   assert.match(refused(JSON.stringify({ ...RELEASE, supervisors: [] })), /supervisors/);
   assert.match(refused(JSON.stringify({ ...RELEASE, clis: [] })), /clis/);
