@@ -38,7 +38,7 @@ export type ClaudeSetupBoxCode = Extract<ControlMessage, { type: "ClaudeSetupBox
 export type StoredClaudeSetupOffer = Pick<ClaudeSetupBoxOffer, "type" | "claudeSetupId" | "boxId">;
 export type StoredClaudeSetupCode = Pick<ClaudeSetupBoxCode, "type" | "claudeSetupId" | "boxId">;
 export type StoredControlMessage =
-  | Exclude<ControlMessage, { type: "TurnOffer" | "TurnWithdrawn" | "ClaudeSetupBoxOffer" | "ClaudeSetupBoxCode" }>
+  | Exclude<ControlMessage, { type: "TurnOffer" | "ClaudeSetupBoxOffer" | "ClaudeSetupBoxCode" }>
   | StoredOffer
   | StoredClaudeSetupOffer
   | StoredClaudeSetupCode;
