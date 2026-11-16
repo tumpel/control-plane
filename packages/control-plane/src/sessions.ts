@@ -11,6 +11,7 @@ import {
   TurnSendSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import { compactorOf } from "./compact.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
@@ -37,15 +38,7 @@ import type {
   TurnFailure,
 } from "./tenant-sessions";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
-import {
-  compactorOf,
-  DEFAULT_PAGE_BYTES,
-  decodeLines,
-  emptyPage,
-  type Page,
-  pageOf,
-  type TranscriptLine,
-} from "./transcript";
+import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type TranscriptLine } from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 type CompactTranscriptTurn = z.infer<typeof CompactTranscriptTurnSchema>;
@@ -493,7 +486,7 @@ export const readTranscript = async (
     return refuse(422, {
       code: "InvalidRequest",
       title: "No compact form for the harness",
-      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; only Claude Code has one`,
+      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; Claude Code, Codex, OpenCode and Pi have one`,
       fix: "Read the transcript without compact",
     });
   }
