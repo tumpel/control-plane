@@ -159,7 +159,7 @@ export class HostChannel extends DurableObject<Env> {
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
-    if (event.kind === "Welcomed") await this.hello(host.host_id, event.boxCapacity, event.usage, now);
+    if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (connection.phase === "Open" && now - attachment.lastSentAt >= HEARTBEAT_INTERVAL_MS / 2) control.beat(context);
     socket.serializeAttachment(attachment);
     await this.ctx.storage.setAlarm(now + HEARTBEAT_DEADLINE_MS);
@@ -196,9 +196,12 @@ export class HostChannel extends DurableObject<Env> {
     if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + HEARTBEAT_DEADLINE_MS);
   }
 
-  private async hello(hostId: string, boxCapacity: number, usage: HostUsage, now: number): Promise<void> {
+  private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
+    await this.env.DB.prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?")
+      .bind(welcomed.supervisorVersion, now, hostId)
+      .run();
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).hostHello(hostId, boxCapacity, usage, now);
+    await this.env.TENANT.getByName(tenantId).hostHello(hostId, welcomed.boxCapacity, welcomed.usage, now);
   }
 
   private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {

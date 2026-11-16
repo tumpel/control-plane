@@ -44,10 +44,12 @@ export interface ControlContext {
 
 export type ControlEvent =
   | { kind: "None" }
-  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage }
+  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "Message"; message: HostMessage }
   | { kind: "Closed"; code: number; reason: string };
+
+export type Welcomed = Extract<ControlEvent, { kind: "Welcomed" }>;
 
 interface Received {
   connection: ControlConnection;
@@ -123,7 +125,12 @@ const hello = async (
   for (const frame of resent) context.port.send(frame);
   return {
     connection: { phase: "Open" },
-    event: { kind: "Welcomed", boxCapacity: envelope.boxCapacity, usage: envelope.usage },
+    event: {
+      kind: "Welcomed",
+      boxCapacity: envelope.boxCapacity,
+      usage: envelope.usage,
+      supervisorVersion: envelope.supervisorVersion,
+    },
   };
 };
 

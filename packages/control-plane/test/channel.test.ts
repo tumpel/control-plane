@@ -174,7 +174,7 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   const link = channel.connect();
   await link.hello();
   assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.events, [{ kind: "Welcomed", boxCapacity: 8, usage: USAGE }]);
+  assert.deepEqual(link.events, [{ kind: "Welcomed", boxCapacity: 8, usage: USAGE, supervisorVersion: "0.1.0" }]);
   assert.deepEqual(
     link.sent.map((envelope) => envelope.type),
     ["Challenge", "Welcome"],
