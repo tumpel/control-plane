@@ -1717,3 +1717,50 @@ test("a turn a host refuses HostUpdating is offered to another host at once", as
   assert.equal((await getJson(`/v1/turns/${started.turn.turnId}`, TurnSchema)).state, "Offered");
   for (const side of sides.values()) side.close();
 });
+
+test("two hosts refusing their turns HostUpdating at the same moment each hand the turn to the other", async () => {
+  const first = await enrol("crossing-1");
+  const second = await enrol("crossing-2");
+  const sides = new Map([
+    [first.id, await HostSide.connect(first.id, first.key, 32)],
+    [second.id, await HostSide.connect(second.id, second.key, 32)],
+  ]);
+  const side = (id: string): HostSide => {
+    const found = sides.get(id);
+    if (found === undefined) throw new Error(`no host side for ${id}`);
+    return found;
+  };
+  await hostState(first.id, "Online");
+  await hostState(second.id, "Online");
+  const start = await sessionStart();
+  const responses = await Promise.all(
+    ["crossing one", "crossing two"].map((prompt) => postJson("/v1/sessions", { ...start, prompt }, bearer)),
+  );
+  const started = [];
+  for (const response of responses) {
+    assert.equal(response.status, 200, await response.clone().text());
+    started.push(StartedSessionSchema.parse(await response.json()));
+  }
+  assert.deepEqual(started.map(({ session }) => session.hostId).toSorted(), [first.id, second.id].toSorted());
+  for (const { session, turn } of started) {
+    assert.equal((await side(session.hostId).next("TurnOffer")).turnId, turn.turnId);
+  }
+  for (const { session, turn } of started) {
+    side(session.hostId).send({
+      type: "TurnFailed",
+      turnId: turn.turnId,
+      reason: "HostUpdating",
+      detail: "this host is swapping to a new supervisor binary",
+      failedAt: new Date().toISOString(),
+    });
+  }
+  for (const { session, turn } of started) {
+    const taking = session.hostId === first.id ? second.id : first.id;
+    const moved = await side(taking).next("TurnOffer");
+    assert.equal(moved.turnId, turn.turnId);
+    const placed = await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema);
+    assert.deepEqual({ hostId: placed.hostId, boxId: placed.boxId }, { hostId: taking, boxId: moved.boxId });
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
+  }
+  for (const side of sides.values()) side.close();
+});

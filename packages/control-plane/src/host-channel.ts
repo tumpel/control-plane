@@ -18,6 +18,7 @@ import { migrateDurableObject } from "./durable-migrate";
 import { problem } from "./http";
 import type { Env } from "./index";
 import { isSupervisorUpdate } from "./supervisor-updates";
+import type { HostReply, TurnHandoff } from "./tenant-sessions";
 
 const HOST_MIGRATIONS = [
   { name: "0001_host", sql: host0001 },
@@ -147,10 +148,14 @@ export class HostChannel extends DurableObject<Env> {
     socket.serializeAttachment(attachment);
     if (event.kind === "Message") {
       const { message: received } = event;
-      await this.ctx.blockConcurrencyWhile(async () => {
+      const handoff = await this.ctx.blockConcurrencyWhile(async (): Promise<TurnHandoff | null> => {
         const reply = await this.forward(host.host_id, received);
-        if (reply !== null) await control.send(attachment.connection, reply, context);
+        if (reply === null) return null;
+        if (reply.type === "TurnHandoff") return reply;
+        await control.send(attachment.connection, reply, context);
+        return null;
       });
+      if (handoff !== null) await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
@@ -211,7 +216,7 @@ export class HostChannel extends DurableObject<Env> {
     return row.tenant_id;
   }
 
-  private async forward(hostId: string, message: HostMessage): Promise<StoredControlMessage | null> {
+  private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
     const tenantId = await this.tenantOf(hostId);
     const tenant = this.env.TENANT.getByName(tenantId);
     if (isSupervisorUpdate(message)) {
