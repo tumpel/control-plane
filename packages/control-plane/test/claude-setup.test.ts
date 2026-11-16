@@ -67,6 +67,7 @@ test("the setup offer carries the box's image, its token URL and credential, and
     updated_at: 1_000_000_000,
   };
   const image = {
+    kind: "Full" as const,
     imageDigest: "a".repeat(64),
     kernelDigest: "b".repeat(64),
     manifestDigest: "c".repeat(64),

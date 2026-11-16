@@ -174,7 +174,14 @@ import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { noticeRelease } from "./release-notices.ts";
-import { cliKey, currentRelease, imagesFor, type ReleaseManifest, readRelease, supervisorKey } from "./releases";
+import {
+  bootArchitectures,
+  cliKey,
+  currentRelease,
+  type ReleaseManifest,
+  readRelease,
+  supervisorKey,
+} from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
@@ -725,7 +732,7 @@ const unreleasedPin = async (
   if (architectures.length === 0) return null;
   const release = await currentRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") return noRelease();
-  const carried = imagesFor(release, harness, harnessVersion).map((image) => image.architecture);
+  const carried = bootArchitectures(release, harness, harnessVersion);
   if (architectures.some((architecture) => carried.includes(architecture))) return null;
   return problem(422, {
     code: "ImageNotReleased",

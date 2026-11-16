@@ -1,9 +1,13 @@
 import { type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import type { BootImage } from "./channel/protocol.ts";
 import { issues } from "./http.ts";
+import type { Signer } from "./presign.ts";
 
 export type ReleaseManifest = z.infer<typeof ReleaseManifestSchema>;
 export type ReleaseImage = ReleaseManifest["images"][number];
+export type ReleaseBaseImage = ReleaseManifest["bases"][number];
+export type ReleaseHarnessLayer = ReleaseManifest["harnessLayers"][number];
 export type ReleaseSupervisor = ReleaseManifest["supervisors"][number];
 export type ReleaseCli = ReleaseManifest["clis"][number];
 export type HostArchitecture = z.infer<typeof HostArchitectureSchema>;
@@ -37,7 +41,13 @@ export const manifestKey = (image: ReleaseImage): string => `${imagePrefix(image
 
 export const rootfsKey = (image: ReleaseImage): string => `${imagePrefix(image)}/rootfs/${image.rootfsDigest}`;
 
-export const kernelKey = (image: ReleaseImage): string => `kernels/${arch(image.architecture)}/${image.kernelDigest}`;
+export const kernelKey = (image: ReleaseImage | ReleaseBaseImage): string =>
+  `kernels/${arch(image.architecture)}/${image.kernelDigest}`;
+
+const basePrefix = (base: ReleaseBaseImage): string => `images/base/${arch(base.architecture)}`;
+
+const layerPrefix = (layer: ReleaseHarnessLayer): string =>
+  `layers/${layer.harness}/${layer.harnessVersion}/${arch(layer.architecture)}`;
 
 const duplicates = (keys: string[]): string[] => [...new Set(keys.filter((key, index) => keys.indexOf(key) !== index))];
 
@@ -100,3 +110,80 @@ export const imagesFor = (release: ReleaseRead, harness: string, harnessVersion:
   release.kind === "Published"
     ? release.manifest.images.filter((image) => image.harness === harness && image.harnessVersion === harnessVersion)
     : [];
+
+export type ReleasedBoot =
+  | { kind: "Layered"; base: ReleaseBaseImage; layer: ReleaseHarnessLayer }
+  | { kind: "Full"; image: ReleaseImage };
+
+export const bootFor = (
+  release: ReleaseRead,
+  harness: string,
+  harnessVersion: string,
+  architecture: HostArchitecture,
+): ReleasedBoot | undefined => {
+  if (release.kind !== "Published") return undefined;
+  const base = release.manifest.bases.find((each) => each.architecture === architecture);
+  const layer = release.manifest.harnessLayers.find(
+    (each) => each.harness === harness && each.harnessVersion === harnessVersion && each.architecture === architecture,
+  );
+  if (base !== undefined && layer !== undefined) return { kind: "Layered", base, layer };
+  const image = imagesFor(release, harness, harnessVersion).find((each) => each.architecture === architecture);
+  return image === undefined ? undefined : { kind: "Full", image };
+};
+
+export const bootArchitectures = (
+  release: ReleaseRead,
+  harness: string,
+  harnessVersion: string,
+): HostArchitecture[] => {
+  if (release.kind !== "Published") return [];
+  const listed = [...release.manifest.images, ...release.manifest.bases].map((each) => each.architecture);
+  return [...new Set(listed)].filter(
+    (architecture) => bootFor(release, harness, harnessVersion, architecture) !== undefined,
+  );
+};
+
+export const bootImage = async (
+  signer: Signer,
+  boot: ReleasedBoot,
+  urlSeconds: number,
+  fetchSeconds: number,
+  now: number,
+): Promise<BootImage> => {
+  const at = new Date(now);
+  const get = (key: string): Promise<string> => signer.presign("GET", key, urlSeconds, at);
+  const downloadExpiresAt = new Date(now + urlSeconds * 1000).toISOString();
+  if (boot.kind === "Full") {
+    const { image } = boot;
+    return {
+      kind: "Full",
+      imageDigest: image.imageDigest,
+      kernelDigest: image.kernelDigest,
+      manifestDigest: image.manifestDigest,
+      imageUrl: await get(imageKey(image)),
+      kernelUrl: await get(kernelKey(image)),
+      manifestUrl: await get(manifestKey(image)),
+      downloadExpiresAt,
+      fetchSeconds,
+    };
+  }
+  const { base, layer } = boot;
+  return {
+    kind: "Layered",
+    base: {
+      imageDigest: base.imageDigest,
+      kernelDigest: base.kernelDigest,
+      manifestDigest: base.manifestDigest,
+      imageUrl: await get(`${basePrefix(base)}/${base.imageDigest}`),
+      kernelUrl: await get(kernelKey(base)),
+      manifestUrl: await get(`${basePrefix(base)}/${base.manifestDigest}`),
+    },
+    layer: {
+      layer,
+      layerUrl: await get(`${layerPrefix(layer)}/${layer.layerDigest}`),
+      manifestUrl: await get(`${layerPrefix(layer)}/${layer.manifestDigest}`),
+    },
+    downloadExpiresAt,
+    fetchSeconds,
+  };
+};

@@ -88,6 +88,7 @@ const setup = (revoked = false) => {
       snapshots: [],
       personaFiles: [],
       image: {
+        kind: "Full",
         imageDigest: "b".repeat(64),
         kernelDigest: "c".repeat(64),
         manifestDigest: "d".repeat(64),

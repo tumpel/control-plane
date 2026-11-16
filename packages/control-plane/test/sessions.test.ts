@@ -92,6 +92,8 @@ type Store = { put(key: string, value: string): Promise<unknown>; head(key: stri
 const IMAGE_DIGEST = "b".repeat(64);
 const KERNEL_DIGEST = "c".repeat(64);
 const MANIFEST_DIGEST = "d".repeat(64);
+const BASE_DIGEST = "3".repeat(64);
+const BASE_MANIFEST_DIGEST = "4".repeat(64);
 const RELEASE = {
   releaseVersion: "0.2.0",
   commit: "e".repeat(40),
@@ -118,6 +120,16 @@ const RELEASE = {
       layerDigest: "1".repeat(64),
       manifestDigest: "2".repeat(64),
       sizeBytes: 65536,
+    },
+  ],
+  bases: [
+    {
+      architecture: "Amd64",
+      imageDigest: BASE_DIGEST,
+      kernelDigest: KERNEL_DIGEST,
+      manifestDigest: BASE_MANIFEST_DIGEST,
+      ociDigest: "5".repeat(64),
+      rootfsDigest: "6".repeat(64),
     },
   ],
 };
@@ -576,18 +588,23 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     ["ticket-worker", "4242+ticket-worker@users.noreply.github.com"],
   );
   assert.equal(userReads, 1, "the control plane reads the token's GitHub user once, when the secret set is written");
+  const { image } = offer;
+  assert.ok(image.kind === "Layered", "a release with a base and the harness layer boots layered");
   assert.deepEqual(
-    [offer.image.imageDigest, offer.image.kernelDigest, offer.image.manifestDigest],
-    [IMAGE_DIGEST, KERNEL_DIGEST, MANIFEST_DIGEST],
+    [image.base.imageDigest, image.base.kernelDigest, image.base.manifestDigest, image.layer.layer.layerDigest],
+    [BASE_DIGEST, KERNEL_DIGEST, BASE_MANIFEST_DIGEST, "1".repeat(64)],
   );
+  const layers = `layers/ClaudeCode/${CLAUDE_CODE_VERSION}/amd64`;
   for (const [url, key] of [
-    [offer.image.imageUrl, `images/ClaudeCode/${CLAUDE_CODE_VERSION}/amd64/${IMAGE_DIGEST}`],
-    [offer.image.kernelUrl, `kernels/amd64/${KERNEL_DIGEST}`],
-    [offer.image.manifestUrl, `images/ClaudeCode/${CLAUDE_CODE_VERSION}/amd64/${MANIFEST_DIGEST}`],
+    [image.base.imageUrl, `images/base/amd64/${BASE_DIGEST}`],
+    [image.base.kernelUrl, `kernels/amd64/${KERNEL_DIGEST}`],
+    [image.base.manifestUrl, `images/base/amd64/${BASE_MANIFEST_DIGEST}`],
+    [image.layer.layerUrl, `${layers}/${"1".repeat(64)}`],
+    [image.layer.manifestUrl, `${layers}/${"2".repeat(64)}`],
   ]) {
     assert.match(url ?? "", new RegExp(`^${R2_STUB_ORIGIN}/tumpel-releases/${key}\\?X-Tumpel-Method=GET`));
   }
-  assert.equal(offer.image.fetchSeconds, IMAGE_FETCH_BUDGET_SECONDS);
+  assert.equal(image.fetchSeconds, IMAGE_FETCH_BUDGET_SECONDS);
   assert.deepEqual(
     [offer.credential.expiresAt, offer.personaFiles[0]?.downloadExpiresAt],
     [offer.image.downloadExpiresAt, offer.image.downloadExpiresAt],
@@ -1293,7 +1310,8 @@ test("a turn whose host fetches its image fails ImageFetchTimedOut after the fet
   const started = StartedSessionSchema.parse(await response.json());
   const offer = await host.next("TurnOffer");
   const fetching = Date.now();
-  host.send({ type: "TurnImageFetching", turnId: offer.turnId, imageDigest: offer.image.imageDigest });
+  const imageDigest = offer.image.kind === "Full" ? offer.image.imageDigest : offer.image.base.imageDigest;
+  host.send({ type: "TurnImageFetching", turnId: offer.turnId, imageDigest });
 
   const failed = await eventually(
     "the turn reading Failed",
@@ -1304,10 +1322,7 @@ test("a turn whose host fetches its image fails ImageFetchTimedOut after the fet
   assert.ok(failed.updatedAt - fetching >= (IMAGE_FETCH_BUDGET_SECONDS + CLAIM_BUDGET_SECONDS) * 1000);
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "ImageFetchTimedOut");
-  assert.match(
-    failure.detail,
-    new RegExp(`^host box started fetching guest image ${offer.image.imageDigest} for the turn`),
-  );
+  assert.match(failure.detail, new RegExp(`^host box started fetching guest image ${imageDigest} for the turn`));
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {

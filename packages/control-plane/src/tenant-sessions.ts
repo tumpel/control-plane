@@ -21,7 +21,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import {
-  type GuestImageDownload,
+  type BootImage,
   HEARTBEAT_DEADLINE_MS,
   type HostMessage,
   type HostUsage,
@@ -53,7 +53,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
-import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
+import { bootArchitectures, bootFor, bootImage, currentRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions";
@@ -733,7 +733,7 @@ export class TenantSessions extends DurableObject<Env> {
     return {
       harness,
       harnessVersion,
-      architectures: imagesFor(release, harness, harnessVersion).map((image) => image.architecture),
+      architectures: bootArchitectures(release, harness, harnessVersion),
     };
   }
 
@@ -744,17 +744,15 @@ export class TenantSessions extends DurableObject<Env> {
     claimSeconds: number,
     fetchSeconds: number,
     now: number,
-  ): Promise<{ kind: "Released"; image: GuestImageDownload } | { kind: "NotReleased"; detail: string }> {
+  ): Promise<{ kind: "Released"; image: BootImage } | { kind: "NotReleased"; detail: string }> {
     const host = await hostOf(this.env.DB, tenantId, hostId);
     if (host === null)
       throw new Error(
         `turn of session ${session.session_id} is offered to host ${hostId}, which tenant ${tenantId} does not list`,
       );
     const release = await currentRelease(this.env.RELEASES, now);
-    const image = imagesFor(release, session.harness, session.harness_version).find(
-      (each) => each.architecture === host.architecture,
-    );
-    if (image === undefined) {
+    const boot = bootFor(release, session.harness, session.harness_version, host.architecture);
+    if (boot === undefined) {
       return {
         kind: "NotReleased",
         detail: `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name}; pin a harness version the current release carries for ${host.architecture}, then send the turn again`,
@@ -766,21 +764,7 @@ export class TenantSessions extends DurableObject<Env> {
       this.env.RELEASES_ACCESS_KEY_ID,
       this.env.RELEASES_SECRET_ACCESS_KEY,
     );
-    const at = new Date(now);
-    const seconds = claimSeconds + fetchSeconds;
-    return {
-      kind: "Released",
-      image: {
-        imageDigest: image.imageDigest,
-        kernelDigest: image.kernelDigest,
-        manifestDigest: image.manifestDigest,
-        imageUrl: await signer.presign("GET", imageKey(image), seconds, at),
-        kernelUrl: await signer.presign("GET", kernelKey(image), seconds, at),
-        manifestUrl: await signer.presign("GET", manifestKey(image), seconds, at),
-        downloadExpiresAt: iso(now + seconds * 1000),
-        fetchSeconds,
-      },
-    };
+    return { kind: "Released", image: await bootImage(signer, boot, claimSeconds + fetchSeconds, fetchSeconds, now) };
   }
 
   startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
