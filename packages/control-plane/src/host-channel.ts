@@ -144,7 +144,7 @@ export class HostChannel extends DurableObject<Env> {
     attachment.lastReceivedAt = now;
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
-    socket.serializeAttachment(attachment);
+    this.keep(socket, attachment);
     if (event.kind === "Message") {
       const { message: received } = event;
       const handoff = await this.ctx.blockConcurrencyWhile(async (): Promise<TurnHandoff | null> => {
@@ -167,8 +167,8 @@ export class HostChannel extends DurableObject<Env> {
       now - attachment.lastSentAt >= (settingsOf(this.env).heartbeatIntervalSeconds * 1000) / 2
     )
       control.beat(context);
-    socket.serializeAttachment(attachment);
-    await this.ctx.storage.setAlarm(now + this.deadlineMs());
+    this.keep(socket, attachment);
+    await this.ctx.storage.setAlarm(attachment.lastReceivedAt + this.deadlineMs());
     if (event.kind !== "Welcomed") return;
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
@@ -198,6 +198,11 @@ export class HostChannel extends DurableObject<Env> {
     }
     await this.refreshPresence();
     if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + deadlineMs);
+  }
+
+  private keep(socket: WebSocket, attachment: Attachment): void {
+    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
+    socket.serializeAttachment(attachment);
   }
 
   private deadlineMs(): number {
