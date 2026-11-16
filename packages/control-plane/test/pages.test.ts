@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { SHELL_MARKER } from "@tumpel/pages";
 import { ProblemSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { TEST_SETTINGS } from "./timing.ts";
 
 const AUDIENCE = "tumpel-pages";
 const KID = "pages-key";
@@ -63,6 +64,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),

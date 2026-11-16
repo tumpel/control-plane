@@ -16,6 +16,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { TEST_SETTINGS } from "./timing.ts";
 
 const AUDIENCE = "tumpel-members";
 const KID = "members-key";
@@ -170,6 +171,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),

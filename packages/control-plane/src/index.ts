@@ -79,7 +79,6 @@ import {
   formatUserCode,
   GRANT_ERRORS,
   listDevices,
-  POLL_INTERVAL_S,
   parseUserCode,
   pendingDeviceCode,
   pollDeviceCode,
@@ -181,6 +180,7 @@ import { cliKey, type ReleaseManifest, readRelease, supervisorKey } from "./rele
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
+import { settingsOf } from "./settings";
 import type { PersonaWrite, Tenant } from "./tenant";
 import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
@@ -911,7 +911,15 @@ const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<
   const parsed = DeviceCodeRequestSchema.safeParse(await readParams(request));
   if (!parsed.success) return oauthError("invalid_request", issues(parsed.error));
   const clientIp = request.headers.get("cf-connecting-ip") ?? "unknown";
-  const started = await startDeviceCode(env.DB, parsed.data.device_name, clientIp, DEVICE_CODE_LIMITS, Date.now());
+  const { devicePollIntervalSeconds } = settingsOf(env);
+  const started = await startDeviceCode(
+    env.DB,
+    parsed.data.device_name,
+    clientIp,
+    DEVICE_CODE_LIMITS,
+    devicePollIntervalSeconds,
+    Date.now(),
+  );
   if (!started) {
     return oauthError("slow_down", "too many sign-ins are waiting for approval; try again in ten minutes", 429);
   }
@@ -923,7 +931,7 @@ const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<
       verification_uri: `${url.origin}${DEVICE_PAGE}`,
       verification_uri_complete: `${url.origin}${DEVICE_PAGE}?code=${userCode}`,
       expires_in: DEVICE_CODE_TTL_MS / 1000,
-      interval: POLL_INTERVAL_S,
+      interval: devicePollIntervalSeconds,
     }),
   );
 };
@@ -1047,7 +1055,12 @@ const handleDeviceToken = async (request: Request, env: Env): Promise<Response> 
   }
   const parsed = DeviceTokenRequestSchema.safeParse(params);
   if (!parsed.success) return oauthError("invalid_request", issues(parsed.error));
-  const outcome = await pollDeviceCode(env.DB, parsed.data.device_code, Date.now());
+  const outcome = await pollDeviceCode(
+    env.DB,
+    parsed.data.device_code,
+    settingsOf(env).deviceSlowDownStepSeconds,
+    Date.now(),
+  );
   if (!outcome.ok) return oauthError(outcome.error, GRANT_ERRORS[outcome.error]);
   return json(DeviceTokenSchema.parse({ access_token: outcome.accessToken, token_type: "Bearer" }));
 };

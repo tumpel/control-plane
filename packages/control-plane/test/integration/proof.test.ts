@@ -9,13 +9,14 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DeviceAuthorizationSchema, DeviceSchema, ProblemSchema, WhoamiSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { TEST_SETTINGS } from "../timing.ts";
 
 const AUDIENCE = "tumpel-proof-e2e";
 const KID = "proof-e2e-key";
 const PROOF_CLIENT_ID = "0123456789abcdef.access";
 const PROOF_CLIENT_SECRET = "proof-secret-never-printed-0123456789abcdef";
 const OTHER_COMMON_NAME = "fedcba9876543210.access";
-const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const TUMPEL = join(ROOT, "target", "debug", "tumpel");
 const BROWSER_PATHS = ["/device", "/v1/tenants", "/v1/device/approve", "/v1/device/deny", "/oauth/consent"];
 
@@ -124,11 +125,12 @@ before(async () => {
   await new Promise<void>((resolve) => certs.listen(0, "127.0.0.1", resolve));
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   server = createTestHarness({
-    root: fileURLToPath(new URL("..", import.meta.url)),
+    root: fileURLToPath(new URL("../..", import.meta.url)),
     workers: [
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           ACCESS_PROOF_COMMON_NAME: PROOF_CLIENT_ID,

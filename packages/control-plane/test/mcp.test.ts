@@ -25,6 +25,7 @@ import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
+import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
 
@@ -105,7 +106,7 @@ const deviceToken = async (tenantId: string): Promise<string> => {
     (await send("POST", "/v1/device/approve", { userCode: started.user_code, tenantId }, browser())).status,
     200,
   );
-  await new Promise((resolve) => setTimeout(resolve, started.interval * 1000 + 100));
+  await pollInterval(started.interval);
   const granted = await send("POST", "/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     device_code: started.device_code,
@@ -187,6 +188,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),

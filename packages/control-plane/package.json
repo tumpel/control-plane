@@ -8,7 +8,8 @@
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
-    "test": "{ [ -n \"${TUMPEL_PREBUILT_BINARIES:-}\" ] || cargo build --quiet -p tumpel-supervisor -p tumpel; } && node --test --test-timeout=90000 ${TEST_SHARD:+--test-shard=$TEST_SHARD} test/*.test.ts"
+    "test": "node --test --test-timeout=90000 test/*.test.ts",
+    "test:integration": "{ [ -n \"${TUMPEL_PREBUILT_BINARIES:-}\" ] || cargo build --quiet -p tumpel-supervisor -p tumpel; } && node --test --test-timeout=90000 test/integration/*.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.0",

@@ -21,6 +21,7 @@ import { z } from "zod";
 import { generateDataKey, seal } from "../src/envelope.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
+import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const ACCESS_AUD = "tumpel-circleci-e2e";
 const ACCESS_KID = "access-key";
@@ -192,6 +193,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: fakeOrigin,
           ACCESS_AUD,
           R2_STUB_ORIGIN: "https://r2.example.test",
@@ -218,7 +220,7 @@ before(async () => {
     (await send("POST", "/v1/device/approve", { userCode: started.user_code, tenantId }, browser)).status,
     200,
   );
-  await new Promise((resolve) => setTimeout(resolve, started.interval * 1000 + 100));
+  await pollInterval(started.interval);
   const granted = await send("POST", "/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     device_code: started.device_code,

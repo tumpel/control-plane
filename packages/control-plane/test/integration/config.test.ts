@@ -19,8 +19,9 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
-import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
+import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
+import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
+import { pollInterval, TEST_SETTINGS } from "../timing.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
 
@@ -29,9 +30,9 @@ const KID = "config-e2e-key";
 const EMAIL = "config@example.test";
 const SECRET = "sk-ant-e2e-never-printed";
 const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
-const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const TUMPEL = join(ROOT, "target", "debug", "tumpel");
-const FIXTURE = fileURLToPath(new URL("fixtures/tenant-config.json", import.meta.url));
+const FIXTURE = fileURLToPath(new URL("../fixtures/tenant-config.json", import.meta.url));
 const REVIEWER_MEMORY = "Review the diff for correctness.\n";
 const REVIEWER_SETTINGS = '{"permissions":{"defaultMode":"bypassPermissions"}}\n';
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -75,8 +76,6 @@ const getJson = async (path: string): Promise<unknown> => {
 };
 
 const browser = (): Record<string, string> => ({ "cf-access-jwt-assertion": assertion(), origin });
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface Finished {
   code: number | null;
@@ -128,11 +127,17 @@ before(async () => {
   await new Promise<void>((resolve) => certs.listen(0, "127.0.0.1", resolve));
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   server = createTestHarness({
-    root: fileURLToPath(new URL("..", import.meta.url)),
+    root: fileURLToPath(new URL("../..", import.meta.url)),
     workers: [
       {
         configPath: "./wrangler.jsonc",
-        vars: { ACCESS_ISSUER: issuer, ACCESS_AUD: AUDIENCE, SECRETS_KEK, DASHBOARD_ORIGIN: "https://app.tumpel.test" },
+        vars: {
+          ACCESS_ISSUER: issuer,
+          ACCESS_AUD: AUDIENCE,
+          SECRETS_KEK,
+          DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          TUMPEL_SETTINGS: TEST_SETTINGS,
+        },
       },
     ],
   });
@@ -150,7 +155,7 @@ before(async () => {
     (await postJson("/v1/device/approve", { userCode: started.user_code, tenantId }, browser())).status,
     200,
   );
-  await sleep(started.interval * 1000 + 100);
+  await pollInterval(started.interval);
   const granted = await postJson("/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     device_code: started.device_code,

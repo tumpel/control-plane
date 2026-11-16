@@ -45,6 +45,10 @@
       "claudeSetupCodeBudgetSeconds": 600,
       "claudeSetupMintBudgetSeconds": 120,
       "claudeSetupMintGraceSeconds": 10,
+      "heartbeatIntervalSeconds": 10,
+      "heartbeatDeadlineSeconds": 30,
+      "devicePollIntervalSeconds": 5,
+      "deviceSlowDownStepSeconds": 5,
       "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
     }
   },
@@ -103,6 +107,10 @@
           "claudeSetupCodeBudgetSeconds": 600,
           "claudeSetupMintBudgetSeconds": 120,
           "claudeSetupMintGraceSeconds": 10,
+          "heartbeatIntervalSeconds": 10,
+          "heartbeatDeadlineSeconds": 30,
+          "devicePollIntervalSeconds": 5,
+          "deviceSlowDownStepSeconds": 5,
           "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
         }
       },

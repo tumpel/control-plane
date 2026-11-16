@@ -6,8 +6,6 @@ import * as control from "./channel/control.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
-  HEARTBEAT_DEADLINE_MS,
-  HEARTBEAT_INTERVAL_MS,
   type HostMessage,
   type HostUsage,
   type Ledger,
@@ -17,6 +15,7 @@ import {
 import { migrateDurableObject } from "./durable-migrate";
 import { problem } from "./http";
 import type { Env } from "./index";
+import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import type { HostReply, TurnHandoff } from "./tenant-sessions";
 
@@ -128,7 +127,7 @@ export class HostChannel extends DurableObject<Env> {
     const attachment: Attachment = { connection: { phase: "Closed" }, lastReceivedAt: now, lastSentAt: now };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
-    await this.ctx.storage.setAlarm(now + HEARTBEAT_DEADLINE_MS);
+    await this.ctx.storage.setAlarm(now + this.deadlineMs());
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -163,9 +162,13 @@ export class HostChannel extends DurableObject<Env> {
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
-    if (connection.phase === "Open" && now - attachment.lastSentAt >= HEARTBEAT_INTERVAL_MS / 2) control.beat(context);
+    if (
+      connection.phase === "Open" &&
+      now - attachment.lastSentAt >= (settingsOf(this.env).heartbeatIntervalSeconds * 1000) / 2
+    )
+      control.beat(context);
     socket.serializeAttachment(attachment);
-    await this.ctx.storage.setAlarm(now + HEARTBEAT_DEADLINE_MS);
+    await this.ctx.storage.setAlarm(now + this.deadlineMs());
     if (event.kind !== "Welcomed") return;
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
@@ -183,20 +186,22 @@ export class HostChannel extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const now = Date.now();
+    const deadlineMs = this.deadlineMs();
     const live: number[] = [];
     for (const socket of this.ctx.getWebSockets()) {
       const { lastReceivedAt } = this.attachment(socket);
-      if (now - lastReceivedAt < HEARTBEAT_DEADLINE_MS) {
+      if (now - lastReceivedAt < deadlineMs) {
         live.push(lastReceivedAt);
         continue;
       }
-      socket.close(
-        CloseCode.HeartbeatDeadline,
-        `nothing arrived for ${HEARTBEAT_DEADLINE_MS / 1000} seconds; reconnect`,
-      );
+      socket.close(CloseCode.HeartbeatDeadline, `nothing arrived for ${deadlineMs / 1000} seconds; reconnect`);
     }
     await this.refreshPresence();
-    if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + HEARTBEAT_DEADLINE_MS);
+    if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + deadlineMs);
+  }
+
+  private deadlineMs(): number {
+    return settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {

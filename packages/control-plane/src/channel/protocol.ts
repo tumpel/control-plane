@@ -8,8 +8,6 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 
-export const HEARTBEAT_INTERVAL_MS = 10_000;
-export const HEARTBEAT_DEADLINE_MS = 30_000;
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true });
