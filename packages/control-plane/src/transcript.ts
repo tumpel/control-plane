@@ -1,5 +1,6 @@
-import { type HarnessSchema, TranscriptLineSchema } from "@tumpel/api/schemas";
-import { z } from "zod";
+import { TranscriptLineSchema } from "@tumpel/api/schemas";
+import type { z } from "zod";
+import type { Compactor } from "./compact.ts";
 
 export type TranscriptLine = z.infer<typeof TranscriptLineSchema>;
 
@@ -71,50 +72,6 @@ export const decodeLines = (text: string): TranscriptLine[] =>
     .map((line) => TranscriptLineSchema.parse(JSON.parse(line)));
 
 export const DEFAULT_PAGE_BYTES = 32768;
-const TOOL_ARGUMENT_CHARS = 400;
-
-type Harness = z.infer<typeof HarnessSchema>;
-
-const ClaudeCodeAssistantSchema = z.object({
-  type: z.literal("assistant"),
-  message: z.object({
-    content: z.array(
-      z.union([
-        z.object({ type: z.literal("text"), text: z.string() }),
-        z.object({ type: z.literal("tool_use"), name: z.string(), input: z.record(z.string(), z.unknown()) }),
-        z.object({ type: z.string() }),
-      ]),
-    ),
-  }),
-});
-
-const oneLine = (value: string): string => {
-  const flat = value.replace(/\s+/g, " ").trim();
-  return flat.length > TOOL_ARGUMENT_CHARS ? `${flat.slice(0, TOOL_ARGUMENT_CHARS)}…` : flat;
-};
-
-const toolCall = (name: string, input: Record<string, unknown>): string => {
-  const [first] = Object.values(input);
-  if (first === undefined) return `[${name}]`;
-  return `[${name}] ${oneLine(typeof first === "string" ? first : JSON.stringify(first))}`;
-};
-
-const compactClaudeCode = (text: string): string | null => {
-  const assistant = ClaudeCodeAssistantSchema.safeParse(JSON.parse(text));
-  if (!assistant.success) return null;
-  const parts = assistant.data.message.content.flatMap((block): string[] => {
-    if ("text" in block && block.text !== "") return [block.text];
-    if ("name" in block) return [toolCall(block.name, block.input)];
-    return [];
-  });
-  return parts.length === 0 ? null : parts.join("\n");
-};
-
-export type Compactor = (text: string) => string | null;
-
-const COMPACTORS: Partial<Record<Harness, Compactor>> = { ClaudeCode: compactClaudeCode };
-
-export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[harness] ?? null;
 
 export interface Page {
   lines: TranscriptLine[];

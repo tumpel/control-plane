@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  type Compactor,
-  compactorOf,
-  emptyPage,
-  encodeChunk,
-  pageOf,
-  rangeAfter,
-  type TranscriptLine,
-} from "../src/transcript.ts";
+import { type Compactor, compactorOf } from "../src/compact.ts";
+import { emptyPage, encodeChunk, pageOf, rangeAfter, type TranscriptLine } from "../src/transcript.ts";
 
 const line = (lineSeq: number, text: string): TranscriptLine => ({
   sessionId: "ses_1",
@@ -71,12 +64,6 @@ test("a compact page drops lines without ending early, and its cursor passes the
 test("a page with no line to read keeps the cursor it was given", () => {
   assert.deepEqual(pageOf(emptyPage(7), [], claudeCode(), 64, 100), emptyPage(7));
   assert.deepEqual(pageOf(emptyPage(7), [], null, 64, 100), emptyPage(7));
-});
-
-test("only ClaudeCode has a compact form", () => {
-  assert.equal(compactorOf("Codex"), null);
-  assert.equal(compactorOf("OpenCode"), null);
-  assert.equal(compactorOf("PiDev"), null);
 });
 
 test("a raw read cuts a chunk on a line boundary at the byte cap and always holds one line", () => {
