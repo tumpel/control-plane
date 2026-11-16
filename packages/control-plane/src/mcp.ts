@@ -532,7 +532,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/prebuilds",
     PrebuildStartSchema.extend({ repository: PrebuildStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a prebuild of a repository's default branch on the named build provider, GitHubActions, CircleCI or Namespace; personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it, and whose harness version picks the guest image. Returns the prebuild; a stored or running prebuild with the same key comes back unless rebuild is true. Refused NoBuildProvider when the named provider is not connected, and BuildProviderUnavailable while this control plane cannot dispatch to it.",
+    "Start a prebuild of a repository's default branch on one of the tenant's online Amd64 hosts that builds no other prebuild; provider is recorded on the prebuild. personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it, and whose harness version picks the guest image; the host clones with an installation token that reads the repository's contents. Returns the prebuild; a stored or running prebuild with the same key comes back unless rebuild is true. Refused NoHostAvailable when no such host is free.",
   ),
   rest(
     "tumpel_prebuild_list",

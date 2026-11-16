@@ -188,37 +188,20 @@ after(async () => {
   certs?.close();
 });
 
-test("a prebuild start refuses before it stores anything: an unconnected provider, a foreign repository, an unknown persona", async () => {
+test("a prebuild start refuses before it stores anything: an unreadable repository, a foreign repository, an unknown persona", async () => {
   const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
   assert.ok(persona);
   const unnamed = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
   const start = { ...unnamed, provider: "GitHubActions" };
-  const problem = await refused("POST", "/v1/prebuilds", start, 409);
-  assert.equal(problem.code, "NoBuildProvider");
-  assert.match(problem.detail, /GitHubActions/);
-  assert.match(problem.fix, /Connect your own GitHubActions account/);
-  const circleCI = await refused("POST", "/v1/prebuilds", { ...start, provider: "CircleCI" }, 409);
-  assert.equal(circleCI.code, "NoBuildProvider");
-  assert.match(circleCI.fix, /Connect your own CircleCI account/);
-  const namespace = await refused("POST", "/v1/prebuilds", { ...start, provider: "Namespace", rebuild: true }, 409);
-  assert.equal(namespace.code, "NoBuildProvider");
-  assert.match(namespace.fix, /Connect your own Namespace account/);
+  const unreadable = await refused("POST", "/v1/prebuilds", start, 409);
+  assert.equal(unreadable.code, "RepositoryUnreadable");
+  assert.match(unreadable.detail, /acme\/app/);
   assert.equal((await refused("POST", "/v1/prebuilds", unnamed, 400)).code, "InvalidRequest");
   assert.equal(
     (await refused("POST", "/v1/prebuilds", { ...start, repository: "https://example.test/app.git" }, 422)).code,
     "InvalidRequest",
   );
   assert.equal((await refused("POST", "/v1/prebuilds", { ...start, personaId: "missing" }, 404)).code, "NotFound");
-
-  await rest(GitHubActionsConnectionLinkSchema, "POST", "/v1/github-actions-connection/start", {
-    accountLabel: "acme on GitHub Actions",
-    callerWorkflow: ".github/workflows/tumpel-prebuild.yml",
-  });
-  const uninstalled = await refused("POST", "/v1/prebuilds", start, 409);
-  assert.equal(uninstalled.code, "GitHubNotConnected");
-  assert.match(uninstalled.detail, /GitHub App on acme/);
-  assert.match(uninstalled.fix, /Connect GitHub for the repository.s owner/);
-  assert.equal((await send("DELETE", "/v1/github-actions-connection", undefined, bearer)).status, 204);
 
   for (const repository of [REPOSITORY, "https://github.com/Acme/App"]) {
     const query = new URLSearchParams({ repository });

@@ -18,6 +18,7 @@ import {
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
+  PrebuildSchema,
   ProblemSchema,
   RawTranscriptPageSchema,
   ReleaseRolloutSchema,
@@ -36,7 +37,9 @@ import {
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../../src/channel/protocol.ts";
+import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
+import { workersSecretKeyStore } from "../../src/key-store.ts";
 import {
   type ChunkLedger,
   type ChunkStore,
@@ -90,6 +93,7 @@ type StoredTimerStub = {
   store(timers: unknown, at: number): Promise<void>;
   stored(): Promise<{ deadlines: Record<string, unknown> } | undefined>;
 };
+type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
 type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
 type ChunkBucket = {
   put(key: string, body: Uint8Array): Promise<unknown>;
@@ -338,6 +342,54 @@ const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
 const GITHUB_USER = { id: 4242, login: "ticket-worker" };
+const PREBUILT_HEAD = "5".repeat(40);
+const PREBUILT_TREE = "6".repeat(40);
+const installationTokenRequests: unknown[] = [];
+
+const prebuiltRepository = (method: string, path: string): { status: number; body: unknown } | null => {
+  if (method === "POST" && path === "/app/installations/77/access_tokens") {
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    return {
+      status: 201,
+      body: { token: "installation-token", expires_at: expiresAt, permissions: { contents: "read" } },
+    };
+  }
+  if (path === "/repos/prebuilt/app") return { status: 200, body: { default_branch: "main" } };
+  if (path === "/repos/prebuilt/app/commits/main") {
+    return { status: 200, body: { sha: PREBUILT_HEAD, commit: { tree: { sha: PREBUILT_TREE } } } };
+  }
+  if (path === `/repos/prebuilt/app/git/trees/${PREBUILT_TREE}`) {
+    return { status: 200, body: { tree: [{ path: "package-lock.json", type: "blob", sha: "7".repeat(40) }] } };
+  }
+  return null;
+};
+
+const installPrebuiltApp = async (tenantId: string): Promise<void> => {
+  const env = await server.getWorker<{ DB: Database }>().getEnv();
+  const keyStore = workersSecretKeyStore(Buffer.alloc(32, 7).toString("base64"));
+  const dataKey = await generateDataKey();
+  const appKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+  const privateKey = appKey.export({ type: "pkcs8", format: "der" }).toString("base64");
+  await env.DB.prepare(
+    `INSERT INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
+    client_secret_sealed, webhook_secret_sealed, private_key_sealed, bot_user_id, created_at)
+    VALUES (1, 1, 'tumpel-sessions', 'Iv1.sessions', 'prebuilt', 'https://github.com/apps/tumpel-sessions', ?, ?, ?, ?, 4343, ?)`,
+  )
+    .bind(
+      await keyStore.wrap(dataKey),
+      await seal(dataKey, "sessions-client-secret", "github-app/client_secret"),
+      await seal(dataKey, "sessions-webhook-secret", "github-app/webhook_secret"),
+      await seal(dataKey, privateKey, "github-app/private_key"),
+      Date.now(),
+    )
+    .run();
+  await env.DB.prepare(
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
+    VALUES (77, ?, 'prebuilt', 'Active', ?, ?)`,
+  )
+    .bind(tenantId, Date.now(), Date.now())
+    .run();
+};
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 
@@ -576,6 +628,19 @@ before(async () => {
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
   github = createServer((request, response) => {
     const path = (request.url ?? "").toLowerCase();
+    const prebuilt = prebuiltRepository(request.method ?? "", path);
+    if (prebuilt !== null) {
+      let body = "";
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        if (body !== "") installationTokenRequests.push(JSON.parse(body));
+        response.writeHead(prebuilt.status, { "content-type": "application/json" });
+        response.end(JSON.stringify(prebuilt.body));
+      });
+      return;
+    }
     const token = (request.headers.authorization ?? "").replace(/^Bearer /, "");
     const known = token.startsWith(GITHUB_TOKEN_PREFIX);
     if (path === "/user" && known) {
@@ -1977,4 +2042,62 @@ suite("sessions", { concurrency: 8 }, () => {
     }
     for (const side of sides.values()) side.close();
   });
+});
+
+test("a prebuild runs as a turn on a free host, its snapshot is its layer, and the repository's next session restores it", async () => {
+  const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
+  await installPrebuiltApp(tenantId);
+  const { personaId } = await sessionStart();
+  const repository = "https://github.com/prebuilt/app";
+  const response = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI" }, bearer);
+  assert.equal(response.status, 200, await response.clone().text());
+  const started = PrebuildSchema.parse(await response.json());
+  assert.equal(started.status.state, "Dispatched");
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.prebuildCommitSha, PREBUILT_HEAD);
+  assert.deepEqual(offer.credential.variables, [
+    { name: "GITHUB_TOKEN", value: "installation-token" },
+    { name: "GH_TOKEN", value: "installation-token" },
+  ]);
+  assert.deepEqual({ files: offer.personaFiles, snapshots: offer.snapshots }, { files: [], snapshots: [] });
+  assert.deepEqual(installationTokenRequests.at(-1), { repositories: ["app"], permissions: { contents: "read" } });
+  assert.equal(new URL(started.logUrl).pathname, `/v1/sessions/${offer.sessionId}/transcript`);
+  const busy = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI", rebuild: true }, bearer);
+  assert.equal(busy.status, 409, await busy.clone().text());
+  assert.equal(ProblemSchema.parse(await busy.json()).code, "NoHostAvailable");
+
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  await host.next("TurnClaimed");
+  const read = () => getJson(`/v1/prebuilds/${started.prebuildId}`, PrebuildSchema);
+  await until("the prebuild reading Building", read, (prebuild) => prebuild.status.state === "Building");
+  host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
+  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+  host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const request = await host.next("SnapshotRequest");
+  assert.equal(request.sessionId, offer.sessionId);
+  await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, "prebuilt root");
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+  const teardown = await host.next("BoxTeardown");
+  host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
+  const done = await until("the prebuild reading Done", read, (prebuild) => prebuild.status.state === "Done");
+  if (done.status.state !== "Done") throw new Error(`prebuild ${started.prebuildId} is ${done.status.state}`);
+  assert.deepEqual(
+    { layerDigest: done.status.layerDigest, layerSizeBytes: done.status.layerSizeBytes },
+    { layerDigest: createHash("sha256").update("prebuilt root").digest("hex"), layerSizeBytes: 4096 },
+  );
+  const listed = await getJson("/v1/sessions", SessionSchema.array());
+  assert.ok(listed.every((session) => session.sessionId !== offer.sessionId));
+
+  const next = await postJson(
+    "/v1/sessions",
+    { ...(await sessionStart()), repository, prompt: "use the prebuild" },
+    bearer,
+  );
+  assert.equal(next.status, 200, await next.clone().text());
+  const consumer = await host.next("TurnOffer");
+  assert.equal(consumer.prebuildCommitSha, undefined);
+  assert.deepEqual(
+    consumer.snapshots.map((snapshot) => snapshot.snapshotId),
+    [request.snapshotId],
+  );
 });

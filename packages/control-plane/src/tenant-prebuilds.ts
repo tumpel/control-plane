@@ -42,7 +42,13 @@ import { keyStoreOf } from "./key-store.ts";
 import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
-import { TenantSessions } from "./tenant-sessions";
+import {
+  type FailureReport,
+  type NewSession,
+  PREBUILD_ARCHITECTURE,
+  type Started,
+  TenantSessions,
+} from "./tenant-sessions";
 
 export type Prebuild = z.infer<typeof PrebuildSchema>;
 export type PrebuildFailure = z.infer<typeof PrebuildFailureSchema>;
@@ -211,14 +217,6 @@ export type StartedGitHubActions =
 
 type Recorded = { kind: "Recorded" } | StartedGitHubActions;
 
-type PrebuildFailurePhase = PrebuildFailure["phase"];
-
-interface FailureReport {
-  phase: PrebuildFailurePhase;
-  detail: string;
-  fix: string;
-}
-
 export interface PrebuildLayerUpload {
   layerDigest: string;
   layerSizeBytes: number;
@@ -380,21 +378,23 @@ export class TenantPrebuilds extends TenantSessions {
     return row === undefined ? null : toPrebuild(tenantId, row);
   }
 
-  private writePrebuildCommit(commit: PrebuildCommit, now: number): void {
+  private writePrebuildCommit(commit: PrebuildCommit, provider: BuildProvider, state: string, now: number): void {
     const { prebuildId } = commit;
     this.ctx.storage.sql.exec(
       `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
         provider, config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'GitHubActions', ?, ?, ?, 'Dispatched', ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       prebuildId,
       commit.personaId,
       commit.key.repository,
       commit.defaultBranch,
       commit.key.inputDigest,
       commit.key.guestImageDigest,
+      provider,
       commit.configSource,
       commit.headSha,
       commit.rootfsKey,
+      state,
       new Date(now).toISOString(),
       commit.logUrl,
       now,
@@ -443,7 +443,7 @@ export class TenantPrebuilds extends TenantSessions {
     return this.env.SESSION_TIMER.getByName(prebuildId).set(tenantId, changes);
   }
 
-  private async failPrebuild(
+  protected async failPrebuild(
     tenantId: string,
     prebuildId: string,
     from: readonly string[],
@@ -722,12 +722,51 @@ export class TenantPrebuilds extends TenantSessions {
           rootfsKey: start.rootfsKey,
           logUrl: workflowPage(target, callerWorkflow),
         },
+        "GitHubActions",
+        "Dispatched",
         now,
       );
       return { kind: "Recorded" };
     });
     if (recorded.kind !== "Recorded") return recorded;
     return { kind: "Started", prebuild: await this.armDispatch(tenantId, start.prebuildId, now) };
+  }
+
+  async startHostPrebuild(
+    tenantId: string,
+    commit: Omit<PrebuildCommit, "logUrl">,
+    provider: BuildProvider,
+    input: NewSession,
+    apiOrigin: string,
+    now: number,
+  ): Promise<Started<Prebuild> | { kind: "NoPrebuildHost" }> {
+    const busy = new Set(
+      this.ctx.storage.sql
+        .exec<{ host_id: string }>(
+          `SELECT sessions.host_id FROM prebuilds JOIN prebuild_sessions USING (prebuild_id) JOIN sessions USING (session_id)
+          WHERE prebuilds.state IN ('Dispatched', 'Building')`,
+        )
+        .toArray()
+        .map((row) => row.host_id),
+    );
+    const hosts = input.hosts.filter((host) => host.architecture === PREBUILD_ARCHITECTURE && !busy.has(host.hostId));
+    if (hosts.length === 0 && input.hosts.length > 0) return { kind: "NoPrebuildHost" };
+    const begun = await this.begin(tenantId, { ...input, hosts }, now, (sessionId) => {
+      this.writePrebuildCommit(
+        { ...commit, logUrl: `${apiOrigin}/v1/sessions/${sessionId}/transcript` },
+        provider,
+        "Dispatched",
+        now,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO prebuild_sessions (prebuild_id, session_id, created_at) VALUES (?, ?, ?)",
+        commit.prebuildId,
+        sessionId,
+        now,
+      );
+    });
+    if (begun.kind !== "Started") return begun;
+    return { kind: "Started", started: this.prebuildOf(tenantId, commit.prebuildId) };
   }
 
   uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {

@@ -8,6 +8,7 @@ import {
 } from "@tumpel/api/credentials";
 import {
   CredentialHandoverSchema,
+  type PrebuildFailurePhaseSchema,
   type SessionIssueSchema,
   SessionSchema,
   type SessionStartSchema,
@@ -50,10 +51,10 @@ import { catalogEntry } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
-import { personaFileKey } from "./persona-files";
+import { personaFileKey, sha256Hex } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
-import { bootArchitectures, bootFor, bootImage, readRelease } from "./releases";
+import { bootArchitectures, bootFor, bootImage, imagesFor, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions";
@@ -91,6 +92,14 @@ export interface SessionFilter {
 }
 
 export type ReleaseUnreadable = { kind: "ReleaseUnreadable"; detail: string };
+
+export interface FailureReport {
+  phase: z.infer<typeof PrebuildFailurePhaseSchema>;
+  detail: string;
+  fix: string;
+}
+
+export const PREBUILD_ARCHITECTURE = "Amd64";
 
 export type Started<T> =
   | { kind: "Started"; started: T }
@@ -235,6 +244,14 @@ type HostUsageRow = {
   updated_at: number;
 };
 
+type HostPrebuildRow = {
+  prebuild_id: string;
+  head_sha: string;
+  log_url: string;
+};
+
+type StoredSnapshotRow = { snapshot_id: string; snapshot_seq: number; storage_key: string };
+
 type SnapshotRequestRow = {
   snapshot_id: string;
   session_id: string;
@@ -259,6 +276,8 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 )`;
 
 const IN_FLIGHT = ["Offered", "Running"];
+const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
+const CONTENTS_READ = { contents: "read" } as const;
 const STORE_DELETE_BATCH = 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
@@ -377,7 +396,93 @@ export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
 
 export const sealContext = (secretSetId: string, name: string): string => `${secretSetId}/${name}`;
 
-export class TenantSessions extends DurableObject<Env> {
+export abstract class TenantSessions extends DurableObject<Env> {
+  protected abstract failPrebuild(
+    tenantId: string,
+    prebuildId: string,
+    from: readonly string[],
+    report: FailureReport,
+    logUrl: string,
+    now: number,
+  ): Promise<boolean>;
+
+  private hostPrebuild(sessionId: string): HostPrebuildRow | null {
+    const [row] = this.ctx.storage.sql
+      .exec<HostPrebuildRow>(
+        "SELECT prebuild_id, head_sha, log_url FROM prebuild_sessions JOIN prebuilds USING (prebuild_id) WHERE session_id = ?",
+        sessionId,
+      )
+      .toArray();
+    return row ?? null;
+  }
+
+  private async prebuildUnstored(tenantId: string, session: SessionRow, detail: string): Promise<void> {
+    const prebuild = this.hostPrebuild(session.session_id);
+    if (prebuild === null) return;
+    const report = { phase: "Upload" as const, detail, fix: PREBUILD_FIX };
+    if (!(await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Building"], report, prebuild.log_url, Date.now())))
+      return;
+    await this.host(session.host_id).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id });
+  }
+
+  private async prebuildStored(request: SnapshotRequestRow, sizeBytes: number, now: number): Promise<void> {
+    const prebuild = this.hostPrebuild(request.session_id);
+    if (prebuild === null) return;
+    const root = await this.env.STORE.get(request.storage_key);
+    if (root === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
+    const digest = await sha256Hex(new Uint8Array(await root.arrayBuffer()));
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      const moved = sql.exec(
+        "UPDATE prebuilds SET state = 'Done', updated_at = ? WHERE prebuild_id = ? AND state = 'Building'",
+        now,
+        prebuild.prebuild_id,
+      ).rowsWritten;
+      if (moved === 0) return;
+      sql.exec(
+        "INSERT INTO prebuild_layers (prebuild_id, layer_digest, layer_size_bytes, finished_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        prebuild.prebuild_id,
+        digest,
+        sizeBytes,
+        iso(now),
+        now,
+      );
+    });
+  }
+
+  private async prebuildLayer(
+    tenantId: string,
+    session: SessionRow,
+    hostId: string,
+    now: number,
+  ): Promise<StoredSnapshotRow[]> {
+    const host = await hostOf(this.env.DB, tenantId, hostId);
+    const release = await readRelease(this.env.RELEASES, now);
+    if (host?.architecture !== PREBUILD_ARCHITECTURE || release.kind === "Unreadable") return [];
+    const image = imagesFor(release, session.harness, session.harness_version).find(
+      (each) => each.architecture === PREBUILD_ARCHITECTURE,
+    );
+    if (image === undefined) return [];
+    const sql = this.ctx.storage.sql;
+    const [layer] = sql
+      .exec<StoredSnapshotRow & { session_id: string }>(
+        `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, snapshots.session_id FROM prebuilds
+        JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
+        WHERE prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
+        ORDER BY prebuilds.created_at DESC, snapshots.snapshot_seq DESC LIMIT 1`,
+        session.repository,
+        image.imageDigest,
+      )
+      .toArray();
+    if (layer === undefined) return [];
+    sql.exec(
+      "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?, digest FROM session_chunks WHERE session_id = ?",
+      session.session_id,
+      layer.session_id,
+    );
+    return [layer];
+  }
+
   private readonly chunks = new ChunkWriter(
     {
       pending: (tenantId, sessionId, turnId) =>
@@ -544,7 +649,12 @@ export class TenantSessions extends DurableObject<Env> {
     return members;
   }
 
-  protected async repositoryToken(tenantId: string, repository: GitHubRepository, now: number): Promise<Minted> {
+  protected async repositoryToken(
+    tenantId: string,
+    repository: GitHubRepository,
+    now: number,
+    permissions: Readonly<Record<string, "read">> | null = null,
+  ): Promise<Minted> {
     const installation = await installationOn(this.env.DB, tenantId, repository.owner);
     if (installation === null) {
       const accounts = (await installationsOf(this.env.DB, tenantId)).map(({ accountLogin }) => accountLogin);
@@ -563,6 +673,7 @@ export class TenantSessions extends DurableObject<Env> {
       installation,
       repository,
       now,
+      permissions,
     );
   }
 
@@ -633,6 +744,7 @@ export class TenantSessions extends DurableObject<Env> {
   private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
     const settings = settingsOf(this.env);
     const now = Date.now();
+    const prebuild = this.hostPrebuild(session.session_id);
     await this.timers(tenantId, session.session_id, {
       Claim: { turnId: turn.turn_id, at: now + settings.turnClaimBudgetSeconds * 1000 },
       FirstLine: null,
@@ -650,6 +762,7 @@ export class TenantSessions extends DurableObject<Env> {
       harnessVersion: session.harness_version,
       model: session.model,
       prompt: turn.prompt,
+      ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
   }
 
@@ -855,7 +968,7 @@ export class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  private async begin(
+  protected async begin(
     tenantId: string,
     input: NewSession,
     now: number,
@@ -972,7 +1085,10 @@ export class TenantSessions extends DurableObject<Env> {
         `${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn has" : "turns have"} no snapshot, so no other host can restore the session`,
       );
     }
-    const hosts = (await listHosts(this.env.DB, tenantId)).filter((host) => host.hostId !== session.host_id);
+    const prebuild = this.hostPrebuild(session.session_id) !== null;
+    const hosts = (await listHosts(this.env.DB, tenantId)).filter(
+      (host) => host.hostId !== session.host_id && (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
+    );
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") {
       return fail(`the published release is unreadable, so no other host can boot it: ${image.detail}`);
@@ -1211,7 +1327,9 @@ export class TenantSessions extends DurableObject<Env> {
   listSessions(tenantId: string, filter: SessionFilter): Session[] {
     return this.ctx.storage.sql
       .exec<SessionViewRow>(
-        `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2) ORDER BY s.created_at, s.session_id`,
+        `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2)
+        AND NOT EXISTS (SELECT 1 FROM prebuild_sessions WHERE prebuild_sessions.session_id = s.session_id)
+        ORDER BY s.created_at, s.session_id`,
         filter.state ?? null,
         filter.hostId ?? null,
       )
@@ -1381,7 +1499,11 @@ export class TenantSessions extends DurableObject<Env> {
       );
     }
     const { secretSetId } = persona;
-    const dispatch = dispatchVariables(entry, await this.members(secretSetId), session.model, now);
+    const prebuild = this.hostPrebuild(session.session_id);
+    const dispatch =
+      prebuild === null
+        ? dispatchVariables(entry, await this.members(secretSetId), session.model, now)
+        : { kind: "Ready" as const, variables: [], arguments: [] };
     if (dispatch.kind !== "Ready") {
       const refused = credentialProblem(
         dispatch,
@@ -1407,7 +1529,21 @@ export class TenantSessions extends DurableObject<Env> {
       return { kind: "Withdrawn" };
     }
     const target = githubRepository(session.repository);
-    const minted: Minted = target === null ? { kind: "NoToken" } : await this.repositoryToken(tenantId, target, now);
+    const minted: Minted =
+      target === null
+        ? { kind: "NoToken" }
+        : await this.repositoryToken(tenantId, target, now, prebuild === null ? null : CONTENTS_READ);
+    if (prebuild !== null && minted.kind !== "Minted") {
+      const reason = minted.kind === "NoToken" ? "no installation covers it" : minted.detail;
+      await this.failTurn(
+        tenantId,
+        turnId,
+        "RepositoryTokenRefused",
+        `a prebuild clones ${session.repository} with an installation token of the stage's GitHub App that reads its contents, and none was minted: ${reason}; connect GitHub for the repository's owner, then start the prebuild again`,
+        iso(now),
+      );
+      return { kind: "Withdrawn" };
+    }
     const credential = repositoryCredential(dispatch.variables, minted);
     if (credential.kind === "Refused") {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", credential.detail, iso(now));
@@ -1436,14 +1572,17 @@ export class TenantSessions extends DurableObject<Env> {
       handover.createdAt,
     );
     const stored = this.ctx.storage.sql
-      .exec<{ snapshot_id: string; snapshot_seq: number; storage_key: string }>(
+      .exec<StoredSnapshotRow>(
         "SELECT snapshot_id, snapshot_seq, storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq DESC LIMIT 1",
         session.session_id,
       )
       .toArray();
+    const restored =
+      stored.length === 0 && prebuild === null ? await this.prebuildLayer(tenantId, session, hostId, now) : stored;
     const credentialSeconds = turnCredentialSeconds(settings);
-    const snapshots = await this.downloads(stored, credentialSeconds, now);
-    const personaFiles = await this.personaFiles(tenantId, session.persona_id, credentialSeconds, now);
+    const snapshots = await this.downloads(restored, credentialSeconds, now);
+    const personaFiles =
+      prebuild === null ? await this.personaFiles(tenantId, session.persona_id, credentialSeconds, now) : [];
     return {
       kind: "Ready",
       credential: {
@@ -1492,11 +1631,7 @@ export class TenantSessions extends DurableObject<Env> {
     return downloads;
   }
 
-  private async downloads(
-    stored: { snapshot_id: string; snapshot_seq: number; storage_key: string }[],
-    seconds: number,
-    now: number,
-  ): Promise<SnapshotDownload[]> {
+  private async downloads(stored: StoredSnapshotRow[], seconds: number, now: number): Promise<SnapshotDownload[]> {
     if (stored.length === 0) return [];
     const signer = signerOf(
       this.env,
@@ -1802,6 +1937,12 @@ export class TenantSessions extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
+      sql.exec(
+        `UPDATE prebuilds SET state = 'Building', updated_at = ?1 WHERE state = 'Dispatched'
+        AND prebuild_id IN (SELECT prebuild_id FROM prebuild_sessions WHERE session_id = ?2)`,
+        now,
+        session.session_id,
+      );
     });
     await this.timers(tenantId, session.session_id, { Claim: null });
     return { type: "TurnClaimed", turnId: turn.turn_id };
@@ -1839,16 +1980,22 @@ export class TenantSessions extends DurableObject<Env> {
       );
     }
     await this.chunks.write(tenantId, session.session_id, turn.turn_id, 1);
+    const prebuild = this.hostPrebuild(session.session_id) !== null;
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
-      sql.exec("UPDATE sessions SET state = 'Idle', updated_at = ? WHERE session_id = ?", now, session.session_id);
+      sql.exec(
+        "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
+        prebuild ? "Stopping" : "Idle",
+        now,
+        session.session_id,
+      );
     });
     await this.timers(tenantId, session.session_id, {
       Claim: null,
       FirstLine: null,
       Total: null,
       HostOffline: null,
-      Snapshot: { turnId: turn.turn_id, at: now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
+      Snapshot: { turnId: turn.turn_id, at: prebuild ? now : now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
     });
   }
 
@@ -1864,7 +2011,14 @@ export class TenantSessions extends DurableObject<Env> {
     const failedAt = iso(Date.now());
     if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
     const host = await this.hostName(tenantId, session.host_id);
-    if (name === "SnapshotAnswer") return this.snapshotUnanswered(session, turn, host, failedAt);
+    if (name === "SnapshotAnswer") {
+      this.snapshotUnanswered(session, turn, host, failedAt);
+      return this.prebuildUnstored(
+        tenantId,
+        session,
+        `host ${host} did not answer the snapshot within ${settings.snapshotDeadlineSeconds} seconds`,
+      );
+    }
     if (name === "Teardown" && session.state === "Stopping") return this.teardown(tenantId, session, turnId);
     if (name === "TeardownAnswer" && session.state === "Stopping") {
       this.recordStopFailure(
@@ -2004,6 +2158,11 @@ export class TenantSessions extends DurableObject<Env> {
       Total: null,
       HostOffline: null,
     });
+    const prebuild = this.hostPrebuild(turn.session_id);
+    if (prebuild === null) return;
+    const phase = turn.state === "Offered" ? "Dispatch" : "Build";
+    const report = { phase, detail: `turn ${turnId} failed ${reason}: ${detail}`, fix: PREBUILD_FIX } as const;
+    await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
   }
 
   private async requestSnapshot(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
@@ -2151,6 +2310,11 @@ export class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
     if (message.type === "SnapshotFailed") {
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
+      await this.prebuildUnstored(
+        tenantId,
+        session,
+        `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`,
+      );
       if (session.state !== "Stopping") return;
       if (message.reason === "BoxNotFound") {
         return this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
@@ -2158,12 +2322,9 @@ export class TenantSessions extends DurableObject<Env> {
       return this.returnToIdle(session.session_id);
     }
     if ((await this.env.STORE.head(request.storage_key)) === null) {
-      this.recordSnapshotFailure(
-        request,
-        "UploadRejected",
-        `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`,
-        iso(Date.now()),
-      );
+      const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
+      this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
+      await this.prebuildUnstored(tenantId, session, detail);
       if (session.state === "Stopping") this.returnToIdle(session.session_id);
       return;
     }
@@ -2184,6 +2345,7 @@ export class TenantSessions extends DurableObject<Env> {
         now,
       );
     });
+    await this.prebuildStored(request, message.uploadedBytes, now);
     if (session.state !== "Stopping") return;
     const latest = this.latestTurn(session.session_id, null);
     if (latest === null) throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
