@@ -224,6 +224,45 @@ test("a duplicate frame is dropped and a gap closes the connection", async () =>
   assert.match(closed?.reason ?? "", /expected seq 2, got 5/);
 });
 
+test("a frame whose message no schema reads is refused once in order, and the next frame follows it", async () => {
+  const link = setup().connect();
+  await link.hello();
+  const unread = {
+    type: "Frame",
+    seq: 1,
+    ack: 0,
+    message: {
+      type: "SupervisorUpdateStep",
+      fromSha256: "a".repeat(64),
+      toSha256: "b".repeat(64),
+      phase: "Swapping",
+      at: "2026-11-16T09:30:00+01:00",
+    },
+  };
+  const deliverText = async (text: string) => {
+    const received = await control.receive(link.connection, text, link.context);
+    link.connection = received.connection;
+    if (received.event.kind !== "None") link.events.push(received.event);
+  };
+  await deliverText(JSON.stringify(unread));
+  await deliverText(JSON.stringify(unread));
+  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
+  assert.equal(link.closed, null);
+  const refusals = link.sent.filter((envelope) => envelope.type === "FrameRefused");
+  assert.equal(refusals.length, 1);
+  assert.equal(refusals[0]?.type === "FrameRefused" && refusals[0].seq, 1);
+  assert.match((refusals[0]?.type === "FrameRefused" && refusals[0].reason) || "", /message\.phase/);
+  assert.deepEqual(
+    link.events.slice(1).map((event) => event.kind),
+    ["FrameRefused", "Message"],
+  );
+
+  await deliverText(JSON.stringify({ ...unread, seq: 4 }));
+  const closed = closure(link);
+  assert.equal(closed?.code, CloseCode.ProtocolError);
+  assert.match(closed?.reason ?? "", /expected seq 3, got 4/);
+});
+
 test("after a reconnect the control plane resends unacked frames, each turn offer with a freshly minted grant", async () => {
   const channel = setup();
   const first = channel.connect();

@@ -157,6 +157,9 @@ export class HostChannel extends DurableObject<Env> {
       });
       if (handoff !== null) await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
     }
+    if (event.kind === "FrameRefused") {
+      console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
+    }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);

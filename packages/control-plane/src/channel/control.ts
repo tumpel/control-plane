@@ -1,4 +1,4 @@
-import { ChannelProtocol, CloseCode } from "@tumpel/api/schemas";
+import { ChannelProtocol, CloseCode, StoredHostFrameSchema } from "@tumpel/api/schemas";
 import {
   accept,
   type ControlEnvelope,
@@ -47,6 +47,7 @@ export type ControlEvent =
   | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "Message"; message: HostMessage }
+  | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
 
 export type Welcomed = Extract<ControlEvent, { kind: "Welcomed" }>;
@@ -134,6 +135,28 @@ const hello = async (
   };
 };
 
+const refuse = async (
+  connection: ControlConnection,
+  text: string,
+  reason: string,
+  context: ControlContext,
+): Promise<Received> => {
+  const stored = parseEnvelope(StoredHostFrameSchema, text);
+  if (!stored.ok) return close(context.port, CloseCode.ProtocolError, reason);
+  const outcome = accept(await context.ledger.load(), stored.value);
+  if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
+  if (outcome.kind === "Gap") {
+    return close(
+      context.port,
+      CloseCode.ProtocolError,
+      `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
+    );
+  }
+  await context.ledger.save(outcome.ledger);
+  context.port.send({ type: "FrameRefused", seq: stored.value.seq, reason });
+  return { connection, event: { kind: "FrameRefused", seq: stored.value.seq, reason } };
+};
+
 export const receive = async (
   connection: ControlConnection,
   text: string,
@@ -151,6 +174,7 @@ export const receive = async (
     }
   }
   const parsed = parseEnvelope(HostEnvelopeSchema, text);
+  if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;
   if (connection.phase === "AwaitingHello") {
