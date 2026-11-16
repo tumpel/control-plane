@@ -293,6 +293,79 @@ test("a frame the host sends the moment Welcome arrives is accepted while the te
   assert.deepEqual(await closed, { code: CloseCode.ProtocolError, reason: "frame gap: expected seq 2, got 3" });
 });
 
+test("a staged supervisor update is stored on the host and tumpel host get names its release and the boxes it waits on", async () => {
+  const keys = generateKeyPairSync("ed25519");
+  const publicKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x ?? "", "base64url").toString("base64");
+  const enrolled = await postJson("/v1/hosts/enrol", {
+    name: "staged",
+    architecture: "Amd64",
+    cpuCount: 1,
+    memoryBytes: 1024,
+    publicKey,
+    supervisorVersion: "0.1.0",
+    enrolmentToken: await mint(),
+  });
+  assert.equal(enrolled.status, 200);
+  const { hostId } = HostSchema.parse(await enrolled.json());
+  const step = {
+    fromSha256: "a".repeat(64),
+    toSha256: "b".repeat(64),
+    releaseVersion: "v0.4.2",
+    boxesRunning: 2,
+    phase: "Staged",
+    at: "2026-11-16T12:07:00+01:00",
+  };
+  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${hostId}/channel`);
+  socket.addEventListener("message", (event) => {
+    const envelope = ControlEnvelopeSchema.parse(JSON.parse(String(event.data)));
+    if (envelope.type === "Welcome") {
+      socket.send(
+        JSON.stringify({ type: "Frame", seq: 1, ack: 0, message: { type: "SupervisorUpdateStep", ...step } }),
+      );
+    }
+    if (envelope.type !== "Challenge") return;
+    socket.send(
+      JSON.stringify({
+        type: "Hello",
+        hostId,
+        protocolVersion: ChannelProtocol.Version,
+        supervisorVersion: "0.1.0",
+        signature: sign(null, helloBytes(envelope.nonce, hostId), keys.privateKey).toString("base64"),
+        boxCapacity: 2,
+        usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 1024 },
+      }),
+    );
+  });
+
+  const started = Date.now();
+  let stored = HostSchema.parse(await (await server.fetch(`${origin}/v1/hosts/${hostId}`, { headers: bearer })).json());
+  while (stored.supervisorUpdateStep.state === "NotReported" && Date.now() - started < 15_000) {
+    await sleep(200);
+    stored = HostSchema.parse(await (await server.fetch(`${origin}/v1/hosts/${hostId}`, { headers: bearer })).json());
+  }
+  assert.deepEqual(stored.supervisorUpdateStep, { state: "Reported", step });
+  assert.equal(stored.state, "Online");
+  socket.close();
+
+  const envFile = join(scratch, "staged.env");
+  writeFileSync(envFile, `TUMPEL_ENDPOINT=${origin}\nTUMPEL_TOKEN=${accessToken}\n`, { mode: 0o600 });
+  const child = spawn(TUMPEL, ["host", "get", hostId], {
+    env: { PATH: process.env.PATH ?? "", HOME: scratch, TUMPEL_ENV_FILE: envFile },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(HostSchema.parse(JSON.parse(stdout)).supervisorUpdateStep, { state: "Reported", step });
+  assert.match(stderr, /Update to v0\.4\.2 staged, waiting for 2 boxes/);
+});
+
 test("an unknown enrolment token is refused", async () => {
   const response = await postJson("/v1/hosts/enrol", {
     name: "stranger",

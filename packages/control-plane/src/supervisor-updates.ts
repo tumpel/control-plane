@@ -14,6 +14,8 @@ type StepRow = {
   host_id: string;
   from_sha256: string;
   to_sha256: string;
+  release_version: string;
+  boxes_running: number;
   phase: Extract<LatestStep, { state: "Reported" }>["step"]["phase"];
   at: string;
 };
@@ -37,12 +39,16 @@ export const NO_SUPERVISOR_UPDATES: SupervisorUpdates = {
 export const recordSupervisorUpdate = (sql: SqlStorage, hostId: string, message: SupervisorUpdateMessage): void => {
   if (message.type === "SupervisorUpdateStep") {
     sql.exec(
-      `INSERT INTO supervisor_update_latest_steps (host_id, from_sha256, to_sha256, phase, at) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO supervisor_update_latest_steps (host_id, from_sha256, to_sha256, release_version, boxes_running, phase, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (host_id) DO UPDATE SET from_sha256 = excluded.from_sha256, to_sha256 = excluded.to_sha256,
+        release_version = excluded.release_version, boxes_running = excluded.boxes_running,
         phase = excluded.phase, at = excluded.at`,
       hostId,
       message.fromSha256,
       message.toSha256,
+      message.releaseVersion,
+      message.boxesRunning,
       message.phase,
       message.at,
     );
@@ -72,13 +78,20 @@ export const supervisorUpdatesByHost = (sql: SqlStorage, hostIds: string[]): Rec
   };
   for (const row of sql
     .exec<StepRow>(
-      "SELECT host_id, from_sha256, to_sha256, phase, at FROM supervisor_update_latest_steps WHERE host_id IN (SELECT value FROM json_each(?))",
+      "SELECT host_id, from_sha256, to_sha256, release_version, boxes_running, phase, at FROM supervisor_update_latest_steps WHERE host_id IN (SELECT value FROM json_each(?))",
       JSON.stringify(hostIds),
     )
     .toArray()) {
     of(row.host_id).supervisorUpdateStep = {
       state: "Reported",
-      step: { fromSha256: row.from_sha256, toSha256: row.to_sha256, phase: row.phase, at: row.at },
+      step: {
+        fromSha256: row.from_sha256,
+        toSha256: row.to_sha256,
+        releaseVersion: row.release_version,
+        boxesRunning: row.boxes_running,
+        phase: row.phase,
+        at: row.at,
+      },
     };
   }
   for (const row of sql
