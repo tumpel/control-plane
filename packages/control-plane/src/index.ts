@@ -182,11 +182,13 @@ import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import type { PersonaWrite, Tenant } from "./tenant";
+import type { TenantMetrics } from "./tenant-metrics";
 import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
+export { TenantMetrics } from "./tenant-metrics";
 
 export interface Env extends SignerEnv {
   R2_BUCKET_NAME: string;
@@ -199,6 +201,7 @@ export interface Env extends SignerEnv {
   TENANT: DurableObjectNamespace<Tenant>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
+  TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
   STORE: R2Bucket;
   RELEASES: R2Bucket;
   TUMPEL_SETTINGS: unknown;
