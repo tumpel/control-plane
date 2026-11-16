@@ -1,4 +1,11 @@
 import {
+  acceptPage,
+  invitationExpiredPage,
+  invitationNotFoundPage,
+  invitationOtherEmailPage,
+  signInAgainPage,
+} from "@tumpel/pages";
+import {
   InvitationAcceptSchema,
   InvitationCreatedSchema,
   InvitationCreateSchema,
@@ -7,14 +14,7 @@ import {
   MemberPathSchema,
   PrincipalSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
-import {
-  acceptPage,
-  invitationExpiredPage,
-  invitationNotFoundPage,
-  invitationOtherEmailPage,
-  signInAgainPage,
-} from "@tumpel/pages";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
 import type { PersonCheck } from "./github-handlers.ts";

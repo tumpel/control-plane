@@ -1,5 +1,5 @@
 import type { D1Database } from "@cloudflare/workers-types/index.ts";
-import { IssuerJwkSchema, type OpenIdConfigurationSchema } from "@tumpel/api/schemas";
+import { IssuerJwkSchema, type OpenIdConfigurationSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { fromBase64, generateDataKey, seal, toBase64, unseal } from "./envelope.ts";
 import { type KeyStore, keyStoreOf } from "./key-store.ts";

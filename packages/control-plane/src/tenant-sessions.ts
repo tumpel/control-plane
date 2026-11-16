@@ -18,7 +18,7 @@ import {
   TranscriptLineSchema,
   TurnFailureSchema,
   TurnSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import {
   type BootImage,

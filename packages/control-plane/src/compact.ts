@@ -1,4 +1,4 @@
-import type { HarnessSchema } from "@tumpel/api/schemas";
+import type { HarnessSchema } from "@tumpel/schemas";
 import { z } from "zod";
 
 export type Compactor = (line: unknown) => string | null;

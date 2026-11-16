@@ -1,4 +1,4 @@
-import { MembershipSchema, type PrincipalRoleSchema, WhoamiSchema } from "@tumpel/api/schemas";
+import { MembershipSchema, type PrincipalRoleSchema, WhoamiSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
 

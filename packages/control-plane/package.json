@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
+    "pretypecheck": "npm --prefix ../.. run generate",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "pretest": "npm --prefix ../.. run generate",
     "test": "cargo build --quiet -p tumpel-supervisor -p tumpel && node --test --test-timeout=90000 ${TEST_SHARD:+--test-shard=$TEST_SHARD} test/*.test.ts"
   },
   "devDependencies": {
@@ -21,6 +23,7 @@
   "dependencies": {
     "@tumpel/api": "*",
     "@tumpel/pages": "*",
+    "@tumpel/schemas": "*",
     "zod": "^4.6.7"
   }
 }

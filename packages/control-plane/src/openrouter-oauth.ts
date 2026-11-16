@@ -1,4 +1,4 @@
-import type { OpenRouterAuthorizationFailureReasonSchema, OpenRouterAuthorizationSchema } from "@tumpel/api/schemas";
+import type { OpenRouterAuthorizationFailureReasonSchema, OpenRouterAuthorizationSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { type Fetch, parseJson } from "./github.ts";
 

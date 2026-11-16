@@ -3,7 +3,7 @@ import {
   type HostEnrolSchema,
   type HostSchema,
   MintedEnrolmentTokenSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";

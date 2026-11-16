@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, verify } from "node:crypto";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { IssuerJwksSchema } from "@tumpel/api/schemas";
+import { IssuerJwksSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { d1Issuer, type IssuerJwk } from "../src/issuer.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";

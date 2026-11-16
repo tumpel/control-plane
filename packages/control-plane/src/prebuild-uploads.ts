@@ -4,7 +4,7 @@ import {
   PrebuildUploadCompleteSchema,
   PrebuildUploadGrantSchema,
   PrebuildUploadStartSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { circleCIRefused } from "./circleci-projects.ts";
 import { REUSABLE_WORKFLOW, REUSABLE_WORKFLOW_PATH, REUSABLE_WORKFLOW_TAGS, RUN_EVENTS } from "./github-actions";
 import { tenantOfAccount } from "./github-store.ts";

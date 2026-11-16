@@ -1,4 +1,4 @@
-import { CircleCIAuthorizationSchema, CircleCIOrganizationSchema } from "@tumpel/api/schemas";
+import { CircleCIAuthorizationSchema, CircleCIOrganizationSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { readCollaborations } from "./circleci.ts";
 import {

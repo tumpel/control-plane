@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { test } from "node:test";
-import { ChannelProtocol, CloseCode } from "@tumpel/api/schemas";
+import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../src/channel/control.ts";
 import {
   type ControlEnvelope,

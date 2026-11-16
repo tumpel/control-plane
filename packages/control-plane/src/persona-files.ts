@@ -1,4 +1,4 @@
-import { type PersonaCreateSchema, PersonaFileLimit } from "@tumpel/api/schemas";
+import { type PersonaCreateSchema, PersonaFileLimit } from "@tumpel/schemas";
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";

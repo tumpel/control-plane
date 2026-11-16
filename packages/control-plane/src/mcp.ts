@@ -51,7 +51,7 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
 import { issues, type Problem } from "./http";

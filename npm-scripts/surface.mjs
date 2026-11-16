@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const OPENAPI = join(ROOT, "packages/api/generated/openapi.json");
+const OPENAPI = join(ROOT, "build/openapi/openapi.json");
 const MCP = join(ROOT, "packages/control-plane/src/mcp.ts");
 const CLI = join(ROOT, "crates/tumpel/src/main.rs");
 const DOC = join(ROOT, "doc/surface.md");

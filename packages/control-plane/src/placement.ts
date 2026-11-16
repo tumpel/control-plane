@@ -1,4 +1,4 @@
-import type { ReportedHostUsageSchema } from "@tumpel/api/schemas";
+import type { ReportedHostUsageSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { HostRecord as Host } from "./host-record.ts";
 import type { HostArchitecture } from "./releases.ts";

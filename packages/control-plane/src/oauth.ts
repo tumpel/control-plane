@@ -5,7 +5,7 @@ import {
   OAuthGrantSchema,
   OAuthTokenSchema,
   ProtectedResourceMetadataSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { z } from "zod";
 import { base64Url, randomToken, sameSecret, sha256Hex } from "./crypto";
 import type { OAuthErrorCode } from "./http";

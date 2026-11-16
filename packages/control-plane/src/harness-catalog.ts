@@ -1,4 +1,4 @@
-import { type EffectiveHarnessVersionSchema, HarnessCatalogEntrySchema } from "@tumpel/api/schemas";
+import { type EffectiveHarnessVersionSchema, HarnessCatalogEntrySchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
 

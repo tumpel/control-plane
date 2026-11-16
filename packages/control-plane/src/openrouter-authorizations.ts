@@ -1,5 +1,5 @@
-import { OpenRouterAuthorizationStartSchema } from "@tumpel/api/schemas";
 import { openRouterNotConnectedPage } from "@tumpel/pages";
+import { OpenRouterAuthorizationStartSchema } from "@tumpel/schemas";
 import { readSignedState } from "./github.ts";
 import { json, parseBody, problem, seeOther } from "./http";
 import type { Caller } from "./identity";

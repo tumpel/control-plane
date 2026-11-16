@@ -10,7 +10,7 @@ import {
   type SecretValueSchema,
   type SessionSchema,
   type TenantConfigPlanRequestSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import type { GitHubUser } from "./github.ts";
 import type { HostRecord } from "./host-record.ts";

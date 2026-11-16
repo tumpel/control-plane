@@ -16,7 +16,7 @@ import {
   PrebuildUploadGrantSchema,
   ProblemSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
 import { callerWorkflowExample } from "../src/github-actions.ts";

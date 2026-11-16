@@ -1,4 +1,4 @@
-import { OpenRouterAuthorizationSchema } from "@tumpel/api/schemas";
+import { OpenRouterAuthorizationSchema } from "@tumpel/schemas";
 import { base64Url } from "./crypto";
 import { seal, unseal } from "./envelope.ts";
 import { type Fetch, signState } from "./github.ts";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { PersonaFileLimit } from "@tumpel/api/schemas";
+import { PersonaFileLimit } from "@tumpel/schemas";
 import { CLAUDE_CODE_VERSION, catalogEntry } from "../src/harness-catalog.ts";
 import { type BlobStore, checkFiles, type PersonaFileWrite, personaFileKey, storeFiles } from "../src/persona-files.ts";
 

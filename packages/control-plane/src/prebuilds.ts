@@ -1,4 +1,4 @@
-import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/api/schemas";
+import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { CIRCLECI_PARAMETER_LIMIT, circleCIParameters, overLongParameter } from "./circleci.ts";
 import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";

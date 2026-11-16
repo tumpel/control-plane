@@ -4,7 +4,7 @@ import {
   ClaudeSetupPathSchema,
   ClaudeSetupStartSchema,
   ClaudeSetupTokenWriteSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { pinnedEntry } from "./harness-catalog";
 import { listHosts } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";

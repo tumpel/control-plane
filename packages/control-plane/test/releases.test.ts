@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ChannelProtocol, ProblemSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
+import { ChannelProtocol, ProblemSchema, ReleaseManifestSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { bootArchitectures, bootFor, parseRelease, type ReleaseManifest } from "../src/releases.ts";
 

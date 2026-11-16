@@ -17,7 +17,7 @@ import {
   MintedEnrolmentTokenSchema,
   ProblemSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { ControlEnvelopeSchema, HEARTBEAT_DEADLINE_MS, helloBytes } from "../src/channel/protocol.ts";
 

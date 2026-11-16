@@ -9,7 +9,7 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
 import { deployInProgress } from "./deploy-drain";
@@ -586,7 +586,7 @@ const invalidQuery = (operation: string, error: z.ZodError): Response =>
     code: "InvalidRequest",
     title: "Invalid query",
     detail: `${operation} refused the query: ${issues(error)}`,
-    fix: "Send query parameters that match the operation's schema in packages/api",
+    fix: "Send query parameters that match the operation's schema in typespec",
   });
 
 const answer = <T>(outcome: Outcome<T>): Response =>

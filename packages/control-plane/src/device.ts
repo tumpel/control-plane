@@ -1,4 +1,4 @@
-import { DeviceSchema } from "@tumpel/api/schemas";
+import { DeviceSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { randomToken, sha256Hex } from "./crypto";
 import type { Caller } from "./identity";

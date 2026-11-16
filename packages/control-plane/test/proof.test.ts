@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DeviceAuthorizationSchema, DeviceSchema, ProblemSchema, WhoamiSchema } from "@tumpel/api/schemas";
+import { DeviceAuthorizationSchema, DeviceSchema, ProblemSchema, WhoamiSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 
 const AUDIENCE = "tumpel-proof-e2e";

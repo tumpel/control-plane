@@ -33,7 +33,7 @@ import {
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../src/channel/protocol.ts";

@@ -1,5 +1,5 @@
 import type { SecretKey, SecretMember } from "@tumpel/api/credentials";
-import { type SecretMemberUpdateSchema, SecretSetCreateSchema, SecretSetSchema } from "@tumpel/api/schemas";
+import { type SecretMemberUpdateSchema, SecretSetCreateSchema, SecretSetSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { REPOSITORY_TOKEN } from "./github.ts";
 import { issues, type Problem } from "./http.ts";
