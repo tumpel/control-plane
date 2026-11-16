@@ -223,6 +223,7 @@ export class HostChannel extends DurableObject<Env> {
     const tenantId = await this.tenantOf(hostId);
     const tenant = this.env.TENANT.getByName(tenantId);
     if (isSupervisorUpdate(message)) {
+      if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
       await tenant.supervisorUpdate(hostId, message);
       if (message.type === "SupervisorUpdateStep" && message.phase === "Restarting") await this.presence("Offline");
       else await this.refreshPresence();
