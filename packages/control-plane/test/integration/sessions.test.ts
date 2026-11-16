@@ -35,7 +35,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import type { z } from "zod";
+import { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../../src/channel/protocol.ts";
 import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
@@ -89,16 +89,6 @@ const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256"
 type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
-type StoredTimerStub = {
-  store(timers: unknown, at: number): Promise<void>;
-  stored(): Promise<{ deadlines: Record<string, unknown> } | undefined>;
-};
-type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
-type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
-type ChunkBucket = {
-  put(key: string, body: Uint8Array): Promise<unknown>;
-  get(key: string): Promise<{ text(): Promise<string> } | null>;
-};
 
 const signal = (): { promise: Promise<void>; resolve: () => void } => {
   let resolve = (): void => undefined;
@@ -180,6 +170,62 @@ const postJson = (path: string, body: unknown, headers: Record<string, string> =
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
+
+type Objects = {
+  put(key: string, body: string | Uint8Array): Promise<void>;
+  delete(key: string): Promise<void>;
+  text(key: string): Promise<string | null>;
+};
+
+const objects = (bucket: "STORE" | "RELEASES"): Objects => {
+  const at = (key: string): string => `/__fixture/objects/${bucket}/${key}`;
+  const written = async (response: { status: number; text(): Promise<string> }): Promise<void> => {
+    assert.equal(response.status, 204, await response.text());
+  };
+  return {
+    put: async (key, body) => written(await call(at(key), { method: "PUT", body })),
+    delete: async (key) => written(await call(at(key), { method: "DELETE" })),
+    text: async (key) => {
+      const response = await call(at(key));
+      if (response.status === 404) return null;
+      assert.equal(response.status, 200, await response.clone().text());
+      return response.text();
+    },
+  };
+};
+
+const store = objects("STORE");
+const releases = objects("RELEASES");
+
+const storeTimers = async (sessionId: string, timers: unknown, at: number): Promise<void> => {
+  const response = await call(`/__fixture/timers/${sessionId}`, {
+    method: "PUT",
+    body: JSON.stringify({ timers, at }),
+  });
+  assert.equal(response.status, 204, await response.text());
+};
+
+const StoredTimersSchema = z.object({ deadlines: z.record(z.string(), z.unknown()) }).nullable();
+
+const storedTimers = async (sessionId: string): Promise<z.infer<typeof StoredTimersSchema>> => {
+  const response = await call(`/__fixture/timers/${sessionId}`);
+  assert.equal(response.status, 200, await response.clone().text());
+  return StoredTimersSchema.parse(await response.json());
+};
+
+const tenantSql = async (tenantId: string, query: string, ...bindings: (string | number)[]): Promise<unknown[]> => {
+  const response = await call(`/__fixture/sql/${tenantId}`, {
+    method: "POST",
+    body: JSON.stringify({ query, bindings }),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  return z.array(z.unknown()).parse(await response.json());
+};
+
+const d1Run = async (query: string, ...bindings: (string | number)[]): Promise<void> => {
+  const response = await call("/__fixture/d1", { method: "POST", body: JSON.stringify({ query, bindings }) });
+  assert.equal(response.status, 204, await response.text());
+};
 
 let mcpId = 0;
 
@@ -365,30 +411,27 @@ const prebuiltRepository = (method: string, path: string): { status: number; bod
 };
 
 const installPrebuiltApp = async (tenantId: string): Promise<void> => {
-  const env = await server.getWorker<{ DB: Database }>().getEnv();
   const keyStore = workersSecretKeyStore(Buffer.alloc(32, 7).toString("base64"));
   const dataKey = await generateDataKey();
   const appKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
   const privateKey = appKey.export({ type: "pkcs8", format: "der" }).toString("base64");
-  await env.DB.prepare(
+  await d1Run(
     `INSERT INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
     client_secret_sealed, webhook_secret_sealed, private_key_sealed, bot_user_id, created_at)
     VALUES (1, 1, 'tumpel-sessions', 'Iv1.sessions', 'prebuilt', 'https://github.com/apps/tumpel-sessions', ?, ?, ?, ?, 4343, ?)`,
-  )
-    .bind(
-      await keyStore.wrap(dataKey),
-      await seal(dataKey, "sessions-client-secret", "github-app/client_secret"),
-      await seal(dataKey, "sessions-webhook-secret", "github-app/webhook_secret"),
-      await seal(dataKey, privateKey, "github-app/private_key"),
-      Date.now(),
-    )
-    .run();
-  await env.DB.prepare(
+    await keyStore.wrap(dataKey),
+    await seal(dataKey, "sessions-client-secret", "github-app/client_secret"),
+    await seal(dataKey, "sessions-webhook-secret", "github-app/webhook_secret"),
+    await seal(dataKey, privateKey, "github-app/private_key"),
+    Date.now(),
+  );
+  await d1Run(
     `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
     VALUES (77, ?, 'prebuilt', 'Active', ?, ?)`,
-  )
-    .bind(tenantId, Date.now(), Date.now())
-    .run();
+    tenantId,
+    Date.now(),
+    Date.now(),
+  );
 };
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
@@ -553,7 +596,6 @@ const tenant = async () => {
   };
 
   const storedChunks = async (
-    store: Store,
     sessionId: string,
     digests: string[],
     packs: Record<string, string[]>,
@@ -673,7 +715,7 @@ before(async () => {
       {
         config: {
           ...config,
-          main: "./test/fixtures/stored-timer-worker.ts",
+          main: "./test/fixtures/sessions-worker.ts",
           vars: {
             ...config.vars,
             ACCESS_ISSUER: issuer,
@@ -691,7 +733,7 @@ before(async () => {
   });
   origin = (await server.listen()).url.origin;
   await server.getWorker().applyD1Migrations("DB");
-  await (await server.getWorker<{ RELEASES: Store }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
+  await releases.put("current.json", JSON.stringify(RELEASE));
 });
 
 after(async () => {
@@ -704,16 +746,15 @@ after(async () => {
 
 test("a start against a current.json of the previous shape is refused ImageNotReleased with the reason, not a crash", async () => {
   const { bearer, sessionStart } = await tenant();
-  const releases = (await server.getWorker<{ RELEASES: Store }>().getEnv()).RELEASES;
   const { bases: _bases, ...previous } = RELEASE;
   await releases.put(
     "current.json",
     JSON.stringify({ ...previous, channelProtocolVersion: ChannelProtocol.Version - 1 }),
   );
   const refusal = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "old release" }, bearer);
+  const problem = ProblemSchema.parse(await refusal.json());
   await releases.put("current.json", JSON.stringify(RELEASE));
   assert.equal(refusal.status, 422);
-  const problem = ProblemSchema.parse(await refusal.json());
   assert.equal(problem.code, "ImageNotReleased");
   assert.match(problem.detail, /the published release is unreadable: current\.json .* bases/);
   assert.equal(problem.fix, "Ask the operator to publish a release with the release workflow, then start again");
@@ -721,8 +762,6 @@ test("a start against a current.json of the previous shape is refused ImageNotRe
 
 test("a deploy drain refuses new sessions and turns DeployInProgress and counts each host's running turns until they end", async () => {
   const { bearer, host, hostId, getJson, sessionStart } = await tenant();
-  const releases = (await server.getWorker<{ RELEASES: Store & { delete(key: string): Promise<void> } }>().getEnv())
-    .RELEASES;
   const drainToken = randomBytes(32).toString("base64url");
   const drainBearer = { authorization: `Bearer ${drainToken}` };
   const report = async () => {
@@ -953,7 +992,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(upload.pathname, `/tumpel-sessions/${request.storageKey}`);
     assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
     assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
-    await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
+    await store.put(request.storageKey, '{"entries":[]}');
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
     const [snapshot] = await until(
       "a stored snapshot",
@@ -1040,11 +1079,14 @@ suite("sessions", { concurrency: 8 }, () => {
 
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
-    await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
+    await store.put(request.storageKey, '{"entries":[]}');
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
 
-    const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: started.session.tenantId });
-    await storage.exec("UPDATE sessions SET harness = 'MistralAgent' WHERE session_id = ?", sessionId);
+    await tenantSql(
+      started.session.tenantId,
+      "UPDATE sessions SET harness = 'MistralAgent' WHERE session_id = ?",
+      sessionId,
+    );
     assert.match(
       await toolRefusal("tumpel_transcript_read", { sessionId, compact: true }),
       /runs MistralAgent, whose transcript has no compact form; ClaudeCode, Codex, OpenCode, PiDev have one/,
@@ -1052,7 +1094,6 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("lines that arrive during a slow chunk write go into the next chunk, and every line is stored once in order", async () => {
-    const bucket = (await server.getWorker<{ STORE: ChunkBucket }>().getEnv()).STORE;
     const tenantId = `ten_${randomBytes(6).toString("hex")}`;
     const sessionId = "ses_serial";
     const turnId = "trn_serial";
@@ -1076,7 +1117,7 @@ suite("sessions", { concurrency: 8 }, () => {
           writing.resolve();
           await held.promise;
         }
-        return bucket.put(key, body);
+        return store.put(key, body);
       },
     };
     const writer = new ChunkWriter(ledger, spied);
@@ -1106,9 +1147,9 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(pending, []);
     const stored = await Promise.all(
       index.map(async ({ storageKey }) => {
-        const object = await bucket.get(storageKey);
-        assert.ok(object, `chunk ${storageKey} is stored`);
-        return decodeLines(await object.text());
+        const text = await store.text(storageKey);
+        assert.ok(text !== null, `chunk ${storageKey} is stored`);
+        return decodeLines(text);
       }),
     );
     assert.deepEqual(
@@ -1166,7 +1207,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 19, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
-    await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
+    await store.put(request.storageKey, '{"entries":[]}');
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   });
 
@@ -1333,8 +1374,8 @@ suite("sessions", { concurrency: 8 }, () => {
       (await listed()).map((setup) => [setup.claudeSetupId, setup.status.state]),
       [[claudeSetupId, "Minting"]],
     );
-    const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenantId });
-    await storage.exec(
+    await tenantSql(
+      tenantId,
       "UPDATE claude_setups SET phase_due_at = ? WHERE claude_setup_id = ?",
       Date.now() - 1,
       claudeSetupId,
@@ -1358,7 +1399,6 @@ suite("sessions", { concurrency: 8 }, () => {
 
   test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and its persona stays", async () => {
     const { github, host, refused, tool, readAll, sessionStart, createPersona, deletePersona } = await tenant();
-    const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
     await createPersona("Archivable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
       { kind: "Variable", name: "GITHUB_TOKEN", value: github },
@@ -1429,7 +1469,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
     const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
     assert.equal(archived.state, "Archived");
-    assert.equal(await store.head(request.storageKey), null);
+    assert.equal(await store.text(request.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
     assert.deepEqual(await readAll(sessionId, turnId, 10), [{ lineSeq: 1, text: '{"type":"result"}' }]);
     const archivedSend = await refused(`/v1/sessions/${sessionId}/turns`, {
@@ -1454,7 +1494,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
     host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
     const warm = await host.next("SnapshotRequest");
     await store.put(warm.storageKey, '{"entries":[]}');
     host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
@@ -1522,20 +1561,17 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Idle",
     );
 
-    const timers = await (
-      await server.getWorker<{ SESSION_TIMER: { getByName(name: string): StoredTimerStub } }>().getEnv()
-    ).SESSION_TIMER.getByName(sessionId).stored();
+    const timers = await storedTimers(sessionId);
     assert.equal(timers?.deadlines.Snapshot, undefined);
     assert.equal(host.snapshotRequestsFor(sessionId), 0);
   });
 
   test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive deletes the packs no live chunk lies in", async () => {
     const { host, getJson, tool, completedTurn, storedChunks } = await tenant();
-    const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
     const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
     const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
     const first = await completedTurn("chunk the first");
-    const { request, held, uploaded } = await storedChunks(store, first.session.sessionId, [one, two], {
+    const { request, held, uploaded } = await storedChunks(first.session.sessionId, [one, two], {
       [packOne]: [one],
       [packTwo]: [two],
     });
@@ -1544,7 +1580,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const tenantId = request.storageKey.split("/")[0] ?? "";
 
     const second = await completedTurn("chunk the second");
-    const shared = await storedChunks(store, second.session.sessionId, [two, three, three], { [packThree]: [three] });
+    const shared = await storedChunks(second.session.sessionId, [two, three, three], { [packThree]: [three] });
     assert.deepEqual(shared.held, [{ digest: two, packDigest: packTwo, offset: 0, length: CHUNK_BYTES }]);
     assert.deepEqual(shared.uploaded, [packThree]);
 
@@ -1607,12 +1643,12 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Stopped",
     );
     await tool("tumpel_session_archive", { sessionId: first.session.sessionId }, SessionSchema);
-    assert.equal(await store.head(`${tenantId}/packs/${packOne}`), null);
-    assert.notEqual(await store.head(`${tenantId}/packs/${packTwo}`), null);
-    assert.notEqual(await store.head(`${tenantId}/packs/${packThree}`), null);
+    assert.equal(await store.text(`${tenantId}/packs/${packOne}`), null);
+    assert.notEqual(await store.text(`${tenantId}/packs/${packTwo}`), null);
+    assert.notEqual(await store.text(`${tenantId}/packs/${packThree}`), null);
 
     const third = await completedTurn("chunk the third");
-    const again = await storedChunks(store, third.session.sessionId, [one, two], { [packOne]: [one] });
+    const again = await storedChunks(third.session.sessionId, [one, two], { [packOne]: [one] });
     assert.deepEqual(
       again.held.map((placement) => placement.digest),
       [two],
@@ -1648,11 +1684,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const offer = await host.next("TurnOffer");
     const { sessionId, tenantId } = started.session;
     const at = Date.now() + 500;
-    const env = await server.getWorker<{ SESSION_TIMER: { getByName(name: string): StoredTimerStub } }>().getEnv();
-    await env.SESSION_TIMER.getByName(sessionId).store(
-      { tenantId, sessionId, deadlines: { Claim: { turnId: offer.turnId, at } } },
-      at,
-    );
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Claim: { turnId: offer.turnId, at } } }, at);
 
     await until(
       "the turn reading Failed",
@@ -1700,9 +1732,9 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(offer.turnId, started.turn.turnId);
     assert.ok(offer.prompt.includes(`Closes ${issue.htmlUrl}`));
 
-    const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenantId });
     assert.deepEqual(
-      await storage.exec(
+      await tenantSql(
+        tenantId,
         "SELECT session_id, issue_number, title, html_url, branch FROM session_issues WHERE session_id = ?",
         sessionId,
       ),
@@ -1844,7 +1876,6 @@ suite("sessions", { concurrency: 8 }, () => {
 
   test("a session moves off its offline host once a snapshot holds its last completed turn, and the old host's late frames leave its channel working", async () => {
     const { bearer, refused, getJson, enrol, sessionStart, hostState } = await tenant();
-    const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
     const first = await enrol("move-from");
     let from = await connect(first.id, first.key, 16);
     await hostState(first.id, "Online");
@@ -2075,7 +2106,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
   assert.equal(request.sessionId, offer.sessionId);
-  await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, "prebuilt root");
+  await store.put(request.storageKey, "prebuilt root");
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   const teardown = await host.next("BoxTeardown");
   host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
