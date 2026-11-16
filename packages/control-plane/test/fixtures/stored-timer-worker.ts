@@ -1,6 +1,6 @@
 import { SessionTimer as BaseSessionTimer } from "../../src/session-timer";
 
-export { default, HostChannel, Tenant } from "../../src/index";
+export { default, HostChannel, Tenant, TenantMetrics } from "../../src/index";
 
 export class SessionTimer extends BaseSessionTimer {
   async store(timers: unknown, at: number): Promise<void> {
