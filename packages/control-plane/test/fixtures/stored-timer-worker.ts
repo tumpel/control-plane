@@ -7,4 +7,8 @@ export class SessionTimer extends BaseSessionTimer {
     await this.ctx.storage.put("timers", timers);
     await this.ctx.storage.setAlarm(at);
   }
+
+  async stored(): Promise<unknown> {
+    return this.ctx.storage.get("timers");
+  }
 }

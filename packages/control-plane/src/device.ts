@@ -6,9 +6,7 @@ import type { Caller } from "./identity";
 export type Device = z.infer<typeof DeviceSchema>;
 
 export const DEVICE_CODE_TTL_MS = 600_000;
-export const POLL_INTERVAL_S = 5;
 export const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
-const SLOW_DOWN_STEP_S = 5;
 const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_LENGTH = 8;
 
@@ -53,6 +51,7 @@ export const startDeviceCode = async (
   deviceName: string,
   clientIp: string,
   limits: DeviceCodeLimits,
+  intervalSeconds: number,
   now: number,
 ): Promise<{ deviceCode: string; userCode: string } | null> => {
   const deviceCode = randomToken();
@@ -75,7 +74,7 @@ export const startDeviceCode = async (
         clientIp,
         now,
         now + DEVICE_CODE_TTL_MS,
-        POLL_INTERVAL_S,
+        intervalSeconds,
         now,
         now,
         limits.total,
@@ -152,7 +151,12 @@ interface PollRow {
   device_id: string | null;
 }
 
-export const pollDeviceCode = async (db: D1Database, deviceCode: string, now: number): Promise<PollOutcome> => {
+export const pollDeviceCode = async (
+  db: D1Database,
+  deviceCode: string,
+  slowDownStepSeconds: number,
+  now: number,
+): Promise<PollOutcome> => {
   const codeHash = await sha256Hex(deviceCode);
   const row = await db
     .prepare(
@@ -170,7 +174,7 @@ export const pollDeviceCode = async (db: D1Database, deviceCode: string, now: nu
   if (now - row.last_polled_at < row.interval_s * 1000) {
     await db
       .prepare("UPDATE device_codes SET interval_s = ?, last_polled_at = ? WHERE device_code_sha256 = ?")
-      .bind(row.interval_s + SLOW_DOWN_STEP_S, now, codeHash)
+      .bind(row.interval_s + slowDownStepSeconds, now, codeHash)
       .run();
     return { ok: false, error: "slow_down" };
   }

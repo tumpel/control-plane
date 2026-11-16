@@ -20,15 +20,14 @@ import {
   TurnSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import {
-  type BootImage,
-  HEARTBEAT_DEADLINE_MS,
-  type HostMessage,
-  type HostUsage,
-  type PersonaFileDownload,
-  type PreparedOffer,
-  type SnapshotDownload,
-  type StoredControlMessage,
+import type {
+  BootImage,
+  HostMessage,
+  HostUsage,
+  PersonaFileDownload,
+  PreparedOffer,
+  SnapshotDownload,
+  StoredControlMessage,
 } from "./channel/protocol.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, unseal } from "./envelope.ts";
@@ -865,9 +864,9 @@ export class TenantSessions extends DurableObject<Env> {
     const { start } = input;
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
+    if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
-    if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
@@ -934,11 +933,12 @@ export class TenantSessions extends DurableObject<Env> {
     if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return image;
+    const from = await this.hostName(tenantId, session.host_id);
     const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
-    this.settleSnapshotRequests(session, await this.hostName(tenantId, session.host_id), placement.host.name, iso(now));
+    this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, prompt, now);
     await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
@@ -1524,9 +1524,10 @@ export class TenantSessions extends DurableObject<Env> {
         ...IN_FLIGHT,
       )
       .toArray();
+    const heartbeatDeadlineMs = settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
     for (const { session_id, turn_id } of inFlight) {
       await this.timers(tenantId, session_id, {
-        HostOffline: presence === "Offline" ? { turnId: turn_id, at: now + HEARTBEAT_DEADLINE_MS } : null,
+        HostOffline: presence === "Offline" ? { turnId: turn_id, at: now + heartbeatDeadlineMs } : null,
       });
     }
   }
@@ -1878,7 +1879,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "HostOffline",
-        `host ${host} went offline during the turn and did not reconnect within ${HEARTBEAT_DEADLINE_MS / 1000} seconds; check that its supervisor runs, then send the turn again`,
+        `host ${host} went offline during the turn and did not reconnect within ${settings.heartbeatDeadlineSeconds} seconds; check that its supervisor runs, then send the turn again`,
         failedAt,
       );
     }

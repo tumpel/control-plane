@@ -16,6 +16,7 @@ import {
 import { JSDOM, VirtualConsole } from "jsdom";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
+import { TEST_SETTINGS } from "./timing.ts";
 
 const AUDIENCE = "tumpel-oauth";
 const KID = "oauth-key";
@@ -150,6 +151,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           ACCESS_PROOF_COMMON_NAME: PROOF_COMMON_NAME,

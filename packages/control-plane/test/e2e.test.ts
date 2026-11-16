@@ -16,6 +16,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const AUDIENCE = "tumpel-e2e";
 const KID = "e2e-key";
@@ -87,6 +88,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
@@ -166,7 +168,7 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   const device = DeviceSchema.parse(await approved.json());
   assert.equal(device.principalId, owner.principal.principalId);
 
-  await new Promise((resolve) => setTimeout(resolve, (started.interval + 5) * 1000 + 100));
+  await pollInterval(started.interval + TEST_SETTINGS.deviceSlowDownStepSeconds);
   const granted = await postJson("/v1/device/token", { grant_type: DEVICE_GRANT, device_code: started.device_code });
   assert.equal(granted.status, 200);
   const deviceToken = DeviceTokenSchema.parse(await granted.json());

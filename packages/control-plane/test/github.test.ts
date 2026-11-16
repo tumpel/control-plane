@@ -40,6 +40,7 @@ import {
   withRepositoryToken,
 } from "../src/github.ts";
 import { GitHubInstallStateSchema, GitHubManifestStateSchema } from "../src/github-schemas.ts";
+import { TEST_SETTINGS } from "./timing.ts";
 
 type Call = { url: string; init: RequestInit };
 
@@ -688,6 +689,7 @@ before(async () => {
       {
         configPath: "./wrangler.jsonc",
         vars: {
+          TUMPEL_SETTINGS: TEST_SETTINGS,
           ACCESS_ISSUER: issuer,
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),

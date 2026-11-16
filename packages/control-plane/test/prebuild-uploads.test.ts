@@ -24,6 +24,7 @@ import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
 import { rootfsKey } from "../src/releases.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
+import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const ACCESS_AUD = "tumpel-prebuild-uploads-e2e";
 const ACCESS_KID = "access-key";
@@ -38,6 +39,7 @@ const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
 const WEBHOOK_SECRET = "prebuild-uploads-webhook-secret";
 const INSTALLATION_ID = 77;
 const BUDGET_SECONDS = 900;
+const UPLOAD_BUDGET_SECONDS = 900;
 const TREE_SHA = "1".repeat(40);
 const DISPATCHED_RUN = 9001;
 const PUSHED_RUN = 9002;
@@ -180,7 +182,6 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
         sha: COMMIT_SHA,
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
     return reply(response, 201, { commit: { sha: COMMIT_SHA } });
   }
   if (
@@ -189,7 +190,6 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
   ) {
     if (!runOnDispatch) return reply(response, 204, null);
     earlyInputs = readInputsAs(jobToken({ run_id: String(DISPATCHED_RUN) }));
-    await new Promise((resolve) => setTimeout(resolve, 500));
     return reply(response, 204, null);
   }
   return reply(response, 404, { message: "Not Found" });
@@ -223,21 +223,10 @@ before(async () => {
           GITHUB_API_ORIGIN: `${keysOrigin}/api`,
           SECRETS_KEK,
           TUMPEL_SETTINGS: {
-            dispatchGrantTtlSeconds: 300,
-            snapshotDelaySeconds: 30,
-            snapshotDeadlineSeconds: 900,
-            turnClaimBudgetSeconds: 60,
-            turnImageFetchBudgetSeconds: 900,
-            turnFirstLineBudgetSeconds: 120,
-            turnTotalBudgetSeconds: 3600,
-            transcriptChunkLines: 64,
-            prebuildUploadBudgetSeconds: 900,
+            ...TEST_SETTINGS,
+            prebuildUploadBudgetSeconds: UPLOAD_BUDGET_SECONDS,
             prebuildDispatchBudgetSeconds: BUDGET_SECONDS,
             prebuildBuildBudgetSeconds: BUDGET_SECONDS,
-            claudeSetupUrlBudgetSeconds: 300,
-            claudeSetupCodeBudgetSeconds: 600,
-            claudeSetupMintBudgetSeconds: 120,
-            claudeSetupMintGraceSeconds: 10,
             gitHubActionsIssuer: githubIssuer,
           },
         },
@@ -257,7 +246,7 @@ before(async () => {
     (await send("POST", "/v1/device/approve", { userCode: started.user_code, tenantId }, browser)).status,
     200,
   );
-  await new Promise((resolve) => setTimeout(resolve, started.interval * 1000 + 100));
+  await pollInterval(started.interval);
   const granted = await send("POST", "/v1/device/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     device_code: started.device_code,
@@ -415,6 +404,7 @@ test("the run at the recorded commit reads its inputs with its job token, which 
   const shaPin = jobToken({ job_workflow_ref: `tumpel/workflows/.github/workflows/prebuild.yml@${"e".repeat(40)}` });
   assert.match((await refusal(uploadsPath, exchange, shaPin, 403)).fix, /commit SHA pin is refused/);
 
+  const asked = Date.now();
   const granted = await send("POST", uploadsPath, exchange, asJob(jobToken()));
   assert.equal(granted.status, 200, await granted.clone().text());
   const grant = PrebuildUploadGrantSchema.parse(await granted.json());
@@ -428,8 +418,12 @@ test("the run at the recorded commit reads its inputs with its job token, which 
   assert.equal(url.searchParams.get("X-Tumpel-Method"), "PUT");
   assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(sha256(layer), "hex").toString("base64"));
   assert.equal(url.searchParams.get("X-Tumpel-Length"), String(layer.length));
-  const lifetime = Date.parse(grant.uploadExpiresAt) - Date.now();
-  assert.ok(lifetime > 890_000 && lifetime <= 900_000, `the URL lives the upload budget, not ${lifetime} ms`);
+  const expiresAt = Date.parse(grant.uploadExpiresAt);
+  const budgetMs = UPLOAD_BUDGET_SECONDS * 1000;
+  assert.ok(
+    expiresAt >= Math.floor(asked / 1000) * 1000 + budgetMs && expiresAt <= Date.now() + budgetMs,
+    `the URL lives the upload budget, not until ${grant.uploadExpiresAt}`,
+  );
   const releasePin = jobToken({ job_workflow_ref: "tumpel/workflows/.github/workflows/prebuild.yml@refs/tags/v2.4.2" });
   const repeated = await send("POST", uploadsPath, exchange, asJob(releasePin));
   assert.equal(repeated.status, 200, await repeated.clone().text());
@@ -613,12 +607,15 @@ test("a run that never starts fails in phase Dispatch, and a build past its budg
   assert.ok(unstarted.status.state === "Failed");
   assert.equal(unstarted.status.phase, "Dispatch");
   const unstartedDetail = (await failure(waiting.prebuild.prebuildId)).detail;
-  assert.match(unstartedDetail, /prebuildDispatchBudgetSeconds 900/);
+  assert.match(unstartedDetail, new RegExp(`prebuildDispatchBudgetSeconds ${BUDGET_SECONDS}`));
   assert.match(unstartedDetail, new RegExp(`no run of commit ${waiting.headSha}`));
   const overdue = await readPrebuild(building.prebuild.prebuildId);
   assert.ok(overdue.status.state === "Failed");
   assert.equal(overdue.status.phase, "Build");
-  assert.match((await failure(building.prebuild.prebuildId)).detail, /prebuildBuildBudgetSeconds 900/);
+  assert.match(
+    (await failure(building.prebuild.prebuildId)).detail,
+    new RegExp(`prebuildBuildBudgetSeconds ${BUDGET_SECONDS}`),
+  );
 });
 
 const takeEarlyInputs = (): Promise<Response> => {
