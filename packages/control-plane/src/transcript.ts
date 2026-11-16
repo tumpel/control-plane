@@ -148,3 +148,45 @@ export const pageOf = (
   }
   return { lines, cursor, bytes, full: false };
 };
+
+export interface ChunkLedger {
+  pending(tenantId: string, sessionId: string, turnId: string): TranscriptLine[];
+  record(sessionId: string, turnId: string, storageKey: string, chunk: Chunk): void;
+}
+
+export interface ChunkStore {
+  put(key: string, body: Uint8Array): Promise<unknown>;
+}
+
+export class ChunkWriter {
+  readonly #writes = new Map<string, Promise<void>>();
+  readonly #ledger: ChunkLedger;
+  readonly #store: ChunkStore;
+
+  constructor(ledger: ChunkLedger, store: ChunkStore) {
+    this.#ledger = ledger;
+    this.#store = store;
+  }
+
+  write(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
+    const run = (): Promise<void> => this.#writeNow(tenantId, sessionId, turnId, minLines);
+    const previous = this.#writes.get(sessionId) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    this.#writes.set(sessionId, next);
+    const forget = (): void => {
+      if (this.#writes.get(sessionId) === next) this.#writes.delete(sessionId);
+    };
+    next.then(forget, forget);
+    return next;
+  }
+
+  async #writeNow(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
+    const lines = this.#ledger.pending(tenantId, sessionId, turnId);
+    const first = lines[0];
+    if (first === undefined || lines.length < minLines) return;
+    const chunk = encodeChunk(lines);
+    const storageKey = chunkKey(tenantId, sessionId, turnId, first.lineSeq);
+    await this.#store.put(storageKey, chunk.body);
+    this.#ledger.record(sessionId, turnId, storageKey, chunk);
+  }
+}
