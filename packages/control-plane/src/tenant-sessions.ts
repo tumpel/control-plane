@@ -59,7 +59,7 @@ import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
-import { chunkKey, encodeChunk, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
+import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
@@ -375,6 +375,45 @@ export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
 export const sealContext = (secretSetId: string, name: string): string => `${secretSetId}/${name}`;
 
 export class TenantSessions extends DurableObject<Env> {
+  private readonly chunks = new ChunkWriter(
+    {
+      pending: (tenantId, sessionId, turnId) =>
+        this.ctx.storage.sql
+          .exec<PendingRow>(
+            "SELECT session_id, line_seq, turn_id, text, created_at FROM transcript_pending WHERE session_id = ? AND turn_id = ? ORDER BY line_seq",
+            sessionId,
+            turnId,
+          )
+          .toArray()
+          .map((row) => toLine(tenantId, row)),
+      record: (sessionId, turnId, storageKey, chunk) => {
+        const first = chunk.lineSeqs[0];
+        const last = chunk.lineSeqs.at(-1);
+        if (first === undefined || last === undefined) throw new Error(`transcript chunk ${storageKey} holds no lines`);
+        const sql = this.ctx.storage.sql;
+        this.ctx.storage.transactionSync(() => {
+          sql.exec(
+            "INSERT INTO transcript_chunks (session_id, first_line_seq, last_line_seq, turn_id, storage_key, line_seqs, offsets) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            sessionId,
+            first,
+            last,
+            turnId,
+            storageKey,
+            JSON.stringify(chunk.lineSeqs),
+            JSON.stringify(chunk.offsets),
+          );
+          sql.exec(
+            "DELETE FROM transcript_pending WHERE session_id = ? AND turn_id = ? AND line_seq <= ?",
+            sessionId,
+            turnId,
+            last,
+          );
+        });
+      },
+    },
+    this.env.STORE,
+  );
+
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
     return row ?? null;
@@ -1807,7 +1846,7 @@ export class TenantSessions extends DurableObject<Env> {
         iso(now),
       );
     }
-    await this.flush(tenantId, session.session_id, turn.turn_id);
+    await this.chunks.write(tenantId, session.session_id, turn.turn_id, 1);
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
       sql.exec("UPDATE sessions SET state = 'Idle', updated_at = ? WHERE session_id = ?", now, session.session_id);
@@ -1943,43 +1982,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (pending === null) return;
     if (turn.line_count === 0) await this.timers(tenantId, session.session_id, { FirstLine: null });
     if (pending >= settingsOf(this.env).transcriptChunkLines)
-      await this.flush(tenantId, session.session_id, turn.turn_id);
-  }
-
-  private async flush(tenantId: string, sessionId: string, turnId: string): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    const lines = sql
-      .exec<PendingRow>(
-        "SELECT session_id, line_seq, turn_id, text, created_at FROM transcript_pending WHERE session_id = ? AND turn_id = ? ORDER BY line_seq",
-        sessionId,
-        turnId,
-      )
-      .toArray()
-      .map((row) => toLine(tenantId, row));
-    const first = lines[0];
-    const last = lines.at(-1);
-    if (first === undefined || last === undefined) return;
-    const chunk = encodeChunk(lines);
-    const storageKey = chunkKey(tenantId, sessionId, turnId, first.lineSeq);
-    await this.env.STORE.put(storageKey, chunk.body);
-    this.ctx.storage.transactionSync(() => {
-      sql.exec(
-        "INSERT INTO transcript_chunks (session_id, first_line_seq, last_line_seq, turn_id, storage_key, line_seqs, offsets) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        sessionId,
-        first.lineSeq,
-        last.lineSeq,
-        turnId,
-        storageKey,
-        JSON.stringify(chunk.lineSeqs),
-        JSON.stringify(chunk.offsets),
-      );
-      sql.exec(
-        "DELETE FROM transcript_pending WHERE session_id = ? AND turn_id = ? AND line_seq <= ?",
-        sessionId,
-        turnId,
-        last.lineSeq,
-      );
-    });
+      await this.chunks.write(tenantId, session.session_id, turn.turn_id, settingsOf(this.env).transcriptChunkLines);
   }
 
   private async failTurn(
@@ -1992,7 +1995,7 @@ export class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
-    await this.flush(tenantId, turn.session_id, turnId);
+    await this.chunks.write(tenantId, turn.session_id, turnId, 1);
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {

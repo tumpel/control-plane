@@ -37,6 +37,7 @@ import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../src/channel/protocol.ts";
 import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
+import { type ChunkLedger, type ChunkStore, ChunkWriter, decodeLines, type TranscriptLine } from "../src/transcript.ts";
 
 const AUDIENCE = "tumpel-sessions-e2e";
 const KID = "sessions-e2e-key";
@@ -88,6 +89,18 @@ type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 type HostMessage = { type: string } & Record<string, unknown>;
 type StoredTimerStub = { store(timers: unknown, at: number): Promise<void> };
 type Store = { put(key: string, value: string): Promise<unknown>; head(key: string): Promise<unknown> };
+type ChunkBucket = {
+  put(key: string, body: Uint8Array): Promise<unknown>;
+  get(key: string): Promise<{ text(): Promise<string> } | null>;
+};
+
+const signal = (): { promise: Promise<void>; resolve: () => void } => {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
 
 const IMAGE_DIGEST = "b".repeat(64);
 const KERNEL_DIGEST = "c".repeat(64);
@@ -830,6 +843,72 @@ test("a turn whose lines arrive up to its completion reads back whole in one pag
   assert.equal(request.sessionId, sessionId);
   await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+});
+
+test("lines that arrive during a slow chunk write go into the next chunk, and every line is stored once in order", async () => {
+  const bucket = (await server.getWorker<{ STORE: ChunkBucket }>().getEnv()).STORE;
+  const tenantId = `ten_${randomBytes(6).toString("hex")}`;
+  const sessionId = "ses_serial";
+  const turnId = "trn_serial";
+  const pending: TranscriptLine[] = [];
+  const index: { storageKey: string; lineSeqs: number[] }[] = [];
+  const ledger: ChunkLedger = {
+    pending: () => [...pending],
+    record: (_sessionId, _turnId, storageKey, chunk) => {
+      const last = chunk.lineSeqs.at(-1) ?? 0;
+      pending.splice(0, pending.filter((line) => line.lineSeq <= last).length);
+      index.push({ storageKey, lineSeqs: chunk.lineSeqs });
+    },
+  };
+  const puts: string[] = [];
+  const writing = signal();
+  const held = signal();
+  const spied: ChunkStore = {
+    put: async (key, body) => {
+      puts.push(key);
+      if (puts.length === 1) {
+        writing.resolve();
+        await held.promise;
+      }
+      return bucket.put(key, body);
+    },
+  };
+  const writer = new ChunkWriter(ledger, spied);
+  const writes: Promise<void>[] = [];
+  const deliver = (lineSeq: number): void => {
+    pending.push({ sessionId, lineSeq, tenantId, turnId, text: `line ${lineSeq}`, createdAt: Date.now() });
+    if (pending.length >= 2) writes.push(writer.write(tenantId, sessionId, turnId, 2));
+  };
+  deliver(1);
+  deliver(2);
+  await writing.promise;
+  deliver(3);
+  deliver(4);
+  deliver(5);
+  writes.push(writer.write(tenantId, sessionId, turnId, 1));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(puts.length, 1);
+  held.resolve();
+  await Promise.all(writes);
+  assert.deepEqual(
+    index.map((entry) => entry.lineSeqs),
+    [
+      [1, 2],
+      [3, 4, 5],
+    ],
+  );
+  assert.deepEqual(pending, []);
+  const stored = await Promise.all(
+    index.map(async ({ storageKey }) => {
+      const object = await bucket.get(storageKey);
+      assert.ok(object, `chunk ${storageKey} is stored`);
+      return decodeLines(await object.text());
+    }),
+  );
+  assert.deepEqual(
+    stored.flat().map(({ lineSeq, text }) => ({ lineSeq, text })),
+    [1, 2, 3, 4, 5].map((lineSeq) => ({ lineSeq, text: `line ${lineSeq}` })),
+  );
 });
 
 test("a compact read stops after eight chunk reads of dropped lines, and the next read goes on from its cursor", async () => {
