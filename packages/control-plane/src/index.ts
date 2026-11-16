@@ -442,6 +442,7 @@ const personaWrite = async (
   caller: Caller,
   body: PersonaBody,
   operation: string,
+  newSecretSet: boolean,
 ): Promise<PersonaWritten> => {
   const tenant = env.TENANT.getByName(caller.tenantId);
   const read = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
@@ -461,7 +462,7 @@ const personaWrite = async (
     };
   }
   const credential = checkCredential(entry, secretSet.keys, Date.now());
-  if (credential.kind === "Unsupported") {
+  if (credential.kind === "Unsupported" || (credential.kind === "NoCredential" && newSecretSet)) {
     const refused = credentialRefused(credential, `secret set ${secretSet.name}`, body.harness, `repeat ${operation}`);
     return { ok: false, response: problem(refused.status, refused.problem) };
   }
@@ -485,7 +486,7 @@ const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promi
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, PersonaCreateSchema, "personas.create");
   if (!body.ok) return body.response;
-  const write = await personaWrite(env, caller, body.value, "personas.create");
+  const write = await personaWrite(env, caller, body.value, "personas.create", true);
   if (!write.ok) return write.response;
   const tenant = env.TENANT.getByName(caller.tenantId);
   const created = await tenant.createPersona(caller.tenantId, write.value, Date.now());
@@ -521,7 +522,13 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     if (!body.ok) return body.response;
     const current = await tenant.getPersona(caller.tenantId, personaId);
     if (current === null) return personaNotFound(personaId);
-    const write = await personaWrite(env, caller, { ...body.value, harness: current.harness }, "personas.update");
+    const write = await personaWrite(
+      env,
+      caller,
+      { ...body.value, harness: current.harness },
+      "personas.update",
+      body.value.secretSetId !== current.secretSetId,
+    );
     if (!write.ok) return write.response;
     const { harness: _fixed, ...change } = write.value;
     const updated = await tenant.updatePersona(caller.tenantId, personaId, change, Date.now());
