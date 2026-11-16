@@ -1450,6 +1450,7 @@ export class TenantSessions extends DurableObject<Env> {
         credentialHandoverId: handover.credentialHandoverId,
         expiresAt: iso(now + credentialSeconds * 1000),
         variables,
+        arguments: dispatch.arguments,
       },
       lastLineSeq: session.last_line_seq,
       snapshots,

@@ -5,31 +5,53 @@ import { dispatchVariables, type SecretMember } from "@tumpel/api/credentials";
 const claudeCode = {
   credentialChoice: "CatalogOrder" as const,
   credentials: [
-    { provider: "Anthropic" as const, kind: "ApiKey" as const, variable: "ANTHROPIC_API_KEY", fixed: [] },
+    {
+      provider: "Anthropic" as const,
+      kind: "ApiKey" as const,
+      variable: "ANTHROPIC_API_KEY",
+      fixed: [],
+      arguments: [],
+    },
     {
       provider: "Anthropic" as const,
       kind: "SubscriptionToken" as const,
       variable: "CLAUDE_CODE_OAUTH_TOKEN",
       fixed: [],
+      arguments: [],
     },
     {
       provider: "OpenRouter" as const,
       kind: "ApiKey" as const,
       variable: "ANTHROPIC_AUTH_TOKEN",
       fixed: [{ name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" }],
+      arguments: [],
     },
   ],
 };
 const codex = {
   credentialChoice: "CatalogOrder" as const,
-  credentials: [{ provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [] }],
+  credentials: [
+    { provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [], arguments: [] },
+  ],
 };
 const openCode = {
   credentialChoice: "ModelProvider" as const,
   credentials: [
-    { provider: "OpenRouter" as const, kind: "ApiKey" as const, variable: "OPENROUTER_API_KEY", fixed: [] },
-    { provider: "Anthropic" as const, kind: "ApiKey" as const, variable: "ANTHROPIC_API_KEY", fixed: [] },
-    { provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [] },
+    {
+      provider: "OpenRouter" as const,
+      kind: "ApiKey" as const,
+      variable: "OPENROUTER_API_KEY",
+      fixed: [],
+      arguments: [],
+    },
+    {
+      provider: "Anthropic" as const,
+      kind: "ApiKey" as const,
+      variable: "ANTHROPIC_API_KEY",
+      fixed: [],
+      arguments: [],
+    },
+    { provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [], arguments: [] },
   ],
 };
 const MODEL = "claude-sonnet";
@@ -53,6 +75,7 @@ test("the credential's kind picks the variable the harness reads, and every othe
       { name: "ANTHROPIC_API_KEY", value: "sk-ant" },
       { name: "GITHUB_TOKEN", value: "ghp" },
     ],
+    arguments: [],
   });
   assert.deepEqual(dispatchVariables(claudeCode, [token("2026-11-15T00:00:00+01:00"), openAi], MODEL, NOW), {
     kind: "Ready",
@@ -60,6 +83,7 @@ test("the credential's kind picks the variable the harness reads, and every othe
       { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "oauth-token" },
       { name: "OPENAI", value: "sk-openai" },
     ],
+    arguments: [],
   });
   assert.deepEqual(dispatchVariables(codex, [apiKey, openAi], MODEL, NOW), {
     kind: "Ready",
@@ -67,6 +91,7 @@ test("the credential's kind picks the variable the harness reads, and every othe
       { name: "OPENAI_API_KEY", value: "sk-openai" },
       { name: "ANTHROPIC", value: "sk-ant" },
     ],
+    arguments: [],
   });
 });
 
@@ -96,6 +121,7 @@ test("an ApiKey of a provider serving the harness's API lands in its variables, 
       { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" },
       { name: "GITHUB_TOKEN", value: "ghp" },
     ],
+    arguments: [],
   });
   assert.deepEqual(dispatchVariables(claudeCode, [openRouter, apiKey], MODEL, NOW), {
     kind: "Ready",
@@ -103,6 +129,7 @@ test("an ApiKey of a provider serving the harness's API lands in its variables, 
       { name: "ANTHROPIC_API_KEY", value: "sk-ant" },
       { name: "API_KEY", value: "sk-or" },
     ],
+    arguments: [],
   });
 });
 
@@ -120,6 +147,7 @@ test("no other member lands on a variable or fixed variable any accepted credent
       { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" },
       { name: "GITHUB_TOKEN", value: "ghp" },
     ],
+    arguments: [],
   });
 });
 
