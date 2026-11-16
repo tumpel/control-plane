@@ -119,23 +119,32 @@ export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[ha
 export interface Page {
   lines: TranscriptLine[];
   cursor: number;
+  bytes: number;
+  full: boolean;
 }
 
-export const pageOf = (read: TranscriptLine[], after: number, compact: Compactor | null, maxBytes: number): Page => {
-  if (compact === null) return { lines: read, cursor: read.at(-1)?.lineSeq ?? after };
+export const emptyPage = (after: number): Page => ({ lines: [], cursor: after, bytes: 0, full: false });
+
+export const pageOf = (
+  page: Page,
+  read: TranscriptLine[],
+  compact: Compactor | null,
+  limit: number,
+  maxBytes: number,
+): Page => {
   const encoder = new TextEncoder();
-  const lines: TranscriptLine[] = [];
-  let bytes = 0;
-  let previous = after;
+  const lines = [...page.lines];
+  let { bytes, cursor } = page;
   for (const line of read) {
-    const text = compact(line.text);
+    const text = compact === null ? line.text : compact(line.text);
     if (text !== null) {
-      const size = encoder.encode(text).byteLength;
-      if (lines.length > 0 && bytes + size > maxBytes) return { lines, cursor: previous };
+      const size = compact === null ? encodeLine(line).byteLength : encoder.encode(text).byteLength;
+      if (lines.length > 0 && bytes + size > maxBytes) return { lines, cursor, bytes, full: true };
       bytes += size;
       lines.push({ ...line, text });
     }
-    previous = line.lineSeq;
+    cursor = line.lineSeq;
+    if (lines.length >= limit) return { lines, cursor, bytes, full: true };
   }
-  return { lines, cursor: previous };
+  return { lines, cursor, bytes, full: false };
 };

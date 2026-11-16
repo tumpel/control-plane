@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   type Compactor,
   compactorOf,
+  emptyPage,
   encodeChunk,
   pageOf,
   rangeAfter,
@@ -54,9 +55,10 @@ test("compact keeps assistant text, shortens a tool call to its name and first a
 
 test("a compact page drops lines without ending early, and its cursor passes the dropped tail", () => {
   const page = pageOf(
+    emptyPage(0),
     SAMPLE.map((text, index) => line(index + 1, text)),
-    0,
     claudeCode(),
+    64,
     32768,
   );
   assert.deepEqual(
@@ -67,8 +69,8 @@ test("a compact page drops lines without ending early, and its cursor passes the
 });
 
 test("a page with no line to read keeps the cursor it was given", () => {
-  assert.deepEqual(pageOf([], 7, claudeCode(), 100), { lines: [], cursor: 7 });
-  assert.deepEqual(pageOf([], 7, null, 100), { lines: [], cursor: 7 });
+  assert.deepEqual(pageOf(emptyPage(7), [], claudeCode(), 64, 100), emptyPage(7));
+  assert.deepEqual(pageOf(emptyPage(7), [], null, 64, 100), emptyPage(7));
 });
 
 test("only ClaudeCode has a compact form", () => {
@@ -94,7 +96,7 @@ test("a compact cut leaves the dropped lines before the cut line behind the curs
     line(2, JSON.stringify({ type: "user", message: { content: [{ type: "tool_result" }] } })),
     line(3, assistant({ type: "text", text: "bbbb" })),
   ];
-  const page = pageOf(lines, 0, claudeCode(), 6);
+  const page = pageOf(emptyPage(0), lines, claudeCode(), 64, 6);
   assert.deepEqual(
     page.lines.map((kept) => kept.lineSeq),
     [1],

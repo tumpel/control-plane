@@ -685,12 +685,20 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     CompactTranscriptPageSchema,
   );
   assert.equal(chunked.sessionId, sessionId);
-  assert.deepEqual(chunked.turns, [{ turnId, lines: [{ lineSeq: 2, text: "on it" }] }]);
-  assert.equal(chunked.cursor, 2);
+  assert.deepEqual(chunked.turns, [
+    {
+      turnId,
+      lines: [
+        { lineSeq: 2, text: "on it" },
+        { lineSeq: 3, text: "[Bash] npm test" },
+      ],
+    },
+  ]);
+  assert.equal(chunked.cursor, 3);
   assert.equal(chunked.finished, false);
   const pending = await tool(
     "tumpel_transcript_read",
-    { sessionId, compact: true, limit: 10, after: chunked.cursor },
+    { sessionId, compact: true, limit: 10, after: 2 },
     CompactTranscriptPageSchema,
   );
   assert.deepEqual(pending.turns, [{ turnId, lines: [{ lineSeq: 3, text: "[Bash] npm test" }] }]);
@@ -766,6 +774,62 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
     () => getJson(`/v1/turns/${next.turnId}`, TurnSchema),
     (turn) => turn.state === "Failed",
   );
+});
+
+test("a turn whose lines arrive up to its completion reads back whole in one page that reads finished", async () => {
+  await createPersona("Tail", [
+    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
+  ]);
+  const started = await tool(
+    "tumpel_session_start",
+    { ...(await sessionStart("Tail")), prompt: "write a long tail" },
+    StartedSessionSchema,
+  );
+  const { sessionId } = started.session;
+  const offer = await host.next("TurnOffer");
+  const { turnId } = offer;
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  await eventually(
+    "the turn reading Running",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Running",
+  );
+  const texts = Array.from({ length: 7 }, (_, index) =>
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `line ${index + 1}` }] } }),
+  );
+  texts.forEach((text, index) => {
+    host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
+  });
+  host.send({ type: "TurnComplete", turnId, lastLineSeq: texts.length, completedAt: new Date().toISOString() });
+  const completed = await eventually(
+    "the turn reading Completed",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Completed",
+  );
+  assert.equal(completed.lineCount, texts.length);
+  const raw = await tool("tumpel_transcript_read", { sessionId, turnId, limit: 100 }, RawTranscriptPageSchema);
+  assert.deepEqual(
+    raw.lines.map(({ lineSeq, text }) => ({ lineSeq, text })),
+    texts.map((text, index) => ({ lineSeq: index + 1, text })),
+  );
+  assert.equal(raw.cursor, texts.length);
+  assert.equal(raw.finished, true);
+  const compact = await tool(
+    "tumpel_transcript_read",
+    { sessionId, turnId, compact: true, limit: 100 },
+    CompactTranscriptPageSchema,
+  );
+  assert.deepEqual(
+    compact.turns.flatMap((turn) => turn.lines.map((line) => line.lineSeq)),
+    texts.map((_, index) => index + 1),
+  );
+  assert.equal(compact.finished, true);
+
+  const request = await host.next("SnapshotRequest");
+  assert.equal(request.sessionId, sessionId);
+  await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
 });
 
 test("a compact read stops after eight chunk reads of dropped lines, and the next read goes on from its cursor", async () => {
