@@ -3,7 +3,7 @@ import type { z } from "zod";
 import { CIRCLECI_PARAMETER_LIMIT, circleCIParameters, overLongParameter } from "./circleci.ts";
 import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
-import type { Outcome, Refused } from "./hosts";
+import { listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -11,8 +11,10 @@ import type { ConfigSource } from "./prebuild-inputs.ts";
 import { inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import { signerOf } from "./presign";
 import { imagesFor, type ReleaseImage, readRelease, releaseUnreadable, rootfsKey } from "./releases";
-import { apiOriginOf, settingsOf } from "./settings";
+import { placed } from "./sessions";
+import { settingsOf } from "./settings";
 import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
+import { PREBUILD_ARCHITECTURE } from "./tenant-sessions";
 
 export type PrebuildStart = z.infer<typeof PrebuildStartSchema>;
 
@@ -21,7 +23,7 @@ type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 const PREBUILDS_PATH = "/v1/prebuilds";
 const LATEST_PATH = "/v1/prebuilds/latest";
 const PREBUILD_PATH = /^\/v1\/prebuilds\/([^/]+)(\/failure)?$/;
-const PREBUILD_ARCHITECTURE = "Amd64";
+const PREBUILD_MODEL = "prebuild";
 
 const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
 
@@ -302,7 +304,6 @@ export const startPrebuild = async (
       fix: "List your personas and use one of their ids",
     });
   }
-  if (!(await tenant.buildProviderConnected(start.provider))) return noBuildProvider(start.provider, repository);
   const entry = pinnedEntry(await tenant.listPins(), persona.harness);
   if (entry === undefined) {
     return refuse(422, {
@@ -314,21 +315,6 @@ export const startPrebuild = async (
   }
   const image = await guestImage(env, entry.harness, entry.harnessVersion, now);
   if (!image.ok) return image;
-  if (start.provider === "GitHubActions") {
-    return startGitHubActions(
-      env,
-      {
-        tenantId: caller.tenantId,
-        personaId: start.personaId,
-        target,
-        repository,
-        image: image.value,
-        apiOrigin: apiOriginOf(env),
-        rebuild: start.rebuild === true,
-      },
-      now,
-    );
-  }
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
@@ -345,23 +331,42 @@ export const startPrebuild = async (
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
   }
-  if (start.provider === "Namespace") return buildProviderUnavailable(start.provider, repository);
-  return dispatchCircleCI(
-    env,
+  const prebuildId = crypto.randomUUID();
+  const started = await tenant.startHostPrebuild(
+    caller.tenantId,
     {
-      prebuildId: crypto.randomUUID(),
-      tenantId: caller.tenantId,
+      prebuildId,
       personaId: start.personaId,
       key,
       configSource: inputs.configSource,
-      target,
       defaultBranch: described.branch,
       headSha: inputs.headSha,
-      image: image.value,
-      apiOrigin,
+      rootfsKey: rootfsKey(image.value),
     },
+    start.provider,
+    {
+      principalId: caller.principalId,
+      hosts: await listHosts(env.DB, caller.tenantId),
+      harness: entry.harness,
+      harnessVersion: entry.harnessVersion,
+      endpoint: apiOrigin,
+      start: {
+        personaId: start.personaId,
+        repository,
+        model: PREBUILD_MODEL,
+        prompt: `Run the setup step of ${repository} at ${inputs.headSha} for prebuild ${prebuildId}`,
+      },
+    },
+    apiOrigin,
     now,
   );
+  if (started.kind !== "NoPrebuildHost") return placed(started);
+  return refuse(409, {
+    code: "NoHostAvailable",
+    title: "No host can take the prebuild",
+    detail: `every ${PREBUILD_ARCHITECTURE} host of your tenant builds another prebuild, or your tenant has no ${PREBUILD_ARCHITECTURE} host; a host builds one prebuild at a time, on ${PREBUILD_ARCHITECTURE}`,
+    fix: `Wait for the running prebuild to end, or enrol another ${PREBUILD_ARCHITECTURE} host, then start the prebuild again`,
+  });
 };
 
 const installationUnreadable = (target: GitHubRepository, detail: string): Refused =>

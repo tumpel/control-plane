@@ -220,7 +220,7 @@ const prepareStart = async (
   });
 };
 
-const placed = <T>(started: Started<T>): Outcome<T> => {
+export const placed = <T>(started: Started<T>): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
   if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));

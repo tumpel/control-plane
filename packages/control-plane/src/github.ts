@@ -334,6 +334,7 @@ export const mintInstallationToken = async (
   installation: Installation,
   target: GitHubRepository,
   now: number,
+  permissions: Readonly<Record<string, "read">> | null = null,
 ): Promise<Minted> => {
   if (installation.status === "Suspended") {
     return {
@@ -349,7 +350,7 @@ export const mintInstallationToken = async (
       url: `${api}/app/installations/${installationId}/access_tokens`,
       accept: API_MEDIA_TYPE,
       bearer: await appJwt(app.clientId, app.privateKey, now),
-      body: { repositories: [target.name] },
+      body: permissions === null ? { repositories: [target.name] } : { repositories: [target.name], permissions },
     },
     GitHubInstallationTokenSchema,
     "GitHubInstallationToken",
