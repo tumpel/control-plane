@@ -426,6 +426,8 @@ const sessionStart = async (name = "Default") => {
   };
 };
 
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
 const GITHUB_USER = { id: 4242, login: "ticket-worker" };
 let userReads = 0;
@@ -1302,7 +1304,10 @@ test("a turn whose host fetches its image fails ImageFetchTimedOut after the fet
   assert.ok(failed.updatedAt - fetching >= (IMAGE_FETCH_BUDGET_SECONDS + CLAIM_BUDGET_SECONDS) * 1000);
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "ImageFetchTimedOut");
-  assert.match(failure.detail, new RegExp(`guest image ${offer.image.imageDigest} for turn ${offer.turnId}`));
+  assert.match(
+    failure.detail,
+    new RegExp(`^host box started fetching guest image ${offer.image.imageDigest} for the turn`),
+  );
 });
 
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
@@ -1320,7 +1325,8 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   assert.ok(failed.updatedAt - started.turn.createdAt >= CLAIM_BUDGET_SECONDS * 1000);
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NotClaimed");
-  assert.match(failure.detail, new RegExp(`did not claim turn ${offer.turnId} within ${CLAIM_BUDGET_SECONDS} seconds`));
+  assert.match(failure.detail, new RegExp(`did not claim the turn within ${CLAIM_BUDGET_SECONDS} seconds`));
+  assert.doesNotMatch(failure.detail, UUID);
 });
 
 test("a session timer stored before its owner field was dropped still fails an unclaimed turn NotClaimed", async () => {
@@ -1415,7 +1421,7 @@ test("a claimed turn whose TurnRepositoryReady is lost fails NoFirstOutput once 
   assert.ok(failed.updatedAt - claimedAt >= (CLONE_SECONDS + FIRST_LINE_BUDGET_SECONDS) * 1000 - 500);
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "NoFirstOutput");
-  assert.match(failure.detail, new RegExp(`no line for turn ${offer.turnId}`));
+  assert.match(failure.detail, /no line for the turn within .* on host box,/);
 });
 
 test("a turn without a GitHub credential fails RepositoryTokenRefused before an offer, and a GITHUB_TOKEN GitHub refuses is refused at the write", async () => {
@@ -1549,11 +1555,13 @@ test("a claimed turn fails HostOffline when its host disconnects and does not co
   );
   const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
   assert.equal(failure.reason, "HostOffline");
-  assert.match(failure.detail, new RegExp(`went offline during turn ${offer.turnId}`));
+  assert.match(failure.detail, /^host box went offline during the turn/);
+  assert.doesNotMatch(failure.detail, UUID);
 
   const offline = await refused(`/v1/sessions/${started.session.sessionId}/stop`);
   assert.equal(offline.code, "HostOffline");
-  assert.match(offline.detail, new RegExp(`host box \\(${hostId}\\), which is Offline`));
+  assert.match(offline.detail, /runs on host box, which is Offline/);
+  assert.doesNotMatch(offline.detail, UUID);
 });
 
 const hostState = (id: string, state: string) =>
@@ -1586,12 +1594,7 @@ test("a session moves off its offline host once a snapshot holds its last comple
     body: JSON.stringify({ prompt: "not yet" }),
   });
   assert.equal(stranded.code, "HostOffline");
-  assert.match(
-    stranded.detail,
-    new RegExp(
-      `move-from \\(${first.id}\\), which is Offline, and its snapshots miss completed turns ${offer.turnId},`,
-    ),
-  );
+  assert.match(stranded.detail, /host move-from, which is Offline, and its snapshots miss 1 completed turn,/);
 
   from = await HostSide.connect(first.id, first.key, 16, from.counters());
   await hostState(first.id, "Online");
