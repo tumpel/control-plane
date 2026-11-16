@@ -254,13 +254,19 @@ export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
-type HostEvent = Exclude<SessionHostMessage, ChunkAsk | CloneFailed>;
+type TurnFailed = Extract<SessionHostMessage, { type: "TurnFailed" }>;
+type HostEvent = Exclude<SessionHostMessage, ChunkAsk | CloneFailed | TurnFailed>;
 type TurnEvent = Exclude<HostEvent, { type: "SnapshotDone" | "SnapshotFailed" | "BoxGone" | "BoxTeardownFailed" }>;
 type ChunkReply = Extract<
   StoredControlMessage,
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
 >;
-export type HostReply = ChunkReply | Extract<StoredControlMessage, { type: "BoxDiscard" | "ClaudeSetupBoxDiscard" }>;
+type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
+export type TurnHandoff = { type: "TurnHandoff"; hostId: string; offer: StoredTurnOffer };
+export type HostReply =
+  | ChunkReply
+  | Extract<StoredControlMessage, { type: "BoxDiscard" | "ClaudeSetupBoxDiscard" }>
+  | TurnHandoff;
 
 const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
 
@@ -570,6 +576,10 @@ export class TenantSessions extends DurableObject<Env> {
   }
 
   private async offer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
+    await this.host(session.host_id).send(await this.armOffer(tenantId, session, turn));
+  }
+
+  private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
     const settings = settingsOf(this.env);
     const now = Date.now();
     await this.timers(tenantId, session.session_id, {
@@ -580,7 +590,7 @@ export class TenantSessions extends DurableObject<Env> {
       Snapshot: null,
       HostOffline: null,
     });
-    const offer: StoredControlMessage = {
+    return {
       type: "TurnOffer",
       turnId: turn.turn_id,
       sessionId: session.session_id,
@@ -591,7 +601,6 @@ export class TenantSessions extends DurableObject<Env> {
       model: session.model,
       prompt: turn.prompt,
     };
-    await this.host(session.host_id).send(offer);
   }
 
   private insertTurn(sessionId: string, hostId: string, boxId: string, prompt: string, now: number): TurnRow {
@@ -889,16 +898,23 @@ export class TenantSessions extends DurableObject<Env> {
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
-  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow, refusal: string): Promise<void> {
+  private async offerElsewhere(
+    tenantId: string,
+    session: SessionRow,
+    turn: TurnRow,
+    refusal: string,
+  ): Promise<TurnHandoff | null> {
     const now = Date.now();
-    const fail = (consequence: string): Promise<void> =>
-      this.failTurn(
+    const fail = async (consequence: string): Promise<null> => {
+      await this.failTurn(
         tenantId,
         turn.turn_id,
         "HostUpdating",
         `host ${session.host_id} refused turn ${turn.turn_id} (${refusal}), and ${consequence}; send the turn again once the host is back online`,
         iso(now),
       );
+      return null;
+    };
     const missingTurnIds = this.unsnapshottedTurns(session.session_id);
     if (missingTurnIds.length > 0) {
       return fail(
@@ -936,7 +952,8 @@ export class TenantSessions extends DurableObject<Env> {
       );
     });
     await this.timers(tenantId, session.session_id, { SnapshotAnswer: null });
-    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
+    const offer = await this.armOffer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
+    return { type: "TurnHandoff", hostId, offer };
   }
 
   private runTurn(session: SessionRow, hostId: string, boxId: string, prompt: string, now: number): TurnRow {
@@ -1468,6 +1485,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
     if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
+    if (message.type === "TurnFailed") return this.turnFailed(tenantId, hostId, message);
     await this.hostEvent(tenantId, hostId, message);
     return null;
   }
@@ -1686,7 +1704,21 @@ export class TenantSessions extends DurableObject<Env> {
     return { type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id };
   }
 
-  private offeredTurn(hostId: string, message: TurnEvent | CloneFailed): { turn: TurnRow; session: SessionRow } {
+  private async turnFailed(tenantId: string, hostId: string, message: TurnFailed): Promise<HostReply | null> {
+    const { turn, session } = this.offeredTurn(hostId, message);
+    if (message.reason === "HostUpdating" && turn.state === "Offered") {
+      return this.offerElsewhere(tenantId, session, turn, message.detail);
+    }
+    const detail =
+      message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
+    await this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
+    return null;
+  }
+
+  private offeredTurn(
+    hostId: string,
+    message: TurnEvent | CloneFailed | TurnFailed,
+  ): { turn: TurnRow; session: SessionRow } {
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || turn.host_id !== hostId) {
@@ -1739,14 +1771,6 @@ export class TenantSessions extends DurableObject<Env> {
       return this.timers(tenantId, session.session_id, {
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
       });
-    }
-    if (message.type === "TurnFailed") {
-      if (message.reason === "HostUpdating" && turn.state === "Offered") {
-        return this.offerElsewhere(tenantId, session, turn, message.detail);
-      }
-      const detail =
-        message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
-      return this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
     }
     if (turn.state !== "Running") return;
     if (message.type === "TurnLine")
