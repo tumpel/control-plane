@@ -276,11 +276,18 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const updated = await toolJson(PersonaSchema, "tumpel_persona_update", {
     personaId: persona.personaId,
     name: "Reviewer",
-    secretSetId: defaultSet.secretSetId,
+    secretSetId: secretSet.secretSetId,
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review closely").toString("base64") }],
   });
   assert.notEqual(updated.files[0]?.digest, persona.files[0]?.digest);
-  assert.equal(updated.secretSetId, defaultSet.secretSetId);
+  const keyless = await send(
+    "PUT",
+    `/v1/personas/${persona.personaId}`,
+    { name: "Reviewer", secretSetId: defaultSet.secretSetId, files: [] },
+    bearer,
+  );
+  assert.equal(keyless.status, 422);
+  assert.equal(ProblemSchema.parse(await keyless.json()).code, "NoCredential");
   assert.deepEqual(
     await toolJson(PersonaSchema.array(), "tumpel_persona_list"),
     await rest(PersonaSchema.array(), "GET", "/v1/personas"),

@@ -269,7 +269,7 @@ test("tumpel config validate names every key that breaks the schema, a pasted se
   assert.ok(!validated.stderr.includes(SECRET));
 });
 
-test("a taken name, a repeated member, two credentials for one provider and deleting a set in use are refused with 409 Conflict", async () => {
+test("a taken name, a repeated member, two credentials for one provider and deleting a set in use are refused with 409 Conflict, and a persona on a set without a key its harness reads with 422", async () => {
   const key = { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET };
   const created = await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer);
   assert.equal(created.status, 200);
@@ -299,6 +299,15 @@ test("a taken name, a repeated member, two credentials for one provider and dele
   assert.equal(ProblemSchema.parse(await twin.json()).code, "Conflict");
   const unknown = await postJson("/v1/personas", { ...persona, name: "Lost", secretSetId: "no-such-set" }, bearer);
   assert.equal(unknown.status, 422);
+  const keyless = await postJson("/v1/personas", { ...persona, name: "Keyless", harness: "Codex" }, bearer);
+  assert.equal(keyless.status, 422);
+  const refusal = ProblemSchema.parse(await keyless.json());
+  assert.equal(refusal.code, "NoCredential");
+  assert.equal(
+    refusal.detail,
+    "secret set twin holds no credential Codex reads: a ApiKey for OpenAi, or a ApiKey for OpenRouter",
+  );
+  assert.equal(refusal.fix, "Add one of those to that secret set, then repeat personas.create");
 
   const inUse = await server.fetch(`${origin}/v1/secret-sets/${secretSetId}`, { method: "DELETE", headers: bearer });
   assert.equal(inUse.status, 409);
@@ -375,16 +384,6 @@ test("secret-set set-member writes one member from stdin and keeps the rest, and
     ],
   );
 
-  const removed = await tumpel(["secret-set", "remove-member", secretSetId, "ANTHROPIC_API_KEY"]);
-  assert.equal(removed.code, 0, removed.stderr);
-  assert.deepEqual(
-    SecretSetSchema.parse(JSON.parse(removed.stdout)).keys.map((member) => member.name),
-    ["DEPLOY_TOKEN"],
-  );
-  const missing = await tumpel(["secret-set", "remove-member", secretSetId, "ANTHROPIC_API_KEY"]);
-  assert.equal(missing.code, 1);
-  assert.match(missing.stderr, /no member ANTHROPIC_API_KEY/);
-
   writeLocal(join(scratch, "piped", "CLAUDE.md"), REVIEWER_MEMORY);
   const persona = await tumpel([
     "persona",
@@ -407,4 +406,14 @@ test("secret-set set-member writes one member from stdin and keeps the rest, and
     [kept.name, kept.secretSetId, kept.files.map((held) => [held.path, held.digest])],
     ["Piped again", secretSetId, [[".claude/CLAUDE.md", sha256(REVIEWER_MEMORY)]]],
   );
+
+  const removed = await tumpel(["secret-set", "remove-member", secretSetId, "ANTHROPIC_API_KEY"]);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.deepEqual(
+    SecretSetSchema.parse(JSON.parse(removed.stdout)).keys.map((member) => member.name),
+    ["DEPLOY_TOKEN"],
+  );
+  const missing = await tumpel(["secret-set", "remove-member", secretSetId, "ANTHROPIC_API_KEY"]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /no member ANTHROPIC_API_KEY/);
 });
