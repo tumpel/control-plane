@@ -1,13 +1,4 @@
 import {
-  GitHubConnectionSchema,
-  GitHubInstallationSchema,
-  type GitHubInstallRefusalSchema,
-  GitHubInstallStartSchema,
-  GitHubIssueSchema,
-  GitHubRepositorySchema,
-  type WhoamiSchema,
-} from "@tumpel/api/schemas";
-import {
   appBadOrganizationPage,
   appCreatedPage,
   appExistsPage,
@@ -26,6 +17,15 @@ import {
   notTheInstallerPage,
   signInAgainPage,
 } from "@tumpel/pages";
+import {
+  GitHubConnectionSchema,
+  GitHubInstallationSchema,
+  type GitHubInstallRefusalSchema,
+  GitHubInstallStartSchema,
+  GitHubIssueSchema,
+  GitHubRepositorySchema,
+  type WhoamiSchema,
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import {
   APP_CREATED_PATH,

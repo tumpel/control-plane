@@ -1,4 +1,4 @@
-import { type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
+import { type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { BootImage } from "./channel/protocol.ts";
 import { issues, type Problem } from "./http.ts";
@@ -62,7 +62,7 @@ export const parseRelease = (text: string): ReleaseParse => {
   if (!parsed.success) {
     return {
       ok: false,
-      detail: `${CURRENT_RELEASE_KEY} in the release bucket does not match ReleaseManifest in packages/api/release.tsp: ${issues(parsed.error)}`,
+      detail: `${CURRENT_RELEASE_KEY} in the release bucket does not match ReleaseManifest in typespec/lib/release.tsp: ${issues(parsed.error)}`,
     };
   }
   const manifest = parsed.data;

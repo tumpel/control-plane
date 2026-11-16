@@ -5,7 +5,7 @@ import {
   type SecretSetCreateSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";

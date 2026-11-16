@@ -1,4 +1,4 @@
-import { OAuthErrorSchema, type ProblemResponseSchema, ProblemSchema } from "@tumpel/api/schemas";
+import { OAuthErrorSchema, type ProblemResponseSchema, ProblemSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 
 export type Problem = z.infer<typeof ProblemSchema>;
@@ -50,7 +50,7 @@ export const parseBody = async <T>(request: Request, schema: z.ZodType<T>, opera
       code: "InvalidRequest",
       title: "Invalid request body",
       detail: `${operation} refused the body: ${issues(parsed.error)}`,
-      fix: "Send a JSON body that matches the operation's schema in packages/api",
+      fix: "Send a JSON body that matches the operation's schema in typespec",
     }),
   };
 };

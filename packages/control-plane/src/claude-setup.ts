@@ -3,7 +3,7 @@ import {
   ClaudeSetupMemberSchema,
   ClaudeSetupSchema,
   ClaudeSetupStateSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import type { BootImage, ClaudeSetupBoxOffer } from "./channel/protocol.ts";
 import type { Settings } from "./settings.ts";

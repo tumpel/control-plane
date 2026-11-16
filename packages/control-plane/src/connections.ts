@@ -11,7 +11,7 @@ import {
   NamespaceConnectionStartSchema,
   NotConfiguredConnectionSchema,
   NotConnectedConnectionSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { CIRCLECI_CONFIG_EXAMPLE, CIRCLECI_ORB, circleCIIssuer, readMe } from "./circleci.ts";
 import { credentialStanding } from "./circleci-oauth.ts";

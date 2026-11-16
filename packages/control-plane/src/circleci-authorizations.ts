@@ -1,4 +1,4 @@
-import { CircleCIAuthorizationChooseSchema, CircleCIAuthorizationCompleteSchema } from "@tumpel/api/schemas";
+import { CircleCIAuthorizationChooseSchema, CircleCIAuthorizationCompleteSchema } from "@tumpel/schemas";
 import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";

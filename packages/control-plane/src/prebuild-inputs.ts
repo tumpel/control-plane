@@ -1,4 +1,4 @@
-import type { PrebuildConfigSourceSchema } from "@tumpel/api/schemas";
+import type { PrebuildConfigSourceSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { callGitHub, type Fetch, type GitHubRepository } from "./github.ts";
 import { GitHubCommitSchema } from "./github-schemas.ts";

@@ -5,7 +5,7 @@ import {
   ProblemSchema,
   SecretValueSchema,
   type TenantConfigApplySchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import {

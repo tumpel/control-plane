@@ -1,4 +1,4 @@
-import { HostSchema } from "@tumpel/api/schemas";
+import { HostSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 
 export const HostRecordSchema = HostSchema.omit({ supervisorUpdateStep: true, supervisorUpdateFailure: true });

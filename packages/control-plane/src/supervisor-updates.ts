@@ -1,4 +1,4 @@
-import type { SupervisorUpdateLatestFailureSchema, SupervisorUpdateLatestStepSchema } from "@tumpel/api/schemas";
+import type { SupervisorUpdateLatestFailureSchema, SupervisorUpdateLatestStepSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { HostMessage } from "./channel/protocol.ts";
 

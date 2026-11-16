@@ -1,4 +1,4 @@
-import { CircleCIProjectAddSchema, CircleCIProjectPathSchema } from "@tumpel/api/schemas";
+import { CircleCIProjectAddSchema, CircleCIProjectPathSchema } from "@tumpel/schemas";
 import { createWebhook, deleteWebhook, readPipelineDefinition, readProject } from "./circleci.ts";
 import { type Fetch, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { json, parseBody, problem } from "./http";

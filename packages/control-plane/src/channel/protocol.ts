@@ -5,7 +5,7 @@ import {
   HostEnvelopeSchema,
   type HostFrameSchema,
   type HostUsageSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 
 export const HEARTBEAT_INTERVAL_MS = 10_000;

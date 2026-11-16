@@ -4,12 +4,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const GENERATED = [
-  "packages/api/generated/",
-  "packages/api/frozen/",
-  "crates/tumpel-api/src/generated.rs",
-  "crates/tumpel-api/src/frozen/",
-];
 const REGEX_AFTER = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
 const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await)$/;
 
@@ -22,13 +16,14 @@ const tracked = execFileSync(
     "packages/**.ts",
     "packages/**.tsx",
     "packages/**.mjs",
-    "packages/**.tsp",
+    "typespec/**.tsp",
+    "typespec/npm-scripts/*.mjs",
     "npm-scripts/*.mjs",
   ],
   { cwd: ROOT, encoding: "utf8" },
 )
   .split("\n")
-  .filter((file) => file && !GENERATED.some((path) => file.startsWith(path)));
+  .filter(Boolean);
 
 const skipQuoted = (source, start, quote) => {
   let index = start + 1;

@@ -9,7 +9,7 @@ import {
   SecretSetSchema,
   SessionSchema,
   TenantConfigSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { type Desired, type Live, type Planned, planOf, type SentFile, type Step } from "../src/configs.ts";
 

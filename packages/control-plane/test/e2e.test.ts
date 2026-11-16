@@ -14,7 +14,7 @@ import {
   PersonaSchema,
   ProblemSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 
 const AUDIENCE = "tumpel-e2e";

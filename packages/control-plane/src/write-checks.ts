@@ -1,5 +1,5 @@
 import { checkCredential } from "@tumpel/api/credentials";
-import type { HarnessPinCreateSchema, SecretSetSchema, SecretValueSchema } from "@tumpel/api/schemas";
+import type { HarnessPinCreateSchema, SecretSetSchema, SecretValueSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { type GitHubUser, REPOSITORY_TOKEN, tokenUser } from "./github.ts";
 import { inCatalog, pinnedEntry } from "./harness-catalog.ts";

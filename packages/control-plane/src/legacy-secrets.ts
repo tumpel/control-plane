@@ -1,4 +1,4 @@
-import { SecretVariableMemberSchema } from "@tumpel/api/schemas";
+import { SecretVariableMemberSchema } from "@tumpel/schemas";
 
 export type PlaintextRow = { secret_set_id: string; name: string; provider: string; value: string; updated_at: number };
 

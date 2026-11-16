@@ -1,4 +1,4 @@
-import { TranscriptLineSchema } from "@tumpel/api/schemas";
+import { TranscriptLineSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { Compactor } from "./compact.ts";
 

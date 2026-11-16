@@ -1,4 +1,4 @@
-import { DeployDrainSchema, type ReleaseRolloutSchema } from "@tumpel/api/schemas";
+import { DeployDrainSchema, type ReleaseRolloutSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { sameSecret } from "./crypto";
 import { issues, json, type Problem, problem } from "./http";
@@ -48,7 +48,7 @@ const drainToken = (text: string): string => {
   const parsed = DeployDrainSchema.safeParse(raw);
   if (!parsed.success) {
     throw new Error(
-      `${DEPLOY_DRAIN_KEY} in the release bucket does not match DeployDrain in packages/api/release.tsp: ${issues(parsed.error)}; start the drain again with npm run deploy:drain -- start`,
+      `${DEPLOY_DRAIN_KEY} in the release bucket does not match DeployDrain in typespec/lib/release.tsp: ${issues(parsed.error)}; start the drain again with npm run deploy:drain -- start`,
     );
   }
   return parsed.data.drainToken;

@@ -11,7 +11,7 @@ import {
   OAuthClientSchema,
   OAuthTokenSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { deriveSigningKey } from "../src/envelope.ts";
 import {

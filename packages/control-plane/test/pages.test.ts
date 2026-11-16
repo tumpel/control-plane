@@ -6,8 +6,8 @@ import type { AddressInfo } from "node:net";
 import { join, relative } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ProblemSchema } from "@tumpel/api/schemas";
 import { SHELL_MARKER } from "@tumpel/pages";
+import { ProblemSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 
 const AUDIENCE = "tumpel-pages";

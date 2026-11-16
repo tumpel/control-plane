@@ -1,4 +1,4 @@
-import { ChannelProtocol, CloseCode, StoredHostFrameSchema } from "@tumpel/api/schemas";
+import { ChannelProtocol, CloseCode, StoredHostFrameSchema } from "@tumpel/schemas";
 import {
   accept,
   type ControlEnvelope,

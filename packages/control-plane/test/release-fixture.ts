@@ -1,4 +1,4 @@
-import { ChannelProtocol } from "@tumpel/api/schemas";
+import { ChannelProtocol } from "@tumpel/schemas";
 import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import type { ReleaseManifest } from "../src/releases.ts";
 

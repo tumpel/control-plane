@@ -1,4 +1,23 @@
 import {
+  alreadyApprovedPage,
+  type ConsentClient,
+  codeNotFoundPage,
+  confirmPage,
+  consentPage,
+  consentRefusedPage,
+  enterCodePage,
+  noBuildPage,
+  noReleasePage,
+  noSuchPage,
+  noTenantPage,
+  nothingToConnectPage,
+  signInAgainPage,
+  signUpPage,
+  type TenantChoice,
+  unknownClientPage,
+  unreadableReleasePage,
+} from "@tumpel/pages";
+import {
   DeviceApprovalSchema,
   DeviceAuthorizationSchema,
   DeviceCodeRequestSchema,
@@ -39,26 +58,7 @@ import {
   TenantConfigPlanRequestSchema,
   WhoamiSchema,
   WhoamiWithEndpointSchema,
-} from "@tumpel/api/schemas";
-import {
-  alreadyApprovedPage,
-  type ConsentClient,
-  codeNotFoundPage,
-  confirmPage,
-  consentPage,
-  consentRefusedPage,
-  enterCodePage,
-  noBuildPage,
-  noReleasePage,
-  noSuchPage,
-  noTenantPage,
-  nothingToConnectPage,
-  signInAgainPage,
-  signUpPage,
-  type TenantChoice,
-  unknownClientPage,
-  unreadableReleasePage,
-} from "@tumpel/pages";
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
@@ -1468,7 +1468,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     code: "NotFound",
     title: "No such route",
     detail: `No route for ${request.method} ${url.pathname}`,
-    fix: "Call /healthz or an operation of the tumpel contract in packages/api",
+    fix: "Call /healthz or an operation of the tumpel contract in typespec",
   });
 };
 

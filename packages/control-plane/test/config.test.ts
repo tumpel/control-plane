@@ -17,7 +17,7 @@ import {
   ProblemSchema,
   SecretSetSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";

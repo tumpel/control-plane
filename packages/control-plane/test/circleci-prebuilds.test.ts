@@ -15,7 +15,7 @@ import {
   PrebuildSchema,
   ProblemSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
 import { generateDataKey, seal } from "../src/envelope.ts";

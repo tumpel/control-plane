@@ -1,5 +1,5 @@
 import type { D1Database } from "@cloudflare/workers-types/index.ts";
-import type { GitHubInstallationSchema } from "@tumpel/api/schemas";
+import type { GitHubInstallationSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {

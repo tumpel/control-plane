@@ -2,7 +2,7 @@ import type {
   CircleCIAuthorizationFailureReasonSchema,
   CircleCIAuthorizationSchema,
   CircleCIOrganizationSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { z } from "zod";
 import type { Fetch } from "./github.ts";
 

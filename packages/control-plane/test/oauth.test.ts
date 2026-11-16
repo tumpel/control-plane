@@ -12,7 +12,7 @@ import {
   ProblemSchema,
   ProtectedResourceMetadataSchema,
   WhoamiSchema,
-} from "@tumpel/api/schemas";
+} from "@tumpel/schemas";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
