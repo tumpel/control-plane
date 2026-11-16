@@ -255,7 +255,8 @@ export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetup
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
 type TurnFailed = Extract<SessionHostMessage, { type: "TurnFailed" }>;
-type HostEvent = Exclude<SessionHostMessage, ChunkAsk | CloneFailed | TurnFailed>;
+type TurnClaim = Extract<SessionHostMessage, { type: "TurnClaim" }>;
+type HostEvent = Exclude<SessionHostMessage, ChunkAsk | CloneFailed | TurnFailed | TurnClaim>;
 type TurnEvent = Exclude<HostEvent, { type: "SnapshotDone" | "SnapshotFailed" | "BoxGone" | "BoxTeardownFailed" }>;
 type ChunkReply = Extract<
   StoredControlMessage,
@@ -265,7 +266,7 @@ type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
 export type TurnHandoff = { type: "TurnHandoff"; hostId: string; offer: StoredTurnOffer };
 export type HostReply =
   | ChunkReply
-  | Extract<StoredControlMessage, { type: "BoxDiscard" | "ClaudeSetupBoxDiscard" }>
+  | Extract<StoredControlMessage, { type: "BoxDiscard" | "ClaudeSetupBoxDiscard" | "TurnClaimed" | "TurnWithdrawn" }>
   | TurnHandoff;
 
 const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
@@ -1482,6 +1483,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
     if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
     if (message.type === "TurnFailed") return this.turnFailed(tenantId, hostId, message);
+    if (message.type === "TurnClaim") return this.turnClaim(tenantId, hostId, message);
     await this.hostEvent(tenantId, hostId, message);
     return null;
   }
@@ -1713,7 +1715,7 @@ export class TenantSessions extends DurableObject<Env> {
 
   private offeredTurn(
     hostId: string,
-    message: TurnEvent | CloneFailed | TurnFailed,
+    message: TurnEvent | CloneFailed | TurnFailed | TurnClaim,
   ): { turn: TurnRow; session: SessionRow } {
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
@@ -1721,6 +1723,27 @@ export class TenantSessions extends DurableObject<Env> {
       throw new Error(`host ${hostId} sent ${message.type} for turn ${message.turnId}, which is not offered to it`);
     }
     return { turn, session };
+  }
+
+  private async turnClaim(tenantId: string, hostId: string, message: TurnClaim): Promise<HostReply> {
+    const { turn, session } = this.offeredTurn(hostId, message);
+    if (turn.state !== "Offered") return { type: "TurnWithdrawn", turnId: turn.turn_id };
+    const now = Date.now();
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
+      sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
+    });
+    const settings = settingsOf(this.env);
+    await this.timers(tenantId, session.session_id, {
+      Claim: null,
+      ImageFetch: null,
+      FirstLine: {
+        turnId: turn.turn_id,
+        at: now + (message.cloneSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
+      },
+    });
+    return { type: "TurnClaimed", turnId: turn.turn_id };
   }
 
   private async hostEvent(tenantId: string, hostId: string, message: HostEvent): Promise<void> {
@@ -1742,22 +1765,6 @@ export class TenantSessions extends DurableObject<Env> {
           turnId: turn.turn_id,
           imageDigest: message.imageDigest,
           at: now + (settings.turnImageFetchBudgetSeconds + settings.turnClaimBudgetSeconds) * 1000,
-        },
-      });
-    }
-    if (message.type === "TurnClaim") {
-      if (turn.state !== "Offered") return;
-      this.ctx.storage.transactionSync(() => {
-        sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
-        sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
-      });
-      const settings = settingsOf(this.env);
-      return this.timers(tenantId, session.session_id, {
-        Claim: null,
-        ImageFetch: null,
-        FirstLine: {
-          turnId: turn.turn_id,
-          at: now + (message.cloneSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
         },
       });
     }
