@@ -94,12 +94,25 @@ const gitHubRefused = (detail: string): Refused =>
 const listed = (names: string[]): string =>
   names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 
-const appPermissionMissing = (target: GitHubRepository, permissions: string[]): Refused =>
+const appPermissionMissing = (target: GitHubRepository, permissions: string[], appSlug: string): Refused =>
   refuse(409, {
     code: "GitHubAppPermissionMissing",
     title: "GitHub App needs more access",
-    detail: `the Tumpel app on GitHub needs Read and write access to ${listed(permissions)} to add its prebuild workflow to ${target.owner}/${target.name} and start it, and ${target.owner} has not granted that yet`,
-    fix: `On GitHub, open the settings of ${target.owner}, go to GitHub Apps, choose Configure next to the Tumpel app, then Review request and Accept new permissions; then start the prebuild again`,
+    detail: `the GitHub App ${appSlug} asks for Read and write access to ${listed(permissions)}, which it needs to add its prebuild workflow to ${target.owner}/${target.name} and start it, and ${target.owner} has not accepted that request yet`,
+    fix: `On GitHub, open the settings of ${target.owner}, go to GitHub Apps, choose Configure next to ${appSlug}, then Review request and Accept new permissions; then start the prebuild again`,
+  });
+
+const appLacksPermission = (
+  target: GitHubRepository,
+  permissions: string[],
+  appSlug: string,
+  appOwner: string,
+): Refused =>
+  refuse(409, {
+    code: "GitHubAppPermissionMissing",
+    title: "GitHub App needs more access",
+    detail: `the GitHub App ${appSlug} itself holds less than Read and write access to ${listed(permissions)}, which it needs to add its prebuild workflow to ${target.owner}/${target.name} and start it, so no installation can grant it`,
+    fix: `${appOwner}, who owns the App, opens its settings on GitHub under Developer settings, GitHub Apps, ${appSlug}, Permissions and events, sets ${listed(permissions)} to Read and write under Repository permissions and saves; then ${target.owner} opens Settings, GitHub Apps, Configure next to ${appSlug}, Review request and accepts the new permissions; then start the prebuild again`,
   });
 
 const callerWorkflowRefused = (detail: string): Refused =>
@@ -186,7 +199,9 @@ const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: 
     case "Unreadable":
       return installationUnreadable(target, started.detail);
     case "PermissionMissing":
-      return appPermissionMissing(target, started.permissions);
+      return appPermissionMissing(target, started.permissions, started.appSlug);
+    case "AppPermissionMissing":
+      return appLacksPermission(target, started.permissions, started.appSlug, started.appOwner);
     case "CallerRefused":
       return callerWorkflowRefused(started.detail);
     case "ActionsDisabled":

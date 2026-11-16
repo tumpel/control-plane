@@ -67,6 +67,9 @@ const missingWrite = (granted: Record<string, string>, needed: string[]): string
     .filter((permission) => granted[permission] !== "write")
     .map((permission) => PERMISSION_LABELS[permission] ?? permission);
 
+export const appLacking = (appPermissions: Record<string, string>, missing: string[]): string[] =>
+  missingWrite(appPermissions, Object.keys(PERMISSION_LABELS)).filter((label) => missing.includes(label));
+
 const repositoryPath = (target: GitHubRepository): string =>
   `${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}`;
 

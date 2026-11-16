@@ -5,6 +5,7 @@ import {
   type GitHubAccountsRefreshStateSchema,
   GitHubAppConversionSchema,
   type GitHubAppManifestSchema,
+  GitHubAppSchema,
   GitHubBotUserSchema,
   GitHubErrorSchema,
   type GitHubInstallationChoiceStateSchema,
@@ -373,6 +374,27 @@ export const mintInstallationToken = async (
     kind: "Refused",
     detail: `${answer.detail}; send the turn again once GitHub answers, and check https://www.githubstatus.com if it keeps failing`,
   };
+};
+
+export const readAppPermissions = async (
+  fetcher: Fetch,
+  api: string,
+  app: AppKey,
+  now: number,
+): Promise<GitHubAnswer<Record<string, string>>> => {
+  const answer = await callGitHub(
+    fetcher,
+    {
+      method: "GET",
+      url: `${api}/app`,
+      accept: API_MEDIA_TYPE,
+      bearer: await appJwt(app.clientId, app.privateKey, now),
+      body: null,
+    },
+    GitHubAppSchema,
+    "GitHubApp",
+  );
+  return answer.ok ? { ok: true, value: answer.value.permissions } : answer;
 };
 
 export const mintInstallationWideToken = async (

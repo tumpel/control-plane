@@ -20,8 +20,15 @@ import {
 } from "./circleci.ts";
 import type { CircleCICredentialRow } from "./circleci-oauth.ts";
 import { seal, unseal } from "./envelope.ts";
-import { type GitHubRepository, type Minted, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
 import {
+  type GitHubRepository,
+  type Minted,
+  REPOSITORY_TOKEN,
+  readAppPermissions,
+  repositoryCredential,
+} from "./github.ts";
+import {
+  appLacking,
   commitCallerWorkflow,
   type Dispatched,
   dispatchCallerWorkflow,
@@ -30,6 +37,8 @@ import {
   runPage,
   workflowPage,
 } from "./github-actions.ts";
+import { appKey, storedApp } from "./github-store.ts";
+import { keyStoreOf } from "./key-store.ts";
 import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
@@ -195,7 +204,8 @@ export type StartedGitHubActions =
   | { kind: "NoInstallation" }
   | { kind: "TokenRefused"; detail: string }
   | { kind: "Unreadable"; detail: string }
-  | { kind: "PermissionMissing"; permissions: string[] }
+  | { kind: "PermissionMissing"; permissions: string[]; appSlug: string }
+  | { kind: "AppPermissionMissing"; permissions: string[]; appSlug: string; appOwner: string }
   | { kind: "CallerRefused"; detail: string }
   | Exclude<Dispatched, { kind: "Dispatched" }>;
 
@@ -646,6 +656,20 @@ export class TenantPrebuilds extends TenantSessions {
     );
   }
 
+  private async permissionHolder(missing: string[], now: number): Promise<StartedGitHubActions> {
+    const stored = await storedApp(this.env.DB);
+    const key = await appKey(this.env.DB, keyStoreOf(this.env));
+    if (stored === null || key === null) {
+      throw new Error("the stage's GitHub App was removed while it minted an installation token; create it again");
+    }
+    const read = await readAppPermissions((url, init) => fetch(url, init), this.env.GITHUB_API_ORIGIN, key, now);
+    if (!read.ok)
+      return { kind: "Refused", detail: `${read.detail}, reading the permissions of GitHub App ${stored.slug}` };
+    const lacking = appLacking(read.value, missing);
+    if (lacking.length === 0) return { kind: "PermissionMissing", permissions: missing, appSlug: stored.slug };
+    return { kind: "AppPermissionMissing", permissions: lacking, appSlug: stored.slug, appOwner: stored.ownerLogin };
+  }
+
   async startGitHubActionsPrebuild(
     tenantId: string,
     start: GitHubActionsStart,
@@ -662,7 +686,7 @@ export class TenantPrebuilds extends TenantSessions {
     const { branch } = described;
     const caller = { path: callerWorkflow, apiOrigin: start.apiOrigin, branch };
     const read = await readCallerWorkflow(fetcher, api, minted, target, caller);
-    if (read.kind === "PermissionMissing") return read;
+    if (read.kind === "PermissionMissing") return this.permissionHolder(read.permissions, now);
     if (read.kind === "Refused") return { kind: "CallerRefused", detail: read.detail };
     const inputs = await readInputs(fetcher, api, target, minted.token, branch);
     if (inputs.kind === "Unreadable") return inputs;

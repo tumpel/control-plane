@@ -126,6 +126,9 @@ const readInputsAs = (token: string) =>
 let earlyInputs: Promise<Response> | null = null;
 let branchHead = HEAD_SHA;
 let runOnDispatch = true;
+const WRITE_ALL = { actions: "write", contents: "write", workflows: "write" };
+let installationPermissions: Record<string, string> = WRITE_ALL;
+let appPermissions: Record<string, string> = WRITE_ALL;
 const gitHubCalls: string[] = [];
 
 const reply = (response: ServerResponse, status: number, body: unknown) => {
@@ -145,9 +148,10 @@ const fakeGitHub = async (request: IncomingMessage, response: ServerResponse, pa
     return reply(response, 201, {
       token: "installation-token",
       expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-      permissions: { actions: "write", contents: "write", workflows: "write" },
+      permissions: installationPermissions,
     });
   }
+  if (request.method === "GET" && path === "/app") return reply(response, 200, { permissions: appPermissions });
   if (/^\/repos\/acme\/(app|fresh|web|pair)$/.test(path)) return reply(response, 200, { default_branch: "main" });
   if (/^\/repos\/acme\/(app|web|pair)\/commits\/main$/.test(path)) {
     return reply(response, 200, { sha: branchHead, commit: { tree: { sha: TREE_SHA } } });
@@ -649,6 +653,26 @@ test("a start on a repository without the caller workflow commits it, starts no 
   assert.ok(gitHubCalls.includes("GET /repos/acme/fresh/commits/main"), gitHubCalls.join("\n"));
   assert.ok(!gitHubCalls.some((call) => call.endsWith("/dispatches")), gitHubCalls.join("\n"));
   assert.equal((await readPrebuild(started.prebuildId)).status.state, "Building");
+});
+
+test("a missing Actions write names the App owner's settings when the App lacks it, and the installation's pending request when only the installation does", async () => {
+  installationPermissions = { ...WRITE_ALL, actions: "read" };
+  appPermissions = { ...WRITE_ALL, actions: "read" };
+  const lacking = await startOn("https://github.com/acme/app");
+  assert.equal(lacking.status, 409, await lacking.clone().text());
+  const onApp = ProblemSchema.parse(await lacking.json());
+  assert.equal(onApp.code, "GitHubAppPermissionMissing");
+  assert.match(onApp.detail, /GitHub App tumpel-runs itself holds less than Read and write access to Actions/);
+  assert.match(onApp.fix, /^acme, who owns the App, opens its settings on GitHub under Developer settings/);
+
+  appPermissions = WRITE_ALL;
+  const pending = await startOn("https://github.com/acme/app");
+  assert.equal(pending.status, 409, await pending.clone().text());
+  const onInstallation = ProblemSchema.parse(await pending.json());
+  assert.equal(onInstallation.code, "GitHubAppPermissionMissing");
+  assert.match(onInstallation.detail, /acme has not accepted that request yet/);
+  assert.match(onInstallation.fix, /Configure next to tumpel-runs, then Review request and Accept new permissions/);
+  installationPermissions = WRITE_ALL;
 });
 
 test("two starts of the same inputs at the same moment dispatch once and answer the same prebuild", async () => {
