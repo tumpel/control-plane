@@ -10,7 +10,7 @@ import type { Env } from "./index";
 import type { ConfigSource } from "./prebuild-inputs.ts";
 import { inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import { signerOf } from "./presign";
-import { currentRelease, imagesFor, type ReleaseImage, rootfsKey } from "./releases";
+import { imagesFor, type ReleaseImage, readRelease, releaseUnreadable, rootfsKey } from "./releases";
 import { apiOriginOf, settingsOf } from "./settings";
 import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
 
@@ -260,7 +260,8 @@ const guestImage = async (
   harnessVersion: string,
   now: number,
 ): Promise<Outcome<ReleaseImage>> => {
-  const release = await currentRelease(env.RELEASES, now);
+  const release = await readRelease(env.RELEASES, now);
+  if (release.kind === "Unreadable") return refuse(422, releaseUnreadable(release.detail, "start the prebuild again"));
   if (release.kind === "Unpublished") {
     return refuse(409, {
       code: "NoRelease",

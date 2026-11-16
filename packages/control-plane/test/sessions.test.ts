@@ -556,6 +556,22 @@ after(async () => {
   if (scratch) rmSync(scratch, { recursive: true, force: true });
 });
 
+test("a start against a current.json of the previous shape is refused ImageNotReleased with the reason, not a crash", async () => {
+  const releases = (await server.getWorker<{ RELEASES: Store }>().getEnv()).RELEASES;
+  const { bases: _bases, ...previous } = RELEASE;
+  await releases.put(
+    "current.json",
+    JSON.stringify({ ...previous, channelProtocolVersion: ChannelProtocol.Version - 1 }),
+  );
+  const refusal = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "old release" }, bearer);
+  await releases.put("current.json", JSON.stringify(RELEASE));
+  assert.equal(refusal.status, 422);
+  const problem = ProblemSchema.parse(await refusal.json());
+  assert.equal(problem.code, "ImageNotReleased");
+  assert.match(problem.detail, /the published release is unreadable: current\.json .* bases/);
+  assert.equal(problem.fix, "Ask the operator to publish a release with the release workflow, then start again");
+});
+
 test("a turn started over MCP reaches the host, its lines read back in order by cursor, and a snapshot follows", async () => {
   const started = await tool(
     "tumpel_session_start",

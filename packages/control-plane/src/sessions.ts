@@ -18,6 +18,7 @@ import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import type { Unplaceable } from "./placement";
+import { releaseUnreadable } from "./releases";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings";
 import type {
@@ -217,8 +218,11 @@ const prepareStart = async (
   });
 };
 
-const placed = <T>(started: Started<T>): Outcome<T> =>
-  started.kind === "Unplaced" ? unplaced(started.hosts, "start again") : ok(started.started);
+const placed = <T>(started: Started<T>): Outcome<T> => {
+  if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
+  if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
+  return ok(started.started);
+};
 
 export const startSession = async (
   env: Env,
@@ -338,6 +342,7 @@ export const sendTurn = async (
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
   if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
+  if (sent.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(sent.detail, "send the turn again"));
   if (sent.kind === "NotFound") return sessionNotFound(sessionId);
   if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");
   if (sent.kind === "Stopping") {

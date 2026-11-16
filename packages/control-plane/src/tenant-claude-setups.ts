@@ -24,7 +24,7 @@ import { type HostRecord, hostOf } from "./hosts";
 import { keyStoreOf } from "./key-store.ts";
 import { placeSession, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
-import { bootArchitectures, bootFor, bootImage, currentRelease } from "./releases";
+import { bootArchitectures, bootFor, bootImage, readRelease } from "./releases";
 import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
@@ -49,6 +49,7 @@ export interface NewClaudeSetup {
 export type ClaudeSetupStarted =
   | { kind: "Started"; setup: ClaudeSetup }
   | { kind: "Unplaced"; hosts: Unplaceable[] }
+  | { kind: "ReleaseUnreadable"; detail: string }
   | { kind: "NoSecretSet" }
   | { kind: "OtherCredential"; name: string };
 
@@ -131,7 +132,8 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (set === undefined) return { kind: "NoSecretSet" };
     const other = this.otherAnthropicCredential(input.secretSetId);
     if (other !== null) return { kind: "OtherCredential", name: other };
-    const release = await currentRelease(this.env.RELEASES, now);
+    const release = await readRelease(this.env.RELEASES, now);
+    if (release.kind === "Unreadable") return { kind: "ReleaseUnreadable", detail: release.detail };
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), {
       harness: HARNESS,
       harnessVersion: input.harnessVersion,
@@ -414,7 +416,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       throw new Error(
         `Claude setup ${row.claude_setup_id} is offered to host ${hostId}, which tenant ${tenantId} does not list`,
       );
-    const release = await currentRelease(this.env.RELEASES, now);
+    const release = await readRelease(this.env.RELEASES, now);
+    if (release.kind === "Unreadable") {
+      return `the published release is unreadable: ${release.detail}; ask the operator to publish a release with the release workflow, then start the Claude setup again`;
+    }
     const boot = bootFor(release, HARNESS, row.harness_version, host.architecture);
     if (boot === undefined) {
       return `the current release carries no ${HARNESS} ${row.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries, then start the Claude setup again`;

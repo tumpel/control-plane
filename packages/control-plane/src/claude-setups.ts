@@ -10,6 +10,7 @@ import { listHosts } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { releaseUnreadable } from "./releases";
 import { placeableFix, why } from "./sessions";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -80,6 +81,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       fix: "List your secret sets and start the setup for one of their ids",
     });
   }
+  if (started.kind === "ReleaseUnreadable") return problem(422, releaseUnreadable(started.detail, START_AGAIN));
   if (started.kind === "OtherCredential") {
     return problem(409, {
       code: "Conflict",
