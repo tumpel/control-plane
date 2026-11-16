@@ -37,7 +37,15 @@ import type {
   TurnFailure,
 } from "./tenant-sessions";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
-import { compactorOf, DEFAULT_PAGE_BYTES, decodeLines, pageOf, type TranscriptLine } from "./transcript";
+import {
+  compactorOf,
+  DEFAULT_PAGE_BYTES,
+  decodeLines,
+  emptyPage,
+  type Page,
+  pageOf,
+  type TranscriptLine,
+} from "./transcript";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 type CompactTranscriptTurn = z.infer<typeof CompactTranscriptTurnSchema>;
@@ -467,16 +475,18 @@ export const readTranscript = async (
   const compact = query.compact ?? false;
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
   const chunkLines = settingsOf(env).transcriptChunkLines;
-  const readAfter = (after: number, limit: number) =>
+  const limit = query.limit ?? chunkLines;
+  const readAfter = (page: Page) =>
     tenantOf(env, caller).transcriptCursor(
       caller.tenantId,
       sessionId,
-      after,
+      page.cursor,
       query.turnId ?? null,
-      limit,
-      compact ? null : maxBytes,
+      compact ? chunkLines : limit - page.lines.length,
+      compact ? null : Math.max(1, maxBytes - page.bytes),
     );
-  const cursor = await readAfter(query.after ?? 0, query.limit ?? chunkLines);
+  let page = emptyPage(query.after ?? 0);
+  const cursor = await readAfter(page);
   if (cursor === null) return sessionNotFound(sessionId);
   const compactor = compact ? compactorOf(cursor.harness) : null;
   if (compact && compactor === null) {
@@ -487,12 +497,12 @@ export const readTranscript = async (
       fix: "Read the transcript without compact",
     });
   }
-  let after = query.after ?? 0;
   let read = cursor;
   for (let pass = 1; ; pass += 1) {
-    const page = pageOf(await linesOf(env, read), after, compactor, maxBytes);
-    const settled = page.lines.length > 0 || page.cursor === after || page.cursor >= read.lastLineSeq;
-    if (settled || pass === COMPACT_READ_PASSES) {
+    const fetched = await linesOf(env, read);
+    page = pageOf(page, fetched, compactor, limit, maxBytes);
+    const settled = page.full || fetched.length === 0 || page.cursor >= read.lastLineSeq;
+    if (settled || (compactor !== null && pass === COMPACT_READ_PASSES)) {
       const { sessionState } = read;
       const finished = !read.inFlight && page.cursor >= read.lastLineSeq;
       if (compactor === null) {
@@ -511,9 +521,8 @@ export const readTranscript = async (
         }),
       );
     }
-    const next = await readAfter(page.cursor, chunkLines);
+    const next = await readAfter(page);
     if (next === null) return sessionNotFound(sessionId);
-    after = page.cursor;
     read = next;
   }
 };
