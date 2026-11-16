@@ -74,6 +74,7 @@ const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
+const INTERNAL_ERROR = -32603;
 const HEADER_MISMATCH = -32020;
 const UNSUPPORTED_VERSION = -32022;
 const UNAUTHORIZED = -32001;
@@ -881,6 +882,22 @@ const listResult = (): unknown => ({
   })),
 });
 
+const toolReply = (id: Id, outcome: ToolResult): Response => {
+  const text = outcome.ok ? outcome.text : outcome.error;
+  return reply(id, { content: [{ type: "text", text }], ...(outcome.ok ? {} : { isError: true }) });
+};
+
+const toolFailed = (id: Id, tool: ToolDefinition, error: unknown): Response => {
+  console.error(`MCP tool ${tool.name} failed inside the control plane`, error);
+  const reason = error instanceof Error ? error.message : String(error);
+  return refuse(
+    id,
+    INTERNAL_ERROR,
+    `${tool.name} failed inside the control plane: ${reason}; report the tool name and this message to the operator`,
+    200,
+  );
+};
+
 const callResult = async (id: Id, params: unknown, run: Bound): Promise<Response> => {
   if (!isRecord(params)) return refuse(id, INVALID_PARAMS, "tools/call takes {name, arguments}", 200);
   const tool = toolNamed(params.name);
@@ -890,11 +907,13 @@ const callResult = async (id: Id, params: unknown, run: Bound): Promise<Response
     return refuse(id, INVALID_PARAMS, `${tool.name} takes its arguments as a JSON object`, 200);
   }
   const parsed = tool.input.safeParse(args ?? {});
-  const outcome: ToolResult = parsed.success
-    ? await runTool(tool, parsed.data, run.dispatch, run.origin)
-    : { ok: false, error: `${tool.name} refused its arguments: ${issues(parsed.error)}` };
-  const text = outcome.ok ? outcome.text : outcome.error;
-  return reply(id, { content: [{ type: "text", text }], ...(outcome.ok ? {} : { isError: true }) });
+  if (!parsed.success) {
+    return toolReply(id, { ok: false, error: `${tool.name} refused its arguments: ${issues(parsed.error)}` });
+  }
+  return runTool(tool, parsed.data, run.dispatch, run.origin).then(
+    (outcome) => toolReply(id, outcome),
+    (error: unknown) => toolFailed(id, tool, error),
+  );
 };
 
 const initializeResult = (params: unknown): unknown => {
