@@ -31,7 +31,7 @@ export type OfferParts = Pick<
   "credential" | "lastLineSeq" | "snapshots" | "personaFiles" | "image" | "gitAuthorName" | "gitAuthorEmail"
 >;
 export type PersonaFileDownload = TurnOffer["personaFiles"][number];
-export type GuestImageDownload = TurnOffer["image"];
+export type BootImage = TurnOffer["image"];
 export type StoredOffer = Omit<TurnOffer, keyof OfferParts>;
 export type ClaudeSetupBoxOffer = Extract<ControlMessage, { type: "ClaudeSetupBoxOffer" }>;
 export type ClaudeSetupBoxCode = Extract<ControlMessage, { type: "ClaudeSetupBoxCode" }>;

@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ChannelProtocol, ProblemSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
-import { parseRelease, type ReleaseManifest } from "../src/releases.ts";
+import { bootArchitectures, bootFor, parseRelease, type ReleaseManifest } from "../src/releases.ts";
 
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const SUPERVISOR_SHA = "a".repeat(64);
@@ -38,6 +38,16 @@ const RELEASE: ReleaseManifest = {
       layerDigest: "1".repeat(64),
       manifestDigest: "2".repeat(64),
       sizeBytes: 65536,
+    },
+  ],
+  bases: [
+    {
+      architecture: "Amd64",
+      imageDigest: "3".repeat(64),
+      kernelDigest: KERNEL,
+      manifestDigest: "4".repeat(64),
+      ociDigest: "5".repeat(64),
+      rootfsDigest: "6".repeat(64),
     },
   ],
 };
@@ -91,6 +101,30 @@ test("current.json parses against ReleaseManifest, keeps its channel protocol ve
     refused(JSON.stringify({ ...RELEASE, images: [image, image] })),
     /two images for ClaudeCode 2\.0\.0 Amd64/,
   );
+});
+
+test("a turn boots layered where the release carries a base and the harness layer, else from the full image", () => {
+  const published = { kind: "Published" as const, manifest: RELEASE };
+  const [base] = RELEASE.bases;
+  const [layer] = RELEASE.harnessLayers;
+  const [image] = RELEASE.images;
+  assert.ok(base && layer && image);
+  assert.deepEqual(bootFor(published, "ClaudeCode", "2.0.0", "Amd64"), { kind: "Layered", base, layer });
+  const withoutLayer = {
+    kind: "Published" as const,
+    manifest: { ...RELEASE, harnessLayers: [{ ...layer, harness: "Shell" as const }] },
+  };
+  assert.deepEqual(bootFor(withoutLayer, "ClaudeCode", "2.0.0", "Amd64"), { kind: "Full", image });
+  const armBase = {
+    kind: "Published" as const,
+    manifest: { ...RELEASE, bases: [{ ...base, architecture: "Arm64" as const }] },
+  };
+  assert.deepEqual(bootFor(armBase, "ClaudeCode", "2.0.0", "Amd64"), { kind: "Full", image });
+  assert.equal(bootFor(published, "ClaudeCode", "1.0.0", "Amd64"), undefined);
+  assert.deepEqual(bootArchitectures(published, "ClaudeCode", "2.0.0"), ["Amd64"]);
+  const layerOnly = { kind: "Published" as const, manifest: { ...RELEASE, images: [] } };
+  assert.deepEqual(bootArchitectures(layerOnly, "ClaudeCode", "2.0.0"), ["Amd64"]);
+  assert.deepEqual(bootArchitectures(layerOnly, "OpenCode", "1.0.0"), []);
 });
 
 test("with no current.json the release reads NoRelease, a malformed one ReleaseUnreadable, and a published one of an older protocol reads back and redirects to its supervisor", async () => {

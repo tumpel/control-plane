@@ -1,5 +1,5 @@
 import type {
-  GuestImageDownload,
+  BootImage,
   HostMessage,
   PreparedClaudeSetup,
   StoredClaudeSetupCode,
@@ -24,7 +24,7 @@ import { type HostRecord, hostOf } from "./hosts";
 import { keyStoreOf } from "./key-store.ts";
 import { placeSession, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
-import { currentRelease, imageKey, imagesFor, kernelKey, manifestKey } from "./releases";
+import { bootArchitectures, bootFor, bootImage, currentRelease } from "./releases";
 import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
@@ -135,7 +135,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), {
       harness: HARNESS,
       harnessVersion: input.harnessVersion,
-      architectures: imagesFor(release, HARNESS, input.harnessVersion).map((image) => image.architecture),
+      architectures: bootArchitectures(release, HARNESS, input.harnessVersion),
     });
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);
@@ -408,17 +408,15 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     row: ClaudeSetupRow,
     hostId: string,
     now: number,
-  ): Promise<GuestImageDownload | string> {
+  ): Promise<BootImage | string> {
     const host = await hostOf(this.env.DB, tenantId, hostId);
     if (host === null)
       throw new Error(
         `Claude setup ${row.claude_setup_id} is offered to host ${hostId}, which tenant ${tenantId} does not list`,
       );
     const release = await currentRelease(this.env.RELEASES, now);
-    const image = imagesFor(release, HARNESS, row.harness_version).find(
-      (each) => each.architecture === host.architecture,
-    );
-    if (image === undefined) {
+    const boot = bootFor(release, HARNESS, row.harness_version, host.architecture);
+    if (boot === undefined) {
       return `the current release carries no ${HARNESS} ${row.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries, then start the Claude setup again`;
     }
     const signer = signerOf(
@@ -428,17 +426,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       this.env.RELEASES_SECRET_ACCESS_KEY,
     );
     const seconds = settingsOf(this.env).claudeSetupUrlBudgetSeconds;
-    const at = new Date(now);
-    return {
-      imageDigest: image.imageDigest,
-      kernelDigest: image.kernelDigest,
-      manifestDigest: image.manifestDigest,
-      imageUrl: await signer.presign("GET", imageKey(image), seconds, at),
-      kernelUrl: await signer.presign("GET", kernelKey(image), seconds, at),
-      manifestUrl: await signer.presign("GET", manifestKey(image), seconds, at),
-      downloadExpiresAt: new Date(now + seconds * 1000).toISOString(),
-      fetchSeconds: seconds,
-    };
+    return bootImage(signer, boot, seconds, seconds, now);
   }
 
   async prepareClaudeSetup(

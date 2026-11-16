@@ -5,7 +5,7 @@ import {
   ClaudeSetupStateSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import type { ClaudeSetupBoxOffer, GuestImageDownload } from "./channel/protocol.ts";
+import type { BootImage, ClaudeSetupBoxOffer } from "./channel/protocol.ts";
 import type { Settings } from "./settings.ts";
 
 export type ClaudeSetup = z.infer<typeof ClaudeSetupSchema>;
@@ -187,7 +187,7 @@ export const tokenUrl = (endpoint: string, claudeSetupId: string): string =>
 export const setupOffer = (
   tenantId: string,
   row: ClaudeSetupRow,
-  image: GuestImageDownload,
+  image: BootImage,
   tokenCredential: string,
   budgets: ClaudeSetupBudgets,
 ): ClaudeSetupBoxOffer => ({

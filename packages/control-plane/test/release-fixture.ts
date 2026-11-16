@@ -30,4 +30,14 @@ export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
       sizeBytes: 65536,
     },
   ],
+  bases: [
+    {
+      architecture: "Amd64",
+      imageDigest: "3".repeat(64),
+      kernelDigest: "c".repeat(64),
+      manifestDigest: "4".repeat(64),
+      ociDigest: "5".repeat(64),
+      rootfsDigest: "6".repeat(64),
+    },
+  ],
 };
