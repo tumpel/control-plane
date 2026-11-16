@@ -74,7 +74,10 @@ const hostOffline = async (env: Env, caller: Caller, session: Session, retry: st
   return refuse(409, {
     code: "HostOffline",
     title: "Host offline",
-    detail: `session ${session.sessionId} runs on host ${host === null ? session.hostId : `${host.name} (${host.hostId})`}, which is ${host?.state ?? "gone"}`,
+    detail:
+      host === null
+        ? "the session's host is no longer enrolled"
+        : `the session runs on host ${host.name}, which is ${host.state}`,
     fix: `Start tumpel-supervisor run on that host, then ${retry}`,
   });
 };
@@ -91,7 +94,7 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
   refuse(422, credentialProblem(refusal, owner, harness, retry));
 
 export const why = (refused: Unplaceable): string => {
-  const named = `${refused.host.name} (${refused.host.hostId})`;
+  const named = refused.host.name;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NoImage") {
     const { harness, harnessVersion, architectures } = refused.image;
@@ -150,7 +153,7 @@ const stranded = (session: Session, hosts: HostRecord[], missingTurnIds: string[
   return refuse(409, {
     code: "HostOffline",
     title: "Host offline",
-    detail: `session ${session.sessionId} runs on host ${host.name} (${host.hostId}), which is ${host.state}, and its snapshots miss completed turns ${missingTurnIds.join(", ")}, so it cannot move to another host`,
+    detail: `the session runs on host ${host.name}, which is ${host.state}, and its snapshots miss ${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn" : "turns"}, so it cannot move to another host`,
     fix:
       host.state === "Revoked"
         ? "The host was revoked and cannot snapshot those turns; enrol a new host"

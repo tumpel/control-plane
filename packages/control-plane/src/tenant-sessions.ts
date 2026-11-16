@@ -543,13 +543,13 @@ export class TenantSessions extends DurableObject<Env> {
     minted: Minted,
     source: RepositoryCredentialSource,
     secretSetId: string,
-    turnId: string,
+    secretSetName: string,
   ): Promise<IdentityAnswer> {
     if (minted.kind === "Minted") return this.botIdentity(minted.token);
     if (source === "None") {
       return {
         kind: "Refused",
-        detail: `turn ${turnId} has no GitHub credential to clone, commit and push with: no GitHub App installation of the tenant covers its repository and secret set ${secretSetId} holds no ${REPOSITORY_TOKEN}; connect GitHub, or add a Variable member ${REPOSITORY_TOKEN} to the secret set, then send the turn again`,
+        detail: `the turn has no GitHub credential to clone, commit and push with: no GitHub App installation of the tenant covers its repository and secret set ${secretSetName} holds no ${REPOSITORY_TOKEN}; connect GitHub, or add a Variable member ${REPOSITORY_TOKEN} to the secret set, then send the turn again`,
       };
     }
     const [user] = this.ctx.storage.sql
@@ -561,7 +561,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (user === undefined) {
       return {
         kind: "Refused",
-        detail: `secret set ${secretSetId} holds a ${REPOSITORY_TOKEN} written before the control plane read its GitHub user; write it again, then send the turn again`,
+        detail: `secret set ${secretSetName} holds a ${REPOSITORY_TOKEN} written before the control plane read its GitHub user; write it again, then send the turn again`,
       };
     }
     return { kind: "Identity", identity: commitIdentity({ githubUserId: user.github_user_id, login: user.login }) };
@@ -710,7 +710,7 @@ export class TenantSessions extends DurableObject<Env> {
       .map((row) => row.turn_id);
   }
 
-  private settleSnapshotRequests(session: SessionRow, hostId: string, failedAt: string): void {
+  private settleSnapshotRequests(session: SessionRow, from: string, to: string, failedAt: string): void {
     const requests = this.ctx.storage.sql
       .exec<SnapshotRequestRow>(
         "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ?",
@@ -721,7 +721,7 @@ export class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(
         request,
         "NotAnswered",
-        `host ${session.host_id} went offline before it answered snapshot ${request.snapshot_id}, and session ${session.session_id} moved to host ${hostId}`,
+        `host ${from} went offline before it answered a snapshot, and the session moved to host ${to}`,
         failedAt,
       );
       this.dropPlacements(request.snapshot_id);
@@ -757,7 +757,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (image === undefined) {
       return {
         kind: "NotReleased",
-        detail: `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries for ${host.architecture}, then send the turn again`,
+        detail: `the current release carries no ${session.harness} ${session.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name}; pin a harness version the current release carries for ${host.architecture}, then send the turn again`,
       };
     }
     const signer = signerOf(
@@ -888,7 +888,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
-    this.settleSnapshotRequests(session, hostId, iso(now));
+    this.settleSnapshotRequests(session, await this.hostName(tenantId, session.host_id), placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, prompt, now);
     await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
@@ -905,12 +905,13 @@ export class TenantSessions extends DurableObject<Env> {
     refusal: string,
   ): Promise<TurnHandoff | null> {
     const now = Date.now();
+    const from = await this.hostName(tenantId, session.host_id);
     const fail = async (consequence: string): Promise<null> => {
       await this.failTurn(
         tenantId,
         turn.turn_id,
         "HostUpdating",
-        `host ${session.host_id} refused turn ${turn.turn_id} (${refusal}), and ${consequence}; send the turn again once the host is back online`,
+        `host ${from} refused the turn (${refusal}), and ${consequence}; send the turn again once the host is back online`,
         iso(now),
       );
       return null;
@@ -918,7 +919,7 @@ export class TenantSessions extends DurableObject<Env> {
     const missingTurnIds = this.unsnapshottedTurns(session.session_id);
     if (missingTurnIds.length > 0) {
       return fail(
-        `turns ${missingTurnIds.join(", ")} of session ${session.session_id} have no snapshot, so no other host can restore the session`,
+        `${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn has" : "turns have"} no snapshot, so no other host can restore the session`,
       );
     }
     const hosts = (await listHosts(this.env.DB, tenantId)).filter((host) => host.hostId !== session.host_id);
@@ -933,7 +934,7 @@ export class TenantSessions extends DurableObject<Env> {
     }
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
-    this.settleSnapshotRequests(session, hostId, iso(now));
+    this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec(
@@ -1330,7 +1331,12 @@ export class TenantSessions extends DurableObject<Env> {
     const { secretSetId } = persona;
     const dispatch = dispatchVariables(entry, await this.members(secretSetId), session.model, now);
     if (dispatch.kind !== "Ready") {
-      const refused = credentialProblem(dispatch, `secret set ${secretSetId}`, session.harness, "send the turn again");
+      const refused = credentialProblem(
+        dispatch,
+        `secret set ${this.secretSetName(session)}`,
+        session.harness,
+        "send the turn again",
+      );
       if (dispatch.kind !== "Expired") throw new Error(`turn ${turnId}: ${refused.detail}; ${refused.fix}`);
       await this.failTurn(tenantId, turnId, "CredentialExpired", `${refused.detail}; ${refused.fix}`, iso(now));
       return { kind: "Withdrawn" };
@@ -1356,7 +1362,7 @@ export class TenantSessions extends DurableObject<Env> {
       return { kind: "Withdrawn" };
     }
     const { variables, source } = credential;
-    const identity = await this.commitIdentityOf(minted, source, secretSetId, turnId);
+    const identity = await this.commitIdentityOf(minted, source, secretSetId, this.secretSetName(session));
     if (identity.kind === "Refused") {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", identity.detail, iso(now));
       return { kind: "Withdrawn" };
@@ -1471,6 +1477,12 @@ export class TenantSessions extends DurableObject<Env> {
         HostOffline: presence === "Offline" ? { turnId: turn_id, at: now + HEARTBEAT_DEADLINE_MS } : null,
       });
     }
+  }
+
+  private async hostName(tenantId: string, hostId: string): Promise<string> {
+    const host = await hostOf(this.env.DB, tenantId, hostId);
+    if (host === null) throw new Error(`host ${hostId} runs a session of tenant ${tenantId}, which does not list it`);
+    return host.name;
   }
 
   private async hostOffline(hostId: string): Promise<boolean> {
@@ -1781,7 +1793,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turn.turn_id,
         "TranscriptGap",
-        `turn ${turn.turn_id} completed at lineSeq ${message.lastLineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
+        `the turn completed at lineSeq ${message.lastLineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
         iso(now),
       );
     }
@@ -1811,13 +1823,14 @@ export class TenantSessions extends DurableObject<Env> {
     const settings = settingsOf(this.env);
     const failedAt = iso(Date.now());
     if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
-    if (name === "SnapshotAnswer") return this.snapshotUnanswered(session, turn, failedAt);
+    const host = await this.hostName(tenantId, session.host_id);
+    if (name === "SnapshotAnswer") return this.snapshotUnanswered(session, turn, host, failedAt);
     if (name === "Teardown" && session.state === "Stopping") return this.teardown(tenantId, session, turnId);
     if (name === "TeardownAnswer" && session.state === "Stopping") {
       this.recordStopFailure(
         sessionId,
         "NotAnswered",
-        `host ${session.host_id} did not answer the teardown of box ${session.box_id} within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs, then stop the session again`,
+        `host ${host} did not answer the teardown of the session's box within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs, then stop the session again`,
         failedAt,
       );
       return this.returnToIdle(sessionId);
@@ -1827,7 +1840,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "HostOffline",
-        `host ${session.host_id} went offline during turn ${turnId} and did not reconnect within ${HEARTBEAT_DEADLINE_MS / 1000} seconds; check that its supervisor runs, then send the turn again`,
+        `host ${host} went offline during the turn and did not reconnect within ${HEARTBEAT_DEADLINE_MS / 1000} seconds; check that its supervisor runs, then send the turn again`,
         failedAt,
       );
     }
@@ -1836,7 +1849,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NotClaimed",
-        `host ${session.host_id} did not claim turn ${turnId} within ${settings.turnClaimBudgetSeconds} seconds; check that its supervisor runs, then send the turn again`,
+        `host ${host} did not claim the turn within ${settings.turnClaimBudgetSeconds} seconds; check that its supervisor runs, then send the turn again`,
         failedAt,
       );
     }
@@ -1845,7 +1858,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "ImageFetchTimedOut",
-        `host ${session.host_id} started fetching guest image ${due.deadline.imageDigest} for turn ${turnId} and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
+        `host ${host} started fetching guest image ${due.deadline.imageDigest} for the turn and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
         failedAt,
       );
     }
@@ -1854,7 +1867,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NoFirstOutput",
-        `the harness wrote no line for turn ${turnId} within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready, or within the image's cloneSeconds plus turnFirstLineBudgetSeconds of the claim when no TurnRepositoryReady arrived; check the box on host ${session.host_id}, then send the turn again`,
+        `the harness wrote no line for the turn within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready, or within the image's cloneSeconds plus turnFirstLineBudgetSeconds of the claim when no TurnRepositoryReady arrived; check the box on host ${host}, then send the turn again`,
         failedAt,
       );
     }
@@ -1863,7 +1876,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "TurnTimedOut",
-        `turn ${turnId} did not finish within ${settings.turnTotalBudgetSeconds} seconds; send a smaller prompt or raise turnTotalBudgetSeconds`,
+        `the turn did not finish within ${settings.turnTotalBudgetSeconds} seconds; send a smaller prompt or raise turnTotalBudgetSeconds`,
         failedAt,
       );
     }
@@ -1884,7 +1897,7 @@ export class TenantSessions extends DurableObject<Env> {
         tenantId,
         turn.turn_id,
         "TranscriptGap",
-        `turn ${turn.turn_id} sent lineSeq ${lineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
+        `the turn sent lineSeq ${lineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
         iso(now),
       );
     }
@@ -2045,7 +2058,7 @@ export class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  private snapshotUnanswered(session: SessionRow, turn: TurnRow, failedAt: string): void {
+  private snapshotUnanswered(session: SessionRow, turn: TurnRow, host: string, failedAt: string): void {
     const sql = this.ctx.storage.sql;
     const requests = sql
       .exec<SnapshotRequestRow>(
@@ -2059,7 +2072,7 @@ export class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(
         request,
         "NotAnswered",
-        `host ${session.host_id} did not answer snapshot ${request.snapshot_id} within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs`,
+        `host ${host} did not answer a snapshot within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs`,
         failedAt,
       );
     }
@@ -2154,7 +2167,7 @@ export class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(
         request,
         "UploadRejected",
-        `host ${hostId} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`,
+        `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`,
         iso(Date.now()),
       );
       if (session.state === "Stopping") this.returnToIdle(session.session_id);
