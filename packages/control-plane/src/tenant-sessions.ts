@@ -53,7 +53,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
-import { bootArchitectures, bootFor, bootImage, currentRelease } from "./releases";
+import { bootArchitectures, bootFor, bootImage, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions";
@@ -90,12 +90,20 @@ export interface SessionFilter {
   hostId?: string;
 }
 
-export type Started<T> = { kind: "Started"; started: T } | { kind: "Unplaced"; hosts: Unplaceable[] };
+export type ReleaseUnreadable = { kind: "ReleaseUnreadable"; detail: string };
+
+export type Started<T> =
+  | { kind: "Started"; started: T }
+  | { kind: "Unplaced"; hosts: Unplaceable[] }
+  | ReleaseUnreadable;
+
+type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
   | { kind: "Stranded"; missingTurnIds: string[] }
   | { kind: "Unplaced"; hosts: Unplaceable[] }
+  | ReleaseUnreadable
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
   | { kind: "Stopping" }
@@ -729,12 +737,12 @@ export class TenantSessions extends DurableObject<Env> {
     }
   }
 
-  private async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageAvailability> {
-    const release = await currentRelease(this.env.RELEASES, now);
+  private async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
+    const release = await readRelease(this.env.RELEASES, now);
+    if (release.kind === "Unreadable") return { kind: "ReleaseUnreadable", detail: release.detail };
     return {
-      harness,
-      harnessVersion,
-      architectures: bootArchitectures(release, harness, harnessVersion),
+      kind: "Read",
+      image: { harness, harnessVersion, architectures: bootArchitectures(release, harness, harnessVersion) },
     };
   }
 
@@ -751,7 +759,13 @@ export class TenantSessions extends DurableObject<Env> {
       throw new Error(
         `turn of session ${session.session_id} is offered to host ${hostId}, which tenant ${tenantId} does not list`,
       );
-    const release = await currentRelease(this.env.RELEASES, now);
+    const release = await readRelease(this.env.RELEASES, now);
+    if (release.kind === "Unreadable") {
+      return {
+        kind: "NotReleased",
+        detail: `the published release is unreadable: ${release.detail}; ask the operator to publish a release with the release workflow, then send the turn again`,
+      };
+    }
     const boot = bootFor(release, session.harness, session.harness_version, host.architecture);
     if (boot === undefined) {
       return {
@@ -788,7 +802,7 @@ export class TenantSessions extends DurableObject<Env> {
         issue.branch,
       );
     });
-    if (begun.kind === "Unplaced") return begun;
+    if (begun.kind !== "Started") return begun;
     return {
       kind: "Started",
       started: { ...begun.started, issue: { sessionId: begun.started.session.sessionId, ...issue } },
@@ -803,7 +817,8 @@ export class TenantSessions extends DurableObject<Env> {
   ): Promise<Started<StartedSession>> {
     const { start } = input;
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
-    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image);
+    if (image.kind === "ReleaseUnreadable") return image;
+    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
@@ -869,7 +884,8 @@ export class TenantSessions extends DurableObject<Env> {
     const missingTurnIds = this.unsnapshottedTurns(sessionId);
     if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image);
+    if (image.kind === "ReleaseUnreadable") return image;
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
@@ -909,7 +925,10 @@ export class TenantSessions extends DurableObject<Env> {
     }
     const hosts = (await listHosts(this.env.DB, tenantId)).filter((host) => host.hostId !== session.host_id);
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image);
+    if (image.kind === "ReleaseUnreadable") {
+      return fail(`the published release is unreadable, so no other host can boot it: ${image.detail}`);
+    }
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image);
     if (placement.kind === "Refused") {
       return fail(
         placement.hosts.length === 0

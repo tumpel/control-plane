@@ -177,9 +177,9 @@ import { noticeRelease } from "./release-notices.ts";
 import {
   bootArchitectures,
   cliKey,
-  currentRelease,
   type ReleaseManifest,
   readRelease,
+  releaseUnreadable,
   supervisorKey,
 } from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
@@ -730,8 +730,9 @@ const unreleasedPin = async (
 ): Promise<Response | null> => {
   const architectures = [...new Set((await listHosts(env.DB, tenantId)).map((host) => host.architecture))];
   if (architectures.length === 0) return null;
-  const release = await currentRelease(env.RELEASES, Date.now());
+  const release = await readRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") return noRelease();
+  if (release.kind === "Unreadable") return problem(422, releaseUnreadable(release.detail, "pin the version again"));
   const carried = bootArchitectures(release, harness, harnessVersion);
   if (architectures.some((architecture) => carried.includes(architecture))) return null;
   return problem(422, {
@@ -888,8 +889,9 @@ const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Pro
 };
 
 const handleInstallScript = async (_request: Request, url: URL, env: Env): Promise<Response> => {
-  const release = await currentRelease(env.RELEASES, Date.now());
+  const release = await readRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") return noRelease();
+  if (release.kind === "Unreadable") return unreadableRelease(release.detail);
   const checksums = release.manifest.clis.map(({ architecture, sha256 }) => `${architecture} ${sha256}`).join("\n");
   const script = installScript.replaceAll("@TUMPEL_ORIGIN@", url.origin).replaceAll("@TUMPEL_CLI_SHA256S@", checksums);
   return new Response(script, {

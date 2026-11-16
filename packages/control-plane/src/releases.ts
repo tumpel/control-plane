@@ -1,7 +1,7 @@
 import { type HostArchitectureSchema, ReleaseManifestSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import type { BootImage } from "./channel/protocol.ts";
-import { issues } from "./http.ts";
+import { issues, type Problem } from "./http.ts";
 import type { Signer } from "./presign.ts";
 
 export type ReleaseManifest = z.infer<typeof ReleaseManifestSchema>;
@@ -22,8 +22,6 @@ export type ReleaseLookup = ReleaseRead | { kind: "Unreadable"; detail: string }
 
 export const CURRENT_RELEASE_KEY = "current.json";
 export const RELEASE_CACHE_MS = 30_000;
-
-const republish = "publish the release again with the release workflow";
 
 const arch = (architecture: HostArchitecture): string => architecture.toLowerCase();
 
@@ -100,11 +98,12 @@ export const readRelease = async (bucket: ReleaseBucket, now: number): Promise<R
   return { kind: "Published", manifest: parsed.manifest };
 };
 
-export const currentRelease = async (bucket: ReleaseBucket, now: number): Promise<ReleaseRead> => {
-  const release = await readRelease(bucket, now);
-  if (release.kind === "Unreadable") throw new Error(`${release.detail}; ${republish}`);
-  return release;
-};
+export const releaseUnreadable = (detail: string, retry: string): Problem => ({
+  code: "ImageNotReleased",
+  title: "The published release is unreadable",
+  detail: `the published release is unreadable: ${detail}`,
+  fix: `Ask the operator to publish a release with the release workflow, then ${retry}`,
+});
 
 export const imagesFor = (release: ReleaseRead, harness: string, harnessVersion: string): ReleaseImage[] =>
   release.kind === "Published"
