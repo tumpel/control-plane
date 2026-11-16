@@ -3,6 +3,7 @@ import {
   accept,
   type ControlEnvelope,
   type ControlMessage,
+  type DispatchGrant,
   decodeBase64,
   type Frame,
   type Hello,
@@ -47,6 +48,8 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   ClaudeSetupBoxCode: ChannelProtocol.Oldest,
   ClaudeSetupBoxDiscard: ChannelProtocol.Oldest,
 };
+
+export const GRANT_ARGUMENTS_VERSION = 18;
 
 export interface ControlHost {
   hostId: string;
@@ -100,7 +103,17 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
+const spokenGrant = (credential: DispatchGrant, protocolVersion: number): DispatchGrant => {
+  if (protocolVersion >= GRANT_ARGUMENTS_VERSION) return credential;
+  const { credentialHandoverId, expiresAt, variables } = credential;
+  return { credentialHandoverId, expiresAt, variables };
+};
+
+const outbound = async (
+  stored: StoredControlMessage,
+  protocolVersion: number,
+  context: ControlContext,
+): Promise<ControlMessage> => {
   if (stored.type === "ClaudeSetupBoxOffer" || stored.type === "ClaudeSetupBoxCode") {
     return (await context.prepareClaudeSetup(stored)).message;
   }
@@ -108,7 +121,16 @@ const outbound = async (stored: StoredControlMessage, context: ControlContext): 
   const prepared = await context.prepareOffer(stored);
   if (prepared.kind === "Withdrawn") return { type: "TurnWithdrawn", turnId: stored.turnId };
   const { credential, lastLineSeq, snapshots, personaFiles, image, gitAuthorName, gitAuthorEmail } = prepared;
-  return { ...stored, credential, lastLineSeq, snapshots, personaFiles, image, gitAuthorName, gitAuthorEmail };
+  return {
+    ...stored,
+    credential: spokenGrant(credential, protocolVersion),
+    lastLineSeq,
+    snapshots,
+    personaFiles,
+    image,
+    gitAuthorName,
+    gitAuthorEmail,
+  };
 };
 
 const unspoken = (
@@ -134,7 +156,7 @@ export const send = async (
   await context.ledger.save(ledger);
   if (connection.phase !== "Open") return;
   if (unspoken(connection.protocolVersion, frame, context) !== null) return;
-  context.port.send({ ...frame, message: await outbound(frame.message, context) });
+  context.port.send({ ...frame, message: await outbound(frame.message, connection.protocolVersion, context) });
 };
 
 export const revoke = (context: ControlContext, reason: string): Received =>
@@ -162,7 +184,7 @@ const hello = async (
     const refused = unspoken(envelope.protocolVersion, frame, context);
     if (refused !== null) return refused;
   }
-  const resent = await resend(ledger, (stored) => outbound(stored, context));
+  const resent = await resend(ledger, (stored) => outbound(stored, envelope.protocolVersion, context));
   context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: envelope.protocolVersion });
   for (const frame of resent) context.port.send(frame);
   return {

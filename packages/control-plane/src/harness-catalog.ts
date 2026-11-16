@@ -6,9 +6,20 @@ export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
 export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSchema>;
 
 export const CLAUDE_CODE_VERSION = "2.1.325";
-const CODEX_VERSION = "0.50.0";
+const CODEX_VERSION = "0.169.0";
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
+
+const codexProvider = (id: string, settings: Record<string, string | boolean>): string[] => {
+  const fields = Object.entries({
+    ...settings,
+    wire_api: "responses",
+    request_max_retries: 0,
+    stream_max_retries: 0,
+    supports_websockets: false,
+  }).map(([key, value]) => `${key}=${typeof value === "string" ? JSON.stringify(value) : value}`);
+  return ["-c", `model_providers.${id}={${fields.join(",")}}`, "-c", `model_provider=${id}`];
+};
 
 export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEntrySchema.array().parse([
   {
@@ -17,13 +28,20 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: CLAUDE_CODE_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
-      { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [] },
-      { provider: "Anthropic", kind: "SubscriptionToken", variable: "CLAUDE_CODE_OAUTH_TOKEN", fixed: [] },
+      { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [], arguments: [] },
+      {
+        provider: "Anthropic",
+        kind: "SubscriptionToken",
+        variable: "CLAUDE_CODE_OAUTH_TOKEN",
+        fixed: [],
+        arguments: [],
+      },
       {
         provider: "OpenRouter",
         kind: "ApiKey",
         variable: "ANTHROPIC_AUTH_TOKEN",
         fixed: [{ name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" }],
+        arguments: [],
       },
     ],
     personaFilePaths: [".claude/settings.json", ".claude/CLAUDE.md", ".claude.json"],
@@ -35,16 +53,59 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: CODEX_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
-      { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [] },
+      {
+        provider: "OpenAi",
+        kind: "SubscriptionToken",
+        variable: "CODEX_ACCESS_TOKEN",
+        fixed: [],
+        arguments: [
+          "-c",
+          `forced_login_method="chatgpt"`,
+          ...codexProvider("chatgpt", { name: "OpenAI", requires_openai_auth: true }),
+        ],
+      },
+      {
+        provider: "OpenAi",
+        kind: "ApiKey",
+        variable: "OPENAI_API_KEY",
+        fixed: [],
+        arguments: codexProvider("openai-api", {
+          name: "OpenAI",
+          base_url: "https://api.openai.com/v1",
+          env_key: "OPENAI_API_KEY",
+        }),
+      },
       {
         provider: "OpenRouter",
         kind: "ApiKey",
-        variable: "OPENAI_API_KEY",
-        fixed: [{ name: "OPENAI_BASE_URL", value: "https://openrouter.ai/api/v1" }],
+        variable: "OPENROUTER_API_KEY",
+        fixed: [],
+        arguments: codexProvider("openrouter", {
+          name: "OpenRouter",
+          base_url: "https://openrouter.ai/api/v1",
+          env_key: "OPENROUTER_API_KEY",
+        }),
       },
     ],
-    personaFilePaths: [],
-    installRecipe: { kind: "Npm", package: "@openai/codex", packageVersion: CODEX_VERSION },
+    personaFilePaths: [".codex/config.toml", ".codex/AGENTS.md"],
+    installRecipe: {
+      kind: "Archive",
+      archives: [
+        {
+          architecture: "Amd64",
+          url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz`,
+          sha256: "9af4d751fce183faedea629437d5252dbf458eeb04130cf4f97be844621ea985",
+          binaryPath: "codex-x86_64-unknown-linux-musl",
+        },
+        {
+          architecture: "Arm64",
+          url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-aarch64-unknown-linux-musl.tar.gz`,
+          sha256: "97b97d87eea075c5cb7709c7f6156a451622a7667953ecda40e0276637196f3f",
+          binaryPath: "codex-aarch64-unknown-linux-musl",
+        },
+      ],
+      stripComponents: 0,
+    },
   },
   {
     harness: "OpenCode",
@@ -52,9 +113,9 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: OPENCODE_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [
-      { provider: "OpenRouter", kind: "ApiKey", variable: "OPENROUTER_API_KEY", fixed: [] },
-      { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [] },
-      { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [] },
+      { provider: "OpenRouter", kind: "ApiKey", variable: "OPENROUTER_API_KEY", fixed: [], arguments: [] },
+      { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [], arguments: [] },
+      { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [], arguments: [] },
     ],
     personaFilePaths: [".config/opencode/opencode.json", ".config/opencode/AGENTS.md"],
     installRecipe: {
@@ -64,11 +125,13 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
           architecture: "Amd64",
           url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz`,
           sha256: "588310a336fa3b9df36b3f0225b26f679d453efaad0cf3d66c3651ef3ec1647a",
+          binaryPath: "opencode",
         },
         {
           architecture: "Arm64",
           url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64.tar.gz`,
           sha256: "fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b",
+          binaryPath: "opencode",
         },
       ],
       stripComponents: 0,
@@ -80,9 +143,9 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     harnessVersion: PI_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [
-      { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [] },
-      { provider: "Anthropic", kind: "SubscriptionToken", variable: "ANTHROPIC_OAUTH_TOKEN", fixed: [] },
-      { provider: "OpenRouter", kind: "ApiKey", variable: "OPENROUTER_API_KEY", fixed: [] },
+      { provider: "Anthropic", kind: "ApiKey", variable: "ANTHROPIC_API_KEY", fixed: [], arguments: [] },
+      { provider: "Anthropic", kind: "SubscriptionToken", variable: "ANTHROPIC_OAUTH_TOKEN", fixed: [], arguments: [] },
+      { provider: "OpenRouter", kind: "ApiKey", variable: "OPENROUTER_API_KEY", fixed: [], arguments: [] },
     ],
     personaFilePaths: [".pi/agent/settings.json", ".pi/agent/models.json", ".pi/agent/AGENTS.md"],
     installRecipe: {
@@ -92,11 +155,13 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
           architecture: "Amd64",
           url: `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-x64.tar.gz`,
           sha256: "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5",
+          binaryPath: "pi",
         },
         {
           architecture: "Arm64",
           url: `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-arm64.tar.gz`,
           sha256: "42805cd5615952fcbbfc9c56b04f8feb84395134952e169a6cdc8d7676975666",
+          binaryPath: "pi",
         },
       ],
       stripComponents: 1,
