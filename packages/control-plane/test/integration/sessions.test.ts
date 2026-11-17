@@ -2121,6 +2121,117 @@ suite("sessions", { concurrency: 8 }, () => {
     for (const side of sides.values()) side.close();
   });
 
+  test("a turn the only host refuses HostUpdating stays Offered and is claimed after the host's next Hello", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const only = await enrol("updating-only");
+    const swapping = await connect(only.id, only.key, 32);
+    await hostState(only.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during a swap" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { turn } = StartedSessionSchema.parse(await response.json());
+    assert.equal((await swapping.next("TurnOffer")).turnId, turn.turnId);
+    swapping.send({
+      type: "TurnFailed",
+      turnId: turn.turnId,
+      reason: "HostUpdating",
+      detail: "this host is swapping to a new supervisor binary",
+      failedAt: new Date().toISOString(),
+    });
+    swapping.close();
+    await hostState(only.id, "Offline");
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
+    const swapped = await connect(only.id, only.key, 32, swapping.counters());
+    const offer = await swapped.next("TurnOffer");
+    assert.equal(offer.turnId, turn.turnId);
+    swapped.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await swapped.next("TurnClaimed")).turnId, turn.turnId);
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
+    swapped.close();
+  });
+
+  test("a turn the only host refuses HostUpdating is offered again when its swap fails", async () => {
+    const { bearer, host, hostId, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const only = await enrol("update-fails");
+    const side = await connect(only.id, only.key, 32);
+    await hostState(only.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "swap fails" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { turn } = StartedSessionSchema.parse(await response.json());
+    assert.equal((await side.next("TurnOffer")).turnId, turn.turnId);
+    side.send({
+      type: "TurnFailed",
+      turnId: turn.turnId,
+      reason: "HostUpdating",
+      detail: "this host is swapping to a new supervisor binary",
+      failedAt: new Date().toISOString(),
+    });
+    side.send({
+      type: "SupervisorUpdateFailed",
+      fromSha256: "a".repeat(64),
+      toSha256: "b".repeat(64),
+      reason: "SupervisorUpdateSwapFailed",
+      detail: "renaming the candidate over the binary failed",
+      outputTail: [],
+      failedAt: new Date().toISOString(),
+    });
+    const offer = await side.next("TurnOffer");
+    assert.equal(offer.turnId, turn.turnId);
+    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
+    side.close();
+  });
+
+  test("a turn sent while the only host restarts for an update waits in its channel and is claimed after its Hello", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const only = await enrol("restarting-only");
+    const restarting = await connect(only.id, only.key, 32);
+    await hostState(only.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "first" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { session } = StartedSessionSchema.parse(await response.json());
+    const first = await restarting.next("TurnOffer");
+    restarting.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
+    restarting.send({ type: "TurnLine", turnId: first.turnId, lineSeq: 1, text: '{"type":"result"}' });
+    restarting.send({
+      type: "TurnComplete",
+      turnId: first.turnId,
+      lastLineSeq: 1,
+      completedAt: new Date().toISOString(),
+    });
+    await until(
+      "the first turn completing",
+      () => getJson(`/v1/turns/${first.turnId}`, TurnSchema),
+      (read) => read.state === "Completed",
+    );
+    restarting.send({
+      type: "SupervisorUpdateStep",
+      fromSha256: "a".repeat(64),
+      toSha256: "b".repeat(64),
+      releaseVersion: "0.2.0",
+      boxesRunning: 0,
+      phase: "Restarting",
+      at: new Date().toISOString(),
+    });
+    await hostState(only.id, "Offline");
+    restarting.close();
+    const sent = await postJson(`/v1/sessions/${session.sessionId}/turns`, { prompt: "during the restart" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const turn = TurnSchema.parse(await sent.json());
+    assert.equal(turn.state, "Offered");
+    const restarted = await connect(only.id, only.key, 32, restarting.counters());
+    const offer = await restarted.next("TurnOffer");
+    assert.equal(offer.turnId, turn.turnId);
+    restarted.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await restarted.next("TurnClaimed")).turnId, turn.turnId);
+    restarted.close();
+  });
+
   test("two hosts refusing their turns HostUpdating at the same moment each hand the turn to the other", async () => {
     const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("crossing-1");

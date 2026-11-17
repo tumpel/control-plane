@@ -58,9 +58,8 @@ import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, imagesFor, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
-import { why } from "./sessions";
 import { settingsOf, turnCredentialSeconds } from "./settings";
-import { forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
+import { forgetSupervisorUpdates, restartDeadline, type SupervisorUpdateMessage } from "./supervisor-updates";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-metrics.ts";
 
@@ -888,6 +887,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   forgetHostUsage(hostId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
+    this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
@@ -1103,6 +1103,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
       return { kind: "Sent", turn: toTurn(tenantId, turn) };
     }
+    const backBy = hosts.some((host) => host.hostId === session.host_id && host.state === "Offline")
+      ? restartDeadline(this.ctx.storage.sql, session.host_id, settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
+      : null;
+    if (backBy !== null && backBy > now) {
+      const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
+      const turn = this.runTurn(session, session.host_id, boxId, prompt, now);
+      await this.offer(tenantId, { ...session, box_id: boxId }, turn);
+      await this.timers(tenantId, sessionId, { HostOffline: { turnId: turn.turn_id, at: backBy } });
+      return { kind: "Sent", turn: toTurn(tenantId, turn) };
+    }
     const missingTurnIds = this.unsnapshottedTurns(sessionId);
     if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
@@ -1122,46 +1132,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
-  private async offerElsewhere(
-    tenantId: string,
-    session: SessionRow,
-    turn: TurnRow,
-    refusal: string,
-  ): Promise<TurnHandoff | null> {
+  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
     const now = Date.now();
-    const from = await this.hostName(tenantId, session.host_id);
-    const fail = async (consequence: string): Promise<null> => {
-      await this.failTurn(
-        tenantId,
-        turn.turn_id,
-        "HostUpdating",
-        `host ${from} refused the turn (${refusal}), and ${consequence}; send the turn again once the host is back online`,
-        iso(now),
-      );
-      return null;
-    };
-    const missingTurnIds = this.unsnapshottedTurns(session.session_id);
-    if (missingTurnIds.length > 0) {
-      return fail(
-        `${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn has" : "turns have"} no snapshot, so no other host can restore the session`,
-      );
-    }
+    const stay = (): Promise<null> => this.deferOffer(tenantId, session, turn, now);
+    if (this.unsnapshottedTurns(session.session_id).length > 0) return stay();
     const prebuild = this.hostPrebuild(session.session_id) !== null;
     const hosts = (await listHosts(this.env.DB, tenantId)).filter(
       (host) => host.hostId !== session.host_id && (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
     );
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
-    if (image.kind === "ReleaseUnreadable") {
-      return fail(`the published release is unreadable, so no other host can boot it: ${image.detail}`);
-    }
+    if (image.kind === "ReleaseUnreadable") return stay();
     const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image);
-    if (placement.kind === "Refused") {
-      return fail(
-        placement.hosts.length === 0
-          ? "the tenant has no other host"
-          : `no other host can take it: ${placement.hosts.map(why).join(", ")}`,
-      );
-    }
+    if (placement.kind === "Refused") return stay();
+    const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
@@ -1185,6 +1168,34 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, session.session_id, { SnapshotAnswer: null });
     const offer = await this.armOffer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
     return { type: "TurnHandoff", hostId, offer };
+  }
+
+  private async deferOffer(tenantId: string, session: SessionRow, turn: TurnRow, now: number): Promise<null> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO deferred_offers (turn_id, host_id, created_at) VALUES (?, ?, ?) ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id",
+      turn.turn_id,
+      session.host_id,
+      now,
+    );
+    await this.timers(tenantId, session.session_id, { Claim: null });
+    return null;
+  }
+
+  async deferredOffers(tenantId: string, hostId: string): Promise<StoredTurnOffer[]> {
+    const sql = this.ctx.storage.sql;
+    const turnIds = sql
+      .exec<{ turn_id: string }>("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId)
+      .toArray()
+      .map((row) => row.turn_id);
+    const offers: StoredTurnOffer[] = [];
+    for (const turnId of turnIds) {
+      sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
+      const turn = this.turnRow(turnId);
+      const session = turn === null ? null : this.sessionRow(turn.session_id);
+      if (turn === null || session === null || turn.state !== "Offered") continue;
+      offers.push(await this.armOffer(tenantId, session, turn));
+    }
+    return offers;
   }
 
   private runTurn(session: SessionRow, hostId: string, boxId: string, prompt: string, now: number): TurnRow {
@@ -2000,7 +2011,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async turnFailed(tenantId: string, hostId: string, message: TurnFailed): Promise<HostReply | null> {
     const { turn, session } = this.offeredTurn(hostId, message);
     if (message.reason === "HostUpdating" && turn.state === "Offered") {
-      return this.offerElsewhere(tenantId, session, turn, message.detail);
+      return this.offerElsewhere(tenantId, session, turn);
     }
     const detail =
       message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
