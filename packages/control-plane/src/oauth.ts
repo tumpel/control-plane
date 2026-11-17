@@ -1,3 +1,4 @@
+import { MCP_PATH } from "@tumpel/api/constants";
 import {
   AuthorizationServerMetadataSchema,
   OAuthClientSchema,
@@ -10,7 +11,8 @@ import { base64Url, randomToken, sameSecret, sha256Hex } from "./crypto";
 import type { OAuthErrorCode } from "./http";
 import type { Caller, Role } from "./identity";
 
-export const MCP_PATH = "/mcp";
+export { MCP_PATH };
+
 export const AUTHORIZE_PATH = "/oauth/authorize";
 export const CONSENT_PATH = "/oauth/consent";
 export const TOKEN_PATH = "/oauth/token";
