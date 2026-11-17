@@ -95,6 +95,36 @@ test("the credential's kind picks the variable the harness reads, and every othe
   });
 });
 
+test("a login file reaches the box as a file at its catalog path, never as a variable, whatever its expiry", () => {
+  const signedIn = {
+    credentialChoice: "CatalogOrder" as const,
+    credentials: [
+      {
+        provider: "OpenAi" as const,
+        kind: "CredentialFile" as const,
+        variable: "CODEX_AUTH_JSON",
+        path: ".codex/auth.json",
+        fixed: [],
+        arguments: ["-c", 'cli_auth_credentials_store="file"'],
+      },
+      ...codex.credentials,
+    ],
+  };
+  const file: SecretMember = {
+    kind: "CredentialFile",
+    name: "CODEX_AUTH_JSON",
+    provider: "OpenAi",
+    expiresAt: "2026-11-14T11:00:00+00:00",
+    value: '{"tokens":{}}',
+  };
+  assert.deepEqual(dispatchVariables(signedIn, [file, github], MODEL, NOW), {
+    kind: "Ready",
+    variables: [{ name: "GITHUB_TOKEN", value: "ghp" }],
+    arguments: ["-c", 'cli_auth_credentials_store="file"'],
+    credentialFile: { path: ".codex/auth.json", value: '{"tokens":{}}' },
+  });
+});
+
 test("a subscription token at or past its expiry refuses the dispatch by name", () => {
   assert.deepEqual(dispatchVariables(claudeCode, [token("2026-11-14T13:00:00+01:00"), github], MODEL, NOW), {
     kind: "Expired",

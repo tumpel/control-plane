@@ -5,6 +5,7 @@ import {
   ClaudeSetupStartSchema,
   ClaudeSetupTokenWriteSchema,
 } from "@tumpel/schemas";
+import { SETUP_CREDENTIALS } from "./claude-setup";
 import { pinnedEntry } from "./harness-catalog";
 import { listHosts } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
@@ -50,13 +51,15 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
   const body = await parseBody(request, ClaudeSetupStartSchema, "claudeSetups.start");
   if (!body.ok) return body.response;
   const tenant = env.TENANT.getByName(caller.tenantId);
-  const entry = pinnedEntry(await tenant.listPins(), "ClaudeCode");
+  const harness = body.value.harness ?? "ClaudeCode";
+  const { name, provider } = SETUP_CREDENTIALS[harness];
+  const entry = pinnedEntry(await tenant.listPins(), harness);
   if (entry === undefined) {
     return problem(422, {
       code: "HarnessNotInCatalog",
-      title: "Claude Code not in the catalog",
-      detail: "the catalog holds no Claude Code version your tenant can run",
-      fix: `Pin a ClaudeCode version the harness catalog lists, then ${START_AGAIN}`,
+      title: `${name} not in the catalog`,
+      detail: `the catalog holds no ${name} version your tenant can run`,
+      fix: `Pin a ${harness} version the harness catalog lists, then ${START_AGAIN}`,
     });
   }
   const now = Date.now();
@@ -66,6 +69,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
     {
       principalId: caller.principalId,
       secretSetId: body.value.secretSetId,
+      harness,
       harnessVersion: entry.harnessVersion,
       hosts,
       endpoint: url.origin,
@@ -85,9 +89,9 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
   if (started.kind === "OtherCredential") {
     return problem(409, {
       code: "Conflict",
-      title: "Secret set holds another Anthropic credential",
-      detail: `secret set ${body.value.secretSetId} holds the Anthropic credential ${started.name}, and a set holds one credential per provider`,
-      fix: `Remove ${started.name} from the set, or set up Claude Code for another set, then ${START_AGAIN}`,
+      title: `Secret set holds another ${provider} credential`,
+      detail: `secret set ${body.value.secretSetId} holds the ${provider} credential ${started.name}, and a set holds one credential per provider`,
+      fix: `Remove ${started.name} from the set, or set up ${name} for another set, then ${START_AGAIN}`,
     });
   }
   return problem(409, {
@@ -121,7 +125,7 @@ const writeToken = async (request: Request, env: Env, claudeSetupId: string): Pr
   if (credential === "") return boxTokenRefused("the request carries no Authorization: Bearer token");
   const body = await parseBody(request, ClaudeSetupTokenWriteSchema, "claudeSetupBoxes.writeToken");
   if (!body.ok) return body.response;
-  const { tenantId, value } = body.value;
+  const { tenantId, value, expiresAt } = body.value;
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
   if (tenant === null) return boxTokenRefused(`no Claude setup ${claudeSetupId} takes this token`);
   const stored = await env.TENANT.getByName(tenantId).writeClaudeSetupToken(
@@ -129,6 +133,7 @@ const writeToken = async (request: Request, env: Env, claudeSetupId: string): Pr
     claudeSetupId,
     credential,
     value,
+    expiresAt,
     Date.now(),
   );
   if (stored.kind === "Stored") return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });

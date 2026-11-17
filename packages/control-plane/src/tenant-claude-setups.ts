@@ -7,12 +7,14 @@ import type {
 } from "./channel/protocol.ts";
 import {
   advance,
-  CLAUDE_SETUP_MEMBER,
   type ClaudeSetup,
   type ClaudeSetupEvent,
   type ClaudeSetupFailureReason,
+  type ClaudeSetupHarness,
   type ClaudeSetupRow,
+  harnessOf,
   overdue,
+  SETUP_CREDENTIALS,
   setupOffer,
   stateOf,
   TOKEN_LIFETIME_MS,
@@ -32,15 +34,14 @@ import { type HostReply, sealContext, type TenantHostMessage } from "./tenant-se
 
 type ClaudeSetupDiscard = Extract<HostReply, { type: "ClaudeSetupBoxDiscard" }>;
 
-const HARNESS = "ClaudeCode";
-const PROVIDER = "Anthropic";
 const BOX_TOKEN_PURPOSE = "tumpel-claude-setup-box-token-v1";
-const CLAUDE_SETUP_SELECT = `SELECT claude_setup_id, principal_id, secret_set_id, host_id, box_id, harness_version, endpoint, state,
-  phase_due_at, sign_in_url, reason, detail, expires_at, ended_at, created_at, updated_at FROM claude_setups`;
+const CLAUDE_SETUP_SELECT = `SELECT claude_setup_id, principal_id, secret_set_id, host_id, box_id, harness, harness_version, endpoint, state,
+  phase_due_at, sign_in_url, user_code, reason, detail, expires_at, ended_at, created_at, updated_at FROM claude_setups`;
 
 export interface NewClaudeSetup {
   principalId: string;
   secretSetId: string;
+  harness: ClaudeSetupHarness;
   harnessVersion: string;
   hosts: HostRecord[];
   endpoint: string;
@@ -114,13 +115,14 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return base64Url(new Uint8Array(signed));
   }
 
-  private otherAnthropicCredential(secretSetId: string): string | null {
+  private otherCredential(secretSetId: string, harness: ClaudeSetupHarness): string | null {
+    const { provider, member } = SETUP_CREDENTIALS[harness];
     const [row] = this.ctx.storage.sql
       .exec<{ name: string }>(
         "SELECT name FROM secret_credentials WHERE secret_set_id = ? AND provider = ? AND name != ?",
         secretSetId,
-        PROVIDER,
-        CLAUDE_SETUP_MEMBER,
+        provider,
+        member,
       )
       .toArray();
     return row?.name ?? null;
@@ -130,14 +132,14 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const sql = this.ctx.storage.sql;
     const [set] = sql.exec("SELECT 1 FROM secret_sets WHERE secret_set_id = ?", input.secretSetId).toArray();
     if (set === undefined) return { kind: "NoSecretSet" };
-    const other = this.otherAnthropicCredential(input.secretSetId);
+    const other = this.otherCredential(input.secretSetId, input.harness);
     if (other !== null) return { kind: "OtherCredential", name: other };
     const release = await readRelease(this.env.RELEASES, now);
     if (release.kind === "Unreadable") return { kind: "ReleaseUnreadable", detail: release.detail };
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), {
-      harness: HARNESS,
+      harness: input.harness,
       harnessVersion: input.harnessVersion,
-      architectures: bootArchitectures(release, HARNESS, input.harnessVersion),
+      architectures: bootArchitectures(release, input.harness, input.harnessVersion),
     });
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);
@@ -153,13 +155,14 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         now,
       );
     sql.exec(
-      `INSERT INTO claude_setups (claude_setup_id, principal_id, secret_set_id, host_id, box_id, harness_version, endpoint, state, phase_due_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'Starting', ?, ?, ?)`,
+      `INSERT INTO claude_setups (claude_setup_id, principal_id, secret_set_id, host_id, box_id, harness, harness_version, endpoint, state, phase_due_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Starting', ?, ?, ?)`,
       claudeSetupId,
       input.principalId,
       input.secretSetId,
       placement.host.hostId,
       crypto.randomUUID(),
+      input.harness,
       input.harnessVersion,
       input.endpoint,
       dueAt,
@@ -208,7 +211,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   ): Promise<ClaudeSetupCoded> {
     const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
     if (row === null) return { kind: "NotFound" };
-    const step = advance(claudeSetupId, stateOf(row), { kind: "Code" }, settingsOf(this.env));
+    const step = advance(claudeSetupId, harnessOf(row), stateOf(row), { kind: "Code" }, settingsOf(this.env));
     if (step.kind === "Refuse") return { kind: "NotWaiting", detail: step.detail };
     if (step.kind !== "Advance") return { kind: "NotWaiting", detail: `Claude setup ${claudeSetupId} takes no code` };
     const sealed = await seal(await this.dataKey(), code, codeContext(claudeSetupId));
@@ -233,13 +236,15 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     claudeSetupId: string,
     credential: string,
     token: string,
+    tokenExpiresAt: string | undefined,
     now: number,
   ): Promise<ClaudeSetupStored> {
     if (this.claudeSetupRow(claudeSetupId) === null) return { kind: "NotFound" };
     if (!sameSecret(credential, await this.boxToken(tenantId, claudeSetupId))) return { kind: "Refused" };
     const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
     if (row === null) return { kind: "NotFound" };
-    const step = advance(claudeSetupId, stateOf(row), { kind: "Stored" }, settingsOf(this.env));
+    const harness = harnessOf(row);
+    const step = advance(claudeSetupId, harness, stateOf(row), { kind: "Stored" }, settingsOf(this.env));
     if (step.kind !== "Complete") {
       return {
         kind: "NotWaiting",
@@ -247,9 +252,18 @@ export class TenantClaudeSetups extends TenantPrebuilds {
           step.kind === "Refuse" ? step.detail : `Claude setup ${claudeSetupId} is ${row.state} and takes no token`,
       };
     }
-    const { secret_set_id: secretSetId } = row;
-    const sealed = await seal(await this.dataKey(), token, sealContext(secretSetId, CLAUDE_SETUP_MEMBER));
-    const expiresAt = new Date(now + TOKEN_LIFETIME_MS).toISOString();
+    const { secret_set_id: secretSetId, state } = row;
+    const { member, provider, kind } = SETUP_CREDENTIALS[harness];
+    if (harness === "Codex" && tokenExpiresAt === undefined) {
+      const detail = `the box of Claude setup ${claudeSetupId} sent the Codex token without expiresAt; the token was discarded with the box. Update the host's supervisor, then start the Codex sign-in again`;
+      await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
+      return { kind: "NotStored", detail };
+    }
+    const sealed = await seal(await this.dataKey(), token, sealContext(secretSetId, member));
+    const expiresAt =
+      harness === "Codex" && tokenExpiresAt !== undefined
+        ? new Date(tokenExpiresAt).toISOString()
+        : new Date(now + TOKEN_LIFETIME_MS).toISOString();
     const sql = this.ctx.storage.sql;
     const written = this.ctx.storage.transactionSync((): TokenWritten => {
       const [set] = sql.exec("SELECT 1 FROM secret_sets WHERE secret_set_id = ?", secretSetId).toArray();
@@ -259,20 +273,21 @@ export class TenantClaudeSetups extends TenantPrebuilds {
           detail: `secret set ${secretSetId} was deleted while Claude setup ${claudeSetupId} ran`,
         };
       }
-      const other = this.otherAnthropicCredential(secretSetId);
+      const other = this.otherCredential(secretSetId, harness);
       if (other !== null) {
         return {
           kind: "NotStored",
-          detail: `secret set ${secretSetId} took the ${PROVIDER} credential ${other} while Claude setup ${claudeSetupId} ran`,
+          detail: `secret set ${secretSetId} took the ${provider} credential ${other} while Claude setup ${claudeSetupId} ran`,
         };
       }
       const completed = sql.exec(
         `UPDATE claude_setups SET state = 'Completed', expires_at = ?, sealed_code = NULL, ended_at = ?, updated_at = ?
-        WHERE claude_setup_id = ? AND state = 'Minting'`,
+        WHERE claude_setup_id = ? AND state = ?`,
         expiresAt,
         now,
         now,
         claudeSetupId,
+        state,
       ).rowsWritten;
       if (completed === 0) {
         return {
@@ -280,34 +295,12 @@ export class TenantClaudeSetups extends TenantPrebuilds {
           detail: `Claude setup ${claudeSetupId} ended while its token was sealed and takes no token`,
         };
       }
-      for (const table of ["secret_expiries", "secret_credentials", "secret_values"]) {
-        sql.exec(`DELETE FROM ${table} WHERE secret_set_id = ? AND name = ?`, secretSetId, CLAUDE_SETUP_MEMBER);
-      }
-      sql.exec(
-        "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, 'SubscriptionToken', ?, ?)",
-        secretSetId,
-        CLAUDE_SETUP_MEMBER,
-        sealed,
-        now,
-      );
-      sql.exec(
-        "INSERT INTO secret_credentials (secret_set_id, name, provider) VALUES (?, ?, ?)",
-        secretSetId,
-        CLAUDE_SETUP_MEMBER,
-        PROVIDER,
-      );
-      sql.exec(
-        "INSERT INTO secret_expiries (secret_set_id, name, expires_at) VALUES (?, ?, ?)",
-        secretSetId,
-        CLAUDE_SETUP_MEMBER,
-        expiresAt,
-      );
-      sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
+      this.replaceCredentialMember(secretSetId, { kind, name: member, provider }, sealed, expiresAt, now);
       return { kind: "Written" };
     });
     if (written.kind === "NotWaiting") return written;
     if (written.kind === "NotStored") {
-      const detail = `${written.detail}; the minted token was discarded with the box. Fix the secret set, then start the Claude setup again`;
+      const detail = `${written.detail}; the minted token was discarded with the box. Fix the secret set, then start the ${SETUP_CREDENTIALS[harness].name} setup again`;
       await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
@@ -366,16 +359,17 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     event: ClaudeSetupEvent,
     now: number,
   ): Promise<ClaudeSetupDiscard | null> {
-    const step = advance(row.claude_setup_id, stateOf(row), event, settingsOf(this.env));
+    const step = advance(row.claude_setup_id, harnessOf(row), stateOf(row), event, settingsOf(this.env));
     if (step.kind === "Fail") {
       return this.failClaudeSetup(tenantId, row, step.reason, step.detail, now, event.kind !== "BoxFailed");
     }
     if (step.kind !== "Advance" || event.kind !== "Url") return null;
     const dueAt = now + step.dueInSeconds * 1000;
     this.ctx.storage.sql.exec(
-      "UPDATE claude_setups SET state = ?, sign_in_url = ?, phase_due_at = ?, updated_at = ? WHERE claude_setup_id = ? AND state = 'Starting'",
+      "UPDATE claude_setups SET state = ?, sign_in_url = ?, user_code = ?, phase_due_at = ?, updated_at = ? WHERE claude_setup_id = ? AND state = 'Starting'",
       step.state,
       event.signInUrl,
+      event.userCode,
       dueAt,
       now,
       row.claude_setup_id,
@@ -394,7 +388,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     }
     const event: ClaudeSetupEvent =
       message.type === "ClaudeSetupBoxUrl"
-        ? { kind: "Url", signInUrl: message.signInUrl }
+        ? { kind: "Url", signInUrl: message.signInUrl, userCode: message.userCode ?? null }
         : { kind: "BoxFailed", reason: message.reason, detail: message.detail };
     return this.stepClaudeSetup(tenantId, row, event, Date.now());
   }
@@ -420,9 +414,9 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (release.kind === "Unreadable") {
       return `the published release is unreadable: ${release.detail}; ask the operator to publish a release with the release workflow, then start the Claude setup again`;
     }
-    const boot = bootFor(release, HARNESS, row.harness_version, host.architecture);
+    const boot = bootFor(release, row.harness, row.harness_version, host.architecture);
     if (boot === undefined) {
-      return `the current release carries no ${HARNESS} ${row.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries, then start the Claude setup again`;
+      return `the current release carries no ${row.harness} ${row.harness_version} guest image for ${host.architecture}, the architecture of host ${host.name} (${hostId}); pin a harness version the current release carries, then start the Claude setup again`;
     }
     const signer = signerOf(
       this.env,

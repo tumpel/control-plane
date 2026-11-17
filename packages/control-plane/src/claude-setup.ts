@@ -1,5 +1,6 @@
 import {
   type ClaudeSetupFailureReasonSchema,
+  ClaudeSetupHarnessSchema,
   ClaudeSetupMemberSchema,
   ClaudeSetupSchema,
   ClaudeSetupStateSchema,
@@ -11,7 +12,30 @@ import type { Settings } from "./settings.ts";
 export type ClaudeSetup = z.infer<typeof ClaudeSetupSchema>;
 export type ClaudeSetupFailureReason = z.infer<typeof ClaudeSetupFailureReasonSchema>;
 
-export const CLAUDE_SETUP_MEMBER = ClaudeSetupMemberSchema.enum.CLAUDE_CODE_OAUTH_TOKEN;
+export type ClaudeSetupHarness = z.infer<typeof ClaudeSetupHarnessSchema>;
+export type ClaudeSetupMember = z.infer<typeof ClaudeSetupMemberSchema>;
+
+export interface SetupCredential {
+  member: ClaudeSetupMember;
+  kind: "SubscriptionToken" | "CredentialFile";
+  provider: "Anthropic" | "OpenAi";
+  name: string;
+}
+
+export const SETUP_CREDENTIALS: Record<ClaudeSetupHarness, SetupCredential> = {
+  ClaudeCode: {
+    member: ClaudeSetupMemberSchema.enum.CLAUDE_CODE_OAUTH_TOKEN,
+    kind: "SubscriptionToken",
+    provider: "Anthropic",
+    name: "Claude Code",
+  },
+  Codex: {
+    member: ClaudeSetupMemberSchema.enum.CODEX_AUTH_JSON,
+    kind: "CredentialFile",
+    provider: "OpenAi",
+    name: "Codex",
+  },
+};
 
 export const TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -28,7 +52,7 @@ export type ClaudeSetupBudgets = Pick<
 >;
 
 export type ClaudeSetupEvent =
-  | { kind: "Url"; signInUrl: string }
+  | { kind: "Url"; signInUrl: string; userCode: string | null }
   | { kind: "Code" }
   | { kind: "Stored" }
   | { kind: "BoxFailed"; reason: ClaudeSetupFailureReason; detail: string }
@@ -49,12 +73,24 @@ const START_AGAIN = "start the Claude setup again";
 const mintTimedOut = (claudeSetupId: string, budgets: ClaudeSetupBudgets): string =>
   `the box of Claude setup ${claudeSetupId} reported nothing within claudeSetupMintBudgetSeconds ${budgets.claudeSetupMintBudgetSeconds} plus claudeSetupMintGraceSeconds ${budgets.claudeSetupMintGraceSeconds} of the code; check that the host is online, then ${START_AGAIN}`;
 
-const timedOut = (claudeSetupId: string, phase: LivePhase, budgets: ClaudeSetupBudgets): ClaudeSetupStep => {
+const timedOut = (
+  claudeSetupId: string,
+  harness: ClaudeSetupHarness,
+  phase: LivePhase,
+  budgets: ClaudeSetupBudgets,
+): ClaudeSetupStep => {
   if (phase === "Starting") {
     return {
       kind: "Fail",
       reason: "SetupUrlMissing",
-      detail: `the box of Claude setup ${claudeSetupId} printed no sign-in URL within claudeSetupUrlBudgetSeconds ${budgets.claudeSetupUrlBudgetSeconds}; check that the host fetched the pinned Claude Code image and can reach claude.ai, then ${START_AGAIN}`,
+      detail: `the box of Claude setup ${claudeSetupId} printed no sign-in URL within claudeSetupUrlBudgetSeconds ${budgets.claudeSetupUrlBudgetSeconds}; check that the host fetched the pinned ${SETUP_CREDENTIALS[harness].name} image and can reach its sign-in page, then ${START_AGAIN}`,
+    };
+  }
+  if (phase === "AwaitingCode" && harness === "Codex") {
+    return {
+      kind: "Fail",
+      reason: "SetupTimedOut",
+      detail: `the Codex sign-in of Claude setup ${claudeSetupId} did not finish within claudeSetupCodeBudgetSeconds ${budgets.claudeSetupCodeBudgetSeconds} of its sign-in URL; ${START_AGAIN}, open the new URL and enter the new code`,
     };
   }
   if (phase === "AwaitingCode") {
@@ -69,6 +105,7 @@ const timedOut = (claudeSetupId: string, phase: LivePhase, budgets: ClaudeSetupB
 
 export const advance = (
   claudeSetupId: string,
+  harness: ClaudeSetupHarness,
   state: ClaudeSetupState,
   event: ClaudeSetupEvent,
   budgets: ClaudeSetupBudgets,
@@ -78,12 +115,18 @@ export const advance = (
       ? { kind: "Refuse", detail: `Claude setup ${claudeSetupId} is ${state} and takes no code` }
       : { kind: "Ignore" };
   }
-  if (event.kind === "Deadline") return timedOut(claudeSetupId, state, budgets);
+  if (event.kind === "Deadline") return timedOut(claudeSetupId, harness, state, budgets);
   if (event.kind === "BoxFailed") return { kind: "Fail", reason: event.reason, detail: event.detail };
   if (event.kind === "Url") {
     return state === "Starting"
       ? { kind: "Advance", state: "AwaitingCode", dueInSeconds: budgets.claudeSetupCodeBudgetSeconds }
       : { kind: "Ignore" };
+  }
+  if (event.kind === "Code" && harness === "Codex") {
+    return {
+      kind: "Refuse",
+      detail: `Claude setup ${claudeSetupId} signs in to Codex and takes no code; open its signInUrl and enter its userCode there`,
+    };
   }
   if (event.kind === "Code") {
     return state === "AwaitingCode"
@@ -100,7 +143,7 @@ export const advance = (
               : `Claude setup ${claudeSetupId} already took a code`,
         };
   }
-  return state === "Minting"
+  return state === "Minting" || (state === "AwaitingCode" && harness === "Codex")
     ? { kind: "Complete" }
     : { kind: "Refuse", detail: `Claude setup ${claudeSetupId} is ${state} and takes no token before its code` };
 };
@@ -111,11 +154,13 @@ export type ClaudeSetupRow = {
   secret_set_id: string;
   host_id: string;
   box_id: string;
+  harness: string;
   harness_version: string;
   endpoint: string;
   state: string;
   phase_due_at: number;
   sign_in_url: string | null;
+  user_code: string | null;
   reason: string | null;
   detail: string | null;
   expires_at: string | null;
@@ -125,6 +170,8 @@ export type ClaudeSetupRow = {
 };
 
 export const stateOf = (row: ClaudeSetupRow): ClaudeSetupState => ClaudeSetupStateSchema.parse(row.state);
+
+export const harnessOf = (row: ClaudeSetupRow): ClaudeSetupHarness => ClaudeSetupHarnessSchema.parse(row.harness);
 
 const iso = (at: number): string => new Date(at).toISOString();
 
@@ -149,12 +196,17 @@ const statusOf = (row: ClaudeSetupRow): Record<string, unknown> => {
   if (row.state === "Starting") return { state: row.state, urlDueAt: iso(row.phase_due_at) };
   if (row.state === "Minting") return { state: row.state, tokenDueAt: iso(row.phase_due_at) };
   if (row.state === "AwaitingCode") {
-    return { state: row.state, signInUrl: row.sign_in_url, codeDueAt: iso(row.phase_due_at) };
+    return {
+      state: row.state,
+      signInUrl: row.sign_in_url,
+      ...(row.user_code === null ? {} : { userCode: row.user_code }),
+      codeDueAt: iso(row.phase_due_at),
+    };
   }
   if (row.state === "Completed") {
     return {
       state: row.state,
-      memberName: CLAUDE_SETUP_MEMBER,
+      memberName: SETUP_CREDENTIALS[harnessOf(row)].member,
       expiresAt: row.expires_at,
       completedAt: endedAt(row),
     };
@@ -175,6 +227,7 @@ export const toClaudeSetup = (tenantId: string, row: ClaudeSetupRow): ClaudeSetu
     secretSetId: row.secret_set_id,
     hostId: row.host_id,
     boxId: row.box_id,
+    harness: row.harness,
     harnessVersion: row.harness_version,
     status: statusOf(row),
     createdAt: row.created_at,

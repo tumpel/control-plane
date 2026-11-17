@@ -378,7 +378,7 @@ test("a taken name, a repeated member, two credentials for one provider and dele
   assert.equal(refusal.code, "NoCredential");
   assert.equal(
     refusal.detail,
-    "secret set twin holds no credential Codex reads: a SubscriptionToken for OpenAi, or a ApiKey for OpenAi, or a ApiKey for OpenRouter",
+    "secret set twin holds no credential Codex reads: a CredentialFile for OpenAi, or a ApiKey for OpenAi, or a ApiKey for OpenRouter",
   );
   assert.equal(refusal.fix, "Add one of those to that secret set, then repeat personas.create");
 
