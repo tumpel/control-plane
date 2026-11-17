@@ -4,6 +4,7 @@ import {
   type ControlEnvelope,
   type ControlMessage,
   decodeBase64,
+  type Frame,
   type Hello,
   HelloVersionSchema,
   HostEnvelopeSchema,
@@ -25,7 +26,27 @@ import {
   sequence,
 } from "./protocol.ts";
 
-export type ControlConnection = { phase: "AwaitingHello"; nonce: string } | { phase: "Open" } | { phase: "Closed" };
+export type ControlConnection =
+  | { phase: "AwaitingHello"; nonce: string }
+  | { phase: "Open"; protocolVersion: number }
+  | { phase: "Closed" };
+
+export type MessageVersions = Record<StoredControlMessage["type"], number>;
+
+export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
+  TurnOffer: ChannelProtocol.Oldest,
+  TurnWithdrawn: ChannelProtocol.Oldest,
+  TurnClaimed: ChannelProtocol.Oldest,
+  SnapshotRequest: ChannelProtocol.Oldest,
+  SnapshotChunksHeld: ChannelProtocol.Oldest,
+  SnapshotPackUploads: ChannelProtocol.Oldest,
+  RestoreDownloads: ChannelProtocol.Oldest,
+  BoxTeardown: ChannelProtocol.Oldest,
+  BoxDiscard: ChannelProtocol.Oldest,
+  ClaudeSetupBoxOffer: ChannelProtocol.Oldest,
+  ClaudeSetupBoxCode: ChannelProtocol.Oldest,
+  ClaudeSetupBoxDiscard: ChannelProtocol.Oldest,
+};
 
 export interface ControlHost {
   hostId: string;
@@ -39,12 +60,13 @@ export interface ControlContext {
   ledger: LedgerStore<StoredControlMessage>;
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
+  messageVersions: MessageVersions;
   now(): Date;
 }
 
 export type ControlEvent =
   | { kind: "None" }
-  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string }
+  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string; protocolVersion: number }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "Message"; message: HostMessage }
   | { kind: "FrameRefused"; seq: number; reason: string }
@@ -89,6 +111,20 @@ const outbound = async (stored: StoredControlMessage, context: ControlContext): 
   return { ...stored, credential, lastLineSeq, snapshots, personaFiles, image, gitAuthorName, gitAuthorEmail };
 };
 
+const unspoken = (
+  protocolVersion: number,
+  frame: Frame<StoredControlMessage>,
+  context: ControlContext,
+): Received | null => {
+  const needed = context.messageVersions[frame.message.type];
+  if (needed <= protocolVersion) return null;
+  return close(
+    context.port,
+    CloseCode.UnsupportedVersion,
+    `frame ${frame.seq} carries ${frame.message.type}, which needs protocol version ${needed}; this connection speaks ${protocolVersion}, update the supervisor`,
+  );
+};
+
 export const send = async (
   connection: ControlConnection,
   message: StoredControlMessage,
@@ -96,9 +132,9 @@ export const send = async (
 ): Promise<void> => {
   const { ledger, frame } = sequence(await context.ledger.load(), message);
   await context.ledger.save(ledger);
-  if (connection.phase === "Open") {
-    context.port.send({ ...frame, message: await outbound(frame.message, context) });
-  }
+  if (connection.phase !== "Open") return;
+  if (unspoken(connection.protocolVersion, frame, context) !== null) return;
+  context.port.send({ ...frame, message: await outbound(frame.message, context) });
 };
 
 export const revoke = (context: ControlContext, reason: string): Received =>
@@ -121,19 +157,27 @@ const hello = async (
     );
   }
   if (context.host.revoked) return revoke(context, "the tenant revoked this host");
-  const resent = await resend(await context.ledger.load(), (stored) => outbound(stored, context));
-  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: ChannelProtocol.Version });
+  const ledger = await context.ledger.load();
+  for (const frame of ledger.unacked) {
+    const refused = unspoken(envelope.protocolVersion, frame, context);
+    if (refused !== null) return refused;
+  }
+  const resent = await resend(ledger, (stored) => outbound(stored, context));
+  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: envelope.protocolVersion });
   for (const frame of resent) context.port.send(frame);
   return {
-    connection: { phase: "Open" },
+    connection: { phase: "Open", protocolVersion: envelope.protocolVersion },
     event: {
       kind: "Welcomed",
       boxCapacity: envelope.boxCapacity,
       usage: envelope.usage,
       supervisorVersion: envelope.supervisorVersion,
+      protocolVersion: envelope.protocolVersion,
     },
   };
 };
+
+const spoken = (version: number): boolean => version >= ChannelProtocol.Oldest && version <= ChannelProtocol.Version;
 
 const refuse = async (
   connection: ControlConnection,
@@ -165,11 +209,11 @@ export const receive = async (
   if (connection.phase === "Closed") return { connection, event: { kind: "None" } };
   if (connection.phase === "AwaitingHello") {
     const greeting = parseEnvelope(HelloVersionSchema, text);
-    if (greeting.ok && greeting.value.protocolVersion !== ChannelProtocol.Version) {
+    if (greeting.ok && !spoken(greeting.value.protocolVersion)) {
       return close(
         context.port,
         CloseCode.UnsupportedVersion,
-        `protocol version ${greeting.value.protocolVersion} is not supported; this control plane speaks ${ChannelProtocol.Version}, update the supervisor`,
+        `protocol version ${greeting.value.protocolVersion} is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
       );
     }
   }

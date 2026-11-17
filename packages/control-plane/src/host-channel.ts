@@ -204,7 +204,13 @@ export class HostChannel extends DurableObject<Env> {
       .bind(welcomed.supervisorVersion, now, hostId)
       .run();
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).hostHello(hostId, welcomed.boxCapacity, welcomed.usage, now);
+    await this.env.TENANT.getByName(tenantId).hostHello(
+      hostId,
+      welcomed.boxCapacity,
+      welcomed.usage,
+      now,
+      welcomed.protocolVersion,
+    );
   }
 
   private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
@@ -302,6 +308,7 @@ export class HostChannel extends DurableObject<Env> {
         const tenantId = await this.tenantOf(host.host_id);
         return this.env.TENANT.getByName(tenantId).prepareClaudeSetup(tenantId, stored, host.host_id, Date.now());
       },
+      messageVersions: control.CONTROL_MESSAGE_VERSIONS,
       now: () => new Date(),
     };
   }
