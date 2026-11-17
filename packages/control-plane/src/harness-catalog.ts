@@ -7,6 +7,7 @@ export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSche
 
 export const CLAUDE_CODE_VERSION = "2.1.325";
 export const CODEX_VERSION = "0.169.0";
+const CODEX_SIBLING_BINARY_PATHS = ["codex-code-mode-host", "codex-exec-server"];
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
 
@@ -90,18 +91,20 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
       archives: [
         {
           architecture: "Amd64",
-          url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz`,
-          sha256: "9af4d751fce183faedea629437d5252dbf458eeb04130cf4f97be844621ea985",
-          binaryPath: "codex-x86_64-unknown-linux-musl",
+          url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz`,
+          sha256: "3b8ed091149cc63a59046b9f094bcfa21cdb4dda15ede441ce369bcee4a71ba0",
+          binaryPath: "codex",
+          siblingBinaryPaths: CODEX_SIBLING_BINARY_PATHS,
         },
         {
           architecture: "Arm64",
-          url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-aarch64-unknown-linux-musl.tar.gz`,
-          sha256: "97b97d87eea075c5cb7709c7f6156a451622a7667953ecda40e0276637196f3f",
-          binaryPath: "codex-aarch64-unknown-linux-musl",
+          url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-aarch64-unknown-linux-musl.tar.gz`,
+          sha256: "c8d0b4ab2a97c595b70b10412d36d0d5464dcef1e1d3246b073d48017cdf5a4f",
+          binaryPath: "codex",
+          siblingBinaryPaths: CODEX_SIBLING_BINARY_PATHS,
         },
       ],
-      stripComponents: 0,
+      stripComponents: 1,
     },
   },
   {
@@ -123,12 +126,14 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
           url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz`,
           sha256: "588310a336fa3b9df36b3f0225b26f679d453efaad0cf3d66c3651ef3ec1647a",
           binaryPath: "opencode",
+          siblingBinaryPaths: [],
         },
         {
           architecture: "Arm64",
           url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64.tar.gz`,
           sha256: "fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b",
           binaryPath: "opencode",
+          siblingBinaryPaths: [],
         },
       ],
       stripComponents: 0,
@@ -153,12 +158,14 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
           url: `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-x64.tar.gz`,
           sha256: "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5",
           binaryPath: "pi",
+          siblingBinaryPaths: [],
         },
         {
           architecture: "Arm64",
           url: `https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-arm64.tar.gz`,
           sha256: "42805cd5615952fcbbfc9c56b04f8feb84395134952e169a6cdc8d7676975666",
           binaryPath: "pi",
+          siblingBinaryPaths: [],
         },
       ],
       stripComponents: 1,
