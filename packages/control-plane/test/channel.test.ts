@@ -308,6 +308,23 @@ test("a frame whose message no schema reads is refused once in order, and the ne
   assert.match(closed?.reason ?? "", /expected seq 3, got 4/);
 });
 
+test("a frame and message carrying fields this control plane does not know are read for the fields it knows", async () => {
+  const channel = setup();
+  const link = channel.connect();
+  await link.hello();
+  const extended = {
+    type: "Frame" as const,
+    seq: 1,
+    ack: 0,
+    priority: "High",
+    message: { ...snapshotDone("snap-1"), compressedBytes: 7 },
+  };
+  await link.deliver(extended);
+  assert.equal(link.closed, null);
+  assert.deepEqual(link.events.at(-1), { kind: "Message", message: snapshotDone("snap-1") });
+  assert.equal(channel.ledger.current.received, 1);
+});
+
 test("after a reconnect the control plane resends unacked frames, each turn offer with a freshly minted grant", async () => {
   const channel = setup();
   const first = channel.connect();
