@@ -231,6 +231,7 @@ type HostUsageRow = {
   boxes_warm: number;
   load_average: number;
   memory_available_mib: number;
+  channel_protocol: number;
   created_at: number;
   updated_at: number;
 };
@@ -680,12 +681,13 @@ export class TenantSessions extends DurableObject<Env> {
     return turn;
   }
 
-  hostHello(hostId: string, boxCapacity: number, usage: HostUsage, now: number): void {
+  hostHello(hostId: string, boxCapacity: number, usage: HostUsage, now: number, channelProtocol: number): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO host_usage (host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO host_usage (host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at, channel_protocol)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (host_id) DO UPDATE SET box_capacity = excluded.box_capacity, boxes_warm = excluded.boxes_warm,
-        load_average = excluded.load_average, memory_available_mib = excluded.memory_available_mib, updated_at = excluded.updated_at`,
+        load_average = excluded.load_average, memory_available_mib = excluded.memory_available_mib, updated_at = excluded.updated_at,
+        channel_protocol = excluded.channel_protocol`,
       hostId,
       boxCapacity,
       usage.boxesWarm,
@@ -693,6 +695,7 @@ export class TenantSessions extends DurableObject<Env> {
       usage.memoryAvailableMib,
       now,
       now,
+      channelProtocol,
     );
   }
 
@@ -730,7 +733,7 @@ export class TenantSessions extends DurableObject<Env> {
     const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
     return sql
       .exec<HostUsageRow>(
-        "SELECT host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at FROM host_usage ORDER BY created_at, host_id",
+        "SELECT host_id, box_capacity, boxes_warm, load_average, memory_available_mib, channel_protocol, created_at, updated_at FROM host_usage ORDER BY created_at, host_id",
       )
       .toArray()
       .map((row) => ({
@@ -741,6 +744,7 @@ export class TenantSessions extends DurableObject<Env> {
         boxesWarm: row.boxes_warm,
         loadAverage: row.load_average,
         memoryAvailableMib: row.memory_available_mib,
+        channelProtocol: row.channel_protocol,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }));
