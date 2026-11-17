@@ -19,6 +19,7 @@ import type { Env } from "./index";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import type { HostReply, TurnHandoff } from "./tenant-sessions";
+import { stampTurnPoints } from "./turn-metrics.ts";
 
 const HOST_MIGRATIONS = [
   { name: "0001_host", sql: host0001 },
@@ -265,8 +266,10 @@ export class HostChannel extends DurableObject<Env> {
       ...point,
       dimensions: { ...point.dimensions, hostId },
     });
+    const turnIds = [...new Set(turns.map((point) => point.turnId))];
+    const offered = turnIds.length === 0 ? {} : await this.env.TENANT.getByName(tenantId).turnMetricDimensions(turnIds);
     await this.env.TENANT_METRICS.getByName(tenantId)
-      .record({ instruments, samples: samples.map(signed), turns: turns.map(signed) })
+      .record({ instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) })
       .catch((error: unknown) => {
         console.error(
           `TelemetryRejected: host ${hostId} sent a telemetry batch the metrics store refused: ${error instanceof Error ? error.message : String(error)}`,

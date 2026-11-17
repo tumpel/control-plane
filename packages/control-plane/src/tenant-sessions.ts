@@ -62,6 +62,7 @@ import { why } from "./sessions";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
+import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-metrics.ts";
 
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
@@ -1539,6 +1540,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { ...known, kind: "Lines", lines: linesWithin(lines, maxBytes) };
   }
 
+  turnMetricDimensions(turnIds: readonly string[]): Record<string, Dimensions> {
+    return Object.fromEntries(
+      this.ctx.storage.sql
+        .exec<{ turn_id: string; dimensions: string }>(
+          "SELECT turn_id, dimensions FROM turn_metric_dimensions WHERE turn_id IN (SELECT value FROM json_each(?))",
+          JSON.stringify(turnIds),
+        )
+        .toArray()
+        .map((row) => [row.turn_id, DimensionsSchema.parse(JSON.parse(row.dimensions))]),
+    );
+  }
+
   async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
@@ -1560,9 +1573,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const { secretSetId } = persona;
     const prebuild = this.hostPrebuild(session.session_id);
+    const members = prebuild === null ? await this.members(secretSetId) : [];
     const dispatch =
       prebuild === null
-        ? dispatchVariables(entry, await this.members(secretSetId), session.model, now)
+        ? dispatchVariables(entry, members, session.model, now)
         : { kind: "Ready" as const, variables: [], arguments: [] };
     if (dispatch.kind !== "Ready") {
       const refused = credentialProblem(
@@ -1575,6 +1589,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, "CredentialExpired", `${refused.detail}; ${refused.fix}`, iso(now));
       return { kind: "Withdrawn" };
     }
+    this.ctx.storage.sql.exec(
+      `INSERT INTO turn_metric_dimensions (turn_id, dimensions, created_at) VALUES (?, ?, ?)
+      ON CONFLICT (turn_id) DO UPDATE SET dimensions = excluded.dimensions`,
+      turnId,
+      JSON.stringify(
+        offeredDimensions(
+          session.persona_id,
+          secretSetId,
+          prebuild === null ? checkModelCredential(entry, members, session.model, now) : null,
+        ),
+      ),
+      now,
+    );
     const settings = settingsOf(this.env);
     const guest = await this.guestImage(
       tenantId,

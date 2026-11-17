@@ -11,6 +11,7 @@ const claudeCode = {
       variable: "ANTHROPIC_API_KEY",
       fixed: [],
       arguments: [],
+      costBasis: "Billed" as const,
     },
     {
       provider: "Anthropic" as const,
@@ -18,6 +19,7 @@ const claudeCode = {
       variable: "CLAUDE_CODE_OAUTH_TOKEN",
       fixed: [],
       arguments: [],
+      costBasis: "NotBilled" as const,
     },
     {
       provider: "OpenRouter" as const,
@@ -25,13 +27,21 @@ const claudeCode = {
       variable: "ANTHROPIC_AUTH_TOKEN",
       fixed: [{ name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" }],
       arguments: [],
+      costBasis: "Billed" as const,
     },
   ],
 };
 const codex = {
   credentialChoice: "CatalogOrder" as const,
   credentials: [
-    { provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [], arguments: [] },
+    {
+      provider: "OpenAi" as const,
+      kind: "ApiKey" as const,
+      variable: "OPENAI_API_KEY",
+      fixed: [],
+      arguments: [],
+      costBasis: "Billed" as const,
+    },
   ],
 };
 const openCode = {
@@ -43,6 +53,7 @@ const openCode = {
       variable: "OPENROUTER_API_KEY",
       fixed: [],
       arguments: [],
+      costBasis: "Billed" as const,
     },
     {
       provider: "Anthropic" as const,
@@ -50,8 +61,16 @@ const openCode = {
       variable: "ANTHROPIC_API_KEY",
       fixed: [],
       arguments: [],
+      costBasis: "Billed" as const,
     },
-    { provider: "OpenAi" as const, kind: "ApiKey" as const, variable: "OPENAI_API_KEY", fixed: [], arguments: [] },
+    {
+      provider: "OpenAi" as const,
+      kind: "ApiKey" as const,
+      variable: "OPENAI_API_KEY",
+      fixed: [],
+      arguments: [],
+      costBasis: "Billed" as const,
+    },
   ],
 };
 const MODEL = "claude-sonnet";
@@ -106,6 +125,7 @@ test("a login file reaches the box as a file at its catalog path, never as a var
         path: ".codex/auth.json",
         fixed: [],
         arguments: ["-c", 'cli_auth_credentials_store="file"'],
+        costBasis: "NotBilled" as const,
       },
       ...codex.credentials,
     ],
