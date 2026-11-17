@@ -1,7 +1,7 @@
 import type { HarnessSchema } from "@tumpel/api/schemas";
 import { z } from "zod";
 
-export type Compactor = (text: string) => string | null;
+export type Compactor = (line: unknown) => string | null;
 
 type Harness = z.infer<typeof HarnessSchema>;
 
@@ -43,8 +43,8 @@ const ClaudeCodeAssistantSchema = z.object({
   }),
 });
 
-const compactClaudeCode = (text: string): string | null => {
-  const assistant = ClaudeCodeAssistantSchema.safeParse(JSON.parse(text));
+const compactClaudeCode = (line: unknown): string | null => {
+  const assistant = ClaudeCodeAssistantSchema.safeParse(line);
   if (!assistant.success) return null;
   return joined(
     assistant.data.message.content.flatMap((block): string[] => {
@@ -89,17 +89,17 @@ const PiLineSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-const compactPi = (text: string): string | null => {
-  const line = PiLineSchema.safeParse(JSON.parse(text));
-  if (!line.success) return null;
-  if (line.data.type === "agent_end") {
-    const usages = line.data.messages.flatMap((message) => ("usage" in message ? [message.usage] : []));
+const compactPi = (line: unknown): string | null => {
+  const parsed = PiLineSchema.safeParse(line);
+  if (!parsed.success) return null;
+  if (parsed.data.type === "agent_end") {
+    const usages = parsed.data.messages.flatMap((message) => ("usage" in message ? [message.usage] : []));
     const sum = (pick: (usage: z.infer<typeof PiUsageSchema>) => number): number =>
       usages.reduce((total, usage) => total + pick(usage), 0);
     const total = { input: sum((u) => u.input), cacheRead: sum((u) => u.cacheRead), output: sum((u) => u.output) };
     return `[result] ${tokens(total)}, ${dollars(sum((u) => u.cost.total))}`;
   }
-  const { message } = line.data;
+  const { message } = parsed.data;
   if (!("content" in message)) return null;
   const parts = message.content.flatMap((block): string[] => {
     if ("text" in block && block.text.trim() !== "") return [block.text.trim()];
@@ -128,10 +128,10 @@ const OpenCodeLineSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-const compactOpenCode = (text: string): string | null => {
-  const line = OpenCodeLineSchema.safeParse(JSON.parse(text));
-  if (!line.success) return null;
-  const event = line.data;
+const compactOpenCode = (line: unknown): string | null => {
+  const parsed = OpenCodeLineSchema.safeParse(line);
+  if (!parsed.success) return null;
+  const event = parsed.data;
   switch (event.type) {
     case "text":
       return event.part.text.trim() === "" ? null : event.part.text.trim();
@@ -190,10 +190,10 @@ const compactCodexItem = (
   }
 };
 
-const compactCodex = (text: string): string | null => {
-  const line = CodexLineSchema.safeParse(JSON.parse(text));
-  if (!line.success) return null;
-  const event = line.data;
+const compactCodex = (line: unknown): string | null => {
+  const parsed = CodexLineSchema.safeParse(line);
+  if (!parsed.success) return null;
+  const event = parsed.data;
   switch (event.type) {
     case "item.started":
     case "item.completed":
@@ -209,11 +209,12 @@ const compactCodex = (text: string): string | null => {
   }
 };
 
-const COMPACTORS: Partial<Record<Harness, Compactor>> = {
+const COMPACTORS: Record<Harness, Compactor | null> = {
   ClaudeCode: compactClaudeCode,
   Codex: compactCodex,
   OpenCode: compactOpenCode,
   PiDev: compactPi,
+  MistralAgent: null,
 };
 
-export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[harness] ?? null;
+export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[harness];
