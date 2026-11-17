@@ -1,4 +1,4 @@
-import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types/index.ts";
+import type { D1Database } from "@cloudflare/workers-types/index.ts";
 import { IssuerJwkSchema, type OpenIdConfigurationSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { fromBase64, generateDataKey, seal, toBase64, unseal } from "./envelope.ts";
@@ -7,7 +7,6 @@ import { type KeyStore, keyStoreOf } from "./key-store.ts";
 export type IssuerJwk = z.infer<typeof IssuerJwkSchema>;
 
 export const ISSUER_TOKEN_TTL_SECONDS = 300;
-const ISSUER_KEY_OVERLAP_MS = 86_400_000;
 export const OPENID_CONFIGURATION_PATH = "/.well-known/openid-configuration";
 export const JWKS_PATH = "/.well-known/jwks.json";
 export const ISSUER_DOCUMENT_HEADERS = { "cache-control": "public, max-age=3600", "access-control-allow-origin": "*" };
@@ -48,9 +47,8 @@ type PublishedRow = { public_jwk: string };
 type NewKey = { kid: string; publicJwk: string; wrappedDataKey: string; privateKeySealed: string };
 
 const RS256 = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
-const SUPERSEDED = "EXISTS (SELECT 1 FROM issuer_keys s WHERE s.signs_from > k.signs_from AND s.signs_from <= ?)";
 const INSERT_KEY =
-  "INSERT INTO issuer_keys (kid, public_jwk, wrapped_data_key, private_key_sealed, signs_from) SELECT ?, ?, ?, ?, ?";
+  "INSERT INTO issuer_keys (kid, public_jwk, wrapped_data_key, private_key_sealed, signs_from) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM issuer_keys)";
 const RESEAL = "SECRETS_KEK no longer opens the issuer's signing key; restore the key it was sealed with";
 const encoder = new TextEncoder();
 
@@ -94,29 +92,15 @@ const newKey = async (keyStore: KeyStore): Promise<NewKey> => {
 };
 
 export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now: () => number) => {
-  const insertKey = (key: NewKey, signsFrom: number, clause: string, ...values: number[]): D1PreparedStatement =>
-    db
-      .prepare(`${INSERT_KEY} ${clause}`)
-      .bind(key.kid, key.publicJwk, key.wrappedDataKey, key.privateKeySealed, signsFrom, ...values);
-
-  const signingRow = (at: number): Promise<KeyRow | null> =>
-    db
-      .prepare(
-        "SELECT kid, wrapped_data_key, private_key_sealed FROM issuer_keys WHERE signs_from <= ? ORDER BY signs_from DESC, kid DESC LIMIT 1",
-      )
-      .bind(at)
-      .first<KeyRow>();
+  const signingRow = (): Promise<KeyRow | null> =>
+    db.prepare("SELECT kid, wrapped_data_key, private_key_sealed FROM issuer_keys").first<KeyRow>();
 
   const signing = async (at: number): Promise<KeyRow> => {
-    const row = await signingRow(at);
+    const row = await signingRow();
     if (row !== null) return row;
-    await insertKey(
-      await newKey(keyStore),
-      at,
-      "WHERE NOT EXISTS (SELECT 1 FROM issuer_keys WHERE signs_from <= ?)",
-      at,
-    ).run();
-    const created = await signingRow(at);
+    const key = await newKey(keyStore);
+    await db.prepare(INSERT_KEY).bind(key.kid, key.publicJwk, key.wrappedDataKey, key.privateKeySealed, at).run();
+    const created = await signingRow();
     if (created === null)
       throw new Error("issuer_keys holds no signing key right after the insert; check the D1 migrations");
     return created;
@@ -155,14 +139,8 @@ export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now
       };
     },
     async publishedKeys(): Promise<IssuerJwk[]> {
-      const at = now();
-      await signing(at);
-      const { results } = await db
-        .prepare(
-          `SELECT k.public_jwk FROM issuer_keys k WHERE NOT ${SUPERSEDED} ORDER BY k.signs_from DESC, k.kid DESC`,
-        )
-        .bind(at - ISSUER_KEY_OVERLAP_MS)
-        .all<PublishedRow>();
+      await signing(now());
+      const { results } = await db.prepare("SELECT public_jwk FROM issuer_keys").all<PublishedRow>();
       return results.map((row) => IssuerJwkSchema.parse(JSON.parse(row.public_jwk)));
     },
   };
