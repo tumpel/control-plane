@@ -312,11 +312,11 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
     }),
   },
   {
-    name: "a kept set that gets only some of its values stops the plan",
+    name: "values that leave out any variable the file names stop the plan",
     desired: desired(twoMembers, new Map(), ["ANTHROPIC_API_KEY"]),
     live: twoKeys,
     planned: problems(
-      "secret set prod is rewritten only with every value it names, and secretValues holds no GITHUB_TOKEN; send all of ANTHROPIC_API_KEY, GITHUB_TOKEN to rewrite it, or none to keep its values",
+      "secretValues holds no GITHUB_TOKEN; send a value for every variable the secret sets in the file name, or none to keep the stored values of every secret set the file keeps",
     ),
   },
   {
