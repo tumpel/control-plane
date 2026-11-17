@@ -12,6 +12,7 @@ import {
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
+import { deployInProgress } from "./deploy-drain";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
@@ -221,6 +222,7 @@ const prepareStart = async (
 
 const placed = <T>(started: Started<T>): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
+  if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
   if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
   return ok(started.started);
 };
@@ -343,6 +345,7 @@ export const sendTurn = async (
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
   if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
+  if (sent.kind === "Draining") return refuse(503, deployInProgress("send the turn again"));
   if (sent.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(sent.detail, "send the turn again"));
   if (sent.kind === "NotFound") return sessionNotFound(sessionId);
   if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");

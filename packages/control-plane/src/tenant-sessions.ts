@@ -30,6 +30,7 @@ import {
   type SnapshotDownload,
   type StoredControlMessage,
 } from "./channel/protocol.ts";
+import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, unseal } from "./envelope.ts";
 import {
   botLogin,
@@ -94,6 +95,7 @@ export type ReleaseUnreadable = { kind: "ReleaseUnreadable"; detail: string };
 
 export type Started<T> =
   | { kind: "Started"; started: T }
+  | { kind: "Draining" }
   | { kind: "Unplaced"; hosts: Unplaceable[] }
   | ReleaseUnreadable;
 
@@ -101,6 +103,7 @@ type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadabl
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
+  | { kind: "Draining" }
   | { kind: "Stranded"; missingTurnIds: string[] }
   | { kind: "Unplaced"; hosts: Unplaceable[] }
   | ReleaseUnreadable
@@ -712,17 +715,19 @@ export class TenantSessions extends DurableObject<Env> {
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
+  runningTurnsByHost(): RunningTurns[] {
+    return this.ctx.storage.sql
+      .exec<{ host_id: string; running: number }>(
+        `SELECT host_id, COUNT(*) AS running FROM turns WHERE state IN (${IN_FLIGHT.map(() => "?").join(", ")}) GROUP BY host_id`,
+        ...IN_FLIGHT,
+      )
+      .toArray()
+      .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
+  }
+
   listHostUsage(tenantId: string): ReportedHostUsage[] {
     const sql = this.ctx.storage.sql;
-    const running = new Map(
-      sql
-        .exec<{ host_id: string; running: number }>(
-          `SELECT host_id, COUNT(*) AS running FROM turns WHERE state IN (${IN_FLIGHT.map(() => "?").join(", ")}) GROUP BY host_id`,
-          ...IN_FLIGHT,
-        )
-        .toArray()
-        .map((row) => [row.host_id, row.running]),
-    );
+    const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
     return sql
       .exec<HostUsageRow>(
         "SELECT host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at FROM host_usage ORDER BY created_at, host_id",
@@ -858,6 +863,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (image.kind === "ReleaseUnreadable") return image;
     const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
@@ -913,6 +919,7 @@ export class TenantSessions extends DurableObject<Env> {
     if (running !== null) return { kind: "InFlight", turnId: running };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
+    if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
     if (hosts.some((host) => host.hostId === session.host_id && host.state === "Online")) {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
       const turn = this.runTurn(session, session.host_id, boxId, prompt, now);
