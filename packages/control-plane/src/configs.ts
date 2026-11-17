@@ -1,45 +1,36 @@
 import {
   type ConfigChangeSchema,
-  type ConfigFileDigestSchema,
-  ConfigPlanSchema,
   type ConfigSecretSetSchema,
-  EffectiveHarnessVersionSchema,
+  type EffectiveHarnessVersionSchema,
   type HarnessPinCreateSchema,
-  HostSchema,
   PersonaFileLimit,
-  PersonaSchema,
-  ProblemResponseSchema,
-  ProblemSchema,
+  type PersonaSchema,
   type SecretSetCreateSchema,
-  SecretSetSchema,
-  SecretValueSchema,
-  SessionSchema,
-  type TenantConfigApplySchema,
+  type SecretSetSchema,
+  type SecretValueSchema,
+  type SessionSchema,
   type TenantConfigPlanRequestSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
-import { decodeBase64 } from "./channel/protocol.ts";
 import type { GitHubUser } from "./github.ts";
-import { json, type Problem, problem } from "./http.ts";
-import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-files.ts";
+import type { HostRecord } from "./host-record.ts";
+import { problem } from "./http.ts";
+import type { StoredFile } from "./persona-files.ts";
 
-type PlanRequest = z.infer<typeof TenantConfigPlanRequestSchema>;
-type ApplyRequest = z.infer<typeof TenantConfigApplySchema>;
-type TenantConfig = PlanRequest["config"];
-type ConfigFileDigest = z.infer<typeof ConfigFileDigestSchema>;
-type ConfigPersona = TenantConfig["personas"][number];
+export type PlanRequest = z.infer<typeof TenantConfigPlanRequestSchema>;
+export type TenantConfig = PlanRequest["config"];
+export type ConfigPersona = TenantConfig["personas"][number];
 type ConfigSecretSet = z.infer<typeof ConfigSecretSetSchema>;
 type ConfigSecret = ConfigSecretSet["secrets"][number];
 type ConfigHost = TenantConfig["hosts"][number];
-type HarnessPinCreate = TenantConfig["harnessPins"][number];
+export type HarnessPinCreate = TenantConfig["harnessPins"][number];
 type ConfigChange = z.infer<typeof ConfigChangeSchema>;
 type Persona = z.infer<typeof PersonaSchema>;
 type SecretSet = z.infer<typeof SecretSetSchema>;
 type SecretKey = SecretSet["keys"][number];
-type SecretMember = z.infer<typeof SecretValueSchema>;
-type Member = SecretKey | SecretMember;
+export type SecretMember = z.infer<typeof SecretValueSchema>;
+export type Member = SecretKey | SecretMember;
 type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
-type Host = z.infer<typeof HostSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
@@ -55,17 +46,15 @@ export type ConfigWrite =
   | { kind: "Pin"; pin: HarnessPinWrite }
   | { kind: "Unpin"; harness: string };
 
-export type Call = (method: string, path: string, body: unknown) => Promise<Response>;
-
 export interface Live {
   personas: Persona[];
   secretSets: SecretSet[];
   pins: Pin[];
-  hosts: Host[];
+  hosts: HostRecord[];
   sessions: Session[];
 }
 
-interface LocalFile {
+export interface LocalFile {
   path: string;
   digest: string;
   sizeBytes: number;
@@ -78,14 +67,14 @@ export interface SentFile {
   content: string | null;
 }
 
-interface PlannedFile {
+export interface PlannedFile {
   file: LocalFile;
   held: boolean;
 }
 
 type ResolvedSecret = { secret: ConfigSecret; expiresAt: string | null };
 
-interface ResolvedSet {
+export interface ResolvedSet {
   name: string;
   secrets: ResolvedSecret[];
 }
@@ -103,9 +92,7 @@ export type Step =
   | { kind: "DeletePin"; harness: string }
   | { kind: "LabelHost"; host: ConfigHost };
 
-type Outcome<T> = { ok: true; value: T } | { ok: false; response: Response };
-
-const stopped = (problems: string[]): Response =>
+export const stopped = (problems: string[]): Response =>
   problem(422, {
     code: "InvalidRequest",
     title: "Config plan stopped",
@@ -146,7 +133,7 @@ const fileList = (files: PlannedFile[], removed: string[]): string => {
   return changed.length === 0 ? "" : `; files: ${changed.join(", ")}`;
 };
 
-const changeOf = (step: Step): ConfigChange => {
+export const changeOf = (step: Step): ConfigChange => {
   switch (step.kind) {
     case "CreatePersona":
       return {
@@ -374,7 +361,7 @@ const planPins = (desired: HarnessPinCreate[], live: Pin[], steps: Step[]): void
 const sameLabels = (left: string[], right: string[]): boolean =>
   left.length === right.length && left.every((label, index) => label === right[index]);
 
-const planHosts = (desired: ConfigHost[], live: Host[], steps: Step[], problems: string[]): void => {
+const planHosts = (desired: ConfigHost[], live: HostRecord[], steps: Step[], problems: string[]): void => {
   const enrolled = live.filter((host) => host.state !== "Revoked");
   const byId = new Map(enrolled.map((host) => [host.hostId, host]));
   for (const host of desired) {
@@ -478,278 +465,4 @@ export const planOf = (desired: Desired, live: Live): Planned => {
   planHosts(config.hosts, live.hosts, steps, problems);
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, steps };
-};
-
-const missingValues = (steps: Step[], values: Map<string, string>): string[] =>
-  steps.flatMap((step) => {
-    if (step.kind !== "CreateSecretSet" && step.kind !== "UpdateSecretSet") return [];
-    return step.secretSet.secrets
-      .filter(({ secret }) => !values.has(secret.valueFrom.env))
-      .map(
-        ({ secret }) =>
-          `secretValues holds no ${secret.valueFrom.env} (member ${secret.name} of secret set ${step.secretSet.name})`,
-      );
-  });
-
-const secretValuesOf = (secretSet: ResolvedSet, values: Map<string, string>): SecretMember[] =>
-  SecretValueSchema.array().parse(
-    secretSet.secrets.map(({ secret, expiresAt }) => {
-      const value = values.get(secret.valueFrom.env);
-      if (secret.kind === "Variable") return { kind: "Variable", name: secret.name, value };
-      if (secret.kind === "ApiKey") return { kind: "ApiKey", name: secret.name, provider: secret.provider, value };
-      return { kind: "SubscriptionToken", name: secret.name, provider: secret.provider, expiresAt, value };
-    }),
-  );
-
-const fileWrites = (files: PlannedFile[]): PersonaFileWrite[] =>
-  files.map(({ file, held }) =>
-    !held && file.content !== null
-      ? { source: "Inline", path: file.path, content: file.content }
-      : { source: "Stored", path: file.path, digest: file.digest, sizeBytes: file.sizeBytes },
-  );
-
-const refusedAt = async (answer: Response, change: ConfigChange, applied: ConfigChange[]): Promise<Response> => {
-  const refusal: Problem = ProblemSchema.parse(await answer.json());
-  const status = ProblemResponseSchema.shape.statusCode.safeParse(answer.status);
-  const done =
-    applied.length === 0
-      ? "no change was applied"
-      : `applied before it: ${applied.map((each) => each.description).join("; ")}`;
-  return problem(status.success ? status.data : 422, {
-    ...refusal,
-    detail: `${change.description} was refused (${refusal.detail}); ${done}`,
-  });
-};
-
-export interface PersonaCheck {
-  harness: string;
-  files: PersonaFileWrite[];
-  secretSetName: string;
-  members: Member[];
-  pins: HarnessPinCreate[];
-  newSecretSet: boolean;
-}
-
-export interface Applier {
-  call: Call;
-  tokenUser(secrets: SecretMember[]): Promise<Outcome<GitHubUser | null>>;
-  personaFiles(check: PersonaCheck): Promise<Outcome<StoredFile[]>>;
-  pinRefusal(pin: HarnessPinCreate): Promise<Response | null>;
-  commit(writes: ConfigWrite[]): Promise<Response | null>;
-}
-
-interface Prepare {
-  applier: Applier;
-  values: Map<string, string>;
-  setIds: Map<string, string>;
-  members: Map<string, Member[]>;
-  heldSets: Map<string, string>;
-  pins: HarnessPinCreate[];
-}
-
-const setIdOf = (prepare: Prepare, name: string): string => {
-  const secretSetId = prepare.setIds.get(name);
-  if (secretSetId === undefined) throw new Error(`secret set ${name} has no id after the plan held it`);
-  return secretSetId;
-};
-
-const checkedFiles = (
-  prepare: Prepare,
-  persona: ConfigPersona,
-  files: PlannedFile[],
-  newSecretSet: boolean,
-): Promise<Outcome<StoredFile[]>> =>
-  prepare.applier.personaFiles({
-    harness: persona.harness,
-    files: fileWrites(files),
-    secretSetName: persona.secretSetName,
-    members: prepare.members.get(persona.secretSetName) ?? [],
-    pins: prepare.pins,
-    newSecretSet,
-  });
-
-const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrite | null>> => {
-  switch (step.kind) {
-    case "CreateSecretSet":
-    case "UpdateSecretSet":
-    case "RewriteSecretSet": {
-      const secrets = secretValuesOf(step.secretSet, prepare.values);
-      const user = await prepare.applier.tokenUser(secrets);
-      if (!user.ok) return user;
-      return {
-        ok: true,
-        value: {
-          kind: step.kind === "CreateSecretSet" ? "CreateSecretSet" : "RewriteSecretSet",
-          secretSetId: setIdOf(prepare, step.secretSet.name),
-          secretSet: { name: step.secretSet.name, secrets },
-          githubUser: user.value,
-        },
-      };
-    }
-    case "DeleteSecretSet":
-      return { ok: true, value: { kind: "DeleteSecretSet", secretSetId: step.secretSetId } };
-    case "CreatePersona": {
-      const files = await checkedFiles(prepare, step.persona, step.files, true);
-      if (!files.ok) return files;
-      const secretSetId = setIdOf(prepare, step.persona.secretSetName);
-      return {
-        ok: true,
-        value: {
-          kind: "CreatePersona",
-          persona: { name: step.persona.name, harness: step.persona.harness, secretSetId, files: files.value },
-        },
-      };
-    }
-    case "UpdatePersona": {
-      const secretSetId = setIdOf(prepare, step.persona.secretSetName);
-      const newSecretSet = prepare.heldSets.get(step.personaId) !== secretSetId;
-      const files = await checkedFiles(prepare, step.persona, step.files, newSecretSet);
-      if (!files.ok) return files;
-      return {
-        ok: true,
-        value: {
-          kind: "UpdatePersona",
-          personaId: step.personaId,
-          persona: { name: step.persona.name, secretSetId, files: files.value },
-        },
-      };
-    }
-    case "DeletePersona":
-      return { ok: true, value: { kind: "DeletePersona", personaId: step.personaId } };
-    case "CreatePin":
-    case "UpdatePin": {
-      const refused = await prepare.applier.pinRefusal(step.pin);
-      if (refused !== null) return { ok: false, response: refused };
-      return { ok: true, value: { kind: "Pin", pin: step.pin } };
-    }
-    case "DeletePin":
-      return { ok: true, value: { kind: "Unpin", harness: step.harness } };
-    case "LabelHost":
-      return { ok: true, value: null };
-  }
-};
-
-const prepared = async (
-  steps: Step[],
-  live: Live,
-  config: TenantConfig,
-  values: Map<string, string>,
-  applier: Applier,
-): Promise<Outcome<ConfigWrite[]>> => {
-  const prepare: Prepare = {
-    applier,
-    values,
-    setIds: new Map(live.secretSets.map((set) => [set.name, set.secretSetId])),
-    members: new Map(live.secretSets.map((set) => [set.name, set.keys])),
-    heldSets: new Map(live.personas.map((persona) => [persona.personaId, persona.secretSetId])),
-    pins: config.harnessPins,
-  };
-  for (const step of steps) {
-    if (step.kind === "CreateSecretSet") prepare.setIds.set(step.secretSet.name, crypto.randomUUID());
-    if (step.kind === "CreateSecretSet" || step.kind === "UpdateSecretSet" || step.kind === "RewriteSecretSet") {
-      prepare.members.set(step.secretSet.name, secretValuesOf(step.secretSet, values));
-    }
-  }
-  const writes: ConfigWrite[] = [];
-  for (const step of steps) {
-    const write = await writeOf(step, prepare);
-    if (!write.ok) return { ok: false, response: await refusedAt(write.response, changeOf(step), []) };
-    if (write.value !== null) writes.push(write.value);
-  }
-  return { ok: true, value: writes };
-};
-const read = async <T>(call: Call, path: string, schema: z.ZodType<T>): Promise<Outcome<T>> => {
-  const answer = await call("GET", path, null);
-  if (!answer.ok) return { ok: false, response: answer };
-  return { ok: true, value: schema.parse(await answer.json()) };
-};
-
-const readLive = async (call: Call): Promise<Outcome<Live>> => {
-  const personas = await read(call, "/v1/personas", PersonaSchema.array());
-  if (!personas.ok) return personas;
-  const secretSets = await read(call, "/v1/secret-sets", SecretSetSchema.array());
-  if (!secretSets.ok) return secretSets;
-  const pins = await read(call, "/v1/harnesses/pins", EffectiveHarnessVersionSchema.array());
-  if (!pins.ok) return pins;
-  const hosts = await read(call, "/v1/hosts", HostSchema.array());
-  if (!hosts.ok) return hosts;
-  const sessions = await read(call, "/v1/sessions", SessionSchema.array());
-  if (!sessions.ok) return sessions;
-  return {
-    ok: true,
-    value: {
-      personas: personas.value,
-      secretSets: secretSets.value,
-      pins: pins.value,
-      hosts: hosts.value,
-      sessions: sessions.value,
-    },
-  };
-};
-
-const digestFiles = (files: ConfigFileDigest[]): Map<string, SentFile> =>
-  new Map(files.map((file) => [file.from, { digest: file.digest, sizeBytes: file.sizeBytes, content: null }]));
-
-const writtenFiles = async (files: ApplyRequest["files"], problems: string[]): Promise<Map<string, SentFile>> => {
-  const sent = new Map<string, SentFile>();
-  for (const file of files) {
-    if (file.source === "Stored") {
-      sent.set(file.from, { digest: file.digest, sizeBytes: file.sizeBytes, content: null });
-      continue;
-    }
-    const bytes = decodeBase64(file.content);
-    if (bytes === null) {
-      problems.push(`the content of ${file.from} is not base64; send the file's bytes base64-encoded`);
-      continue;
-    }
-    sent.set(file.from, { digest: await sha256Hex(bytes), sizeBytes: bytes.byteLength, content: file.content });
-  }
-  return sent;
-};
-
-export const planConfig = async (body: PlanRequest, call: Call): Promise<Response> => {
-  const live = await readLive(call);
-  if (!live.ok) return live.response;
-  const planned = planOf(
-    {
-      config: body.config,
-      files: digestFiles(body.files),
-      expiryValues: body.expiryValues,
-      secretEnvs: new Set(body.secretValues.map((each) => each.env)),
-    },
-    live.value,
-  );
-  if (!planned.ok) return stopped(planned.problems);
-  return json(ConfigPlanSchema.parse({ changes: planned.steps.map(changeOf) }));
-};
-
-export const applyConfig = async (body: ApplyRequest, applier: Applier): Promise<Response> => {
-  const problems: string[] = [];
-  const files = await writtenFiles(body.files, problems);
-  if (problems.length > 0) return stopped(problems);
-  const live = await readLive(applier.call);
-  if (!live.ok) return live.response;
-  const values = new Map(body.secretValues.map((each) => [each.env, each.value]));
-  const planned = planOf(
-    { config: body.config, files, expiryValues: body.expiryValues, secretEnvs: new Set(values.keys()) },
-    live.value,
-  );
-  if (!planned.ok) return stopped(planned.problems);
-  const missing = missingValues(planned.steps, values);
-  if (missing.length > 0) return stopped(missing);
-  const writes = await prepared(planned.steps, live.value, body.config, values, applier);
-  if (!writes.ok) return writes.response;
-  const refused = await applier.commit(writes.value);
-  if (refused !== null) return refused;
-  const applied = planned.steps.filter((step) => step.kind !== "LabelHost").map(changeOf);
-  for (const step of planned.steps) {
-    if (step.kind !== "LabelHost") continue;
-    const change = changeOf(step);
-    const answer = await applier.call("PUT", `/v1/hosts/${encodeURIComponent(step.host.hostId)}/labels`, {
-      labels: step.host.labels,
-    });
-    if (!answer.ok) return refusedAt(answer, change, applied);
-    applied.push(change);
-  }
-  return json(ConfigPlanSchema.parse({ changes: applied }));
 };

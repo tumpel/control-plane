@@ -42,6 +42,17 @@ export type StoredGitHubReading = { reading: GitHubReading; readAt: number };
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
+export type ConfigApplied =
+  | { kind: "Applied" }
+  | { kind: "Conflict"; constraint: string }
+  | { kind: "Deleted"; resource: string };
+
+const sealedOf = (sealed: Map<string, SealedMember[]>, secretSetId: string): SealedMember[] => {
+  const members = sealed.get(secretSetId);
+  if (members === undefined) throw new Error(`secret set ${secretSetId} reached the config write unsealed`);
+  return members;
+};
+
 export type SecretSetDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; personas: string[] };
 
 export type SecretSetsRead = { kind: "Read"; secretSets: SecretSet[] } | UnreadableSecretSet;
@@ -599,17 +610,16 @@ export class Tenant extends TenantOpenRouterAuthorizations {
           now,
           now,
         );
-        this.writeSecrets(write.secretSetId, sealed.get(write.secretSetId) ?? [], write.githubUser, now);
+        this.writeSecrets(write.secretSetId, sealedOf(sealed, write.secretSetId), write.githubUser, now);
         return;
       case "RewriteSecretSet": {
-        const updated = sql.exec(
+        sql.exec(
           "UPDATE secret_sets SET name = ?, updated_at = ? WHERE secret_set_id = ?",
           write.secretSet.name,
           now,
           write.secretSetId,
         );
-        if (updated.rowsWritten === 0) throw new Error(`secret set ${write.secretSetId} was deleted while apply ran`);
-        this.writeSecrets(write.secretSetId, sealed.get(write.secretSetId) ?? [], write.githubUser, now);
+        this.writeSecrets(write.secretSetId, sealedOf(sealed, write.secretSetId), write.githubUser, now);
         return;
       }
       case "DeleteSecretSet":
@@ -631,7 +641,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
         return;
       }
       case "UpdatePersona": {
-        const updated = sql.exec(
+        sql.exec(
           "UPDATE personas SET name = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           write.persona.name,
           write.persona.secretSetId,
@@ -639,7 +649,6 @@ export class Tenant extends TenantOpenRouterAuthorizations {
           tenantId,
           write.personaId,
         );
-        if (updated.rowsWritten === 0) throw new Error(`persona ${write.personaId} was deleted while apply ran`);
         this.writeFiles(write.personaId, write.persona.files, now);
         return;
       }
@@ -655,18 +664,35 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     }
   }
 
-  async applyConfig(tenantId: string, writes: ConfigWrite[], now: number): Promise<Written<null>> {
+  private deletedDuringApply(tenantId: string, writes: ConfigWrite[]): string | null {
+    const created = new Set(writes.flatMap((write) => (write.kind === "CreateSecretSet" ? [write.secretSetId] : [])));
+    for (const write of writes) {
+      const setId = write.kind === "CreatePersona" || write.kind === "UpdatePersona" ? write.persona.secretSetId : null;
+      if (setId !== null && !created.has(setId) && !this.hasSecretSet(setId)) return `secret set ${setId}`;
+      if (write.kind === "RewriteSecretSet" && !this.hasSecretSet(write.secretSetId)) {
+        return `secret set ${write.secretSetId}`;
+      }
+      if (write.kind === "UpdatePersona" && this.getPersona(tenantId, write.personaId) === null) {
+        return `persona ${write.personaId}`;
+      }
+    }
+    return null;
+  }
+
+  async applyConfig(tenantId: string, writes: ConfigWrite[], now: number): Promise<ConfigApplied> {
     const sealed = new Map<string, SealedMember[]>();
     for (const write of writes) {
       if (write.kind !== "CreateSecretSet" && write.kind !== "RewriteSecretSet") continue;
       sealed.set(write.secretSetId, await this.sealMembers(write.secretSetId, write.secretSet.secrets, now));
     }
-    return uniquely(() =>
+    const deleted = this.deletedDuringApply(tenantId, writes);
+    if (deleted !== null) return { kind: "Deleted", resource: deleted };
+    const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         for (const write of writes) this.writeConfig(tenantId, write, sealed, now);
-        return null;
       }),
     );
+    return written.ok ? { kind: "Applied" } : { kind: "Conflict", constraint: written.constraint };
   }
 
   listPins(): HarnessPin[] {
