@@ -1,5 +1,6 @@
 import { type EffectiveHarnessVersionSchema, HarnessCatalogEntrySchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import { compactorOf } from "./compact.ts";
 
 export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
 export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSchema>;
@@ -12,6 +13,7 @@ const PI_VERSION = "1.5.2";
 export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEntrySchema.array().parse([
   {
     harness: "ClaudeCode",
+    compactTranscript: compactorOf("ClaudeCode") !== null,
     harnessVersion: CLAUDE_CODE_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
@@ -29,6 +31,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   },
   {
     harness: "Codex",
+    compactTranscript: compactorOf("Codex") !== null,
     harnessVersion: CODEX_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
@@ -45,6 +48,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   },
   {
     harness: "OpenCode",
+    compactTranscript: compactorOf("OpenCode") !== null,
     harnessVersion: OPENCODE_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [
@@ -72,6 +76,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   },
   {
     harness: "PiDev",
+    compactTranscript: compactorOf("PiDev") !== null,
     harnessVersion: PI_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [

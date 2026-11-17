@@ -82,28 +82,48 @@ export interface Page {
 
 export const emptyPage = (after: number): Page => ({ lines: [], cursor: after, bytes: 0, full: false });
 
+export type PageRead = { ok: true; page: Page } | { ok: false; lineSeq: number };
+
+type Compacted = { ok: true; text: string | null } | { ok: false };
+
+const parsedJson = (text: string): { ok: true; value: unknown } | { ok: false } => {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+};
+
+const compacted = (compact: Compactor, text: string): Compacted => {
+  const parsed = parsedJson(text);
+  return parsed.ok ? { ok: true, text: compact(parsed.value) } : parsed;
+};
+
 export const pageOf = (
   page: Page,
   read: TranscriptLine[],
   compact: Compactor | null,
-  limit: number,
+  limit: number | null,
   maxBytes: number,
-): Page => {
+): PageRead => {
   const encoder = new TextEncoder();
   const lines = [...page.lines];
   let { bytes, cursor } = page;
+  const done = (full: boolean): PageRead => ({ ok: true, page: { lines, cursor, bytes, full } });
   for (const line of read) {
-    const text = compact === null ? line.text : compact(line.text);
+    const kept = compact === null ? { ok: true as const, text: line.text } : compacted(compact, line.text);
+    if (!kept.ok) return { ok: false, lineSeq: line.lineSeq };
+    const { text } = kept;
     if (text !== null) {
       const size = compact === null ? encodeLine(line).byteLength : encoder.encode(text).byteLength;
-      if (lines.length > 0 && bytes + size > maxBytes) return { lines, cursor, bytes, full: true };
+      if (lines.length > 0 && bytes + size > maxBytes) return done(true);
       bytes += size;
       lines.push({ ...line, text });
     }
     cursor = line.lineSeq;
-    if (lines.length >= limit) return { lines, cursor, bytes, full: true };
+    if (limit !== null && lines.length >= limit) return done(true);
   }
-  return { lines, cursor, bytes, full: false };
+  return done(false);
 };
 
 export interface ChunkLedger {

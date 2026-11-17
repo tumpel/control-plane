@@ -9,7 +9,7 @@ const compactorFor = (harness: "Codex" | "OpenCode" | "PiDev"): Compactor => {
 };
 
 const kept = (compactor: Compactor, lines: unknown[]): string[] =>
-  lines.map((line) => compactor(JSON.stringify(line))).filter((text): text is string => text !== null);
+  lines.map((line) => compactor(line)).filter((text): text is string => text !== null);
 
 const piUsage = (input: number, cacheRead: number, output: number, total: number) => ({
   input,
@@ -233,8 +233,4 @@ test("a Codex turn keeps each tool call once when it starts, the agent's text, t
     "[error] unexpected status 401 Unauthorized",
     "[error] stream disconnected before completion",
   ]);
-});
-
-test("a Mistral session has no compact form", () => {
-  assert.equal(compactorOf("MistralAgent"), null);
 });

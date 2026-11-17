@@ -842,6 +842,13 @@ test("a turn whose lines arrive up to its completion reads back whole in one pag
   assert.equal(request.sessionId, sessionId);
   await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+
+  const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: started.session.tenantId });
+  await storage.exec("UPDATE sessions SET harness = 'MistralAgent' WHERE session_id = ?", sessionId);
+  assert.match(
+    await toolRefusal("tumpel_transcript_read", { sessionId, compact: true }),
+    /runs MistralAgent, whose transcript has no compact form; ClaudeCode, Codex, OpenCode, PiDev have one/,
+  );
 });
 
 test("a compact read without a limit returns a turn longer than a chunk in one page", async () => {

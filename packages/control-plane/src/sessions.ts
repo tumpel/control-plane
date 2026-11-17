@@ -458,7 +458,9 @@ const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
 };
 
 const COMPACT_READ_PASSES = 8;
-const COMPACT_DEFAULT_LIMIT = 1000;
+const COMPACT_HARNESSES = [
+  ...new Set(HARNESS_CATALOG.filter((entry) => entry.compactTranscript).map((entry) => entry.harness)),
+];
 
 export const readTranscript = async (
   env: Env,
@@ -469,14 +471,14 @@ export const readTranscript = async (
   const compact = query.compact ?? false;
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
   const chunkLines = settingsOf(env).transcriptChunkLines;
-  const limit = query.limit ?? (compact ? COMPACT_DEFAULT_LIMIT : chunkLines);
+  const limit = query.limit ?? (compact ? null : chunkLines);
   const readAfter = (page: Page) =>
     tenantOf(env, caller).transcriptCursor(
       caller.tenantId,
       sessionId,
       page.cursor,
       query.turnId ?? null,
-      compact ? chunkLines : limit - page.lines.length,
+      compact || limit === null ? chunkLines : limit - page.lines.length,
       compact ? null : Math.max(1, maxBytes - page.bytes),
     );
   let page = emptyPage(query.after ?? 0);
@@ -487,14 +489,23 @@ export const readTranscript = async (
     return refuse(422, {
       code: "InvalidRequest",
       title: "No compact form for the harness",
-      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; Claude Code, Codex, OpenCode and Pi have one`,
+      detail: `session ${sessionId} runs ${cursor.harness}, whose transcript has no compact form; ${COMPACT_HARNESSES.join(", ")} have one`,
       fix: "Read the transcript without compact",
     });
   }
   let read = cursor;
   for (let pass = 1; ; pass += 1) {
     const fetched = await linesOf(env, read);
-    page = pageOf(page, fetched, compactor, limit, maxBytes);
+    const paged = pageOf(page, fetched, compactor, limit, maxBytes);
+    if (!paged.ok) {
+      return refuse(422, {
+        code: "TranscriptLineUnreadable",
+        title: "Transcript line is not JSON",
+        detail: `line ${paged.lineSeq} of session ${sessionId} is not JSON, so the transcript has no compact form from there`,
+        fix: "Read the transcript without compact",
+      });
+    }
+    page = paged.page;
     const settled = page.full || fetched.length === 0 || page.cursor >= read.lastLineSeq;
     if (settled || (compactor !== null && pass === COMPACT_READ_PASSES)) {
       const { sessionState } = read;
