@@ -281,7 +281,7 @@ const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again w
 const CONTENTS_READ = { contents: "read" } as const;
 const STORE_DELETE_BATCH = 1000;
 
-export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
+export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;

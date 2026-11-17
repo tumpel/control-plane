@@ -20,6 +20,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../../src/channel/protocol.ts";
 import { pollInterval, TEST_SETTINGS, until } from "../timing.ts";
 
@@ -49,6 +50,7 @@ let issuer: string;
 let scratch: string;
 let bearer: Record<string, string>;
 let accessToken: string;
+let tenantId: string;
 const children: ChildProcess[] = [];
 
 const assertion = (): string => {
@@ -207,7 +209,7 @@ before(async () => {
 
   const signedUp = await postJson("/v1/tenants", { name: "Hosts" }, browser());
   assert.equal(signedUp.status, 200);
-  const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+  tenantId = WhoamiSchema.parse(await signedUp.json()).tenant.tenantId;
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "hosts e2e" })).json(),
   );
@@ -282,6 +284,22 @@ suite("hosts", { concurrency: true }, () => {
     const afterRevoke = await supervisor(first.dir, ["run"]).finished;
     assert.equal(afterRevoke.code, 5);
     assert.match(afterRevoke.stderr, /HostRevoked/);
+  });
+
+  test("a running supervisor's host samples land in its tenant's metrics store under its signed host id", async () => {
+    const enrolled = await enrol("telemetry", await mint());
+    assert.equal(enrolled.finished.code, 0, enrolled.finished.stderr);
+    const { hostId } = HostSchema.parse(JSON.parse(enrolled.finished.stdout));
+    supervisor(enrolled.dir, ["run"]);
+    const SeriesSchema = z.array(z.object({ metric: z.string(), dimensions: z.string() }));
+    await until(
+      `host ${hostId}'s host.memory.total reaching the metrics store`,
+      async () => SeriesSchema.parse(await (await server.fetch(`${origin}/__fixture/metrics/${tenantId}`)).json()),
+      (series) =>
+        series.some(
+          ({ metric, dimensions }) => metric === "host.memory.total" && JSON.parse(dimensions).hostId === hostId,
+        ),
+    );
   });
 
   test("a supervisor whose channel state is gone exits with ChannelStateLost", async () => {

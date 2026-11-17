@@ -11,6 +11,7 @@ import {
   type Ledger,
   type LedgerStore,
   type StoredControlMessage,
+  type TelemetryBatch,
 } from "./channel/protocol.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { problem } from "./http";
@@ -240,6 +241,10 @@ export class HostChannel extends DurableObject<Env> {
 
   private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
     const tenantId = await this.tenantOf(hostId);
+    if (message.type === "TelemetryBatch") {
+      await this.telemetry(tenantId, hostId, message);
+      return null;
+    }
     const tenant = this.env.TENANT.getByName(tenantId);
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
@@ -249,6 +254,24 @@ export class HostChannel extends DurableObject<Env> {
       return null;
     }
     return tenant.hostMessage(tenantId, hostId, message);
+  }
+
+  private async telemetry(
+    tenantId: string,
+    hostId: string,
+    { instruments, samples, turns }: TelemetryBatch,
+  ): Promise<void> {
+    const signed = <Point extends { dimensions: Record<string, string> }>(point: Point): Point => ({
+      ...point,
+      dimensions: { ...point.dimensions, hostId },
+    });
+    await this.env.TENANT_METRICS.getByName(tenantId)
+      .record({ instruments, samples: samples.map(signed), turns: turns.map(signed) })
+      .catch((error: unknown) => {
+        console.error(
+          `TelemetryRejected: host ${hostId} sent a telemetry batch the metrics store refused: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
   }
 
   private host(): HostRow | null {
