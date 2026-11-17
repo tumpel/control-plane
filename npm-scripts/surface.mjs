@@ -97,6 +97,8 @@ const ALLOWLIST = {
   Releases_cli: RELEASE_DOWNLOAD,
   Releases_supervisor: RELEASE_DOWNLOAD,
   Releases_install: "install script a person pipes to sh before the CLI exists",
+  Releases_rollout:
+    "stage-wide rollout the release workflow reads with the drainToken it wrote to the release bucket, never a principal",
   PrebuildUploads_start: BUILD_JOB,
   PrebuildUploads_complete: BUILD_JOB,
   PrebuildInputs_read: BUILD_JOB,

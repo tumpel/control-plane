@@ -67,6 +67,7 @@ import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, planConfig } from "./config-apply.ts";
 import { handleConnections } from "./connections.ts";
 import { randomToken, sameSecret } from "./crypto";
+import { handleReleaseRollout } from "./deploy-drain";
 import {
   approveDeviceCode,
   DEVICE_CODE_LIMITS,
@@ -205,6 +206,7 @@ export interface Env extends SignerEnv {
   ISSUER_HOSTNAME: string;
   DASHBOARD_ORIGIN: string;
   API_ORIGIN: string;
+  DEPLOYED_COMMIT: string;
   GITHUB_API_ORIGIN: string;
   GITHUB_WEB_ORIGIN: string;
   CIRCLECI_API_ORIGIN: string;
@@ -1350,6 +1352,7 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/hosts": handleListHosts,
   "GET /v1/hosts/usage": handleListHostUsage,
   "GET /v1/releases/current": handleCurrentRelease,
+  "GET /v1/releases/rollout": handleReleaseRollout,
   "GET /v1/releases/install.sh": handleInstallScript,
   [`GET ${DEVICE_PAGE}`]: handleDevicePage,
   [`POST ${MCP_PATH}`]: (request, _url, env) => handleMcp(request, env),

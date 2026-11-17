@@ -141,6 +141,7 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `Releases_cli`: release download the installer and the supervisor fetch without sign-in.
 - `Releases_supervisor`: release download the installer and the supervisor fetch without sign-in.
 - `Releases_install`: install script a person pipes to sh before the CLI exists.
+- `Releases_rollout`: stage-wide rollout the release workflow reads with the drainToken it wrote to the release bucket, never a principal.
 - `PrebuildUploads_start`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `PrebuildUploads_complete`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `PrebuildInputs_read`: build job wire, signed by the provider's OIDC job token, never by a principal.

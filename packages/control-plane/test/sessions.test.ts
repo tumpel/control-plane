@@ -21,6 +21,7 @@ import {
   PersonaSchema,
   ProblemSchema,
   RawTranscriptPageSchema,
+  ReleaseRolloutSchema,
   ReportedHostUsageSchema,
   SecretSetSchema,
   SessionSchema,
@@ -40,6 +41,7 @@ import { CLAUDE_CODE_VERSION } from "../src/harness-catalog.ts";
 import { type ChunkLedger, type ChunkStore, ChunkWriter, decodeLines, type TranscriptLine } from "../src/transcript.ts";
 
 const AUDIENCE = "tumpel-sessions-e2e";
+const DEPLOYED_COMMIT = "7".repeat(40);
 const KID = "sessions-e2e-key";
 const EMAIL = "sessions@example.test";
 const CALLBACK = "https://client.example.test/callback";
@@ -518,6 +520,7 @@ before(async () => {
             ACCESS_ISSUER: issuer,
             ACCESS_AUD: AUDIENCE,
             TUMPEL_SETTINGS: SETTINGS,
+            DEPLOYED_COMMIT,
             R2_STUB_ORIGIN,
             SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
             DASHBOARD_ORIGIN: "https://app.tumpel.test",
@@ -1533,6 +1536,64 @@ test("a turn the host never claims fails NotClaimed once the claim budget runs o
   assert.equal(failure.reason, "NotClaimed");
   assert.match(failure.detail, new RegExp(`did not claim the turn within ${CLAIM_BUDGET_SECONDS} seconds`));
   assert.doesNotMatch(failure.detail, UUID);
+});
+
+test("a deploy drain refuses new sessions and turns DeployInProgress and counts each host's running turns until they end", async () => {
+  const releases = (await server.getWorker<{ RELEASES: Store & { delete(key: string): Promise<void> } }>().getEnv())
+    .RELEASES;
+  const drainToken = randomBytes(32).toString("base64url");
+  const drainBearer = { authorization: `Bearer ${drainToken}` };
+  const report = async () => {
+    const response = await call("/v1/releases/rollout", { headers: drainBearer });
+    assert.equal(response.status, 200, await response.clone().text());
+    return ReleaseRolloutSchema.parse(await response.json());
+  };
+
+  const idle = await call("/v1/releases/rollout", { headers: drainBearer });
+  assert.equal(idle.status, 404);
+  assert.equal(ProblemSchema.parse(await idle.json()).code, "NotFound");
+
+  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "before the drain" }, bearer);
+  assert.equal(response.status, 200);
+  const started = StartedSessionSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  assert.equal(offer.turnId, started.turn.turnId);
+
+  await releases.put("deploy-drain.json", JSON.stringify({ drainToken }));
+  try {
+    const wrong = await call("/v1/releases/rollout", { headers: bearer });
+    assert.equal(wrong.status, 401);
+    assert.equal(ProblemSchema.parse(await wrong.json()).code, "DeployDrainTokenRefused");
+
+    assert.deepEqual(await report(), {
+      deployedCommit: DEPLOYED_COMMIT,
+      drained: false,
+      hosts: [{ hostId, tenantId: started.session.tenantId, runningTurns: 1 }],
+    });
+
+    const start = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during the drain" }, bearer);
+    assert.equal(start.status, 503);
+    const startRefusal = ProblemSchema.parse(await start.json());
+    assert.equal(startRefusal.code, "DeployInProgress");
+    assert.match(startRefusal.detail, /a deploy of the control plane is in progress/);
+    assert.equal(startRefusal.fix, "Once the dashboard shows the new release, start again");
+
+    await eventually(
+      "the offered turn reading Failed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    assert.deepEqual(await report(), { deployedCommit: DEPLOYED_COMMIT, drained: true, hosts: [] });
+
+    const send = await postJson(`/v1/sessions/${started.session.sessionId}/turns`, { prompt: "draining" }, bearer);
+    assert.equal(send.status, 503);
+    const sendRefusal = ProblemSchema.parse(await send.json());
+    assert.equal(sendRefusal.code, "DeployInProgress");
+    assert.equal(sendRefusal.fix, "Once the dashboard shows the new release, send the turn again");
+  } finally {
+    await releases.delete("deploy-drain.json");
+  }
+  assert.equal((await call("/v1/releases/rollout", { headers: drainBearer })).status, 404);
 });
 
 test("a session timer stored before its owner field was dropped still fails an unclaimed turn NotClaimed", async () => {
