@@ -157,6 +157,7 @@ export class HostChannel extends DurableObject<Env> {
         return null;
       });
       if (handoff !== null) await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
+      if (received.type === "SupervisorUpdateFailed") await this.sendDeferredOffers(host.host_id, attachment, context);
     }
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
@@ -176,6 +177,19 @@ export class HostChannel extends DurableObject<Env> {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
     await this.presence("Online");
+    await this.sendDeferredOffers(host.host_id, attachment, context);
+    this.keep(socket, attachment);
+  }
+
+  private async sendDeferredOffers(
+    hostId: string,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
+    const tenantId = await this.tenantOf(hostId);
+    for (const offer of await this.env.TENANT.getByName(tenantId).deferredOffers(tenantId, hostId)) {
+      await control.send(attachment.connection, offer, context);
+    }
   }
 
   override async webSocketClose(socket: WebSocket): Promise<void> {
