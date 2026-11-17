@@ -41,6 +41,8 @@ import {
   WhoamiWithEndpointSchema,
 } from "@tumpel/api/schemas";
 import {
+  alreadyApprovedPage,
+  type ConsentClient,
   codeNotFoundPage,
   confirmPage,
   consentPage,
@@ -149,6 +151,7 @@ import {
   redirectFor,
   refreshGrant,
   registerClient,
+  requestClient,
   resourceMetadataUrl,
   revokeCallerGrant,
   revokeToken,
@@ -1199,6 +1202,15 @@ const handleAuthorize = async (request: Request, url: URL, env: Env): Promise<Re
   return seeOther(`${url.origin}${CONSENT_PATH}?request=${requestId}`);
 };
 
+const consentClient = (request: { clientName: string; redirectUri: string }): ConsentClient => {
+  const callbackOrigin = new URL(request.redirectUri).origin;
+  return {
+    clientName: request.clientName,
+    callbackOrigin,
+    returnUrl: CONNECTOR_ORIGINS.includes(callbackOrigin) ? callbackOrigin : null,
+  };
+};
+
 const handleConsent = async (request: Request, url: URL, env: Env): Promise<Response> => {
   const asserted = await assertedSigner(request, env);
   if (!asserted.ok) return htmlPage(env, url, 401, (links) => signInAgainPage(links, asserted.reason, url.href));
@@ -1216,36 +1228,46 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
   if (memberships instanceof Response) return memberships;
   const [first, ...others] = memberships;
   const email = first.principal.email;
-  const expired = (): Response => htmlPage(env, url, 404, (links) => nothingToConnectPage(links, email));
+  const expired = async (requestId: string): Promise<Response> => {
+    const known = await requestClient(env.DB, requestId);
+    if (known === null) return htmlPage(env, url, 404, (links) => nothingToConnectPage(links, email, null));
+    const client = consentClient(known);
+    if (known.spent) return htmlPage(env, url, 200, (links) => alreadyApprovedPage(links, email, client));
+    return htmlPage(env, url, 404, (links) => nothingToConnectPage(links, email, client));
+  };
   if (request.method === "GET") {
-    const asked = await pendingAuthorization(env.DB, url.searchParams.get("request") ?? "", Date.now());
-    if (asked === null) return expired();
+    const requestId = url.searchParams.get("request") ?? "";
+    const asked = await pendingAuthorization(env.DB, requestId, Date.now());
+    if (asked === null) return expired(requestId);
     if (asked.firstParty && others.length === 0) {
       const code = await grantCode(env.DB, asked, callerOf(first), Date.now());
+      if (code === null) return expired(requestId);
       return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
     }
     const csrf = randomToken();
     const consent = {
+      ...consentClient(asked),
       email,
       tenants: choicesOf(memberships),
-      clientName: asked.clientName,
-      callbackOrigin: new URL(asked.redirectUri).origin,
       requestId: asked.requestId,
       csrf,
     };
     return withHeaders(
-      htmlPage(env, url, 200, (links) => consentPage(links, consent)),
+      htmlPage(env, url, 200, (links) => consentPage(links, consent), [consent.callbackOrigin]),
       { "set-cookie": `${CONSENT_CSRF_COOKIE}=${csrf}; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Strict` },
     );
   }
   const form = new URLSearchParams(await request.text());
   const cookie = readCookie(request.headers.get("cookie"), CONSENT_CSRF_COOKIE);
   const csrf = form.get("csrf") ?? "";
+  const requestId = form.get("request") ?? "";
   if (request.headers.get("origin") !== url.origin || cookie === null || !sameSecret(cookie, csrf)) {
-    return htmlPage(env, url, 403, (links) => consentRefusedPage(links, email, "CrossSite"));
+    const known = await requestClient(env.DB, requestId);
+    const client = known === null ? null : consentClient(known);
+    return htmlPage(env, url, 403, (links) => consentRefusedPage(links, email, "CrossSite", client));
   }
-  const asked = await pendingAuthorization(env.DB, form.get("request") ?? "", Date.now());
-  if (asked === null) return expired();
+  const asked = await pendingAuthorization(env.DB, requestId, Date.now());
+  if (asked === null) return expired(requestId);
   const action = form.get("action");
   if (action === "deny") {
     await forgetAuthorization(env.DB, asked.requestId);
@@ -1256,10 +1278,13 @@ const handleConsent = async (request: Request, url: URL, env: Env): Promise<Resp
       }),
     );
   }
-  if (action !== "approve") return htmlPage(env, url, 400, (links) => consentRefusedPage(links, email, "NoAction"));
+  if (action !== "approve")
+    return htmlPage(env, url, 400, (links) => consentRefusedPage(links, email, "NoAction", consentClient(asked)));
   const caller = chosenCaller(memberships, form.get("tenant") ?? "");
-  if (caller === null) return htmlPage(env, url, 403, (links) => consentRefusedPage(links, email, "NotYourTenant"));
+  if (caller === null)
+    return htmlPage(env, url, 403, (links) => consentRefusedPage(links, email, "NotYourTenant", consentClient(asked)));
   const code = await grantCode(env.DB, asked, caller, Date.now());
+  if (code === null) return expired(requestId);
   return seeOther(redirectBack(asked.redirectUri, asked.state, url.origin, { code }));
 };
 

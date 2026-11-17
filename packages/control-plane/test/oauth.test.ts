@@ -13,6 +13,7 @@ import {
   ProtectedResourceMetadataSchema,
   WhoamiSchema,
 } from "@tumpel/api/schemas";
+import { JSDOM, VirtualConsole } from "jsdom";
 import { createTestHarness, type TestHarness } from "wrangler";
 import type { z } from "zod";
 
@@ -34,7 +35,11 @@ let server: TestHarness;
 let origin: string;
 let issuer: string;
 
-type Database = { prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } } };
+type Database = {
+  prepare(sql: string): {
+    bind(...values: unknown[]): { run(): Promise<unknown>; first<Row>(): Promise<Row | null> };
+  };
+};
 type HarnessInit = NonNullable<Parameters<TestHarness["fetch"]>[1]>;
 type HarnessResponse = Awaited<ReturnType<TestHarness["fetch"]>>;
 
@@ -198,7 +203,16 @@ test("the 401 from /mcp leads through both metadata documents to S256 PKCE, publ
 test("registration refuses missing and unusable redirect addresses and registers a public client", async () => {
   assert.equal(await oauthErrorOf(await register({ client_name: "no callback" })), "invalid_client_metadata");
   assert.equal(await oauthErrorOf(await register({ redirect_uris: [] })), "invalid_client_metadata");
-  for (const uri of ["http://claude.ai/callback", "https://claude.ai/callback#here", "https://user:pw@claude.ai/cb"]) {
+  for (const uri of [
+    "http://claude.ai/callback",
+    "https://claude.ai/callback#here",
+    "https://user:pw@claude.ai/cb",
+    "https://a;sandbox/cb",
+    "https://a,b.example/cb",
+    "https://a'b.example/cb",
+    "https://[::1]/cb",
+    "https://-a.example/cb",
+  ]) {
     assert.equal(await oauthErrorOf(await register({ redirect_uris: [uri] })), "invalid_redirect_uri", uri);
   }
 
@@ -457,4 +471,352 @@ test("an Origin outside the allow-list gets no access-control-allow-origin, the 
   });
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get("access-control-allow-origin"), DASHBOARD);
+});
+
+test("a consent error still names the client whose request expired, and stays generic when the request is gone", async () => {
+  const registered = await register({
+    redirect_uris: ["https://callback.mistral.ai"],
+    client_name: "mistral-mcp-client",
+    grant_types: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_method: "none",
+  });
+  assert.equal(registered.status, 201);
+  const client = OAuthClientSchema.parse(await registered.json());
+
+  const email = "mistral-consent@example.test";
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...person(email) },
+    body: JSON.stringify({ name: "Mistral consent" }),
+  });
+  assert.equal(created.status, 200);
+  const signer = person(email);
+
+  const db = (await await server.getWorker<{ DB: Database }>().getEnv()).DB;
+  const now = Date.now();
+  await db
+    .prepare(
+      "INSERT INTO oauth_requests (request_id, client_id, redirect_uri, state, state_sent, code_challenge, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      "expired-consent",
+      client.client_id,
+      "https://callback.mistral.ai",
+      "",
+      0,
+      "a".repeat(43),
+      now - 1_200_000,
+      now - 600_000,
+    )
+    .run();
+
+  const expired = await call("/oauth/consent?request=expired-consent", { headers: signer });
+  assert.equal(expired.status, 404);
+  const expiredPage = await expired.text();
+  assert.ok(expiredPage.includes("Nothing to connect"));
+  assert.ok(expiredPage.includes("Start again from mistral-mcp-client."));
+  assert.ok(!expiredPage.includes("Return to"));
+  assert.ok(!expiredPage.includes('href="https://callback.mistral.ai'));
+  assert.ok(!expiredPage.includes("claude.ai"));
+
+  const unknown = await call("/oauth/consent?request=never-recorded", { headers: signer });
+  assert.equal(unknown.status, 404);
+  const unknownPage = await unknown.text();
+  assert.ok(unknownPage.includes("Nothing to connect"));
+  assert.ok(unknownPage.includes("Start the connection again from the app you came from."));
+  assert.ok(!unknownPage.includes("claude.ai"));
+  assert.ok(!unknownPage.includes("Return to"));
+
+  const pair = pkce();
+  const authorize = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: "https://callback.mistral.ai",
+    state: "mistral-state",
+    code_challenge: pair.challenge,
+    code_challenge_method: "S256",
+    resource: `${origin}/mcp`,
+  });
+  const redirected = await call(`/oauth/authorize?${authorize}`);
+  assert.equal(redirected.status, 303);
+  const consentAt = new URL(redirected.headers.get("location") ?? "");
+  const shown = await call(consentAt.toString(), { headers: signer });
+  assert.equal(shown.status, 200);
+  assert.ok((await shown.text()).includes("Connect mistral-mcp-client"));
+  const cookie = (shown.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  assert.ok(cookie.startsWith(`${CSRF_COOKIE}=`));
+  const refused = await call(consentAt.pathname, {
+    method: "POST",
+    headers: { ...signer, origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      request: consentAt.searchParams.get("request") ?? "",
+      csrf: cookie.slice(CSRF_COOKIE.length + 1),
+      tenant: "",
+      action: "approve-again",
+    }).toString(),
+  });
+  assert.equal(refused.status, 400);
+  const refusedPage = await refused.text();
+  assert.ok(refusedPage.includes("Bad request"));
+  assert.ok(!refusedPage.includes("Return to"));
+  assert.ok(!refusedPage.includes("claude.ai"));
+});
+
+test("the consent page allows the redirect to the client's registered callback origin", async () => {
+  const registered = await register({
+    redirect_uris: ["https://callback.mistral.ai"],
+    client_name: "mistral-mcp-client",
+    grant_types: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_method: "none",
+  });
+  assert.equal(registered.status, 201);
+  const client = OAuthClientSchema.parse(await registered.json());
+
+  const email = "mistral-csp@example.test";
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...person(email) },
+    body: JSON.stringify({ name: "Mistral csp" }),
+  });
+  assert.equal(created.status, 200);
+  const signer = person(email);
+
+  const pair = pkce();
+  const authorize = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: "https://callback.mistral.ai",
+    state: "mistral-csp-state",
+    code_challenge: pair.challenge,
+    code_challenge_method: "S256",
+    resource: `${origin}/mcp`,
+  });
+  const redirected = await call(`/oauth/authorize?${authorize}`);
+  assert.equal(redirected.status, 303);
+  const consentAt = new URL(redirected.headers.get("location") ?? "");
+  const shown = await call(consentAt.toString(), { headers: signer });
+  assert.equal(shown.status, 200);
+  const policy = shown.headers.get("content-security-policy") ?? "";
+  assert.match(policy, /form-action 'self' https:\/\/callback\.mistral\.ai;/);
+  assert.ok(!policy.includes("github.com"));
+});
+
+test("a repeat of a granted consent request says it was already approved without claiming a connection", async () => {
+  const registered = await register({
+    redirect_uris: ["https://callback.mistral.ai"],
+    client_name: "mistral-mcp-client",
+    grant_types: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_method: "none",
+  });
+  assert.equal(registered.status, 201);
+  const client = OAuthClientSchema.parse(await registered.json());
+
+  const email = "mistral-repeat@example.test";
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...person(email) },
+    body: JSON.stringify({ name: "Mistral repeat" }),
+  });
+  assert.equal(created.status, 200);
+  const signer = person(email);
+
+  const pair = pkce();
+  const authorize = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: "https://callback.mistral.ai",
+    state: "mistral-repeat-state",
+    code_challenge: pair.challenge,
+    code_challenge_method: "S256",
+    resource: `${origin}/mcp`,
+  });
+  const redirected = await call(`/oauth/authorize?${authorize}`);
+  assert.equal(redirected.status, 303);
+  const consentAt = new URL(redirected.headers.get("location") ?? "");
+  const shown = await call(consentAt.toString(), { headers: signer });
+  assert.equal(shown.status, 200);
+  const cookie = (shown.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const tenant = /name="tenant" value="([^"]+)"/.exec(await shown.text())?.[1] ?? "";
+
+  const approve = (): Promise<HarnessResponse> =>
+    call(consentAt.pathname, {
+      method: "POST",
+      headers: { ...signer, origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        request: consentAt.searchParams.get("request") ?? "",
+        csrf: cookie.slice(CSRF_COOKIE.length + 1),
+        tenant,
+        action: "approve",
+      }).toString(),
+    });
+  const granted = await approve();
+  assert.equal(granted.status, 303);
+  const callback = new URL(granted.headers.get("location") ?? "");
+  assert.equal(callback.origin, "https://callback.mistral.ai");
+  assert.ok(callback.searchParams.get("code"));
+
+  const repeated = await call(consentAt.toString(), { headers: signer });
+  assert.equal(repeated.status, 200);
+  const repeatedPage = await repeated.text();
+  assert.ok(repeatedPage.includes("This sign-in was already approved; return to mistral-mcp-client."));
+  assert.ok(!repeatedPage.includes("connected as"));
+  assert.ok(!repeatedPage.includes(`${email}.`));
+  assert.ok(!repeatedPage.includes("Return to mistral-mcp-client"));
+  assert.ok(!repeatedPage.includes("Nothing to connect"));
+
+  const posted = await approve();
+  assert.equal(posted.status, 200);
+  assert.equal(posted.headers.get("location"), null);
+  assert.ok((await posted.text()).includes("This sign-in was already approved; return to mistral-mcp-client."));
+});
+
+test("two Connect posts racing for one consent request issue exactly one code", async () => {
+  const email = "consent-race@example.test";
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...person(email) },
+    body: JSON.stringify({ name: "Consent race" }),
+  });
+  assert.equal(created.status, 200);
+  const signer = person(email);
+  const registered = await register({ redirect_uris: [CALLBACK], client_name: "race client" });
+  assert.equal(registered.status, 201);
+  const client = OAuthClientSchema.parse(await registered.json());
+  const url = await consentUrl(client.client_id, pkce().challenge);
+  const shown = await call(url.toString(), { headers: signer });
+  assert.equal(shown.status, 200);
+  const cookie = (shown.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const tenant = /name="tenant" value="([^"]+)"/.exec(await shown.text())?.[1] ?? "";
+  const body = new URLSearchParams({
+    request: url.searchParams.get("request") ?? "",
+    csrf: cookie.slice(CSRF_COOKIE.length + 1),
+    tenant,
+    action: "approve",
+  }).toString();
+  const posts = await Promise.all(
+    Array.from({ length: 4 }, () =>
+      call(url.pathname, {
+        method: "POST",
+        headers: { ...signer, origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    ),
+  );
+  assert.deepEqual(posts.map((post) => post.status).sort(), [200, 200, 200, 303]);
+  const db = (await server.getWorker<{ DB: Database }>().getEnv()).DB;
+  const codes = await db
+    .prepare("SELECT COUNT(*) AS count FROM oauth_codes WHERE client_id = ?")
+    .bind(client.client_id)
+    .first<{ count: number }>();
+  assert.equal(codes?.count, 1);
+});
+
+const submitConsentTwice = (page: string, value: string): { bodies: string[]; prevented: boolean[] } => {
+  const failures: string[] = [];
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("jsdomError", (error) => {
+    if (!error.message.startsWith("Not implemented")) failures.push(error.message);
+  });
+  const { window } = new JSDOM(page, { url: origin, runScripts: "dangerously", virtualConsole });
+  const form = window.document.querySelector<HTMLFormElement>("form#consent");
+  assert.ok(form, "the consent page has a form");
+  const submitter = form.querySelector<HTMLButtonElement>(`button[name="action"][value="${value}"]`);
+  assert.ok(submitter, `the consent form has a ${value} button`);
+  const bodies: string[] = [];
+  const prevented: boolean[] = [];
+  form.addEventListener("submit", (event: SubmitEvent) => {
+    prevented.push(event.defaultPrevented);
+    if (event.defaultPrevented) return;
+    const entries = [...new window.FormData(form, event.submitter)].map(([name, entry]) => [name, String(entry)]);
+    bodies.push(new URLSearchParams(entries).toString());
+  });
+  form.requestSubmit(submitter);
+  form.requestSubmit(submitter);
+  window.close();
+  assert.deepEqual(failures, []);
+  return { bodies, prevented };
+};
+
+test("the consent form as a browser submits it sends the clicked button, once, and Connect and Cancel both work", async () => {
+  const email = "form-submit@example.test";
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...person(email) },
+    body: JSON.stringify({ name: "Form submit" }),
+  });
+  assert.equal(created.status, 200);
+  const signer = person(email);
+  const registered = await register({ redirect_uris: [CALLBACK], client_name: "form client" });
+  assert.equal(registered.status, 201);
+  const client = OAuthClientSchema.parse(await registered.json());
+
+  for (const value of ["approve", "deny"]) {
+    const url = await consentUrl(client.client_id, pkce().challenge);
+    const shown = await call(url.toString(), { headers: signer });
+    assert.equal(shown.status, 200);
+    const cookie = (shown.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+    const { bodies, prevented } = submitConsentTwice(await shown.text(), value);
+    const body = new URLSearchParams(bodies[0]);
+    assert.equal(body.get("action"), value);
+    assert.equal(body.get("request"), url.searchParams.get("request"));
+    assert.deepEqual(prevented, [false, true]);
+    assert.equal(bodies.length, 1);
+    const posted = await call(url.pathname, {
+      method: "POST",
+      headers: { ...signer, origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: bodies[0],
+    });
+    assert.equal(posted.status, 303);
+    const back = new URL(posted.headers.get("location") ?? "");
+    assert.equal(`${back.origin}${back.pathname}`, CALLBACK);
+    if (value === "deny") {
+      assert.equal(back.searchParams.get("error"), "access_denied");
+      continue;
+    }
+    assert.ok(back.searchParams.get("code"));
+    const approved = await call(url.toString(), { headers: signer });
+    assert.equal(approved.status, 200);
+    const approvedPage = await approved.text();
+    assert.ok(approvedPage.includes("Already approved"));
+    assert.ok(approvedPage.includes('href="https://claude.ai"'));
+    assert.ok(approvedPage.includes("Return to form client"));
+  }
+});
+
+test("a client with several redirect_uris gets only the requested origin in form-action, and an unregistered one gets no consent page", async () => {
+  const registered = await register({
+    redirect_uris: ["https://a.example/cb", "https://b.example/cb"],
+    client_name: "two callbacks",
+  });
+  assert.equal(registered.status, 201);
+  const client = OAuthClientSchema.parse(await registered.json());
+  const email = "two-callbacks@example.test";
+  const created = await call("/v1/tenants", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...person(email) },
+    body: JSON.stringify({ name: "Two callbacks" }),
+  });
+  assert.equal(created.status, 200);
+  const ask = (redirectUri: string): URLSearchParams =>
+    new URLSearchParams({
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      state: "two-callbacks",
+      code_challenge: pkce().challenge,
+      code_challenge_method: "S256",
+      resource: `${origin}/mcp`,
+    });
+
+  const redirected = await call(`/oauth/authorize?${ask("https://b.example/cb")}`);
+  assert.equal(redirected.status, 303);
+  const shown = await call(redirected.headers.get("location") ?? "", { headers: person(email) });
+  assert.equal(shown.status, 200);
+  const policy = shown.headers.get("content-security-policy") ?? "";
+  assert.match(policy, /form-action 'self' https:\/\/b\.example;/);
+  assert.ok(!policy.includes("a.example"));
+
+  const unregistered = await call(`/oauth/authorize?${ask("https://c.example/cb")}`);
+  assert.equal(unregistered.status, 400);
+  assert.equal(unregistered.headers.get("location"), null);
 });

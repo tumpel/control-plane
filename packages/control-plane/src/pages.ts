@@ -37,7 +37,7 @@ const linksOf = (env: PageEnv, url: URL): ServerLinks => ({
   },
 });
 
-const contentSecurityPolicy = (links: ServerLinks): string =>
+const contentSecurityPolicy = (links: ServerLinks, formActions: readonly string[]): string =>
   [
     "default-src 'none'",
     "style-src 'unsafe-inline'",
@@ -45,14 +45,20 @@ const contentSecurityPolicy = (links: ServerLinks): string =>
     "connect-src 'self'",
     `img-src ${links.dashboard}`,
     `font-src ${links.dashboard}`,
-    `form-action 'self' ${GITHUB_WEB}`,
+    ["form-action 'self'", ...formActions].join(" "),
     "base-uri 'none'",
     "frame-ancestors 'none'",
   ].join("; ");
 
 export type BuildPage = (links: ServerLinks, context: PageContext) => Page;
 
-export const htmlPage = (env: PageEnv, url: URL, status: number, build: BuildPage): Response => {
+export const htmlPage = (
+  env: PageEnv,
+  url: URL,
+  status: number,
+  build: BuildPage,
+  formActions: readonly string[] = [GITHUB_WEB],
+): Response => {
   const links = linksOf(env, url);
   const context = { links, path: `${url.pathname}${url.search}`, at: new Date() };
   return new Response(shellDocument(build(links, context), context, { tokens, shell }), {
@@ -60,7 +66,7 @@ export const htmlPage = (env: PageEnv, url: URL, status: number, build: BuildPag
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "content-security-policy": contentSecurityPolicy(links),
+      "content-security-policy": contentSecurityPolicy(links, formActions),
     },
   });
 };
