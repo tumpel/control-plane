@@ -1,0 +1,13 @@
+{
+  "name": "tumpel",
+  "containerEnv": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TERM_COLOR": "never",
+    "CARGO_NET_RETRY": "2",
+    "NPM_CONFIG_AUDIT": "false",
+    "NPM_CONFIG_FUND": "false",
+    "NPM_CONFIG_UPDATE_NOTIFIER": "false"
+  },
+  "onCreateCommand": "npm ci && npm ci --prefix typespec && make generate && cargo fetch --locked",
+  "updateContentCommand": "make generate && cargo build --workspace --all-targets && cargo clippy --workspace --all-targets"
+}
