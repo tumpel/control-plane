@@ -649,14 +649,14 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema.extend({ repository: SessionStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a session with its first prompt on the online host of the tenant with the most free box slots, then the most memory available; refused PoolExhausted when every host runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns {session, turn}, before the harness writes anything.",
+    "Start a session with its first prompt on the online host of the tenant with the most free box slots, then the most memory available; refused PoolExhausted when every host runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
   ),
   rest(
     "tumpel_session_start_from_issue",
     "POST",
     "/v1/sessions/from-issue",
     SessionStartFromIssueSchema,
-    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass the owner and name tumpel_github_list_repositories prints. Returns the session and its first turn; issue names the issue and the branch. Refused IssueNotFound for a missing issue and IssueNotOpen for a closed one or a pull request.",
+    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass the owner and name tumpel_github_list_repositories prints. Returns the session and its first turn; issue names the issue and the branch. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused IssueNotFound for a missing issue and IssueNotOpen for a closed one or a pull request.",
   ),
   rest(
     "tumpel_session_list",
@@ -698,7 +698,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions/{sessionId}/turns",
     SessionPathSchema.extend(TurnSendSchema.shape),
-    "Send a session its next prompt. Returns the turn before any output; refused while another turn of the session runs.",
+    "Send a session its next prompt. Returns the turn; the turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused while another turn of the session runs.",
   ),
   rest(
     "tumpel_turn_list",
