@@ -13,7 +13,11 @@ import {
 } from "./github.ts";
 import type { KeyStore } from "./key-store.ts";
 
-export type GitHubInstallation = z.infer<typeof GitHubInstallationSchema>;
+export type GitHubAccountType = z.infer<typeof GitHubInstallationSchema>["accountType"];
+
+export type StoredInstallation = Omit<z.infer<typeof GitHubInstallationSchema>, "accountType"> & {
+  accountType: GitHubAccountType | null;
+};
 
 export interface StoredApp {
   appId: number;
@@ -140,23 +144,25 @@ type InstallationRow = {
   installation_id: number;
   tenant_id: string;
   account_login: string;
-  status: GitHubInstallation["status"];
+  account_type: GitHubAccountType | null;
+  status: StoredInstallation["status"];
   created_at: number;
   updated_at: number;
 };
 
-const INSTALLATION_COLUMNS = "installation_id, tenant_id, account_login, status, created_at, updated_at";
+const INSTALLATION_COLUMNS = "installation_id, tenant_id, account_login, account_type, status, created_at, updated_at";
 
-const toInstallation = (row: InstallationRow): GitHubInstallation => ({
+const toInstallation = (row: InstallationRow): StoredInstallation => ({
   installationId: row.installation_id,
   tenantId: row.tenant_id,
   accountLogin: row.account_login,
+  accountType: row.account_type,
   status: row.status,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
 
-export const installationsOf = async (db: D1Database, tenantId: string): Promise<GitHubInstallation[]> => {
+export const installationsOf = async (db: D1Database, tenantId: string): Promise<StoredInstallation[]> => {
   const { results } = await db
     .prepare(
       `SELECT ${INSTALLATION_COLUMNS} FROM github_installations WHERE tenant_id = ? ORDER BY created_at, installation_id`,
@@ -170,7 +176,7 @@ export const installationOn = async (
   db: D1Database,
   tenantId: string,
   accountLogin: string,
-): Promise<GitHubInstallation | null> => {
+): Promise<StoredInstallation | null> => {
   const row = await db
     .prepare(
       `SELECT ${INSTALLATION_COLUMNS} FROM github_installations WHERE tenant_id = ? AND account_login = ? COLLATE NOCASE`,
@@ -186,7 +192,7 @@ const installationRow = (db: D1Database, installationId: number): Promise<Instal
     .bind(installationId)
     .first<InstallationRow>();
 
-export type Linked = { kind: "Linked"; installation: GitHubInstallation } | { kind: "OtherTenant" };
+export type Linked = { kind: "Linked"; installation: StoredInstallation } | { kind: "OtherTenant" };
 
 export const linkInstallation = async (
   db: D1Database,
@@ -196,11 +202,11 @@ export const linkInstallation = async (
 ): Promise<Linked> => {
   await db
     .prepare(
-      `INSERT INTO github_installations (${INSTALLATION_COLUMNS}) VALUES (?, ?, ?, 'Active', ?, ?)
-      ON CONFLICT (installation_id) DO UPDATE SET account_login = excluded.account_login, updated_at = excluded.updated_at
+      `INSERT INTO github_installations (${INSTALLATION_COLUMNS}) VALUES (?, ?, ?, ?, 'Active', ?, ?)
+      ON CONFLICT (installation_id) DO UPDATE SET account_login = excluded.account_login, account_type = excluded.account_type, updated_at = excluded.updated_at
       WHERE github_installations.tenant_id = excluded.tenant_id`,
     )
-    .bind(record.id, tenantId, record.account.login, now, now)
+    .bind(record.id, tenantId, record.account.login, record.account.type, now, now)
     .run();
   const row = await installationRow(db, record.id);
   return row === null || row.tenant_id !== tenantId
@@ -251,15 +257,17 @@ export const refreshInstallation = async (
   now: number,
 ): Promise<void> => {
   await db
-    .prepare("UPDATE github_installations SET account_login = ?, updated_at = ? WHERE installation_id = ?")
-    .bind(record.account.login, now, record.id)
+    .prepare(
+      "UPDATE github_installations SET account_login = ?, account_type = ?, updated_at = ? WHERE installation_id = ?",
+    )
+    .bind(record.account.login, record.account.type, now, record.id)
     .run();
 };
 
 export const setInstallationStatus = async (
   db: D1Database,
   installationId: number,
-  status: GitHubInstallation["status"],
+  status: StoredInstallation["status"],
   now: number,
 ): Promise<void> => {
   await db

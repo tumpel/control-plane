@@ -426,8 +426,8 @@ const installPrebuiltApp = async (tenantId: string): Promise<void> => {
     Date.now(),
   );
   await d1Run(
-    `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
-    VALUES (77, ?, 'prebuilt', 'Active', ?, ?)`,
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at)
+    VALUES (77, ?, 'prebuilt', 'Organization', 'Active', ?, ?)`,
     tenantId,
     Date.now(),
     Date.now(),
