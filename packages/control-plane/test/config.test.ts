@@ -256,6 +256,31 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   assert.equal(replanned.stdout.trim(), "no changes; the tenant matches the file", replanned.stderr);
 });
 
+test("an apply refused at a later change writes none of the earlier ones", async () => {
+  const held = await Promise.all(["/v1/personas", "/v1/secret-sets", "/v1/harnesses/pins"].map(getJson));
+  const fixture = JSON.parse(readFileSync(FIXTURE, "utf8"));
+  const refused = await postJson(
+    "/v1/tenant-config/apply",
+    {
+      config: {
+        ...fixture,
+        personas: [{ name: "Atomic", harness: "ClaudeCode", secretSetName: "atomic", files: [] }],
+        secretSets: [{ ...fixture.secretSets[0], name: "atomic" }],
+        harnessPins: [{ harness: "ClaudeCode", harnessVersion: "0.0.1" }],
+        hosts: [],
+      },
+      files: [],
+      secretValues: [{ env: "TUMPEL_E2E_ANTHROPIC_KEY", value: SECRET }],
+      expiryValues: [],
+    },
+    bearer,
+  );
+  assert.equal(refused.status, 422);
+  assert.match(ProblemSchema.parse(await refused.json()).detail, /no change was applied$/);
+  const kept = await Promise.all(["/v1/personas", "/v1/secret-sets", "/v1/harnesses/pins"].map(getJson));
+  assert.deepEqual(kept, held);
+});
+
 test("tumpel config validate names every key that breaks the schema, a pasted secret value among them", async () => {
   const file = join(scratch, "broken.json");
   const fixture = JSON.parse(readFileSync(FIXTURE, "utf8"));
