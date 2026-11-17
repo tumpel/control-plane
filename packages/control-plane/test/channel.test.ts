@@ -133,13 +133,13 @@ const setup = (revoked = false) => {
         link.connection = received.connection;
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey) => {
+      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
           type: "Hello",
           hostId: HOST_ID,
-          protocolVersion: ChannelProtocol.Version,
+          protocolVersion,
           supervisorVersion: "0.1.0",
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
@@ -187,6 +187,15 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.deepEqual(link.events.at(-1), { kind: "Message", message: snapshotDone("snap-1") });
   assert.deepEqual(channel.ledger.current, { received: 1, sent: 1, unacked: [] });
   assert.equal(link.closed, null);
+});
+
+test("a Hello on every version from ChannelProtocol.Oldest to Version is welcomed", async () => {
+  for (let version: number = ChannelProtocol.Oldest; version <= ChannelProtocol.Version; version += 1) {
+    const link = setup().connect();
+    await link.hello(undefined, version);
+    assert.equal(link.closed, null, `protocol version ${version} was refused`);
+    assert.equal(link.connection.phase, "Open");
+  }
 });
 
 test("a Hello signed by another key is closed as a bad signature", async () => {
