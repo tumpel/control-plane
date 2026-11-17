@@ -4,7 +4,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const GENERATED = ["packages/api/generated/", "crates/tumpel-api/src/generated.rs"];
+const GENERATED = [
+  "packages/api/generated/",
+  "packages/api/frozen/",
+  "crates/tumpel-api/src/generated.rs",
+  "crates/tumpel-api/src/frozen/",
+];
 const REGEX_AFTER = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
 const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await)$/;
 
