@@ -46,7 +46,6 @@ const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-sessions-e2e-provider-key";
 const CLAIM_BUDGET_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
-const CLONE_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const HOST_OFFLINE_GRACE_MS = 30_000;
@@ -667,7 +666,7 @@ test("a turn started over MCP reaches the host, its lines read back in order by 
   assert.ok(!JSON.stringify(handovers).includes(PROVIDER_KEY));
   assert.ok(!JSON.stringify(handovers).includes("ghp-e2e"));
 
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   await eventually(
     "the turn reading Running",
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -802,7 +801,7 @@ test("a turn whose lines arrive up to its completion reads back whole in one pag
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   await eventually(
     "the turn reading Running",
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -924,7 +923,7 @@ test("a compact read stops after eight chunk reads of dropped lines, and the nex
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   await eventually(
     "the turn reading Running",
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1159,7 +1158,7 @@ test("a stop snapshots an idle session and frees its box, and an archive deletes
   const offer = await host.next("TurnOffer");
   assert.equal(offer.sessionId, sessionId);
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   await eventually(
     "the turn reading Running",
     () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1237,7 +1236,7 @@ test("a stop whose teardown the host refuses returns the session to Idle with th
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
   host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const store = (await server.getWorker<{ STORE: Store }>().getEnv()).STORE;
@@ -1288,7 +1287,7 @@ test("a stop whose snapshot fails returns the session to Idle and does not ask f
   const { sessionId } = started.session;
   const offer = await host.next("TurnOffer");
   const { turnId } = offer;
-  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
   host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
   host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const warm = await host.next("SnapshotRequest");
@@ -1315,7 +1314,7 @@ const completedTurn = async (prompt: string) => {
   const started = await tool("tumpel_session_start", { ...(await sessionStart()), prompt }, StartedSessionSchema);
   const offer = await host.next("TurnOffer");
   assert.equal(offer.sessionId, started.session.sessionId);
-  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
   host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: '{"type":"result"}' });
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   return { session: started.session, offer };
@@ -1463,27 +1462,6 @@ test("a snapshot learns where the tenant holds its chunks and uploads only new p
   assert.deepEqual(again.uploaded, [packOne]);
 });
 
-test("a turn whose host fetches its image fails ImageFetchTimedOut after the fetch and claim budgets", async () => {
-  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "fetching" }, bearer);
-  assert.equal(response.status, 200);
-  const started = StartedSessionSchema.parse(await response.json());
-  const offer = await host.next("TurnOffer");
-  const fetching = Date.now();
-  const imageDigest = offer.image.kind === "Full" ? offer.image.imageDigest : offer.image.base.imageDigest;
-  host.send({ type: "TurnImageFetching", turnId: offer.turnId, imageDigest });
-
-  const failed = await eventually(
-    "the turn reading Failed",
-    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-    (turn) => turn.state === "Failed",
-  );
-  assert.equal(failed.turnId, started.turn.turnId);
-  assert.ok(failed.updatedAt - fetching >= (IMAGE_FETCH_BUDGET_SECONDS + CLAIM_BUDGET_SECONDS) * 1000);
-  const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-  assert.equal(failure.reason, "ImageFetchTimedOut");
-  assert.match(failure.detail, new RegExp(`^host box started fetching guest image ${imageDigest} for the turn`));
-});
-
 test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
   const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
   assert.equal(response.status, 200);
@@ -1577,27 +1555,6 @@ test("a start from an issue over MCP refuses a missing or closed issue, and an o
   );
 });
 
-test("a claimed turn whose TurnRepositoryReady is lost fails NoFirstOutput once the clone and first-line budgets run out", async () => {
-  const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "ready never arrives" }, bearer);
-  assert.equal(response.status, 200);
-  const started = StartedSessionSchema.parse(await response.json());
-  const offer = await host.next("TurnOffer");
-  assert.equal(offer.turnId, started.turn.turnId);
-  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
-  const claimedAt = Date.now();
-
-  const failed = await eventually(
-    "the turn reading Failed",
-    () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-    (turn) => turn.state === "Failed",
-    (CLONE_SECONDS + FIRST_LINE_BUDGET_SECONDS + 10) * 1000,
-  );
-  assert.ok(failed.updatedAt - claimedAt >= (CLONE_SECONDS + FIRST_LINE_BUDGET_SECONDS) * 1000 - 500);
-  const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-  assert.equal(failure.reason, "NoFirstOutput");
-  assert.match(failure.detail, /no line for the turn within .* on host box,/);
-});
-
 test("a turn without a GitHub credential fails RepositoryTokenRefused before an offer, and a GITHUB_TOKEN GitHub refuses is refused at the write", async () => {
   const stale = await postJson(
     "/v1/secret-sets",
@@ -1655,7 +1612,7 @@ test("a clone failure fails the session, which takes no more turns, frees its pe
     assert.equal(response.status, 200);
     const { sessionId } = StartedSessionSchema.parse(await response.json()).session;
     const offer = await host.next("TurnOffer");
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     host.send({
       type: "TurnRepositoryCloneFailed",
       turnId: offer.turnId,
@@ -1712,7 +1669,7 @@ test("a claimed turn fails HostOffline when its host disconnects and does not co
   const started = StartedSessionSchema.parse(await response.json());
   const offer = await host.next("TurnOffer");
   assert.equal(offer.turnId, started.turn.turnId);
-  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
   host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
   await eventually(
     "the turn reading Running",
@@ -1756,7 +1713,7 @@ test("a session moves off its offline host once a snapshot holds its last comple
   const { sessionId } = started.session;
   assert.equal(started.session.hostId, first.id);
   const offer = await from.next("TurnOffer");
-  from.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  from.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
   from.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
   from.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await from.next("SnapshotRequest");
@@ -1812,7 +1769,7 @@ test("a session moves off its offline host once a snapshot holds its last comple
   await hostState(first.id, "Online");
   const discard = await from.next("BoxDiscard");
   assert.deepEqual({ sessionId: discard.sessionId, boxId: discard.boxId }, { sessionId, boxId: offer.boxId });
-  from.send({ type: "TurnClaim", turnId: lost.turnId, boxId: offer.boxId, cloneSeconds: CLONE_SECONDS });
+  from.send({ type: "TurnClaim", turnId: lost.turnId, boxId: offer.boxId });
   from.send({
     type: "TurnFailed",
     turnId: lost.turnId,
@@ -1827,7 +1784,7 @@ test("a session moves off its offline host once a snapshot holds its last comple
   const after = StartedSessionSchema.parse(await next.json());
   assert.equal(after.session.hostId, first.id);
   const afterOffer = await from.next("TurnOffer");
-  from.send({ type: "TurnClaim", turnId: afterOffer.turnId, boxId: afterOffer.boxId, cloneSeconds: CLONE_SECONDS });
+  from.send({ type: "TurnClaim", turnId: afterOffer.turnId, boxId: afterOffer.boxId });
   await eventually(
     "the turn on the old host reading Running",
     () => getJson(`/v1/turns/${afterOffer.turnId}`, TurnSchema),

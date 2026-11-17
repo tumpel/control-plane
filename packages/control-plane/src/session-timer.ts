@@ -3,7 +3,6 @@ import type { Env } from "./index";
 
 export type DeadlineName =
   | "Claim"
-  | "ImageFetch"
   | "FirstLine"
   | "Total"
   | "Snapshot"
@@ -21,10 +20,6 @@ export type PrebuildDeadlineName = "PrebuildDispatch" | "PrebuildBuild";
 export interface Deadline {
   turnId: string;
   at: number;
-}
-
-export interface ImageFetchDeadline extends Deadline {
-  imageDigest: string;
 }
 
 export interface ClaudeSetupDeadline {
@@ -47,17 +42,15 @@ export interface PrebuildDeadline {
   at: number;
 }
 
-type DeadlineOf<N extends DeadlineName> = N extends "ImageFetch"
-  ? ImageFetchDeadline
-  : N extends PrebuildDeadlineName
-    ? PrebuildDeadline
-    : N extends "ClaudeSetup"
-      ? ClaudeSetupDeadline
-      : N extends "CircleCIAuthorization"
-        ? CircleCIAuthorizationDeadline
-        : N extends "OpenRouterAuthorization"
-          ? OpenRouterAuthorizationDeadline
-          : Deadline;
+type DeadlineOf<N extends DeadlineName> = N extends PrebuildDeadlineName
+  ? PrebuildDeadline
+  : N extends "ClaudeSetup"
+    ? ClaudeSetupDeadline
+    : N extends "CircleCIAuthorization"
+      ? CircleCIAuthorizationDeadline
+      : N extends "OpenRouterAuthorization"
+        ? OpenRouterAuthorizationDeadline
+        : Deadline;
 
 export type DueDeadline = { [N in DeadlineName]: { name: N; deadline: DeadlineOf<N> } }[DeadlineName];
 
