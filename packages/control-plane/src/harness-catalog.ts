@@ -6,7 +6,7 @@ export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
 export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSchema>;
 
 export const CLAUDE_CODE_VERSION = "2.1.325";
-const CODEX_VERSION = "0.169.0";
+export const CODEX_VERSION = "0.169.0";
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
 
@@ -55,14 +55,11 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
     credentials: [
       {
         provider: "OpenAi",
-        kind: "SubscriptionToken",
-        variable: "CODEX_ACCESS_TOKEN",
+        kind: "CredentialFile",
+        variable: "CODEX_AUTH_JSON",
+        path: ".codex/auth.json",
         fixed: [],
-        arguments: [
-          "-c",
-          `forced_login_method="chatgpt"`,
-          ...codexProvider("chatgpt", { name: "OpenAI", requires_openai_auth: true }),
-        ],
+        arguments: ["-c", `cli_auth_credentials_store="file"`, "-c", `forced_login_method="chatgpt"`],
       },
       {
         provider: "OpenAi",

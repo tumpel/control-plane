@@ -30,8 +30,9 @@ import type {
   SnapshotDownload,
   StoredControlMessage,
 } from "./channel/protocol.ts";
+import { accessTokenExpiry } from "./credential-file.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
-import { generateDataKey, unseal } from "./envelope.ts";
+import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
   botLogin,
   botUserId,
@@ -635,6 +636,65 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (wrapped === null)
       throw new Error("the tenant holds no data key; the Durable Object constructor creates it before any request");
     return keyStoreOf(this.env).unwrap(wrapped);
+  }
+
+  protected replaceCredentialMember(
+    secretSetId: string,
+    member: { kind: "SubscriptionToken" | "CredentialFile"; name: string; provider: string },
+    sealed: string,
+    expiresAt: string,
+    now: number,
+  ): void {
+    const sql = this.ctx.storage.sql;
+    for (const table of ["secret_expiries", "secret_credentials", "secret_values"]) {
+      sql.exec(`DELETE FROM ${table} WHERE secret_set_id = ? AND name = ?`, secretSetId, member.name);
+    }
+    sql.exec(
+      "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
+      secretSetId,
+      member.name,
+      member.kind,
+      sealed,
+      now,
+    );
+    sql.exec(
+      "INSERT INTO secret_credentials (secret_set_id, name, provider) VALUES (?, ?, ?)",
+      secretSetId,
+      member.name,
+      member.provider,
+    );
+    sql.exec(
+      "INSERT INTO secret_expiries (secret_set_id, name, expires_at) VALUES (?, ?, ?)",
+      secretSetId,
+      member.name,
+      expiresAt,
+    );
+    sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
+  }
+
+  private async storeCredentialFile(
+    hostId: string,
+    message: Extract<SessionHostMessage, { type: "TurnComplete" | "TurnFailed" }>,
+    credentialFile: string,
+  ): Promise<void> {
+    const { session } = this.offeredTurn(hostId, message);
+    const persona = this.personaRow(session.persona_id);
+    if (persona === null) return;
+    const { secretSetId } = persona;
+    const [held] = this.ctx.storage.sql
+      .exec<{ name: string; provider: string; expires_at: string }>(
+        `SELECT secret_values.name, secret_credentials.provider, secret_expiries.expires_at FROM secret_values
+        JOIN secret_credentials USING (secret_set_id, name) JOIN secret_expiries USING (secret_set_id, name)
+        WHERE secret_values.secret_set_id = ? AND secret_values.kind = 'CredentialFile'`,
+        secretSetId,
+      )
+      .toArray();
+    if (held === undefined) return;
+    const now = Date.now();
+    const sealed = await seal(await this.dataKey(), credentialFile, sealContext(secretSetId, held.name));
+    const member = { kind: "CredentialFile" as const, name: held.name, provider: held.provider };
+    const expiresAt = accessTokenExpiry(credentialFile) ?? held.expires_at;
+    this.ctx.storage.transactionSync(() => this.replaceCredentialMember(secretSetId, member, sealed, expiresAt, now));
   }
 
   protected async members(secretSetId: string): Promise<SecretMember[]> {
@@ -1590,6 +1650,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         expiresAt: iso(now + credentialSeconds * 1000),
         variables,
         arguments: dispatch.arguments,
+        ...(dispatch.credentialFile === undefined ? {} : { credentialFile: dispatch.credentialFile }),
       },
       lastLineSeq: session.last_line_seq,
       snapshots,
@@ -1685,6 +1746,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
+    if ((message.type === "TurnComplete" || message.type === "TurnFailed") && message.credentialFile !== undefined) {
+      await this.storeCredentialFile(hostId, message, message.credentialFile);
+    }
     if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
     if (message.type === "TurnFailed") return this.turnFailed(tenantId, hostId, message);
     if (message.type === "TurnClaim") return this.turnClaim(tenantId, hostId, message);

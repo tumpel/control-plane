@@ -553,7 +553,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/claude-setups",
     ClaudeSetupStartSchema,
-    "Mint a Claude subscription token for a secret set without installing Claude Code: starts a short-lived box on an Online host that runs claude setup-token from the pinned Claude Code, with no secret set member and no GitHub token. Returns the setup in state Starting; poll tumpel_claude_setup_get until it is AwaitingCode, give the person its signInUrl, and have them paste the code the sign-in page shows into the dashboard or tumpel claude-setup submit-code --stdin, since the code never passes through MCP. Refused NoHostOnline when no Online host can run the box. A start fails the set's running setup Superseded.",
+    "Mint a Claude subscription token for a secret set without installing Claude Code: starts a short-lived box on an Online host that runs claude setup-token from the pinned Claude Code, with no secret set member and no GitHub token. Returns the setup in state Starting; poll tumpel_claude_setup_get until it is AwaitingCode, give the person its signInUrl, and have them paste the code the sign-in page shows into the dashboard or tumpel claude-setup submit-code --stdin, since the code never passes through MCP. With harness Codex the box runs codex login --device-auth instead: give the person the signInUrl and userCode of AwaitingCode, and the box stores its auth.json as the CredentialFile CODEX_AUTH_JSON once they sign in, with no code to submit. Refused NoHostOnline when no Online host can run the box. A start fails the set's running setup Superseded.",
   ),
   rest(
     "tumpel_claude_setup_list",

@@ -38,7 +38,7 @@ import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
 import { ControlEnvelopeSchema, helloBytes } from "../../src/channel/protocol.ts";
 import { generateDataKey, seal } from "../../src/envelope.ts";
-import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
+import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
 import { workersSecretKeyStore } from "../../src/key-store.ts";
 import {
   type ChunkLedger,
@@ -128,6 +128,14 @@ const RELEASE = {
       architecture: "Amd64",
       layerDigest: "1".repeat(64),
       manifestDigest: "2".repeat(64),
+      sizeBytes: 65536,
+    },
+    {
+      harness: "Codex",
+      harnessVersion: CODEX_VERSION,
+      architecture: "Amd64",
+      layerDigest: "7".repeat(64),
+      manifestDigest: "8".repeat(64),
       sizeBytes: 65536,
     },
   ],
@@ -1313,6 +1321,93 @@ suite("sessions", { concurrency: 8 }, () => {
       detail: "the e2e leaves this setup",
       failedAt: new Date().toISOString(),
     });
+  });
+
+  test("a Codex sign-in stores its auth.json as a credential file, a turn gets it as a file, and a file the turn rewrote replaces it", async () => {
+    const { bearer, host, getJson, github, tool } = await tenant();
+    const created = await postJson(
+      "/v1/secret-sets",
+      { name: "Codex sign-in secrets", secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: github }] },
+      bearer,
+    );
+    assert.equal(created.status, 200, await created.clone().text());
+    const { secretSetId } = SecretSetSchema.parse(await created.json());
+    const started = await postJson("/v1/claude-setups", { secretSetId, harness: "Codex" }, bearer);
+    assert.equal(started.status, 200, await started.clone().text());
+    assert.equal(ClaudeSetupSchema.parse(await started.json()).harness, "Codex");
+    const offer = await host.next("ClaudeSetupBoxOffer");
+    assert.equal(offer.harnessVersion, CODEX_VERSION);
+    const { claudeSetupId } = offer;
+    const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
+    host.send({
+      type: "ClaudeSetupBoxUrl",
+      claudeSetupId,
+      signInUrl: "https://auth.openai.com/codex/device",
+      userCode: "K7QD-3MZP9",
+    });
+    const waiting = await until(
+      "the setup reading AwaitingCode",
+      status,
+      (setup) => setup.status.state === "AwaitingCode",
+    );
+    assert.ok(waiting.status.state === "AwaitingCode" && waiting.status.userCode === "K7QD-3MZP9");
+    const coded = await postJson(`/v1/claude-setups/${claudeSetupId}/code`, { code: "codex-code" }, bearer);
+    assert.equal(coded.status, 409, "a Codex sign-in takes no submitted code");
+    assert.equal(ProblemSchema.parse(await coded.json()).code, "ClaudeSetupNotWaiting");
+    const expiresAt = "2026-12-01T10:00:00.000Z";
+    const authFile = (exp: number) =>
+      JSON.stringify({
+        tokens: {
+          access_token: `h.${Buffer.from(JSON.stringify({ exp })).toString("base64url")}.s`,
+          refresh_token: `codex-e2e-refresh-${exp}`,
+        },
+      });
+    const token = authFile(Date.parse(expiresAt) / 1000);
+    const stored = await postJson(
+      `/v1/claude-setups/${claudeSetupId}/token`,
+      { tenantId: offer.tenantId, value: token, expiresAt },
+      { authorization: `Bearer ${offer.tokenCredential}` },
+    );
+    assert.equal(stored.status, 204, await stored.clone().text());
+    const completed = await status();
+    assert.ok(completed.status.state === "Completed");
+    assert.equal(completed.status.memberName, "CODEX_AUTH_JSON");
+    assert.equal(completed.status.expiresAt, expiresAt);
+    assert.equal(JSON.stringify(completed).includes(token), false);
+    const keys = async () =>
+      (await getJson(`/v1/secret-sets/${secretSetId}`, SecretSetSchema)).keys
+        .map((key) => ({ kind: key.kind, name: key.name, expiresAt: "expiresAt" in key ? key.expiresAt : null }))
+        .toSorted((a, b) => a.name.localeCompare(b.name));
+    assert.deepEqual(await keys(), [
+      { kind: "CredentialFile", name: "CODEX_AUTH_JSON", expiresAt },
+      { kind: "Variable", name: "GITHUB_TOKEN", expiresAt: null },
+    ]);
+
+    const persona = await postJson("/v1/personas", { name: "Codex", harness: "Codex", secretSetId, files: [] }, bearer);
+    assert.equal(persona.status, 200, await persona.clone().text());
+    const { personaId } = PersonaSchema.parse(await persona.json());
+    await tool(
+      "tumpel_session_start",
+      { repository: "https://github.com/acme/app.git", model: "gpt-test", personaId, prompt: "refresh" },
+      StartedSessionSchema,
+    );
+    const turn = await host.next("TurnOffer");
+    assert.deepEqual(turn.credential.credentialFile, { path: ".codex/auth.json", value: token });
+    assert.equal(
+      turn.credential.variables.some((variable) => variable.value === token),
+      false,
+      "the login file is never a variable",
+    );
+    host.send({ type: "TurnClaim", turnId: turn.turnId, boxId: turn.boxId });
+    const refreshedAt = "2026-12-02T10:00:00.000Z";
+    host.send({
+      type: "TurnComplete",
+      turnId: turn.turnId,
+      lastLineSeq: 0,
+      completedAt: new Date().toISOString(),
+      credentialFile: authFile(Date.parse(refreshedAt) / 1000),
+    });
+    await until("the secret set holding the rewritten file", keys, (read) => read[0]?.expiresAt === refreshedAt);
   });
 
   test("a box whose Claude Code mints no token within the code's mint budget is waited on past that budget and fails SetupTimedOut when its box says so", async () => {

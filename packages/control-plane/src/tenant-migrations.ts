@@ -51,6 +51,7 @@ import tenant0050 from "../migrations/tenant/0050_supervisor_update_step_release
 import tenant0051 from "../migrations/tenant/0051_drop_unused_github_tables.sql";
 import tenant0052 from "../migrations/tenant/0052_host_usage_channel_protocol.sql";
 import tenant0053 from "../migrations/tenant/0053_prebuild_sessions.sql";
+import tenant0054 from "../migrations/tenant/0054_claude_setup_harness.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -107,4 +108,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0051_drop_unused_github_tables", sql: tenant0051 },
   { name: "0052_host_usage_channel_protocol", sql: tenant0052 },
   { name: "0053_prebuild_sessions", sql: tenant0053 },
+  { name: "0054_claude_setup_harness", sql: tenant0054 },
 ];
