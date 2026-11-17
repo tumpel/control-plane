@@ -51,6 +51,7 @@ let issuer: string;
 let scratch: string;
 let bearer: Record<string, string>;
 let envFile: string;
+let tenant: string;
 
 const assertion = (): string => {
   const now = Math.floor(Date.now() / 1000);
@@ -141,6 +142,7 @@ before(async () => {
   const signedUp = await postJson("/v1/tenants", { name: "Config" }, browser());
   assert.equal(signedUp.status, 200);
   const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+  tenant = tenantId;
   const started = DeviceAuthorizationSchema.parse(
     await (await postJson("/v1/device/code", { device_name: "config e2e" })).json(),
   );
@@ -279,6 +281,47 @@ test("an apply refused at a later change writes none of the earlier ones", async
   assert.match(ProblemSchema.parse(await refused.json()).detail, /no change was applied$/);
   const kept = await Promise.all(["/v1/personas", "/v1/secret-sets", "/v1/harnesses/pins"].map(getJson));
   assert.deepEqual(kept, held);
+});
+
+type ConfigApplier = { applyConfig(tenantId: string, writes: unknown[], now: number): Promise<{ kind: string }> };
+
+const tenantRows = async (): Promise<Record<string, unknown[]>> => {
+  const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenant });
+  const tables = (await storage.exec(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name",
+  )) as { name: string }[];
+  const rows: Record<string, unknown[]> = {};
+  for (const { name } of tables) rows[name] = await storage.exec(`SELECT * FROM "${name}" ORDER BY rowid`);
+  return rows;
+};
+
+test("a write that breaks a constraint inside the apply transaction rolls back every earlier write", async () => {
+  const held = await tenantRows();
+  const stub = (
+    await server.getWorker<{ TENANT: { getByName(name: string): ConfigApplier } }>().getEnv()
+  ).TENANT.getByName(tenant);
+  const secretSetId = crypto.randomUUID();
+  const persona = { name: "Rollback", harness: "ClaudeCode", secretSetId, files: [] };
+  const applied = await stub.applyConfig(
+    tenant,
+    [
+      {
+        kind: "CreateSecretSet",
+        secretSetId,
+        secretSet: {
+          name: "rollback",
+          secrets: [{ kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET }],
+        },
+        githubUser: null,
+      },
+      { kind: "Pin", pin: { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION } },
+      { kind: "CreatePersona", persona },
+      { kind: "CreatePersona", persona },
+    ],
+    Date.now(),
+  );
+  assert.equal(applied.kind, "Conflict");
+  assert.deepEqual(await tenantRows(), held);
 });
 
 test("tumpel config validate names every key that breaks the schema, a pasted secret value among them", async () => {
