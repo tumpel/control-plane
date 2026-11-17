@@ -25,6 +25,10 @@ import {
   InvitationCreateSchema,
   InvitationPathSchema,
   MemberPathSchema,
+  MetricPathSchema,
+  MetricSeriesQuerySchema,
+  MetricTurnQuerySchema,
+  MetricWindowSchema,
   NamespaceConnectionStartSchema,
   OAuthGrantPathSchema,
   OpenRouterAuthorizationPathSchema,
@@ -746,6 +750,27 @@ export const TOOLS: ToolDefinition[] = [
     SnapshotPathSchema,
     "Read one snapshot: its stored size, or why it was not stored.",
   ),
+  rest(
+    "tumpel_metrics_catalog",
+    "GET",
+    "/v1/metrics",
+    MetricWindowSchema,
+    "List every metric with series seen between from and to (ISO 8601 with an offset), each with its unit, kind and its dimensions with their values and series counts. filter takes dimension:value entries; one dimension repeated is OR, different dimensions AND. Returns {metrics: [{metric, unit, kind, description, facets}]}.",
+  ),
+  rest(
+    "tumpel_metrics_query",
+    "GET",
+    "/v1/metrics/{metric}/series",
+    MetricPathSchema.extend(MetricSeriesQuerySchema.shape),
+    "Read a metric's buckets between from and to: bucket is Minute, Hour or Day (Day starts at midnight in the offset of from). groupBy takes up to two dimensions; past 20 groups the rest fold into one group whose values read Other. filter takes dimension:value entries as in tumpel_metrics_catalog. Each point has bucketStart, count, sum, min, max, p50, p90 and p99. Refused MetricRangeTooLarge past 500 buckets or for Minute buckets older than 8 days, naming a range that fits.",
+  ),
+  rest(
+    "tumpel_metrics_turns",
+    "GET",
+    "/v1/metrics/{metric}/turns",
+    MetricPathSchema.extend(MetricTurnQuerySchema.shape),
+    "List the turn points behind a Turn metric between from and to, oldest first, each with its turnId, sessionId, value and dimensions; sessionId keeps one session's points. Pass the cursor of the previous page to read on; finished is true when no point follows.",
+  ),
 ];
 
 const PATH_KEY = /\{(\w+)\}/g;
@@ -764,7 +789,11 @@ const toolRequest = (
   const body = Object.fromEntries(Object.entries(args).filter(([key]) => !keys.includes(key)));
   const query =
     request.method === "GET" && Object.keys(body).length > 0
-      ? `?${new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)]))}`
+      ? `?${new URLSearchParams(
+          Object.entries(body).flatMap(([key, value]) =>
+            Array.isArray(value) ? value.map((entry) => [key, String(entry)]) : [[key, String(value)]],
+          ),
+        )}`
       : "";
   return new Request(`${origin}${path}${query}`, {
     method: request.method,

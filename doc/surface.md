@@ -67,6 +67,9 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Invitations_revoke`                     | `tumpel_invitation_revoke`            | `tumpel invitation revoke`            |
 | `Members_list`                           | `tumpel_member_list`                  | `tumpel member list`                  |
 | `Members_remove`                         | `tumpel_member_remove`                | `tumpel member remove`                |
+| `Metrics_catalog`                        | `tumpel_metrics_catalog`              | `tumpel metrics catalog`              |
+| `Metrics_query`                          | `tumpel_metrics_query`                | `tumpel metrics query`                |
+| `Metrics_turns`                          | `tumpel_metrics_turns`                | `tumpel metrics turns`                |
 | `NamespaceConnections_delete`            | `tumpel_namespace_delete`             | `tumpel namespace delete`             |
 | `NamespaceConnections_get`               | `tumpel_namespace_get`                | `tumpel namespace get`                |
 | `NamespaceConnections_start`             | `tumpel_namespace_start`              | `tumpel namespace start`              |

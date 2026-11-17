@@ -125,6 +125,7 @@ import {
 } from "./issuer.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
 import { handleMembers } from "./members";
+import { handleMetrics } from "./metrics";
 import {
   AUTHORIZATION_SERVER_PATH,
   AUTHORIZE_PATH,
@@ -1450,6 +1451,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   if (uploads) return uploads;
   const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
   if (prebuilds) return prebuilds;
+  const metrics = await handleMetrics(request, url, env, deviceCaller);
+  if (metrics) return metrics;
   const claudeSetups = await handleClaudeSetups(request, url, env, deviceCaller);
   if (claudeSetups) return claudeSetups;
   const connections =

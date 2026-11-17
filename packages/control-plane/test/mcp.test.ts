@@ -13,6 +13,7 @@ import {
   HarnessCatalogEntrySchema,
   HarnessPinSchema,
   HostSchema,
+  MetricCatalogSchema,
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
@@ -257,6 +258,22 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     { harness: "OpenCode", harnessVersion: "1.19.5", pinned: false },
     { harness: "PiDev", harnessVersion: "1.5.2", pinned: false },
   ]);
+
+  const window = { from: "2026-11-16T00:00:00+02:00", to: "2026-11-17T00:00:00+02:00" };
+  const windowQuery = new URLSearchParams({ ...window });
+  windowQuery.append("filter", "harness:Pi");
+  windowQuery.append("filter", "harness:Codex");
+  assert.deepEqual(
+    await toolJson(MetricCatalogSchema, "tumpel_metrics_catalog", {
+      ...window,
+      filter: ["harness:Pi", "harness:Codex"],
+    }),
+    await rest(MetricCatalogSchema, "GET", `/v1/metrics?${windowQuery}`),
+  );
+  const unknownMetric = await call(`/v1/metrics/turn.nope/series?${windowQuery}&bucket=Hour`, { headers: bearer });
+  assert.equal(unknownMetric.status, 404);
+  assert.equal(ProblemSchema.parse(await unknownMetric.json()).code, "MetricNotFound");
+  assert.ok((await tool("tumpel_metrics_query", { metric: "turn.nope", ...window, bucket: "Hour" })).isError);
 
   const [defaultSet] = await rest(SecretSetSchema.array(), "GET", "/v1/secret-sets");
   assert.ok(defaultSet);
