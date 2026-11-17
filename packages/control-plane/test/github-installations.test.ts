@@ -127,8 +127,8 @@ before(async () => {
     )
     .run();
   await env.DB.prepare(
-    `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'Active', ?, ?)`,
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'Organization', 'Active', ?, ?)`,
   )
     .bind(INSTALLATION_ID, tenantId, "acme", Date.now(), Date.now())
     .run();
@@ -158,8 +158,8 @@ const installations = async () =>
 test("a tenant holds an installation per account, a suspension changes only that one, and an uninstall drops only that one", async () => {
   const env = await server.getWorker<{ DB: Database }>().getEnv();
   await env.DB.prepare(
-    `INSERT INTO github_installations (installation_id, tenant_id, account_login, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'Active', ?, ?)`,
+    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'Organization', 'Active', ?, ?)`,
   )
     .bind(INSTALLATION_ID + 1, tenantId, "octo", Date.now(), Date.now())
     .run();

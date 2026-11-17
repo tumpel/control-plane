@@ -52,6 +52,7 @@ import {
   notARepository,
   parseJson,
   type RecordedInstaller,
+  readInstallation,
   readState,
   STATE_KEY_PURPOSE,
   STATE_TTL_MS,
@@ -76,7 +77,6 @@ import {
 } from "./github-schemas.ts";
 import {
   appKey,
-  type GitHubInstallation,
   installationOn,
   installationsOf,
   linkInstallation,
@@ -84,6 +84,7 @@ import {
   recordedInstaller,
   recordInstaller,
   refreshInstallation,
+  type StoredInstallation,
   setInstallationStatus,
   storeApp,
   storedApp,
@@ -136,12 +137,45 @@ const handleConnection = async (caller: Caller, url: URL, env: Env): Promise<Res
   return json(GitHubConnectionSchema.parse({ tenantId: caller.tenantId, app: { state: "Ready", appSlug: app.slug } }));
 };
 
-const handleList = async (caller: Caller, env: Env): Promise<Response> =>
-  json(
-    (await installationsOf(env.DB, caller.tenantId)).map((installation) =>
-      GitHubInstallationSchema.parse(installation),
-    ),
-  );
+const installationUnreadable = (installationId: number, detail: string): Response =>
+  problem(503, {
+    code: "GitHubInstallationUnreadable",
+    title: "GitHub did not answer for an installation",
+    detail: `${detail}; the control plane reads the account type of installation ${installationId} once`,
+    fix: `List the installations again in a moment. If GitHub answers 404, the App was uninstalled there: disconnect installation ${installationId} and add the account again. See https://www.githubstatus.com if GitHub keeps failing`,
+  });
+
+type Typed = { ok: true; installation: z.infer<typeof GitHubInstallationSchema> } | { ok: false; response: Response };
+
+const typed = async (env: Env, app: AppKey, installation: StoredInstallation): Promise<Typed> => {
+  if (installation.accountType !== null) {
+    return { ok: true, installation: GitHubInstallationSchema.parse(installation) };
+  }
+  const read = await readInstallation(fetcher, env.GITHUB_API_ORIGIN, app, installation.installationId, Date.now());
+  if (!read.ok) return { ok: false, response: installationUnreadable(installation.installationId, read.detail) };
+  await refreshInstallation(env.DB, read.value, Date.now());
+  return {
+    ok: true,
+    installation: GitHubInstallationSchema.parse({
+      ...installation,
+      accountLogin: read.value.account.login,
+      accountType: read.value.account.type,
+    }),
+  };
+};
+
+const handleList = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
+  const installations = await installationsOf(env.DB, caller.tenantId);
+  if (installations.every((installation) => installation.accountType !== null)) {
+    return json(installations.map((installation) => GitHubInstallationSchema.parse(installation)));
+  }
+  const app = await appKey(env.DB, keyStoreOf(env));
+  if (app === null) return appMissing(url.origin);
+  const answers = await Promise.all(installations.map((installation) => typed(env, app, installation)));
+  const refused = answers.find((answer) => !answer.ok);
+  if (refused !== undefined && !refused.ok) return refused.response;
+  return json(answers.flatMap((answer) => (answer.ok ? [answer.installation] : [])));
+};
 
 const returnRefused = (operation: string, detail: string, env: Env): Response =>
   problem(400, {
@@ -227,7 +261,7 @@ const unreadable = (detail: string): Response =>
 const listed = <T>(answer: GitHubAnswer<T[]>, schema: z.ZodType<T>): Response =>
   answer.ok ? json(answer.value.map((item) => schema.parse(item))) : unreadable(answer.detail);
 
-type Access = { ok: true; app: AppKey; installations: GitHubInstallation[] } | { ok: false; response: Response };
+type Access = { ok: true; app: AppKey; installations: StoredInstallation[] } | { ok: false; response: Response };
 
 const installationAccess = async (caller: Caller, url: URL, env: Env): Promise<Access> => {
   const app = await appKey(env.DB, keyStoreOf(env));
@@ -240,7 +274,7 @@ const installationAccess = async (caller: Caller, url: URL, env: Env): Promise<A
 const repositoriesOf = async (
   app: AppKey,
   env: Env,
-  installation: GitHubInstallation,
+  installation: StoredInstallation,
 ): Promise<GitHubAnswer<z.infer<typeof GitHubRepositorySchema>[]>> => {
   const token = await mintInstallationWideToken(
     fetcher,
@@ -309,7 +343,7 @@ export const handleGitHubConnection = async (
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (deleting !== null) return handleDelete(caller, env, decodeURIComponent(deleting[1] ?? ""));
-  if (listing) return handleList(caller, env);
+  if (listing) return handleList(caller, url, env);
   if (repositories) return handleRepositories(caller, url, env);
   if (issuesOf !== null) {
     return handleIssues(caller, url, env, decodeURIComponent(issuesOf[1] ?? ""), decodeURIComponent(issuesOf[2] ?? ""));

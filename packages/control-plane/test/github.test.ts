@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  GitHubInstallationSchema,
   GitHubInstallStartSchema,
   GitHubIssueSchema,
   GitHubRepositorySchema,
@@ -508,6 +509,8 @@ const VICTIM_INSTALLATION = { id: 66, account: { id: 1, login: "victim", type: "
 const RIVAL = "rival@example.test";
 const RIVAL_PERSONAL = { id: 130, account: { id: 20, login: "rival", type: "User" } };
 const RIVAL_ORG = { id: 131, account: { id: 702, login: "rivalorg", type: "Organization" } };
+const LISTER = "lister@example.test";
+const UNTYPED_INSTALLATION = { id: 140, account: { id: 30, login: "untyped", type: "User" } };
 const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[] }> = {
   ghu_victim: { id: 1, login: "victim", installations: [ORG_INSTALLATION, VICTIM_INSTALLATION] },
   ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION] },
@@ -516,7 +519,7 @@ const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: 
 };
 
 interface Database {
-  prepare(query: string): { bind(...values: unknown[]): { first<T>(): Promise<T | null> } };
+  prepare(query: string): { bind(...values: unknown[]): { first<T>(): Promise<T | null>; run(): Promise<unknown> } };
 }
 
 type HarnessInit = NonNullable<Parameters<TestHarness["fetch"]>[1]>;
@@ -564,6 +567,7 @@ const gitHubStandIn = async (request: IncomingMessage, response: ServerResponse)
     const { code } = JSON.parse(await bodyOf(request));
     return answer(response, 200, { access_token: `ghu_${String(code).replace(/-code$/, "")}`, token_type: "bearer" });
   }
+  if (path === `/app/installations/${UNTYPED_INSTALLATION.id}`) return answer(response, 200, UNTYPED_INSTALLATION);
   const person = GITHUB_PEOPLE[(request.headers.authorization ?? "").replace(/^Bearer /, "")];
   if (person === undefined) return answer(response, 401, { message: "Bad credentials" });
   if (path === "/user") return answer(response, 200, { id: person.id, login: person.login });
@@ -834,6 +838,30 @@ test("adding an account opens GitHub's install picker, and every outcome returns
   const failed = returnedTo(await installed(RIVAL, "nobody-code", 131, await pickerStart(RIVAL, secondTenant)));
   assert.equal(failed.from, "github");
   assert.match(failed.failed ?? "", /Bad credentials|401/);
+});
+
+test("the installation list names each account type, reading it once from GitHub for an installation stored without one", async () => {
+  const tenantId = await signUp(LISTER, "Lister");
+  const env = await harness.getWorker<{ DB: Database }>().getEnv();
+  const insert =
+    "INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'Active', ?, ?)";
+  await env.DB.prepare(insert).bind(140, tenantId, "untyped", null, 1, 1).run();
+  await env.DB.prepare(insert).bind(141, tenantId, "typedorg", "Organization", 2, 2).run();
+
+  const listed = await call("/v1/github-connection/installations", { headers: await bearerFor(LISTER, tenantId) });
+  assert.equal(listed.status, 200);
+  const installations = GitHubInstallationSchema.array().parse(await listed.json());
+  assert.deepEqual(
+    installations.map(({ installationId, accountType }) => [installationId, accountType]),
+    [
+      [140, "User"],
+      [141, "Organization"],
+    ],
+  );
+  const stored = await env.DB.prepare("SELECT account_type FROM github_installations WHERE installation_id = ?")
+    .bind(140)
+    .first<{ account_type: string }>();
+  assert.equal(stored?.account_type, "User");
 });
 
 test("a request an organization member makes directly on GitHub shows the requested page", async () => {

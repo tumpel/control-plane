@@ -375,6 +375,26 @@ export const mintInstallationToken = async (
   };
 };
 
+export const readInstallation = async (
+  fetcher: Fetch,
+  api: string,
+  app: AppKey,
+  installationId: number,
+  now: number,
+): Promise<GitHubAnswer<GitHubInstallationRecord>> =>
+  callGitHub(
+    fetcher,
+    {
+      method: "GET",
+      url: `${api}/app/installations/${installationId}`,
+      accept: API_MEDIA_TYPE,
+      bearer: await appJwt(app.clientId, app.privateKey, now),
+      body: null,
+    },
+    GitHubInstallationRecordSchema,
+    "GitHubInstallation",
+  );
+
 export const readAppPermissions = async (
   fetcher: Fetch,
   api: string,
