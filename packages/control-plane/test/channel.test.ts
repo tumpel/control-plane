@@ -189,12 +189,18 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.equal(link.closed, null);
 });
 
-test("a Hello on every version from ChannelProtocol.Oldest to Version is welcomed", async () => {
+test("a Hello on every version from ChannelProtocol.Oldest to Version is welcomed and one outside is refused", async () => {
   for (let version: number = ChannelProtocol.Oldest; version <= ChannelProtocol.Version; version += 1) {
     const link = setup().connect();
     await link.hello(undefined, version);
     assert.equal(link.closed, null, `protocol version ${version} was refused`);
     assert.equal(link.connection.phase, "Open");
+  }
+  for (const version of [ChannelProtocol.Oldest - 1, ChannelProtocol.Version + 1]) {
+    const link = setup().connect();
+    await link.hello(undefined, version);
+    assert.equal(link.closed?.code, CloseCode.UnsupportedVersion, `protocol version ${version} was not refused`);
+    assert.equal(link.connection.phase, "Closed");
   }
 });
 
