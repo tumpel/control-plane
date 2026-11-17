@@ -632,7 +632,6 @@ export class TenantSessions extends DurableObject<Env> {
     const now = Date.now();
     await this.timers(tenantId, session.session_id, {
       Claim: { turnId: turn.turn_id, at: now + settings.turnClaimBudgetSeconds * 1000 },
-      ImageFetch: null,
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: now + settings.turnTotalBudgetSeconds * 1000 },
       Snapshot: null,
@@ -1063,7 +1062,6 @@ export class TenantSessions extends DurableObject<Env> {
     await this.releaseChunks(tenantId, sessionId);
     await this.timers(tenantId, sessionId, {
       Claim: null,
-      ImageFetch: null,
       FirstLine: null,
       Total: null,
       Snapshot: null,
@@ -1792,15 +1790,7 @@ export class TenantSessions extends DurableObject<Env> {
       sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
     });
-    const settings = settingsOf(this.env);
-    await this.timers(tenantId, session.session_id, {
-      Claim: null,
-      ImageFetch: null,
-      FirstLine: {
-        turnId: turn.turn_id,
-        at: now + (message.cloneSeconds + settings.turnFirstLineBudgetSeconds) * 1000,
-      },
-    });
+    await this.timers(tenantId, session.session_id, { Claim: null });
     return { type: "TurnClaimed", turnId: turn.turn_id };
   }
 
@@ -1814,18 +1804,7 @@ export class TenantSessions extends DurableObject<Env> {
     const { turn, session } = this.offeredTurn(hostId, message);
     const now = Date.now();
     const sql = this.ctx.storage.sql;
-    if (message.type === "TurnImageFetching") {
-      if (turn.state !== "Offered") return;
-      const settings = settingsOf(this.env);
-      return this.timers(tenantId, session.session_id, {
-        Claim: null,
-        ImageFetch: {
-          turnId: turn.turn_id,
-          imageDigest: message.imageDigest,
-          at: now + (settings.turnImageFetchBudgetSeconds + settings.turnClaimBudgetSeconds) * 1000,
-        },
-      });
-    }
+    if (message.type === "TurnImageFetching") return;
     if (message.type === "TurnRepositoryReady") {
       if (turn.state !== "Running" || turn.line_count > 0) return;
       const settings = settingsOf(this.env);
@@ -1853,7 +1832,6 @@ export class TenantSessions extends DurableObject<Env> {
     });
     await this.timers(tenantId, session.session_id, {
       Claim: null,
-      ImageFetch: null,
       FirstLine: null,
       Total: null,
       HostOffline: null,
@@ -1902,21 +1880,12 @@ export class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (due.name === "ImageFetch" && turn.state === "Offered") {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "ImageFetchTimedOut",
-        `host ${host} started fetching guest image ${due.deadline.imageDigest} for the turn and did not claim it within turnImageFetchBudgetSeconds ${settings.turnImageFetchBudgetSeconds} plus turnClaimBudgetSeconds ${settings.turnClaimBudgetSeconds}; check the host's bandwidth to the release bucket or raise turnImageFetchBudgetSeconds, then send the turn again`,
-        failedAt,
-      );
-    }
     if (name === "FirstLine" && turn.state === "Running" && turn.line_count === 0) {
       return this.failTurn(
         tenantId,
         turnId,
         "NoFirstOutput",
-        `the harness wrote no line for the turn within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready, or within the image's cloneSeconds plus turnFirstLineBudgetSeconds of the claim when no TurnRepositoryReady arrived; check the box on host ${host}, then send the turn again`,
+        `the harness wrote no line for the turn within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready; check the box on host ${host}, then send the turn again`,
         failedAt,
       );
     }
@@ -2018,7 +1987,6 @@ export class TenantSessions extends DurableObject<Env> {
     });
     await this.timers(tenantId, turn.session_id, {
       Claim: null,
-      ImageFetch: null,
       FirstLine: null,
       Total: null,
       HostOffline: null,
