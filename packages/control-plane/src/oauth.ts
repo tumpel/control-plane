@@ -89,9 +89,18 @@ const parsedUrl = (value: string): URL | null => {
   }
 };
 
+const REDIRECT_HOST_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+
 export const usableRedirect = (value: string): boolean => {
   const url = parsedUrl(value);
-  return url !== null && url.protocol === "https:" && url.hash === "" && url.username === "" && url.password === "";
+  return (
+    url !== null &&
+    url.protocol === "https:" &&
+    url.hash === "" &&
+    url.username === "" &&
+    url.password === "" &&
+    REDIRECT_HOST_PATTERN.test(url.hostname)
+  );
 };
 
 export const clientName = (name: string | undefined): string =>
@@ -251,7 +260,7 @@ export const pendingAuthorization = async (
       `SELECT r.request_id, r.client_id, c.client_name, c.first_party, r.redirect_uri, r.state, r.state_sent,
         r.code_challenge
       FROM oauth_requests r JOIN oauth_clients c ON c.client_id = r.client_id
-      WHERE r.request_id = ? AND r.expires_at > ?`,
+      WHERE r.request_id = ? AND r.expires_at > ? AND r.spent = 0`,
     )
     .bind(requestId, now)
     .first<{
@@ -280,12 +289,41 @@ export const forgetAuthorization = async (db: D1Database, requestId: string): Pr
   await db.prepare("DELETE FROM oauth_requests WHERE request_id = ?").bind(requestId).run();
 };
 
+export interface RequestClient {
+  clientName: string;
+  redirectUri: string;
+  spent: boolean;
+}
+
+export const requestClient = async (db: D1Database, requestId: string): Promise<RequestClient | null> => {
+  const row = await db
+    .prepare(
+      `SELECT c.client_name, r.redirect_uri, r.spent
+       FROM oauth_requests r
+       JOIN oauth_clients c ON c.client_id = r.client_id
+       WHERE r.request_id = ?`,
+    )
+    .bind(requestId)
+    .first<{ client_name: string; redirect_uri: string; spent: number }>();
+  if (row === null) return null;
+  const redirectUri = parsedUrl(row.redirect_uri);
+  if (redirectUri === null) return null;
+  return { clientName: row.client_name, redirectUri: redirectUri.toString(), spent: row.spent === 1 };
+};
+
 export const grantCode = async (
   db: D1Database,
   request: AuthorizationRequest,
   caller: Caller,
   now: number,
-): Promise<string> => {
+): Promise<string | null> => {
+  const spent = await db
+    .prepare(
+      "UPDATE oauth_requests SET spent = 1 WHERE request_id = ? AND spent = 0 AND expires_at > ? RETURNING request_id",
+    )
+    .bind(request.requestId, now)
+    .first<{ request_id: string }>();
+  if (spent === null) return null;
   const code = randomToken();
   await db.batch([
     db.prepare("DELETE FROM oauth_codes WHERE expires_at <= ?").bind(now),
@@ -304,7 +342,6 @@ export const grantCode = async (
         now,
         now + CODE_TTL_MS,
       ),
-    db.prepare("DELETE FROM oauth_requests WHERE request_id = ?").bind(request.requestId),
   ]);
   return code;
 };
