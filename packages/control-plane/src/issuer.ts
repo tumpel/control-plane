@@ -48,7 +48,7 @@ type NewKey = { kid: string; publicJwk: string; wrappedDataKey: string; privateK
 
 const RS256 = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
 const INSERT_KEY =
-  "INSERT INTO issuer_keys (kid, public_jwk, wrapped_data_key, private_key_sealed, signs_from) SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM issuer_keys)";
+  "INSERT INTO issuer_keys (key_slot, kid, public_jwk, wrapped_data_key, private_key_sealed) VALUES (1, ?, ?, ?, ?) ON CONFLICT (key_slot) DO NOTHING";
 const RESEAL = "SECRETS_KEK no longer opens the issuer's signing key; restore the key it was sealed with";
 const encoder = new TextEncoder();
 
@@ -93,13 +93,13 @@ const newKey = async (keyStore: KeyStore): Promise<NewKey> => {
 
 export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now: () => number) => {
   const signingRow = (): Promise<KeyRow | null> =>
-    db.prepare("SELECT kid, wrapped_data_key, private_key_sealed FROM issuer_keys").first<KeyRow>();
+    db.prepare("SELECT kid, wrapped_data_key, private_key_sealed FROM issuer_keys WHERE key_slot = 1").first<KeyRow>();
 
-  const signing = async (at: number): Promise<KeyRow> => {
+  const signing = async (): Promise<KeyRow> => {
     const row = await signingRow();
     if (row !== null) return row;
     const key = await newKey(keyStore);
-    await db.prepare(INSERT_KEY).bind(key.kid, key.publicJwk, key.wrappedDataKey, key.privateKeySealed, at).run();
+    await db.prepare(INSERT_KEY).bind(key.kid, key.publicJwk, key.wrappedDataKey, key.privateKeySealed).run();
     const created = await signingRow();
     if (created === null)
       throw new Error("issuer_keys holds no signing key right after the insert; check the D1 migrations");
@@ -110,7 +110,7 @@ export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now
     issuer,
     async signIssuerToken(subject: string, audience: string): Promise<IssuedToken> {
       const at = now();
-      const row = await signing(at);
+      const row = await signing();
       const pkcs8 = await unseal(
         await keyStore.unwrap(row.wrapped_data_key),
         row.private_key_sealed,
@@ -139,7 +139,7 @@ export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now
       };
     },
     async publishedKeys(): Promise<IssuerJwk[]> {
-      await signing(now());
+      await signing();
       const { results } = await db.prepare("SELECT public_jwk FROM issuer_keys").all<PublishedRow>();
       return results.map((row) => IssuerJwkSchema.parse(JSON.parse(row.public_jwk)));
     },
