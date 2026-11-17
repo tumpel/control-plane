@@ -48,10 +48,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `GitHubConnections_delete`               | `tumpel_github_delete`                | `tumpel github delete`                |
 | `GitHubConnections_get`                  | `tumpel_github_get`                   | `tumpel github get`                   |
 | `GitHubConnections_list`                 | `tumpel_github_list`                  | `tumpel github list`                  |
-| `GitHubConnections_listAccounts`         | `tumpel_github_list_accounts`         | `tumpel github list-accounts`         |
 | `GitHubConnections_listIssues`           | `tumpel_github_list_issues`           | `tumpel github list-issues`           |
 | `GitHubConnections_listRepositories`     | `tumpel_github_list_repositories`     | `tumpel github list-repositories`     |
-| `GitHubConnections_refresh`              | `tumpel_github_refresh`               | `tumpel github refresh`               |
 | `GitHubConnections_start`                | `tumpel_github_start`                 | `tumpel github start`                 |
 | `HarnessCatalog_list`                    | `tumpel_harness_list`                 | `tumpel harness list`                 |
 | `HarnessCatalog_listPins`                | `tumpel_harness_list_pins`            | `tumpel harness list-pins`            |
