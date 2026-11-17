@@ -844,6 +844,53 @@ test("a turn whose lines arrive up to its completion reads back whole in one pag
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
 });
 
+test("a compact read without a limit returns a turn longer than a chunk in one page", async () => {
+  await createPersona("Long", [
+    { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+    { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-e2e" },
+  ]);
+  const started = await tool(
+    "tumpel_session_start",
+    { ...(await sessionStart("Long")), prompt: "write a very long turn" },
+    StartedSessionSchema,
+  );
+  const { sessionId } = started.session;
+  const offer = await host.next("TurnOffer");
+  const { turnId } = offer;
+  host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+  await eventually(
+    "the turn reading Running",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Running",
+  );
+  const lineCount = 12;
+  Array.from({ length: lineCount }, (_, index) =>
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `line ${index + 1}` }] } }),
+  ).forEach((text, index) => {
+    host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
+  });
+  host.send({ type: "TurnComplete", turnId, lastLineSeq: lineCount, completedAt: new Date().toISOString() });
+  await eventually(
+    "the turn reading Completed",
+    () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+    (turn) => turn.state === "Completed",
+  );
+  const compact = await tool(
+    "tumpel_transcript_read",
+    { sessionId, turnId, compact: true },
+    CompactTranscriptPageSchema,
+  );
+  assert.deepEqual(
+    compact.turns.flatMap((turn) => turn.lines.map((line) => line.lineSeq)),
+    Array.from({ length: lineCount }, (_, index) => index + 1),
+  );
+  assert.equal(compact.finished, true);
+
+  const request = await host.next("SnapshotRequest");
+  await (await server.getWorker<{ STORE: Store }>().getEnv()).STORE.put(request.storageKey, '{"entries":[]}');
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+});
+
 test("lines that arrive during a slow chunk write go into the next chunk, and every line is stored once in order", async () => {
   const bucket = (await server.getWorker<{ STORE: ChunkBucket }>().getEnv()).STORE;
   const tenantId = `ten_${randomBytes(6).toString("hex")}`;

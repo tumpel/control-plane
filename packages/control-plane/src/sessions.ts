@@ -458,6 +458,7 @@ const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
 };
 
 const COMPACT_READ_PASSES = 8;
+const COMPACT_DEFAULT_LIMIT = 1000;
 
 export const readTranscript = async (
   env: Env,
@@ -468,7 +469,7 @@ export const readTranscript = async (
   const compact = query.compact ?? false;
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
   const chunkLines = settingsOf(env).transcriptChunkLines;
-  const limit = query.limit ?? chunkLines;
+  const limit = query.limit ?? (compact ? COMPACT_DEFAULT_LIMIT : chunkLines);
   const readAfter = (page: Page) =>
     tenantOf(env, caller).transcriptCursor(
       caller.tenantId,
