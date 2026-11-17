@@ -26,7 +26,7 @@ import {
   type TenantConfig,
 } from "./configs.ts";
 import { effectiveVersions } from "./harness-catalog.ts";
-import { listHosts, setHostLabels } from "./hosts.ts";
+import { hostOf, listHosts, setHostLabels } from "./hosts.ts";
 import { json, type Problem, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
@@ -125,6 +125,17 @@ const checkedFiles = (
     OPERATION,
   );
 
+const labelRefusal = async (prepare: Prepare, hostId: string): Promise<Response | null> => {
+  const host = await hostOf(prepare.env.DB, prepare.tenantId, hostId);
+  if (host !== null && host.state !== "Revoked") return null;
+  return problem(409, {
+    code: "Conflict",
+    title: "Host gone during apply",
+    detail: `host ${hostId} was revoked or removed after the plan read it`,
+    fix: "Run tumpel config plan again, then apply",
+  });
+};
+
 const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrite | null>> => {
   switch (step.kind) {
     case "CreateSecretSet":
@@ -181,8 +192,11 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
     }
     case "DeletePin":
       return { ok: true, value: { kind: "Unpin", harness: step.harness } };
-    case "LabelHost":
+    case "LabelHost": {
+      const refused = await labelRefusal(prepare, step.host.hostId);
+      if (refused !== null) return { ok: false, response: refused };
       return { ok: true, value: null };
+    }
   }
 };
 
