@@ -281,13 +281,7 @@ const readBundles = (
   return bundles;
 };
 
-const planSecretSets = (
-  desired: ResolvedSet[],
-  live: SecretSet[],
-  sent: Set<string>,
-  steps: Step[],
-  problems: string[],
-): void => {
+const planSecretSets = (desired: ResolvedSet[], live: SecretSet[], rewrite: boolean, steps: Step[]): void => {
   const byName = new Map(live.map((set) => [set.name, set]));
   for (const secretSet of desired) {
     const current = byName.get(secretSet.name);
@@ -298,20 +292,8 @@ const planSecretSets = (
     const wanted = new Set(secretSet.secrets.map(secretIdentity));
     const held = new Set(current.keys.map(keyIdentity));
     const same = wanted.size === held.size && [...wanted].every((key) => held.has(key));
-    if (!same) {
-      steps.push({ kind: "UpdateSecretSet", secretSetId: current.secretSetId, secretSet });
-      continue;
-    }
-    const envs = secretSet.secrets.map(({ secret }) => secret.valueFrom.env);
-    const missing = envs.filter((env) => !sent.has(env));
-    if (missing.length === envs.length) continue;
-    if (missing.length > 0) {
-      problems.push(
-        `secret set ${secretSet.name} is rewritten only with every value it names, and secretValues holds no ${missing.join(", ")}; send all of ${envs.join(", ")} to rewrite it, or none to keep its values`,
-      );
-      continue;
-    }
-    steps.push({ kind: "RewriteSecretSet", secretSetId: current.secretSetId, secretSet });
+    if (!same) steps.push({ kind: "UpdateSecretSet", secretSetId: current.secretSetId, secretSet });
+    else if (rewrite) steps.push({ kind: "RewriteSecretSet", secretSetId: current.secretSetId, secretSet });
   }
 };
 
@@ -476,11 +458,19 @@ export const planOf = (desired: Desired, live: Live): Planned => {
       `persona ${JSON.stringify(persona.name)} names secret set ${JSON.stringify(persona.secretSetName)}, which the config does not hold; add it to secretSets or name one that is there`,
     );
   }
+  const envs = [...new Set(config.secretSets.flatMap((set) => set.secrets.map((secret) => secret.valueFrom.env)))];
+  const rewrite = desired.secretEnvs.size > 0;
+  const uncovered = rewrite ? envs.filter((env) => !desired.secretEnvs.has(env)) : [];
+  if (uncovered.length > 0) {
+    problems.push(
+      `secretValues holds no ${uncovered.join(", ")}; send a value for every variable the secret sets in the file name, or none to keep the stored values of every secret set the file keeps`,
+    );
+  }
   const expiries = new Map(desired.expiryValues.map((each) => [each.env, each.expiresAt]));
   const sets = resolveSets(config, expiries, problems);
   const bundles = readBundles(config, desired.files, problems);
   const steps: Step[] = [];
-  planSecretSets(sets, live.secretSets, desired.secretEnvs, steps, problems);
+  planSecretSets(sets, live.secretSets, rewrite, steps);
   planPersonas(config.personas, bundles, live, steps, problems);
   planPersonaDeletes(config.personas, live, steps, problems);
   planSecretSetDeletes(sets, live.secretSets, steps);
