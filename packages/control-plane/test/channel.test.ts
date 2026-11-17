@@ -325,6 +325,45 @@ test("a frame and message carrying fields this control plane does not know are r
   assert.equal(channel.ledger.current.received, 1);
 });
 
+const telemetryBatch: HostMessage = {
+  type: "TelemetryBatch",
+  instruments: [{ metric: "host.load.1m", unit: "1", kind: "Sample", description: "one-minute load average" }],
+  samples: [{ metric: "host.load.1m", at: "2026-11-17T10:00:00+01:00", value: 0.5, dimensions: {} }],
+  turns: [],
+};
+
+test("a TelemetryBatch on a connection below its version is refused and acked, and the next frame follows it", async () => {
+  const channel = setup();
+  const link = channel.connect();
+  await link.hello(undefined, control.TELEMETRY_BATCH_VERSION - 1);
+  await link.deliver(frame(1, 0, telemetryBatch));
+  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
+  assert.equal(link.closed, null);
+  assert.deepEqual(
+    link.sent.filter((envelope) => envelope.type === "FrameRefused"),
+    [
+      {
+        type: "FrameRefused",
+        seq: 1,
+        reason: `frame 1 carries TelemetryBatch, which needs protocol version ${control.TELEMETRY_BATCH_VERSION}; this connection speaks ${control.TELEMETRY_BATCH_VERSION - 1}, update the supervisor`,
+      },
+    ],
+  );
+  assert.deepEqual(
+    link.events.slice(1).map((event) => event.kind),
+    ["FrameRefused", "Message"],
+  );
+  assert.equal(channel.ledger.current.received, 2);
+});
+
+test("a TelemetryBatch on a connection that speaks its version is accepted as a message", async () => {
+  const link = setup().connect();
+  await link.hello(undefined, control.TELEMETRY_BATCH_VERSION);
+  await link.deliver(frame(1, 0, telemetryBatch));
+  assert.equal(link.closed, null);
+  assert.deepEqual(link.events.at(-1), { kind: "Message", message: telemetryBatch });
+});
+
 test("after a reconnect the control plane resends unacked frames, each turn offer with a freshly minted grant", async () => {
   const channel = setup();
   const first = channel.connect();

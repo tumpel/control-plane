@@ -49,6 +49,32 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   ClaudeSetupBoxDiscard: ChannelProtocol.Oldest,
 };
 
+export type HostMessageVersions = Record<HostMessage["type"], number>;
+
+export const TELEMETRY_BATCH_VERSION = 19;
+
+export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
+  TurnImageFetching: ChannelProtocol.Oldest,
+  TurnClaim: ChannelProtocol.Oldest,
+  TurnRepositoryReady: ChannelProtocol.Oldest,
+  TurnLine: ChannelProtocol.Oldest,
+  TurnComplete: ChannelProtocol.Oldest,
+  TurnRepositoryCloneFailed: ChannelProtocol.Oldest,
+  TurnFailed: ChannelProtocol.Oldest,
+  SnapshotChunks: ChannelProtocol.Oldest,
+  SnapshotPacks: ChannelProtocol.Oldest,
+  RestoreChunks: ChannelProtocol.Oldest,
+  SnapshotDone: ChannelProtocol.Oldest,
+  SnapshotFailed: ChannelProtocol.Oldest,
+  BoxGone: ChannelProtocol.Oldest,
+  BoxTeardownFailed: ChannelProtocol.Oldest,
+  ClaudeSetupBoxUrl: ChannelProtocol.Oldest,
+  ClaudeSetupBoxFailed: ChannelProtocol.Oldest,
+  SupervisorUpdateStep: ChannelProtocol.Oldest,
+  SupervisorUpdateFailed: ChannelProtocol.Oldest,
+  TelemetryBatch: TELEMETRY_BATCH_VERSION,
+};
+
 export const GRANT_ARGUMENTS_VERSION = 18;
 
 export interface ControlHost {
@@ -253,6 +279,15 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") return { connection, event: { kind: "Heartbeat", usage: envelope.usage } };
+  const needed = HOST_MESSAGE_VERSIONS[envelope.message.type];
+  if (needed > connection.protocolVersion) {
+    return refuse(
+      connection,
+      text,
+      `frame ${envelope.seq} carries ${envelope.message.type}, which needs protocol version ${needed}; this connection speaks ${connection.protocolVersion}, update the supervisor`,
+      context,
+    );
+  }
   const outcome = accept(await context.ledger.load(), envelope);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
