@@ -48,6 +48,7 @@ import tenant0047 from "../migrations/tenant/0047_drop_prebuild_default_commands
 import tenant0048 from "../migrations/tenant/0048_prebuild_head_sha.sql";
 import tenant0049 from "../migrations/tenant/0049_supervisor_update_latest_without_updated_at.sql";
 import tenant0050 from "../migrations/tenant/0050_supervisor_update_step_release_and_boxes.sql";
+import tenant0051 from "../migrations/tenant/0051_drop_unused_github_tables.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -101,4 +102,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0048_prebuild_head_sha", sql: tenant0048 },
   { name: "0049_supervisor_update_latest_without_updated_at", sql: tenant0049 },
   { name: "0050_supervisor_update_step_release_and_boxes", sql: tenant0050 },
+  { name: "0051_drop_unused_github_tables", sql: tenant0051 },
 ];

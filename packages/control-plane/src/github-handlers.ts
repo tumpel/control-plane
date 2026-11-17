@@ -1,11 +1,9 @@
 import {
-  GitHubAccountListSchema,
-  type GitHubAccountUnavailableReasonSchema,
   GitHubConnectionSchema,
   GitHubInstallationSchema,
+  type GitHubInstallRefusalSchema,
   GitHubInstallStartSchema,
   GitHubIssueSchema,
-  GitHubRefreshStartSchema,
   GitHubRepositorySchema,
   type WhoamiSchema,
 } from "@tumpel/api/schemas";
@@ -28,7 +26,7 @@ import {
   notTheInstallerPage,
   signInAgainPage,
 } from "@tumpel/pages";
-import { z } from "zod";
+import type { z } from "zod";
 import {
   APP_CREATED_PATH,
   APP_INSTALLED_PATH,
@@ -42,7 +40,6 @@ import {
   type Fetch,
   type GitHubAnswer,
   type GitHubInstallationRecord,
-  type GitHubUser,
   githubRepository,
   installationSettings,
   installedBy,
@@ -53,7 +50,6 @@ import {
   mintInstallationToken,
   mintInstallationWideToken,
   notARepository,
-  type OAuthClient,
   parseJson,
   type RecordedInstaller,
   readState,
@@ -65,9 +61,7 @@ import {
   verifyWebhookSignature,
   WEBHOOK_PATH,
 } from "./github.ts";
-import { accountList, installedRows, readAccounts } from "./github-accounts.ts";
 import {
-  GitHubAccountsRefreshStateSchema,
   GitHubInstallationChoiceQuerySchema,
   GitHubInstallationChoiceStateSchema,
   GitHubInstallationEventSchema,
@@ -83,10 +77,8 @@ import {
 import {
   appKey,
   type GitHubInstallation,
-  holdersOf,
   installationOn,
   installationsOf,
-  installersOf,
   linkInstallation,
   oauthClient,
   recordedInstaller,
@@ -105,7 +97,7 @@ import { type Caller, membershipsOfEmail, whoamiOf } from "./identity";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
-import { dashboardOrigin, htmlPage } from "./pages";
+import { htmlPage } from "./pages";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
 export type SignedInPerson = (request: Request, env: Env) => Promise<PersonCheck>;
@@ -114,8 +106,6 @@ export type Authenticate = (request: Request, env: Env) => Promise<Caller | Resp
 const START_PATH = "/v1/github-connection/start";
 const CONNECTION_PATH = "/v1/github-connection";
 const INSTALLATIONS_PATH = "/v1/github-connection/installations";
-const ACCOUNTS_PATH = "/v1/github-connection/accounts";
-const REFRESH_PATH = "/v1/github-connection/refresh";
 const INSTALLATION_PATH = /^\/v1\/github-connection\/installations\/([^/]+)$/;
 const REPOSITORIES_PATH = "/v1/github-connection/repositories";
 const ISSUES_PATH = /^\/v1\/github-connection\/repositories\/([^/]+)\/([^/]+)\/issues$/;
@@ -174,7 +164,7 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
       code: "InvalidRequest",
       title: "Not a GitHub account id",
       detail: `gitHubAccountId ${account} is not a GitHub account id, which is a positive whole number`,
-      fix: "Pass a gitHubAccountId that gitHubConnections.listAccounts answers, or leave it out to pick the account on GitHub",
+      fix: "Pass the id of a GitHub account or organization, or leave gitHubAccountId out to pick the account on GitHub's install page",
     });
   }
   const app = await storedApp(env.DB);
@@ -191,49 +181,6 @@ const handleStart = async (caller: Caller, url: URL, env: Env): Promise<Response
     ...(gitHubAccountId === null ? {} : { gitHubAccountId }),
   });
   return json(GitHubInstallStartSchema.parse({ installUrl: installUrl(app.slug, state, gitHubAccountId), expiresAt }));
-};
-
-const handleListAccounts = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
-  if ((await storedApp(env.DB)) === null) return appMissing(url.origin);
-  const tenant = env.TENANT.getByName(caller.tenantId);
-  const stored = await tenant.gitHubReading();
-  const installations = await installationsOf(env.DB, caller.tenantId);
-  if (stored === null) {
-    return json(GitHubAccountListSchema.parse({ state: "Unlisted", accounts: installedRows(installations) }));
-  }
-  const reachable = stored.reading.installations.map((installation) => installation.id);
-  const accounts = accountList({
-    tenantId: caller.tenantId,
-    reading: stored.reading,
-    requests: await tenant.installRequests(),
-    installations,
-    holders: await holdersOf(env.DB, reachable),
-    installers: await installersOf(env.DB, reachable),
-    now: Date.now(),
-  });
-  return json(
-    GitHubAccountListSchema.parse({ state: "Listed", refreshedAt: new Date(stored.readAt).toISOString(), accounts }),
-  );
-};
-
-const handleRefresh = async (caller: Caller, url: URL, env: Env): Promise<Response> => {
-  const refused = ownerRequired(caller, "gitHubConnections.refresh");
-  if (refused) return refused;
-  const back = dashboardReturn(url.searchParams.get("returnUrl"), env.DASHBOARD_ORIGIN);
-  if (!back.ok) return returnRefused("gitHubConnections.refresh", back.detail, env);
-  const client = await oauthClient(env.DB, keyStoreOf(env));
-  if (client === null) return appMissing(url.origin);
-  const expiresAt = expiry(Date.now());
-  const { principal } = await whoamiOf(env.DB, caller);
-  const state = await signState(await stateKey(env), {
-    purpose: "AccountsRefresh",
-    tenantId: caller.tenantId,
-    email: principal.email,
-    expiresAt,
-    returnUrl: back.returnUrl ?? `${dashboardOrigin(env)}/t/${encodeURIComponent(caller.tenantId)}/connections`,
-  });
-  const authorizeAt = authorizeUrl(env.GITHUB_WEB_ORIGIN, client.clientId, `${url.origin}${APP_INSTALLED_PATH}`, state);
-  return json(GitHubRefreshStartSchema.parse({ authorizeUrl: authorizeAt, expiresAt }));
 };
 
 const noInstallation = (installationId: string): Response =>
@@ -355,18 +302,14 @@ export const handleGitHubConnection = async (
   const deleting = request.method === "DELETE" ? INSTALLATION_PATH.exec(url.pathname) : null;
   const getting = request.method === "GET";
   const listing = getting && url.pathname === INSTALLATIONS_PATH;
-  const accounts = getting && url.pathname === ACCOUNTS_PATH;
-  const refreshing = url.pathname === REFRESH_PATH && request.method === "POST";
   const repositories = getting && url.pathname === REPOSITORIES_PATH;
   const issuesOf = getting ? ISSUES_PATH.exec(url.pathname) : null;
-  const known = starting || reading || listing || accounts || refreshing || repositories;
+  const known = starting || reading || listing || repositories;
   if (!known && deleting === null && issuesOf === null) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (deleting !== null) return handleDelete(caller, env, decodeURIComponent(deleting[1] ?? ""));
   if (listing) return handleList(caller, env);
-  if (accounts) return handleListAccounts(caller, url, env);
-  if (refreshing) return handleRefresh(caller, url, env);
   if (repositories) return handleRepositories(caller, url, env);
   if (issuesOf !== null) {
     return handleIssues(caller, url, env, decodeURIComponent(issuesOf[1] ?? ""), decodeURIComponent(issuesOf[2] ?? ""));
@@ -428,12 +371,11 @@ const ownedTenants = async (env: Env, email: string): Promise<z.infer<typeof Who
 const ownsTenant = async (env: Env, email: string, tenantId: string): Promise<boolean> =>
   (await ownedTenants(env, email)).some(({ tenant }) => tenant.tenantId === tenantId);
 
-type UnavailableReason = z.infer<typeof GitHubAccountUnavailableReasonSchema>;
-type Refusal = { reason: UnavailableReason; detail: string };
+type Refusal = { reason: z.infer<typeof GitHubInstallRefusalSchema>; detail: string };
 
 const otherTenantRefusal = (record: GitHubInstallationRecord): Refusal => ({
   reason: "OtherTenant",
-  detail: `another Tumpel tenant holds installation ${record.id} on ${record.account.login}; disconnect it there, then refresh`,
+  detail: `another Tumpel tenant holds installation ${record.id} on ${record.account.login}; disconnect it there, then add the account again`,
 });
 
 const unavailablePage = (
@@ -441,12 +383,12 @@ const unavailablePage = (
   url: URL,
   email: string,
   tenantId: string | null,
-  installation: GitHubInstallationRecord,
+  installation: { id: number; login: string },
   refusal: Refusal,
 ): Response => {
   if (refusal.reason === "OtherTenant") {
     return htmlPage(env, url, 409, (links) =>
-      installationInUsePage(links, email, tenantId, installation.account.login, installationSettings(installation.id)),
+      installationInUsePage(links, email, tenantId, installation.login, installationSettings(installation.id)),
     );
   }
   if (refusal.reason === "NotInstaller") {
@@ -472,7 +414,7 @@ const linked = async (
 ): Promise<Response> => {
   const outcome = await linkInstallation(env.DB, tenantId, record, Date.now());
   if (outcome.kind === "OtherTenant")
-    return unavailablePage(env, url, email, tenantId, record, otherTenantRefusal(record));
+    return unavailablePage(env, url, email, tenantId, refusedOn(record), otherTenantRefusal(record));
   const installation = {
     tenantId: outcome.installation.tenantId,
     accountLogin: outcome.installation.accountLogin,
@@ -643,20 +585,20 @@ const startedBy = async (env: Env, url: URL, email: string, stateText: string): 
   return { ok: true, tenantId: state.claims.tenantId, returnUrl: state.claims.returnUrl };
 };
 
-type Verified = { ok: true; installation: GitHubInstallationRecord } | { ok: false; response: Response };
+type Verified =
+  | { kind: "Installer"; installation: GitHubInstallationRecord }
+  | { kind: "AppMissing" }
+  | { kind: "Failed"; detail: string }
+  | { kind: "Refused"; installation: { id: number; login: string }; refusal: Refusal };
 
-const verifiedInstaller = async (
-  env: Env,
-  url: URL,
-  email: string,
-  tenantId: string | null,
-  code: string,
-  installationId: number,
-): Promise<Verified> => {
+const refusedOn = (record: GitHubInstallationRecord): { id: number; login: string } => ({
+  id: record.id,
+  login: record.account.login,
+});
+
+const verifiedInstaller = async (env: Env, code: string, installationId: number): Promise<Verified> => {
   const client = await oauthClient(env.DB, keyStoreOf(env));
-  if (client === null) {
-    return { ok: false, response: htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId)) };
-  }
+  if (client === null) return { kind: "AppMissing" };
   const access = await verifyInstaller(
     fetcher,
     { api: env.GITHUB_API_ORIGIN, web: env.GITHUB_WEB_ORIGIN },
@@ -664,16 +606,12 @@ const verifiedInstaller = async (
     code,
     installationId,
   );
-  if (access.kind === "Failed") {
-    return {
-      ok: false,
-      response: htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, access.detail)),
-    };
-  }
+  if (access.kind === "Failed") return { kind: "Failed", detail: access.detail };
   if (access.kind === "NotInstaller") {
     return {
-      ok: false,
-      response: htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, access.detail)),
+      kind: "Refused",
+      installation: { id: installationId, login: `installation ${installationId}` },
+      refusal: { reason: "NotInstaller", detail: access.detail },
     };
   }
   const { user, installation } = access;
@@ -681,44 +619,28 @@ const verifiedInstaller = async (
     installation.account.type === "User" ? { kind: "Unrecorded" } : await recordedInstaller(env.DB, installation.id);
   const installer = installedBy(user, installation, recorded);
   if (installer.kind !== "Installer") {
-    const refusal = { reason: installer.kind, detail: installer.detail };
-    return { ok: false, response: unavailablePage(env, url, email, tenantId, installation, refusal) };
+    return {
+      kind: "Refused",
+      installation: refusedOn(installation),
+      refusal: { reason: installer.kind, detail: installer.detail },
+    };
   }
-  return { ok: true, installation: installer.installation };
+  return { kind: "Installer", installation: installer.installation };
 };
 
-type LinkOutcome = { kind: "Linked" } | ({ kind: "Unavailable" } & Refusal);
-type Outcome = { installation: GitHubInstallationRecord; outcome: LinkOutcome };
-type Refreshed = { ok: true; outcomes: Map<number, Outcome> } | { ok: false; detail: string };
-
-const linkReachable = async (
+const unverifiedPage = (
   env: Env,
-  tenantId: string,
-  user: GitHubUser,
-  installation: GitHubInstallationRecord,
-  now: number,
-): Promise<LinkOutcome> => {
-  const recorded: RecordedInstaller =
-    installation.account.type === "User" ? { kind: "Unrecorded" } : await recordedInstaller(env.DB, installation.id);
-  const binding = installedBy(user, installation, recorded);
-  if (binding.kind !== "Installer") return { kind: "Unavailable", reason: binding.kind, detail: binding.detail };
-  const linking = await linkInstallation(env.DB, tenantId, installation, now);
-  if (linking.kind === "Linked") return { kind: "Linked" };
-  return { kind: "Unavailable", ...otherTenantRefusal(installation) };
-};
-
-const refreshAccounts = async (env: Env, client: OAuthClient, tenantId: string, code: string): Promise<Refreshed> => {
-  const origins = { api: env.GITHUB_API_ORIGIN, web: env.GITHUB_WEB_ORIGIN };
-  const reading = await readAccounts(fetcher, origins, client, code);
-  if (!reading.ok) return { ok: false, detail: reading.detail };
-  const now = Date.now();
-  const outcomes = new Map<number, Outcome>();
-  for (const installation of reading.value.installations) {
-    const outcome = await linkReachable(env, tenantId, reading.value.user, installation, now);
-    outcomes.set(installation.id, { installation, outcome });
+  url: URL,
+  email: string,
+  tenantId: string | null,
+  verified: Exclude<Verified, { kind: "Installer" }>,
+): Response => {
+  if (verified.kind === "AppMissing")
+    return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId));
+  if (verified.kind === "Failed") {
+    return htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, verified.detail));
   }
-  await env.TENANT.getByName(tenantId).storeGitHubReading(reading.value, now);
-  return { ok: true, outcomes };
+  return unavailablePage(env, url, email, tenantId, verified.installation, verified.refusal);
 };
 
 const RETURN_PARAMETERS = ["from", "refused", "account", "failed"];
@@ -740,24 +662,20 @@ const installReturn = async (
   installationId: number,
 ): Promise<Response> => {
   const { tenantId, returnUrl } = started;
-  const client = await oauthClient(env.DB, keyStoreOf(env));
-  if (client === null) return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId));
-  const refreshed = await refreshAccounts(env, client, tenantId, code);
-  if (!refreshed.ok) {
-    if (returnUrl !== undefined) return backTo(returnUrl, { failed: refreshed.detail });
-    return htmlPage(env, url, 502, (links) => installerUnconfirmedPage(links, email, tenantId, refreshed.detail));
+  const verified = await verifiedInstaller(env, code, installationId);
+  if (verified.kind !== "Installer") {
+    if (returnUrl === undefined || verified.kind === "AppMissing")
+      return unverifiedPage(env, url, email, tenantId, verified);
+    if (verified.kind === "Failed") return backTo(returnUrl, { failed: verified.detail });
+    return backTo(returnUrl, { refused: verified.refusal.reason, account: verified.installation.login });
   }
-  const found = refreshed.outcomes.get(installationId);
-  if (found === undefined) {
-    const detail = `installation ${installationId} is not among the installations of this stage's GitHub App that the GitHub account you authorized can access`;
-    return htmlPage(env, url, 403, (links) => notTheInstallerPage(links, email, tenantId, detail));
-  }
-  const { installation, outcome } = found;
-  if (outcome.kind === "Unavailable") {
+  const { installation } = verified;
+  const linking = await linkInstallation(env.DB, tenantId, installation, Date.now());
+  if (linking.kind === "OtherTenant") {
     if (returnUrl !== undefined) {
-      return backTo(returnUrl, { refused: outcome.reason, account: installation.account.login });
+      return backTo(returnUrl, { refused: "OtherTenant", account: installation.account.login });
     }
-    return unavailablePage(env, url, email, tenantId, installation, outcome);
+    return unavailablePage(env, url, email, tenantId, refusedOn(installation), otherTenantRefusal(installation));
   }
   if (returnUrl !== undefined) return backTo(returnUrl, {});
   const connected = {
@@ -766,22 +684,6 @@ const installReturn = async (
     settingsUrl: installationSettings(installation.id),
   };
   return htmlPage(env, url, 200, (links) => gitHubConnectedPage(links, email, connected));
-};
-
-const accountsReturn = async (
-  env: Env,
-  url: URL,
-  email: string,
-  code: string,
-  claims: z.infer<typeof GitHubAccountsRefreshStateSchema>,
-): Promise<Response> => {
-  const refused = await ownerRefusal(env, url, email, claims, "This GitHub sign-in");
-  if (refused !== null) return refused;
-  const { tenantId, returnUrl } = claims;
-  const client = await oauthClient(env.DB, keyStoreOf(env));
-  if (client === null) return htmlPage(env, url, 409, (links) => noGitHubAppPage(links, email, tenantId));
-  const refreshed = await refreshAccounts(env, client, tenantId, code);
-  return backTo(returnUrl, refreshed.ok ? {} : { failed: refreshed.detail });
 };
 
 const askInstallerIdentity = async (env: Env, url: URL, email: string, installationId: number): Promise<Response> => {
@@ -802,7 +704,7 @@ const handleInstallerIdentity = async (env: Env, url: URL, email: string): Promi
   const state = await readState(
     await stateKey(env),
     callback.data.state,
-    z.union([GitHubAccountsRefreshStateSchema, GitHubInstallerIdentityStateSchema]),
+    GitHubInstallerIdentityStateSchema,
     Date.now(),
   );
   if (!state.ok) {
@@ -816,8 +718,6 @@ const handleInstallerIdentity = async (env: Env, url: URL, email: string): Promi
       `The GitHub sign-in for this installation is no longer valid: ${state.reason}.`,
     );
   }
-  if (state.claims.purpose === "AccountsRefresh")
-    return accountsReturn(env, url, email, callback.data.code, state.claims);
   if (state.claims.email !== email) {
     return refuseInstall(
       env,
@@ -829,8 +729,8 @@ const handleInstallerIdentity = async (env: Env, url: URL, email: string): Promi
       `The GitHub sign-in for this installation was started by ${state.claims.email}, and you are signed in as ${email}. Each person connects GitHub from their own Tumpel session.`,
     );
   }
-  const verified = await verifiedInstaller(env, url, email, null, callback.data.code, state.claims.installationId);
-  if (!verified.ok) return verified.response;
+  const verified = await verifiedInstaller(env, callback.data.code, state.claims.installationId);
+  if (verified.kind !== "Installer") return unverifiedPage(env, url, email, null, verified);
   return confirmInstallation(env, url, email, verified.installation);
 };
 
@@ -846,12 +746,6 @@ const handleInstalled = async (env: Env, url: URL, email: string): Promise<Respo
       action.data.state === undefined
         ? null
         : await readState(await stateKey(env), action.data.state, GitHubInstallStateSchema, Date.now());
-    if (requested?.ok === true && requested.claims.email === email && requested.claims.gitHubAccountId !== undefined) {
-      await env.TENANT.getByName(requested.claims.tenantId).recordInstallRequest(
-        requested.claims.gitHubAccountId,
-        Date.now(),
-      );
-    }
     if (requested?.ok === true && requested.claims.returnUrl !== undefined)
       return backTo(requested.claims.returnUrl, {});
     const tenantId = requested?.ok === true ? requested.claims.tenantId : null;

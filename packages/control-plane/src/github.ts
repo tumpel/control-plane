@@ -2,7 +2,6 @@ import type { DispatchVariable } from "@tumpel/api/credentials";
 import type { GitHubIssueSchema, GitHubRepositorySchema, RepositoryCredentialSourceSchema } from "@tumpel/api/schemas";
 import type { z } from "zod";
 import {
-  type GitHubAccountsRefreshStateSchema,
   GitHubAppConversionSchema,
   type GitHubAppManifestSchema,
   GitHubAppSchema,
@@ -33,7 +32,6 @@ export type GitHubIssueRecord = z.infer<typeof GitHubIssueRecordSchema>;
 export type GitHubState =
   | z.infer<typeof GitHubManifestStateSchema>
   | z.infer<typeof GitHubInstallStateSchema>
-  | z.infer<typeof GitHubAccountsRefreshStateSchema>
   | z.infer<typeof GitHubInstallationChoiceStateSchema>
   | z.infer<typeof GitHubInstallerIdentityStateSchema>;
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;

@@ -11,8 +11,6 @@ import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
-import type { GitHubReading, InstallRequest } from "./github-accounts.ts";
-import { GitHubReadingSchema } from "./github-schemas.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import type { StoredFile } from "./persona-files";
@@ -37,8 +35,6 @@ export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type SecretSetChange = z.infer<typeof SecretSetUpdateSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-
-export type StoredGitHubReading = { reading: GitHubReading; readAt: number };
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
@@ -715,42 +711,5 @@ export class Tenant extends TenantOpenRouterAuthorizations {
 
   unpin(harness: string): boolean {
     return this.ctx.storage.sql.exec("DELETE FROM harness_pins WHERE harness = ?", harness).rowsWritten > 0;
-  }
-
-  gitHubReading(): StoredGitHubReading | null {
-    const [row] = this.ctx.storage.sql
-      .exec<{ reading: string; read_at: number }>(
-        "SELECT reading, read_at FROM github_account_readings WHERE reading_slot = 1",
-      )
-      .toArray();
-    if (row === undefined) return null;
-    return { reading: GitHubReadingSchema.parse(JSON.parse(row.reading)), readAt: row.read_at };
-  }
-
-  storeGitHubReading(reading: GitHubReading, now: number): void {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO github_account_readings (reading_slot, reading, read_at) VALUES (1, ?, ?)
-      ON CONFLICT (reading_slot) DO UPDATE SET reading = excluded.reading, read_at = excluded.read_at`,
-      JSON.stringify(GitHubReadingSchema.parse(reading)),
-      now,
-    );
-  }
-
-  installRequests(): InstallRequest[] {
-    return this.ctx.storage.sql
-      .exec<{ github_account_id: number; requested_at: number }>(
-        "SELECT github_account_id, requested_at FROM github_install_requests",
-      )
-      .toArray()
-      .map((row) => ({ gitHubAccountId: row.github_account_id, requestedAt: row.requested_at }));
-  }
-
-  recordInstallRequest(gitHubAccountId: number, now: number): void {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO github_install_requests (github_account_id, requested_at) VALUES (?, ?)
-      ON CONFLICT (github_account_id) DO UPDATE SET requested_at = excluded.requested_at`,
-      gitHubAccountId,
-      now,
-    );
   }
 }

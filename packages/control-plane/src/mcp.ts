@@ -373,20 +373,6 @@ export const TOOLS: ToolDefinition[] = [
     "Get the URL where a person installs the stage's GitHub App on one more account or organization for the tenant; installations already connected stay. Returns {installUrl, expiresAt}. Hand installUrl to the user to open in a browser before expiresAt; afterwards every turn on a repository of that account gets a short-lived installation token as GITHUB_TOKEN and GH_TOKEN.",
   ),
   rest(
-    "tumpel_github_list_accounts",
-    "GET",
-    "/v1/github-connection/accounts",
-    NO_ARGUMENTS,
-    "List every installation the tenant holds, then the GitHub accounts the person named on the tenant's last return from GitHub: their personal account and each organization they belong to. Returns state Unlisted with only the installations until someone returns from GitHub, or Listed with refreshedAt; each Installed row has installationId, login, status and linkedAt, every other row gitHubAccountId, login, kind, role and state Install, Request, Requested or Unavailable (installationId, reason OtherTenant, NotInstaller or InstallerUnknown).",
-  ),
-  rest(
-    "tumpel_github_refresh",
-    "POST",
-    "/v1/github-connection/refresh",
-    NO_ARGUMENTS,
-    "Get the URL where an Owner signs in to GitHub so the tenant reads their accounts again and links every installation they made that no tenant holds. Returns {authorizeUrl, expiresAt}. Hand authorizeUrl to the user to open in a browser before expiresAt; GitHub sends them back to the dashboard's Connections page.",
-  ),
-  rest(
     "tumpel_github_delete",
     "DELETE",
     "/v1/github-connection/installations/{installationId}",

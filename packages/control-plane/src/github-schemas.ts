@@ -1,4 +1,3 @@
-import { GitHubAccountRoleSchema } from "@tumpel/api/schemas";
 import { z } from "zod";
 
 const GitHubIdSchema = z.int().min(1);
@@ -21,14 +20,6 @@ export const GitHubInstallStateSchema = z.object({
   expiresAt: OffsetDateTimeSchema,
   returnUrl: z.string().url().optional(),
   gitHubAccountId: GitHubIdSchema.optional(),
-});
-
-export const GitHubAccountsRefreshStateSchema = z.object({
-  purpose: z.literal("AccountsRefresh"),
-  tenantId: TenantIdSchema,
-  email: EmailSchema,
-  expiresAt: OffsetDateTimeSchema,
-  returnUrl: z.string().url(),
 });
 
 export const GitHubInstallerIdentityStateSchema = z.object({
@@ -148,25 +139,6 @@ export const GitHubUserSchema = z.object({
 
 export const GitHubUserInstallationsSchema = z.object({
   installations: z.array(z.object({ id: GitHubIdSchema }).loose()),
-});
-
-export const GitHubReachableInstallationsSchema = z.object({
-  installations: z.array(GitHubInstallationRecordSchema),
-});
-
-export const GitHubOrganizationMembershipsSchema = z.array(
-  z.object({
-    role: z.string(),
-    organization: z.object({ id: GitHubIdSchema, login: GitHubLoginSchema }),
-  }),
-);
-
-export const GitHubReadingSchema = z.object({
-  user: z.object({ githubUserId: GitHubIdSchema, login: GitHubLoginSchema }),
-  organizations: z.array(
-    z.object({ gitHubAccountId: GitHubIdSchema, login: GitHubLoginSchema, role: GitHubAccountRoleSchema }),
-  ),
-  installations: z.array(GitHubInstallationRecordSchema),
 });
 
 export const GitHubAppSchema = z.object({

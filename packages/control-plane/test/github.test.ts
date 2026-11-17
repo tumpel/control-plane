@@ -5,10 +5,8 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  GitHubAccountListSchema,
   GitHubInstallStartSchema,
   GitHubIssueSchema,
-  GitHubRefreshStartSchema,
   GitHubRepositorySchema,
   OAuthClientSchema,
   OAuthTokenSchema,
@@ -506,32 +504,15 @@ const MALLORY = "mallory@example.test";
 const ORG_INSTALLATION = { id: 88, account: { id: 500, login: "victimorg", type: "Organization" } };
 const MALLORY_INSTALLATION = { id: 77, account: { id: 3, login: "mallory", type: "User" } };
 const VICTIM_INSTALLATION = { id: 66, account: { id: 1, login: "victim", type: "User" } };
-const VICTIM_ORG = { role: "admin", state: "active", organization: { id: 500, login: "victimorg" } };
 const RIVAL = "rival@example.test";
-const MULTI = "multi@example.test";
-const SHARED_ORG = { id: 120, account: { id: 700, login: "sharedorg", type: "Organization" } };
-const MULTI_PERSONAL = { id: 121, account: { id: 21, login: "multi", type: "User" } };
-const MULTI_ORG = { id: 122, account: { id: 701, login: "multiorg", type: "Organization" } };
-const SHARED_MEMBERSHIP = { role: "admin", state: "active", organization: { id: 700, login: "sharedorg" } };
-const MULTI_MEMBERSHIP = { role: "admin", state: "active", organization: { id: 701, login: "multiorg" } };
-const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[]; organizations: unknown[] }> =
-  {
-    ghu_victim: {
-      id: 1,
-      login: "victim",
-      installations: [ORG_INSTALLATION, VICTIM_INSTALLATION],
-      organizations: [VICTIM_ORG],
-    },
-    ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION], organizations: [VICTIM_ORG] },
-    ghu_mallory: { id: 3, login: "mallory", installations: [MALLORY_INSTALLATION], organizations: [] },
-    ghu_rival: { id: 20, login: "rival", installations: [SHARED_ORG], organizations: [SHARED_MEMBERSHIP] },
-    ghu_multi: {
-      id: 21,
-      login: "multi",
-      installations: [MULTI_PERSONAL, MULTI_ORG, SHARED_ORG],
-      organizations: [MULTI_MEMBERSHIP, SHARED_MEMBERSHIP],
-    },
-  };
+const RIVAL_PERSONAL = { id: 130, account: { id: 20, login: "rival", type: "User" } };
+const RIVAL_ORG = { id: 131, account: { id: 702, login: "rivalorg", type: "Organization" } };
+const GITHUB_PEOPLE: Record<string, { id: number; login: string; installations: unknown[] }> = {
+  ghu_victim: { id: 1, login: "victim", installations: [ORG_INSTALLATION, VICTIM_INSTALLATION] },
+  ghu_coowner: { id: 2, login: "coowner", installations: [ORG_INSTALLATION] },
+  ghu_mallory: { id: 3, login: "mallory", installations: [MALLORY_INSTALLATION] },
+  ghu_rival: { id: 20, login: "rival", installations: [RIVAL_PERSONAL, RIVAL_ORG, MALLORY_INSTALLATION] },
+};
 
 interface Database {
   prepare(query: string): { bind(...values: unknown[]): { first<T>(): Promise<T | null> } };
@@ -588,7 +569,6 @@ const gitHubStandIn = async (request: IncomingMessage, response: ServerResponse)
   if (path.startsWith("/user/installations")) {
     return answer(response, 200, { total_count: person.installations.length, installations: person.installations });
   }
-  if (path.startsWith("/user/memberships/orgs")) return answer(response, 200, person.organizations);
   return answer(response, 404, { message: "Not Found" });
 };
 
@@ -791,45 +771,6 @@ const delivered = async (installation: unknown, senderId: number): Promise<numbe
   return answered.status;
 };
 
-const refreshedBy = async (email: string, tenantId: string, code: string): Promise<HarnessResponse> => {
-  const started = await call(
-    `/v1/github-connection/refresh?${form({ returnUrl: "https://app.tumpel.test/t/x/connections" })}`,
-    {
-      method: "POST",
-      headers: await bearerFor(email, tenantId),
-    },
-  );
-  assert.equal(started.status, 200);
-  const authorizeAt = new URL(GitHubRefreshStartSchema.parse(await started.json()).authorizeUrl);
-  return identified(email, code, authorizeAt.searchParams.get("state") ?? "");
-};
-
-test("one return links every installation the person installed and never moves one another tenant holds", async () => {
-  const rivalTenant = await signUp(RIVAL, "Rival");
-  const multiTenant = await signUp(MULTI, "Multi");
-  assert.equal(await delivered(SHARED_ORG, 20), 204);
-  assert.equal((await refreshedBy(RIVAL, rivalTenant, "rival-code")).status, 303);
-  assert.equal(await linkedTenant(120), rivalTenant);
-
-  assert.equal(await delivered(SHARED_ORG, 21), 204);
-  assert.equal(await delivered(MULTI_ORG, 21), 204);
-  const back = await refreshedBy(MULTI, multiTenant, "multi-code");
-  assert.equal(back.status, 303);
-  assert.equal(new URL(back.headers.get("location") ?? "").searchParams.get("from"), "github");
-  assert.equal(await linkedTenant(121), multiTenant);
-  assert.equal(await linkedTenant(122), multiTenant);
-  assert.equal(await linkedTenant(120), rivalTenant);
-
-  const answered = await call("/v1/github-connection/accounts", { headers: await bearerFor(MULTI, multiTenant) });
-  const listed = GitHubAccountListSchema.parse(await answered.json());
-  assert.deepEqual(
-    listed.accounts.map((account) =>
-      account.state === "Installed" ? `Installed ${account.installationId}` : `${account.state} ${account.login}`,
-    ),
-    ["Installed 121", "Installed 122", "Unavailable sharedorg"],
-  );
-});
-
 test("an organization install connects only for the GitHub account its installation notice names, whichever arrives first", async () => {
   const mallorys = await startedState(MALLORY, malloryTenant);
   await refusedPage(await installed(VICTIM, "victim-code", 88, mallorys), 403, /started by mallory@example.test/);
@@ -844,6 +785,60 @@ test("an organization install connects only for the GitHub account its installat
 
   assert.equal((await installed(VICTIM, "victim-code", 88, victims)).status, 200);
   assert.equal(await linkedTenant(88), victimTenant);
+});
+
+const RETURN_URL = "https://app.tumpel.test/t/rival/connections?tab=github";
+
+const pickerStart = async (email: string, tenantId: string): Promise<string> => {
+  const started = await call(`/v1/github-connection/start?${form({ returnUrl: RETURN_URL })}`, {
+    method: "POST",
+    headers: await bearerFor(email, tenantId),
+  });
+  assert.equal(started.status, 200);
+  const installUrl = new URL(GitHubInstallStartSchema.parse(await started.json()).installUrl);
+  assert.equal(`${installUrl.origin}${installUrl.pathname}`, "https://github.com/apps/tumpel-test/installations/new");
+  assert.deepEqual([...installUrl.searchParams.keys()], ["state"]);
+  return installUrl.searchParams.get("state") ?? "";
+};
+
+const returnedTo = (response: HarnessResponse): Record<string, string> => {
+  assert.equal(response.status, 303);
+  const location = new URL(response.headers.get("location") ?? "");
+  assert.equal(`${location.origin}${location.pathname}`, "https://app.tumpel.test/t/rival/connections");
+  const { tab, ...outcome } = Object.fromEntries(location.searchParams);
+  assert.equal(tab, "github");
+  return outcome;
+};
+
+test("adding an account opens GitHub's install picker, and every outcome returns to the dashboard page that started it", async () => {
+  const rivalTenant = await signUp(RIVAL, "Rival");
+  const secondTenant = await signUp(RIVAL, "Rival Two");
+
+  const linked = await installed(RIVAL, "rival-code", 130, await pickerStart(RIVAL, rivalTenant));
+  assert.deepEqual(returnedTo(linked), { from: "github" });
+  assert.equal(await linkedTenant(130), rivalTenant);
+
+  const held = await installed(RIVAL, "rival-code", 130, await pickerStart(RIVAL, secondTenant));
+  assert.deepEqual(returnedTo(held), { from: "github", refused: "OtherTenant", account: "rival" });
+  assert.equal(await linkedTenant(130), rivalTenant);
+
+  const notInstaller = await installed(RIVAL, "rival-code", 77, await pickerStart(RIVAL, secondTenant));
+  assert.deepEqual(returnedTo(notInstaller), { from: "github", refused: "NotInstaller", account: "mallory" });
+
+  const unknown = await installed(RIVAL, "rival-code", 131, await pickerStart(RIVAL, secondTenant));
+  assert.deepEqual(returnedTo(unknown), { from: "github", refused: "InstallerUnknown", account: "rivalorg" });
+  assert.equal(await linkedTenant(131), null);
+
+  const failed = returnedTo(await installed(RIVAL, "nobody-code", 131, await pickerStart(RIVAL, secondTenant)));
+  assert.equal(failed.from, "github");
+  assert.match(failed.failed ?? "", /Bad credentials|401/);
+});
+
+test("a request an organization member makes directly on GitHub shows the requested page", async () => {
+  const requested = await call(`/github/app/installed?${form({ setup_action: "request" })}`, {
+    headers: signedIn(RIVAL),
+  });
+  assert.equal(requested.status, 202);
 });
 
 test("a repository is read from owner/name as from its GitHub URL, and anything else is no GitHub repository", () => {
