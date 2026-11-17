@@ -65,7 +65,7 @@ import { handleCircleCIAuthorizations } from "./circleci-authorizations.ts";
 import { handleCircleCIEvents } from "./circleci-events.ts";
 import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
-import { applyConfig, type Call, planConfig } from "./configs.ts";
+import { applyConfig, type Call, type PersonaCheck, planConfig } from "./configs.ts";
 import { handleConnections } from "./connections.ts";
 import { randomToken, sameSecret } from "./crypto";
 import {
@@ -169,7 +169,7 @@ import {
   SIGN_UP_PATH,
   wantsHtml,
 } from "./pages";
-import { checkFiles, personaFileKey, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { checkFiles, personaFileKey, type StoredFile, storeFiles, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
@@ -185,7 +185,7 @@ import {
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { credentialRefused, handleSessions } from "./sessions";
-import type { PersonaWrite, Tenant } from "./tenant";
+import type { HarnessPinWrite, PersonaWrite, Tenant } from "./tenant";
 
 export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
@@ -347,7 +347,27 @@ const handleConfigApply = async (request: Request, url: URL, env: Env): Promise<
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, TenantConfigApplySchema, "tenantConfigs.apply");
   if (!body.ok) return body.response;
-  return applyConfig(body.value, callAs(env, caller, url.origin));
+  const operation = "tenantConfigs.apply";
+  const tenant = env.TENANT.getByName(caller.tenantId);
+  return applyConfig(body.value, {
+    call: callAs(env, caller, url.origin),
+    tokenUser: async (secrets) => {
+      const read = await repositoryTokenUser(env, secrets, operation);
+      return read.ok ? { ok: true, value: read.user } : read;
+    },
+    personaFiles: (check) => personaFiles(env, caller.tenantId, check, operation),
+    pinRefusal: (pin) => pinRefusal(env, caller.tenantId, pin),
+    commit: async (writes) => {
+      const written = await tenant.applyConfig(caller.tenantId, writes, Date.now());
+      if (written.ok) return null;
+      return problem(409, {
+        code: "Conflict",
+        title: "Tenant changed during apply",
+        detail: `${operation} broke the constraint ${written.constraint}, which a change made while it ran now holds; nothing was changed`,
+        fix: "Run tumpel config plan again, then apply",
+      });
+    },
+  });
 };
 
 const handleGrantsList = async (request: Request, env: Env): Promise<Response> => {
@@ -455,37 +475,64 @@ const personaWrite = async (
   const read = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
   if (read.kind === "NotFound") return { ok: false, response: unknownSecretSet(body.secretSetId) };
   if (read.kind === "Unreadable") return { ok: false, response: unreadable(operation, read) };
-  const { secretSet } = read;
-  const entry = pinnedEntry(await tenant.listPins(), body.harness);
-  if (entry === undefined) {
-    return {
-      ok: false,
-      response: problem(422, {
-        code: "HarnessNotInCatalog",
-        title: "Harness not in the catalog",
-        detail: `${operation} names ${body.harness}, of which the catalog holds no version your tenant can run`,
-        fix: "Name a harness the harness catalog lists, or pin one of its listed versions",
-      }),
-    };
-  }
-  const credential = checkCredential(entry, secretSet.keys, Date.now());
-  if (credential.kind === "Unsupported" || (credential.kind === "NoCredential" && newSecretSet)) {
-    const refused = credentialRefused(credential, `secret set ${secretSet.name}`, body.harness, `repeat ${operation}`);
-    return { ok: false, response: problem(refused.status, refused.problem) };
-  }
-  const checked = await checkFiles(entry, body.files ?? [], operation);
-  if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
-  const stored = await storeFiles(env.STORE, caller.tenantId, checked.files, operation);
-  if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };
+  const stored = await personaFiles(
+    env,
+    caller.tenantId,
+    {
+      harness: body.harness,
+      files: body.files ?? [],
+      secretSetName: read.secretSet.name,
+      members: read.secretSet.keys,
+      pins: await tenant.listPins(),
+      newSecretSet,
+    },
+    operation,
+  );
+  if (!stored.ok) return stored;
   return {
     ok: true,
     value: {
       name: body.name,
       harness: body.harness,
       secretSetId: body.secretSetId,
-      files: stored.files,
+      files: stored.value,
     },
   };
+};
+
+const personaFiles = async (
+  env: Env,
+  tenantId: string,
+  check: PersonaCheck,
+  operation: string,
+): Promise<{ ok: true; value: StoredFile[] } | { ok: false; response: Response }> => {
+  const entry = pinnedEntry(check.pins, check.harness);
+  if (entry === undefined) {
+    return {
+      ok: false,
+      response: problem(422, {
+        code: "HarnessNotInCatalog",
+        title: "Harness not in the catalog",
+        detail: `${operation} names ${check.harness}, of which the catalog holds no version your tenant can run`,
+        fix: "Name a harness the harness catalog lists, or pin one of its listed versions",
+      }),
+    };
+  }
+  const credential = checkCredential(entry, check.members, Date.now());
+  if (credential.kind === "Unsupported" || (credential.kind === "NoCredential" && check.newSecretSet)) {
+    const refused = credentialRefused(
+      credential,
+      `secret set ${check.secretSetName}`,
+      check.harness,
+      `repeat ${operation}`,
+    );
+    return { ok: false, response: problem(refused.status, refused.problem) };
+  }
+  const checked = await checkFiles(entry, check.files, operation);
+  if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
+  const stored = await storeFiles(env.STORE, tenantId, checked.files, operation);
+  if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };
+  return { ok: true, value: stored.files };
 };
 
 const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -743,21 +790,25 @@ const unreleasedPin = async (
   });
 };
 
+const pinRefusal = async (env: Env, tenantId: string, pin: HarnessPinWrite): Promise<Response | null> => {
+  if (!inCatalog(pin.harness, pin.harnessVersion)) {
+    return problem(422, {
+      code: "HarnessNotInCatalog",
+      title: "Harness version not in the catalog",
+      detail: `the catalog has no ${pin.harness} ${pin.harnessVersion}`,
+      fix: "Pin a version the harness catalog lists",
+    });
+  }
+  return unreleasedPin(env, tenantId, pin.harness, pin.harnessVersion);
+};
+
 const handlePin = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, HarnessPinCreateSchema, "harnessCatalog.pin");
   if (!body.ok) return body.response;
-  if (!inCatalog(body.value.harness, body.value.harnessVersion)) {
-    return problem(422, {
-      code: "HarnessNotInCatalog",
-      title: "Harness version not in the catalog",
-      detail: `the catalog has no ${body.value.harness} ${body.value.harnessVersion}`,
-      fix: "Pin a version the harness catalog lists",
-    });
-  }
-  const unreleased = await unreleasedPin(env, caller.tenantId, body.value.harness, body.value.harnessVersion);
-  if (unreleased !== null) return unreleased;
+  const refused = await pinRefusal(env, caller.tenantId, body.value);
+  if (refused !== null) return refused;
   const pinned = await env.TENANT.getByName(caller.tenantId).pin(body.value, Date.now());
   return json(HarnessPinSchema.parse(pinned));
 };

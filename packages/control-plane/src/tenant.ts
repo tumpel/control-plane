@@ -7,6 +7,7 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/api/schemas";
 import type { z } from "zod";
+import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
@@ -584,6 +585,87 @@ export class Tenant extends TenantOpenRouterAuthorizations {
       this.ctx.storage.sql
         .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM secret_sets WHERE secret_set_id = ?", secretSetId)
         .toArray().length > 0
+    );
+  }
+
+  private writeConfig(tenantId: string, write: ConfigWrite, sealed: Map<string, SealedMember[]>, now: number): void {
+    const sql = this.ctx.storage.sql;
+    switch (write.kind) {
+      case "CreateSecretSet":
+        sql.exec(
+          "INSERT INTO secret_sets (secret_set_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+          write.secretSetId,
+          write.secretSet.name,
+          now,
+          now,
+        );
+        this.writeSecrets(write.secretSetId, sealed.get(write.secretSetId) ?? [], write.githubUser, now);
+        return;
+      case "RewriteSecretSet": {
+        const updated = sql.exec(
+          "UPDATE secret_sets SET name = ?, updated_at = ? WHERE secret_set_id = ?",
+          write.secretSet.name,
+          now,
+          write.secretSetId,
+        );
+        if (updated.rowsWritten === 0) throw new Error(`secret set ${write.secretSetId} was deleted while apply ran`);
+        this.writeSecrets(write.secretSetId, sealed.get(write.secretSetId) ?? [], write.githubUser, now);
+        return;
+      }
+      case "DeleteSecretSet":
+        sql.exec("DELETE FROM secret_sets WHERE secret_set_id = ?", write.secretSetId);
+        return;
+      case "CreatePersona": {
+        const personaId = crypto.randomUUID();
+        sql.exec(
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          personaId,
+          tenantId,
+          write.persona.name,
+          write.persona.harness,
+          write.persona.secretSetId,
+          now,
+          now,
+        );
+        this.writeFiles(personaId, write.persona.files, now);
+        return;
+      }
+      case "UpdatePersona": {
+        const updated = sql.exec(
+          "UPDATE personas SET name = ?, secret_set_id = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          write.persona.name,
+          write.persona.secretSetId,
+          now,
+          tenantId,
+          write.personaId,
+        );
+        if (updated.rowsWritten === 0) throw new Error(`persona ${write.personaId} was deleted while apply ran`);
+        this.writeFiles(write.personaId, write.persona.files, now);
+        return;
+      }
+      case "DeletePersona":
+        sql.exec("DELETE FROM personas WHERE tenant_id = ? AND persona_id = ?", tenantId, write.personaId);
+        return;
+      case "Pin":
+        this.pin(write.pin, now);
+        return;
+      case "Unpin":
+        this.unpin(write.harness);
+        return;
+    }
+  }
+
+  async applyConfig(tenantId: string, writes: ConfigWrite[], now: number): Promise<Written<null>> {
+    const sealed = new Map<string, SealedMember[]>();
+    for (const write of writes) {
+      if (write.kind !== "CreateSecretSet" && write.kind !== "RewriteSecretSet") continue;
+      sealed.set(write.secretSetId, await this.sealMembers(write.secretSetId, write.secretSet.secrets, now));
+    }
+    return uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        for (const write of writes) this.writeConfig(tenantId, write, sealed, now);
+        return null;
+      }),
     );
   }
 
