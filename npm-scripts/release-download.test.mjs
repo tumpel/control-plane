@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { supervisorRefusal } from "./release-download.mjs";
+import { checkedPins, supervisorRefusal } from "./release-download.mjs";
 
 const CHANNEL = { Oldest: 18, Version: 19 };
 const GUEST = { Oldest: 9, Version: 11 };
@@ -40,5 +40,28 @@ test("a pinned supervisor whose window misses this commit's or the images' guest
   assert.match(
     supervisorRefusal({ ...RELEASE, guestProtocolOldest: 10 }, CHANNEL, GUEST, 9),
     /speaks guest protocol 10 to 11, and the guests of the image release speak 9/,
+  );
+});
+
+test("stage dev runs a supervisor dev build, and every stage runs a stable supervisor", () => {
+  assert.deepEqual(checkedPins({ supervisor: "0.1.22-main.3", cli: "0.4.0" }, "dev"), {
+    supervisor: "0.1.22-main.3",
+    cli: "0.4.0",
+  });
+  assert.deepEqual(checkedPins({ supervisor: "0.1.22", cli: "0.4.0" }, "prod"), { supervisor: "0.1.22", cli: "0.4.0" });
+});
+
+test("a supervisor dev build pinned outside stage dev, or any other version, is refused", () => {
+  assert.throws(
+    () => checkedPins({ supervisor: "0.1.22-main.3", cli: "0.4.0" }, "prod"),
+    /dev build 0\.1\.22-main\.3, and only stage dev runs dev builds; pin a stable X\.Y\.Z for prod/,
+  );
+  assert.throws(
+    () => checkedPins({ supervisor: "0.1.22-rc.1", cli: "0.4.0" }, "dev"),
+    /not X\.Y\.Z or X\.Y\.Z-main\.N/,
+  );
+  assert.throws(
+    () => checkedPins({ supervisor: "0.1.22", cli: "0.4.0-main.1" }, "dev"),
+    /cli 0\.4\.0-main\.1, not X\.Y\.Z/,
   );
 });
