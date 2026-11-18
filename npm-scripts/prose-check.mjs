@@ -4,11 +4,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const SCOPES = [
-  ["packages/dashboard/src/**.ts", "packages/dashboard/src/**.tsx"],
-  ["packages/control-plane/src/**.ts"],
-];
-const OUT_OF_SCOPE = [/\/stories\//, /\.test\.tsx?$/, /\.stories\.tsx$/];
+const SCOPES = [["packages/control-plane/src/**.ts"]];
+const OUT_OF_SCOPE = [/\.test\.ts$/];
 const SHAPES = [
   ["a gap id", /\bG\d{1,3}\b/],
   ["a requirement id", /\b(?:N?FR|OR)-\d+/],

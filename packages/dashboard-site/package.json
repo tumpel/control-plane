@@ -1,0 +1,20 @@
+{
+  "name": "@tumpel/dashboard-site",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "test": "node --test --test-timeout=60000 test/*.test.ts"
+  },
+  "dependencies": {
+    "@tumpel/dashboard": "https://github.com/tumpel/dashboard/releases/download/v0.1.0/dashboard-0.1.0.tgz"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.0",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.150.0"
+  }
+}

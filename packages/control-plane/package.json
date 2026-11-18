@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v0.2.0/tumpel-api-0.2.0.tgz",
-    "@tumpel/pages": "*",
+    "@tumpel/pages": "https://github.com/tumpel/dashboard/releases/download/v0.1.0/pages-0.1.0.tgz",
     "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.2.0/tumpel-schemas-0.2.0.tgz",
     "zod": "^4.6.7"
   }
