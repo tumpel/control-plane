@@ -1,4 +1,5 @@
 import {
+  BoxDiskLimit,
   BoxMemoryLimit,
   type ConfigFileDigestSchema,
   ConfigPlanSchema,
@@ -172,6 +173,7 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
             harness: step.persona.harness,
             secretSetId,
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
+            boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
             files: files.value,
           },
         },
@@ -191,6 +193,7 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
             name: step.persona.name,
             secretSetId,
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
+            boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
             files: files.value,
           },
         },

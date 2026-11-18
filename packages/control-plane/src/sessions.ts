@@ -114,6 +114,9 @@ export const why = (refused: Unplaceable): string => {
   if (refused.reason === "NoMemory") {
     return `${named} has ${refused.usage.memoryAvailableMib} MiB of memory available, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
   }
+  if (refused.reason === "NoDisk") {
+    return `${named} gives box disks ${refused.usage.diskBudgetMib} MiB and its boxes hold ${refused.usage.diskHeldMib} MiB of it, and the persona's boxes need ${refused.boxDiskMib} MiB`;
+  }
   return `${named} runs a turn in all ${refused.usage.boxCapacity} of its box slots`;
 };
 
@@ -121,6 +124,9 @@ export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoMemory")) {
     return `Lower the persona's boxMemoryMib toward the 4096 MiB default, free memory on a host, or enrol a host with more memory, then ${retry}`;
+  }
+  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoDisk")) {
+    return `Lower the persona's boxDiskMib toward the 32768 MiB default, free disk on a host, or enrol a host with more disk, then ${retry}`;
   }
   if (lacking === undefined) {
     return `Start the supervisor on a host, or enrol a new host, then ${retry}`;

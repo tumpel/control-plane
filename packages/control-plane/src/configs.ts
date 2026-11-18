@@ -1,4 +1,5 @@
 import {
+  BoxDiskLimit,
   BoxMemoryLimit,
   type ConfigChangeSchema,
   type ConfigSecretSetSchema,
@@ -35,6 +36,7 @@ type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
 type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId"> & {
   boxMemoryMib: number;
+  boxDiskMib: number;
   files: StoredFile[];
 };
 
@@ -315,6 +317,7 @@ const planPersonas = (
     const unchanged =
       setIds.get(persona.secretSetName) === current.secretSetId &&
       (persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib) === current.boxMemoryMib &&
+      (persona.boxDiskMib ?? BoxDiskLimit.DefaultMib) === current.boxDiskMib &&
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {

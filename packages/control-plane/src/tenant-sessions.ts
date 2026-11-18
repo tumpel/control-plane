@@ -64,7 +64,13 @@ import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
-import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
+import {
+  type BoxSize,
+  type ImageAvailability,
+  placeSession,
+  type ReportedHostUsage,
+  type Unplaceable,
+} from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, imagesFor, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
@@ -173,6 +179,7 @@ type SessionRow = {
   last_line_seq: number;
   endpoint: string;
   box_memory_mib: number;
+  box_disk_mib: number;
   created_at: number;
   updated_at: number;
 };
@@ -183,6 +190,7 @@ type SessionViewRow = SessionRow & {
   last_turn_box_id: string;
   last_turn_prompt: string;
   last_turn_goal: string | null;
+  last_turn_warning: string | null;
   last_turn_state: string;
   last_turn_line_count: number;
   last_turn_created_at: number;
@@ -203,6 +211,7 @@ type TurnRow = {
   box_id: string;
   prompt: string;
   goal: string | null;
+  warning: string | null;
   state: string;
   line_count: number;
   created_at: number;
@@ -277,6 +286,8 @@ type HostUsageRow = {
   load_average: number;
   memory_available_mib: number;
   channel_protocol: number;
+  disk_budget_mib: number | null;
+  disk_held_mib: number | null;
   created_at: number;
   updated_at: number;
 };
@@ -314,13 +325,13 @@ type SnapshotRequestRow = {
 };
 
 const SESSION_SELECT =
-  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, created_at, updated_at FROM sessions";
+  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, box_disk_mib, created_at, updated_at FROM sessions";
 const TURN_SELECT = `SELECT * FROM (
-  SELECT turn_id, turns.session_id, host_id, box_id, prompt, (SELECT goal FROM turn_goals WHERE turn_goals.turn_id = turns.turn_id) AS goal, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
+  SELECT turn_id, turns.session_id, host_id, box_id, prompt, (SELECT goal FROM turn_goals WHERE turn_goals.turn_id = turns.turn_id) AS goal, (SELECT warning FROM turn_warnings WHERE turn_warnings.turn_id = turns.turn_id) AS warning, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
   FROM turns LEFT JOIN turn_failures USING (turn_id)
 )`;
-const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.box_memory_mib, s.created_at, s.updated_at,
-  t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.goal AS last_turn_goal, t.state AS last_turn_state,
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.box_memory_mib, s.box_disk_mib, s.created_at, s.updated_at,
+  t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.goal AS last_turn_goal, t.warning AS last_turn_warning, t.state AS last_turn_state,
   t.line_count AS last_turn_line_count, t.created_at AS last_turn_created_at, t.updated_at AS last_turn_at,
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
   i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch
@@ -413,6 +424,7 @@ const toSession = (
         box_id: row.last_turn_box_id,
         prompt: row.last_turn_prompt,
         goal: row.last_turn_goal,
+        warning: row.last_turn_warning,
         state: row.last_turn_state,
         line_count: row.last_turn_line_count,
         created_at: row.last_turn_created_at,
@@ -440,6 +452,7 @@ const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null):
     state: row.state,
     lineCount: row.line_count,
     ...(row.state === "Failed" ? { reason: row.reason, detail: row.detail, failedAt: row.failed_at } : {}),
+    ...(row.state === "Completed" && row.warning !== null ? { warning: row.warning } : {}),
     image: image ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -493,6 +506,11 @@ const toLine = (tenantId: string, row: PendingRow): TranscriptLine =>
   });
 
 const iso = (at: number): string => new Date(at).toISOString();
+
+const boxSizeOf = (session: SessionRow): BoxSize => ({
+  boxMemoryMib: session.box_memory_mib,
+  boxDiskMib: session.box_disk_mib,
+});
 
 export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
   sql
@@ -705,21 +723,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  protected personaRow(personaId: string): { secretSetId: string; boxMemoryMib: number } | null {
+  protected personaRow(personaId: string): { secretSetId: string; boxMemoryMib: number; boxDiskMib: number } | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ secret_set_id: string; box_memory_mib: number }>(
-        "SELECT secret_set_id, box_memory_mib FROM personas WHERE persona_id = ?",
+      .exec<{ secret_set_id: string; box_memory_mib: number; box_disk_mib: number }>(
+        "SELECT secret_set_id, box_memory_mib, box_disk_mib FROM personas WHERE persona_id = ?",
         personaId,
       )
       .toArray();
     if (row === undefined) return null;
-    return { secretSetId: row.secret_set_id, boxMemoryMib: row.box_memory_mib };
+    return { secretSetId: row.secret_set_id, boxMemoryMib: row.box_memory_mib, boxDiskMib: row.box_disk_mib };
   }
 
-  private boxMemoryMib(personaId: string): number {
+  private boxSize(personaId: string): { boxMemoryMib: number; boxDiskMib: number } {
     const persona = this.personaRow(personaId);
-    if (persona === null) throw new Error(`persona ${personaId} is gone, so its box memory is unknown`);
-    return persona.boxMemoryMib;
+    if (persona === null) throw new Error(`persona ${personaId} is gone, so its box size is unknown`);
+    return persona;
   }
 
   private secretSetName(session: SessionRow): string {
@@ -985,6 +1003,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       model: session.model,
       prompt: offerPrompt(session.harness, turn),
       boxMemoryMib: session.box_memory_mib,
+      boxDiskMib: session.box_disk_mib,
       ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
   }
@@ -997,6 +1016,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       box_id: boxId,
       prompt: send.prompt,
       goal: send.goal ?? null,
+      warning: null,
       state: "Offered",
       line_count: 0,
       created_at: now,
@@ -1044,6 +1064,24 @@ export abstract class TenantSessions extends DurableObject<Env> {
       now,
       channelProtocol,
     );
+    this.hostDiskUsage(hostId, usage, now);
+  }
+
+  private hostDiskUsage(hostId: string, usage: HostUsage, now: number): void {
+    const sql = this.ctx.storage.sql;
+    if (usage.diskBudgetMib === undefined || usage.diskHeldMib === undefined) {
+      sql.exec("DELETE FROM host_disk_usage WHERE host_id = ?", hostId);
+      return;
+    }
+    sql.exec(
+      `INSERT INTO host_disk_usage (host_id, disk_budget_mib, disk_held_mib, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT (host_id) DO UPDATE SET disk_budget_mib = excluded.disk_budget_mib, disk_held_mib = excluded.disk_held_mib,
+        updated_at = excluded.updated_at`,
+      hostId,
+      usage.diskBudgetMib,
+      usage.diskHeldMib,
+      now,
+    );
   }
 
   hostUsage(hostId: string, usage: HostUsage, now: number): void {
@@ -1058,6 +1096,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (updated.rowsWritten === 0) {
       throw new Error(`host ${hostId} sent a Heartbeat, but its tenant holds no usage from its Hello`);
     }
+    this.hostDiskUsage(hostId, usage, now);
   }
 
   async failLostTurns(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
@@ -1102,7 +1141,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
     return sql
       .exec<HostUsageRow>(
-        "SELECT host_id, box_capacity, boxes_warm, load_average, memory_available_mib, channel_protocol, created_at, updated_at FROM host_usage ORDER BY created_at, host_id",
+        `SELECT u.host_id, u.box_capacity, u.boxes_warm, u.load_average, u.memory_available_mib, u.channel_protocol,
+          d.disk_budget_mib, d.disk_held_mib, u.created_at, u.updated_at
+        FROM host_usage u LEFT JOIN host_disk_usage d ON d.host_id = u.host_id ORDER BY u.created_at, u.host_id`,
       )
       .toArray()
       .map((row) => ({
@@ -1113,6 +1154,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         boxesWarm: row.boxes_warm,
         loadAverage: row.load_average,
         memoryAvailableMib: row.memory_available_mib,
+        ...(row.disk_budget_mib === null || row.disk_held_mib === null
+          ? {}
+          : { diskBudgetMib: row.disk_budget_mib, diskHeldMib: row.disk_held_mib }),
         channelProtocol: row.channel_protocol,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -1243,8 +1287,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    const boxMemoryMib = this.boxMemoryMib(start.personaId);
-    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image, boxMemoryMib);
+    const { boxMemoryMib, boxDiskMib } = this.boxSize(start.personaId);
+    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image, {
+      boxMemoryMib,
+      boxDiskMib,
+    });
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
@@ -1260,13 +1307,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       last_line_seq: 0,
       endpoint: input.endpoint,
       box_memory_mib: boxMemoryMib,
+      box_disk_mib: boxDiskMib,
       created_at: now,
       updated_at: now,
     };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, box_disk_mib, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         session.session_id,
         session.principal_id,
         session.host_id,
@@ -1280,6 +1328,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.last_line_seq,
         session.endpoint,
         session.box_memory_mib,
+        session.box_disk_mib,
         session.created_at,
         session.updated_at,
       );
@@ -1319,7 +1368,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return image;
     const from = await this.hostName(tenantId, session.host_id);
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image, session.box_memory_mib);
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image, boxSizeOf(session));
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
@@ -1357,7 +1406,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const usages = this.listHostUsage(tenantId).map((usage) =>
       usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
     );
-    const placement = placeSession(hosts, usages, image.image, session.box_memory_mib);
+    const placement = placeSession(hosts, usages, image.image, boxSizeOf(session));
     if (placement.kind === "Refused") return stay();
     if (placement.host.hostId === session.host_id) {
       return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
@@ -2418,7 +2467,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
     const now = Date.now();
-    if (message.reason === "PoolExhausted" && turn.state === "Offered") return this.deferOffer(session, turn, now);
+    if (message.reason === "PoolExhausted" && turn.state === "Offered") {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO turn_refusals (turn_id, host_id, detail, refused_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id, detail = excluded.detail, refused_at = excluded.refused_at`,
+        turn.turn_id,
+        hostId,
+        message.detail,
+        now,
+      );
+      return this.deferOffer(session, turn, now);
+    }
     if (message.reason === "HostUpdating" && turn.state === "Offered")
       return this.offerElsewhere(tenantId, session, turn);
     const stopped = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
@@ -2525,6 +2584,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     await this.endTurn(tenantId, turn, now, () => {
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
+      if (message.warning !== undefined)
+        sql.exec(
+          "INSERT INTO turn_warnings (turn_id, warning, created_at) VALUES (?, ?, ?)",
+          turn.turn_id,
+          message.warning,
+          now,
+        );
       sql.exec(
         "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
         prebuild ? "Stopping" : "Idle",
@@ -2603,6 +2669,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (name === "Total" && turn.state === "Offered") {
+      const [refusal] = this.ctx.storage.sql
+        .exec<{ host_id: string; detail: string }>(
+          "SELECT host_id, detail FROM turn_refusals WHERE turn_id = ?",
+          turnId,
+        )
+        .toArray();
+      if (refusal !== undefined) {
+        return this.failTurn(
+          tenantId,
+          turnId,
+          "Undelivered",
+          `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${await this.hostName(tenantId, refusal.host_id)} last refused it: ${refusal.detail}`,
+          failedAt,
+        );
+      }
       const presence = (await this.hostOffline(session.host_id)) ? "is offline" : "is online but never claimed it";
       return this.failTurn(
         tenantId,

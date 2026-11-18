@@ -64,7 +64,7 @@ const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
-const USAGE = { boxesWarm: 0, loadAverage: 0.25, memoryAvailableMib: 6144 };
+const USAGE = { boxesWarm: 0, loadAverage: 0.25, memoryAvailableMib: 6144, diskBudgetMib: 200000, diskHeldMib: 32768 };
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
@@ -898,12 +898,22 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(started.turn.state, "Offered");
     const [usage] = await getJson("/v1/hosts/usage", ReportedHostUsageSchema.array());
     assert.deepEqual(
-      { hostId: usage?.hostId, boxCapacity: usage?.boxCapacity, boxesRunning: usage?.boxesRunning },
-      { hostId, boxCapacity: 8, boxesRunning: 1 },
+      {
+        hostId: usage?.hostId,
+        boxCapacity: usage?.boxCapacity,
+        boxesRunning: usage?.boxesRunning,
+        diskBudgetMib: usage?.diskBudgetMib,
+        diskHeldMib: usage?.diskHeldMib,
+      },
+      { hostId, boxCapacity: 8, boxesRunning: 1, diskBudgetMib: 200000, diskHeldMib: 32768 },
     );
 
     const offer = await host.next("TurnOffer");
     assert.equal(offer.turnId, started.turn.turnId);
+    assert.deepEqual(
+      { boxMemoryMib: offer.boxMemoryMib, boxDiskMib: offer.boxDiskMib },
+      { boxMemoryMib: 4096, boxDiskMib: 32768 },
+    );
     assert.equal(offer.sessionId, started.session.sessionId);
     assert.equal(offer.prompt, "fix the build");
     assert.deepEqual(offer.credential.variables, [
@@ -2789,7 +2799,74 @@ suite("sessions", { concurrency: 8 }, () => {
     after.close();
   });
 
-  test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline", async () => {
+  test("a turn completed on a nearly full box disk stays Completed and its turn and session reads carry the warning", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "build it all" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { session } = StartedSessionSchema.parse(await response.json());
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    await host.next("TurnClaimed");
+    const warning =
+      "the box disk of 32096 MiB is full, 12 MiB free; give the persona a larger boxDiskMib, up to 262144 MiB, or have it delete build output it no longer needs";
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({
+      type: "TurnComplete",
+      turnId: offer.turnId,
+      lastLineSeq: 1,
+      completedAt: new Date().toISOString(),
+      warning,
+    });
+    const turn = await until(
+      "the turn reading Completed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (read) => read.state === "Completed",
+    );
+    assert.equal(turn.state === "Completed" ? turn.warning : undefined, warning);
+    const { lastTurn } = await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema);
+    assert.equal(lastTurn.state === "Completed" ? lastTurn.warning : undefined, warning);
+  });
+
+  test("a persona's box disk reads back, a host without disk room refuses its session by name, and every offer carries it", async () => {
+    const { bearer, host, getJson } = await tenant();
+    const [persona] = await getJson("/v1/personas", PersonaSchema.array());
+    assert.ok(persona);
+    const sized = async (boxDiskMib: number) => {
+      const written = await server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...bearer },
+        body: JSON.stringify({ name: persona.name, secretSetId: persona.secretSetId, boxDiskMib, files: [] }),
+      });
+      assert.equal(written.status, 200, await written.clone().text());
+      assert.equal((await getJson(`/v1/personas/${persona.personaId}`, PersonaSchema)).boxDiskMib, boxDiskMib);
+      return postJson(
+        "/v1/sessions",
+        {
+          repository: "https://github.com/acme/app.git",
+          model: "claude-sonnet-test",
+          personaId: persona.personaId,
+          prompt: "build every repo",
+        },
+        bearer,
+      );
+    };
+    const refused = await sized(262144);
+    assert.equal(refused.status, 409);
+    assert.match(
+      ProblemSchema.parse(await refused.json()).detail,
+      /gives box disks 200000 MiB and its boxes hold 32768 MiB of it, and the persona's boxes need 262144 MiB/,
+    );
+    const response = await sized(131072);
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await host.next("TurnOffer")).boxDiskMib, 131072);
+  });
+
+  test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline, naming the refusal", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never fits" }, bearer);
     assert.equal(response.status, 200, await response.clone().text());
@@ -2800,13 +2877,14 @@ suite("sessions", { concurrency: 8 }, () => {
       Date.now() - (SETTINGS.turnTotalBudgetSeconds - 2) * 1000,
       turn.turnId,
     );
+    const refusal =
+      "this host gives box disks 70000 MiB, its 80000 MiB of free disk and the 0 MiB its boxes wrote less the 10000 MiB it keeps free; its 2 boxes hold 65536 MiB of it, so a box disk of 32768 MiB does not fit; free disk on the host, or lower the persona's boxDiskMib";
     const refuse = (turnId: string): void =>
       host.send({
         type: "TurnFailed",
         turnId,
         reason: "PoolExhausted",
-        detail:
-          "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
+        detail: refusal,
         failedAt: new Date().toISOString(),
       });
     refuse((await host.next("TurnOffer")).turnId);
@@ -2816,7 +2894,9 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
       (read) => read.state === "Failed",
     );
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema)).reason, "Undelivered");
+    const failure = await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "Undelivered");
+    assert.ok(failure.detail.endsWith(`last refused it: ${refusal}`), failure.detail);
   });
 
   test("a turn a host refuses PoolExhausted goes to an idle host on the refusing host's next heartbeat, in a new box", async () => {

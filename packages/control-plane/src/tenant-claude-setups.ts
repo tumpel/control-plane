@@ -1,4 +1,4 @@
-import { BoxMemoryLimit } from "@tumpel/schemas";
+import { BoxDiskLimit, BoxMemoryLimit } from "@tumpel/schemas";
 import type {
   BootImage,
   HostMessage,
@@ -145,7 +145,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         harnessVersion: input.harnessVersion,
         architectures: bootArchitectures(release, input.harness, input.harnessVersion),
       },
-      BoxMemoryLimit.DefaultMib,
+      { boxMemoryMib: BoxMemoryLimit.DefaultMib, boxDiskMib: BoxDiskLimit.DefaultMib },
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);

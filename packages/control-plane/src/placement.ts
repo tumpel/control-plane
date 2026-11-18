@@ -15,7 +15,13 @@ export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
   | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
-  | { kind: "Unplaceable"; host: Host; reason: "NoMemory"; usage: ReportedHostUsage; boxMemoryMib: number };
+  | { kind: "Unplaceable"; host: Host; reason: "NoMemory"; usage: ReportedHostUsage; boxMemoryMib: number }
+  | { kind: "Unplaceable"; host: Host; reason: "NoDisk"; usage: ReportedHostUsage; boxDiskMib: number };
+
+export interface BoxSize {
+  boxMemoryMib: number;
+  boxDiskMib: number;
+}
 
 type Candidate = { kind: "Candidate"; host: Host; usage: ReportedHostUsage };
 
@@ -25,16 +31,28 @@ const MIB = 1024 ** 2;
 
 const freeSlots = (usage: ReportedHostUsage): number => usage.boxCapacity - usage.boxesRunning - usage.boxesWarm;
 
+const diskHeld = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage): number =>
+  diskBudgetMib === undefined || diskHeldMib === undefined || diskHeldMib === 0
+    ? 0
+    : Math.min(diskHeldMib / Math.max(diskBudgetMib, 1), 1);
+
 const busyness = ({ host, usage }: Candidate): number =>
   usage.loadAverage / host.cpuCount -
   freeSlots(usage) / usage.boxCapacity -
-  (usage.memoryAvailableMib * MIB) / host.memoryBytes;
+  (usage.memoryAvailableMib * MIB) / host.memoryBytes +
+  diskHeld(usage);
+
+const lacksDisk = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage, boxDiskMib: number): boolean =>
+  diskBudgetMib !== undefined &&
+  diskHeldMib !== undefined &&
+  diskHeldMib > 0 &&
+  diskHeldMib + boxDiskMib > diskBudgetMib;
 
 const assess = (
   host: Host,
   usages: ReadonlyMap<string, ReportedHostUsage>,
   image: ImageAvailability,
-  boxMemoryMib: number,
+  { boxMemoryMib, boxDiskMib }: BoxSize,
 ): Candidate | Unplaceable => {
   if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
@@ -47,6 +65,7 @@ const assess = (
   if (usage.boxesRunning >= usage.boxCapacity) return { kind: "Unplaceable", host, reason: "Full", usage };
   if (boxMemoryMib > BoxMemoryLimit.DefaultMib && usage.memoryAvailableMib < boxMemoryMib)
     return { kind: "Unplaceable", host, reason: "NoMemory", usage, boxMemoryMib };
+  if (lacksDisk(usage, boxDiskMib)) return { kind: "Unplaceable", host, reason: "NoDisk", usage, boxDiskMib };
   return { kind: "Candidate", host, usage };
 };
 
@@ -54,10 +73,10 @@ export const placeSession = (
   hosts: readonly Host[],
   usages: readonly ReportedHostUsage[],
   image: ImageAvailability,
-  boxMemoryMib: number,
+  box: BoxSize,
 ): Placement => {
   const byHost = new Map(usages.map((usage) => [usage.hostId, usage]));
-  const assessed = hosts.map((host) => assess(host, byHost, image, boxMemoryMib));
+  const assessed = hosts.map((host) => assess(host, byHost, image, box));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
     .sort((a, b) => busyness(a) - busyness(b) || freeSlots(b.usage) - freeSlots(a.usage));
