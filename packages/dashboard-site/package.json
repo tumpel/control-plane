@@ -9,7 +9,7 @@
     "test": "node --test --test-timeout=60000 test/*.test.ts"
   },
   "dependencies": {
-    "@tumpel/dashboard": "https://github.com/tumpel/dashboard/releases/download/v0.1.0/dashboard-0.1.0.tgz"
+    "@tumpel/dashboard": "https://github.com/tumpel/dashboard/releases/download/v0.2.0/dashboard-0.2.0.tgz"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.0",
