@@ -21,7 +21,14 @@ type Candidate = { kind: "Candidate"; host: Host; usage: ReportedHostUsage };
 
 export type Placement = { kind: "Placed"; host: Host } | { kind: "Refused"; hosts: Unplaceable[] };
 
+const MIB = 1024 ** 2;
+
 const freeSlots = (usage: ReportedHostUsage): number => usage.boxCapacity - usage.boxesRunning - usage.boxesWarm;
+
+const busyness = ({ host, usage }: Candidate): number =>
+  usage.loadAverage / host.cpuCount -
+  freeSlots(usage) / usage.boxCapacity -
+  (usage.memoryAvailableMib * MIB) / host.memoryBytes;
 
 const assess = (
   host: Host,
@@ -53,7 +60,7 @@ export const placeSession = (
   const assessed = hosts.map((host) => assess(host, byHost, image, boxMemoryMib));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
-    .sort((a, b) => freeSlots(b.usage) - freeSlots(a.usage) || b.usage.memoryAvailableMib - a.usage.memoryAvailableMib);
+    .sort((a, b) => busyness(a) - busyness(b) || freeSlots(b.usage) - freeSlots(a.usage));
   if (best !== undefined) return { kind: "Placed", host: best.host };
   return { kind: "Refused", hosts: assessed.filter((each): each is Unplaceable => each.kind === "Unplaceable") };
 };

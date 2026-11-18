@@ -2154,7 +2154,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(failure.reason, "Undelivered");
     assert.match(
       failure.detail,
-      /^no host took the turn within 60 seconds of its offer, so it never ran; host box is online but never claimed it\./,
+      /^no host took the turn within 60 seconds of its first offer, so it never ran; host box is online but never claimed it\./,
     );
     assert.doesNotMatch(failure.detail, UUID);
     const read = FailedTurnSchema.parse(failed);
@@ -2703,6 +2703,178 @@ suite("sessions", { concurrency: 8 }, () => {
     swapped.close();
   });
 
+  test("a claimed turn whose box a handover stops is offered to another host in a new box, before the new binary's first heartbeat can call it lost", async () => {
+    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
+    const first = await enrol("handover-1");
+    const second = await enrol("handover-2");
+    const sides = new Map([
+      [first.id, await connect(first.id, first.key, 32)],
+      [second.id, await connect(second.id, second.key, 32)],
+    ]);
+    await hostState(first.id, "Online");
+    await hostState(second.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a handover" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const started = StartedSessionSchema.parse(await response.json());
+    const handing = started.session.hostId;
+    const taking = handing === first.id ? second.id : first.id;
+    const before = sides.get(handing);
+    assert.ok(before);
+    const offer = await before.next("TurnOffer");
+    before.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    await until(
+      "the control plane taking the claim",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    before.close();
+    const after = await connect(
+      handing,
+      handing === first.id ? first.key : second.key,
+      32,
+      { ...before.carried(), held: [] },
+      [
+        {
+          type: "TurnFailed",
+          turnId: offer.turnId,
+          reason: "HostUpdating",
+          detail: `HandoverTimedOut: the box of turn ${offer.turnId} did not reach a point it could be handed to the new supervisor binary within 60 s, so it was stopped; the control plane offers the turn to another host`,
+          failedAt: new Date().toISOString(),
+        },
+      ],
+    );
+    const moved = await sides.get(taking)?.next("TurnOffer");
+    assert.equal(moved?.turnId, offer.turnId);
+    assert.notEqual(moved?.boxId, offer.boxId);
+    const session = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
+    assert.deepEqual({ hostId: session.hostId, boxId: session.boxId }, { hostId: taking, boxId: moved?.boxId });
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Offered");
+    after.close();
+    for (const side of sides.values()) side.close();
+  });
+
+  test("a claimed turn whose box a handover stops on the only host is offered again in a new box on the new binary's first heartbeat, which does not call it lost", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const only = await enrol("handover-only");
+    const before = await connect(only.id, only.key, 32);
+    await hostState(only.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a handover" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { turn } = StartedSessionSchema.parse(await response.json());
+    const offer = await before.next("TurnOffer");
+    before.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    await until(
+      "the control plane taking the claim",
+      () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
+      (read) => read.state === "Running",
+    );
+    before.close();
+    const after = await connect(only.id, only.key, 32, { ...before.carried(), held: [] }, [
+      {
+        type: "TurnFailed",
+        turnId: turn.turnId,
+        reason: "HostUpdating",
+        detail: `HandoverTimedOut: the box of turn ${turn.turnId} did not reach a point it could be handed to the new supervisor binary within 60 s, so it was stopped; the control plane offers the turn to another host`,
+        failedAt: new Date().toISOString(),
+      },
+    ]);
+    const again = await after.next("TurnOffer");
+    assert.equal(again.turnId, turn.turnId);
+    assert.notEqual(again.boxId, offer.boxId);
+    after.send({ type: "TurnClaim", turnId: again.turnId, boxId: again.boxId });
+    assert.equal((await after.next("TurnClaimed")).turnId, turn.turnId);
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
+    after.close();
+  });
+
+  test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never fits" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { session, turn } = StartedSessionSchema.parse(await response.json());
+    await tenantSql(
+      session.tenantId,
+      "UPDATE turns SET created_at = ? WHERE turn_id = ?",
+      Date.now() - (SETTINGS.turnTotalBudgetSeconds - 2) * 1000,
+      turn.turnId,
+    );
+    const refuse = (turnId: string): void =>
+      host.send({
+        type: "TurnFailed",
+        turnId,
+        reason: "PoolExhausted",
+        detail:
+          "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
+        failedAt: new Date().toISOString(),
+      });
+    refuse((await host.next("TurnOffer")).turnId);
+    refuse((await host.next("TurnOffer")).turnId);
+    await until(
+      "the turn reading Failed",
+      () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
+      (read) => read.state === "Failed",
+    );
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema)).reason, "Undelivered");
+  });
+
+  test("a turn a host refuses PoolExhausted goes to an idle host on the refusing host's next heartbeat, in a new box", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "too big here" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { session, turn } = StartedSessionSchema.parse(await response.json());
+    assert.equal(session.hostId, hostId);
+    const idle = await enrol("idle-host");
+    const idleSide = await connect(idle.id, idle.key, 32);
+    await hostState(idle.id, "Online");
+    const offer = await host.next("TurnOffer");
+    host.send({
+      type: "TurnFailed",
+      turnId: offer.turnId,
+      reason: "PoolExhausted",
+      detail:
+        "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
+      failedAt: new Date().toISOString(),
+    });
+    const moved = await idleSide.next("TurnOffer");
+    assert.equal(moved.turnId, turn.turnId);
+    assert.notEqual(moved.boxId, offer.boxId);
+    const read = await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema);
+    assert.deepEqual({ hostId: read.hostId, boxId: read.boxId }, { hostId: idle.id, boxId: moved.boxId });
+    idleSide.send({ type: "TurnClaim", turnId: moved.turnId, boxId: moved.boxId });
+    assert.equal((await idleSide.next("TurnClaimed")).turnId, turn.turnId);
+    idleSide.close();
+  });
+
+  test("a turn the only host refuses PoolExhausted stays Offered and is offered again on a later heartbeat", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const only = await enrol("short-of-memory");
+    const side = await connect(only.id, only.key, 32);
+    await hostState(only.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "under pressure" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { turn } = StartedSessionSchema.parse(await response.json());
+    assert.equal((await side.next("TurnOffer")).turnId, turn.turnId);
+    side.send({
+      type: "TurnFailed",
+      turnId: turn.turnId,
+      reason: "PoolExhausted",
+      detail:
+        "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
+      failedAt: new Date().toISOString(),
+    });
+    const offer = await side.next("TurnOffer");
+    assert.equal(offer.turnId, turn.turnId);
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
+    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
+    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
+    side.close();
+  });
+
   test("a turn the only host refuses HostUpdating is offered again when its swap fails", async () => {
     const { bearer, host, hostId, enrol, sessionStart, hostState } = await tenant();
     host.close();
@@ -2790,7 +2962,9 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("two hosts refusing their turns HostUpdating at the same moment each hand the turn to the other", async () => {
-    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
     const first = await enrol("crossing-1");
     const second = await enrol("crossing-2");
     const sides = new Map([
