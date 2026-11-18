@@ -700,6 +700,7 @@ const tenant = async () => {
 
   return {
     tenantId,
+    email,
     github,
     reads: () => userReads.get(github) ?? 0,
     bearer,
@@ -1743,6 +1744,131 @@ suite("sessions", { concurrency: 8 }, () => {
       ProblemSchema.parse(await codex.json()).detail,
       /runs Codex, which takes no goal; ClaudeCode takes one$/,
     );
+  });
+
+  test("a stop with cancelTurn fails the running turn Cancelled, snapshots and frees its box, and the next send boots a fresh box", async () => {
+    const { email, host, refused, getJson, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "run away" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"assistant"}' });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    assert.equal((await refused(`/v1/sessions/${sessionId}/stop`)).code, "TurnInFlight");
+
+    const stopping = await tool("tumpel_session_stop", { sessionId, cancelTurn: true }, SessionSchema);
+    assert.equal(stopping.state, "Stopping");
+    assert.deepEqual(await host.next("TurnCancel"), { type: "TurnCancel", turnId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 2, text: '{"type":"assistant"}' });
+    host.send({
+      type: "TurnFailed",
+      turnId,
+      reason: "Cancelled",
+      detail: "the host cancelled the turn",
+      failedAt: new Date().toISOString(),
+    });
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "Cancelled");
+    assert.match(
+      failure.detail,
+      new RegExp(`^${email} stopped the session and cancelled the turn while it was Running$`),
+    );
+
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.turnId, turnId);
+    await store.put(request.storageKey, '{"entries":[]}');
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+    const teardown = await host.next("BoxTeardown");
+    assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId: offer.boxId });
+    host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+    await until(
+      "the session reading Stopped",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+    assert.equal((await tool("tumpel_turn_get", { turnId }, TurnSchema)).lineCount, 1);
+
+    await tool("tumpel_turn_send", { sessionId, prompt: "try again" }, TurnSchema);
+    const next = await host.next("TurnOffer");
+    assert.notEqual(next.boxId, offer.boxId);
+    assert.deepEqual(
+      next.snapshots.map((snapshot) => snapshot.snapshotId),
+      [request.snapshotId],
+    );
+  });
+
+  test("a cancel before the claim withdraws the claim, fails the turn Cancelled and stops the session", async () => {
+    const { host, getJson, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "never mind" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+
+    const stopping = await tool("tumpel_session_stop", { sessionId, cancelTurn: true }, SessionSchema);
+    assert.equal(stopping.state, "Stopping");
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    assert.deepEqual(await host.next("TurnWithdrawn"), { type: "TurnWithdrawn", turnId });
+    assert.equal((await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema)).reason, "Cancelled");
+
+    const request = await host.next("SnapshotRequest");
+    await store.put(request.storageKey, '{"entries":[]}');
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+    const teardown = await host.next("BoxTeardown");
+    host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+    await until(
+      "the session reading Stopped",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+  });
+
+  test("a TurnComplete that crosses the cancel leaves the turn failed Cancelled", async () => {
+    const { host, getJson, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "almost done" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+
+    await tool("tumpel_session_stop", { sessionId, cancelTurn: true }, SessionSchema);
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    assert.deepEqual(await host.next("TurnCancel"), { type: "TurnCancel", turnId });
+    const request = await host.next("SnapshotRequest");
+    await store.put(request.storageKey, '{"entries":[]}');
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+    const teardown = await host.next("BoxTeardown");
+    host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+    await until(
+      "the session reading Stopped",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+
+    assert.equal((await tool("tumpel_turn_get", { turnId }, TurnSchema)).state, "Failed");
+    assert.equal((await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema)).reason, "Cancelled");
   });
 
   test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {

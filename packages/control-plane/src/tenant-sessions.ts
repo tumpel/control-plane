@@ -25,6 +25,7 @@ import {
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { TURN_CANCEL_VERSION } from "./channel/control.ts";
 import type {
   BootImage,
   HostMessage,
@@ -141,6 +142,7 @@ export type Stop =
   | { kind: "Stopping"; session: Session }
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
+  | { kind: "CancelUnspoken"; turnId: string; host: string }
   | { kind: "Archived" };
 
 export type WaitedTurns = { kind: "Read"; turns: Turn[] } | { kind: "NotFound"; turnId: string };
@@ -1409,7 +1411,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async stopSession(tenantId: string, sessionId: string, now: number): Promise<Stop> {
+  async stopSession(tenantId: string, sessionId: string, cancelledBy: string | null, now: number): Promise<Stop> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -1417,7 +1419,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
     }
     const running = this.inFlightTurn(sessionId);
-    if (running !== null) return { kind: "InFlight", turnId: running };
+    if (running !== null) {
+      if (cancelledBy === null) return { kind: "InFlight", turnId: running };
+      const turn = this.turnRow(running);
+      if (turn === null) throw new Error(`turn ${running} is in flight but has no row`);
+      if (turn.state === "Running" && this.channelProtocol(session.host_id) < TURN_CANCEL_VERSION) {
+        return { kind: "CancelUnspoken", turnId: running, host: await this.hostName(tenantId, session.host_id) };
+      }
+      const detail = `${cancelledBy} stopped the session and cancelled the turn while it was ${turn.state}`;
+      await this.failTurn(tenantId, running, "Cancelled", detail, iso(now), "Stopping");
+      if (turn.state === "Running") await this.host(session.host_id).send({ type: "TurnCancel", turnId: running });
+    }
     const latest = this.latestTurn(sessionId, null);
     if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
     this.setSessionState(sessionId, "Stopping", now);
@@ -1425,6 +1437,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const stopping = { ...session, state: "Stopping", updated_at: now };
     await this.snapshotOrTeardown(tenantId, stopping, latest);
     return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
+  }
+
+  private channelProtocol(hostId: string): number {
+    const [row] = this.ctx.storage.sql
+      .exec<{ channel_protocol: number }>("SELECT channel_protocol FROM host_usage WHERE host_id = ?", hostId)
+      .toArray();
+    if (row === undefined) throw new Error(`host ${hostId} runs a turn but never said hello`);
+    return row.channel_protocol;
   }
 
   async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
@@ -2634,7 +2654,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     reason: TurnFailureReason,
     detail: string,
     failedAt: string,
-    sessionState: "Idle" | "Failed" = "Idle",
+    sessionState: "Idle" | "Failed" | "Stopping" = "Idle",
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
