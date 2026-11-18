@@ -16,7 +16,7 @@ const RELEASE: ReleaseManifest = {
   releaseVersion: "0.2.0",
   commit: "e".repeat(40),
   channelProtocolVersion: ChannelProtocol.Version,
-  supervisors: [{ architecture: "Amd64", sha256: SUPERVISOR_SHA, sizeBytes: 4096 }],
+  supervisors: [{ architecture: "Amd64", sha256: SUPERVISOR_SHA, sizeBytes: 4096, guestProtocolVersion: 11 }],
   clis: [{ architecture: "Amd64", sha256: CLI_SHA, sizeBytes: 2048 }],
   images: [
     {
