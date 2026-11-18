@@ -25,7 +25,7 @@ export const RELEASE_CACHE_MS = 30_000;
 
 const arch = (architecture: HostArchitecture): string => architecture.toLowerCase();
 
-export const supervisorKey = (supervisor: ReleaseSupervisor): string =>
+export const supervisorKey = (supervisor: Pick<ReleaseSupervisor, "architecture" | "sha256">): string =>
   `supervisor/${arch(supervisor.architecture)}/${supervisor.sha256}`;
 
 export const cliKey = (cli: ReleaseCli): string => `cli/${arch(cli.architecture)}/${cli.sha256}`;
