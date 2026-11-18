@@ -3,16 +3,25 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ReleaseManifestSchema, SupervisorReleaseSchema } from "@tumpel/schemas";
-import {
-  CLI_REPOSITORY,
-  releaseAssetUrl,
-  SUPERVISOR_REPOSITORY,
-} from "../packages/control-plane/src/release-assets.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const PINS_PATH = join(ROOT, "release-pins.json");
 export const RELEASE_CACHE = process.env.TUMPEL_RELEASE_CACHE ?? join(ROOT, ".tmp", "releases");
 const VERSION = /^\d+\.\d+\.\d+$/;
+
+export const SUPERVISOR_REPOSITORY = "tumpel/supervisor";
+export const CLI_REPOSITORY = "tumpel/cli";
+
+const MACHINES = { Amd64: "x86_64", Arm64: "aarch64" };
+
+export const supervisorAsset = (architecture) => `tumpel-supervisor-${MACHINES[architecture]}-linux`;
+
+export const guestAsset = (architecture) => `tumpel-guest-${MACHINES[architecture]}-linux`;
+
+export const cliAsset = (architecture) => `tumpel-${MACHINES[architecture]}-linux`;
+
+export const releaseAssetUrl = (repository, version, asset) =>
+  `https://github.com/${repository}/releases/download/v${version}/${asset}`;
 
 export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -21,7 +30,12 @@ export const currentRelease = async (endpoint, stage) => {
   const response = await fetch(url);
   if (!response.ok)
     throw new Error(`GET ${url} answered ${response.status}: ${await response.text()}; publish a release to ${stage}`);
-  return ReleaseManifestSchema.parse(await response.json());
+  const parsed = ReleaseManifestSchema.safeParse(await response.json());
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+  throw new Error(
+    `GET ${url} answered a release this checkout cannot read (${issues}); ${stage} has not published a release with downloadUrl yet, so merge to main or push a v* tag to publish one, then try again`,
+  );
 };
 
 export const cached = (path, digest) => existsSync(path) && sha256(readFileSync(path)) === digest;
@@ -72,7 +86,7 @@ export const downloadAsset = async (repository, version, asset, cacheDir) => {
   if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error(`${url}.sha256 holds no sha256; ${fix}`);
   const path = join(cacheDir, repository, `v${version}`, asset);
   if (!cached(path, digest)) await fetchVerified(url, digest, path, fix);
-  return { path, digest, sizeBytes: statSync(path).size };
+  return { url, path, digest, sizeBytes: statSync(path).size };
 };
 
 export const supervisorRelease = async (version) => {

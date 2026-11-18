@@ -9,17 +9,7 @@ const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|in|of|delete|void|thro
 
 const tracked = execFileSync(
   "git",
-  [
-    "ls-files",
-    "--",
-    "crates/**.rs",
-    "packages/**.ts",
-    "packages/**.tsx",
-    "packages/**.mjs",
-    "typespec/**.tsp",
-    "typespec/npm-scripts/*.mjs",
-    "npm-scripts/*.mjs",
-  ],
+  ["ls-files", "--", "packages/**.ts", "packages/**.tsx", "packages/**.mjs", "npm-scripts/*.mjs"],
   { cwd: ROOT, encoding: "utf8" },
 )
   .split("\n")
@@ -51,7 +41,7 @@ const regexCanStart = (source, index) => {
   return REGEX_AFTER.has(before.at(-1)) || REGEX_KEYWORDS.test(before);
 };
 
-const scan = (source, rust) => {
+const scan = (source) => {
   const comments = [];
   const templates = [];
   let index = 0;
@@ -67,7 +57,7 @@ const scan = (source, rust) => {
       } else index += 1;
       continue;
     }
-    if (char === "`" && !rust) {
+    if (char === "`") {
       if (templates.length > 0 && templates.at(-1) === 0) templates.pop();
       else templates.push(0);
       index += 1;
@@ -76,37 +66,16 @@ const scan = (source, rust) => {
     if (templates.length > 0 && char === "{") templates[templates.length - 1] += 1;
     if (templates.length > 0 && char === "}") templates[templates.length - 1] -= 1;
     if (char === "/" && (next === "/" || next === "*")) {
-      const doc = rust && (source[index + 2] === next || source[index + 2] === "!");
       const end = next === "/" ? source.indexOf("\n", index) : source.indexOf("*/", index + 2) + 2;
-      if (!doc) comments.push(lineAt(index));
+      comments.push(lineAt(index));
       index = end <= index ? source.length : end;
       continue;
     }
-    if (
-      rust &&
-      char === "r" &&
-      /^r#*"/.test(source.slice(index, index + 10)) &&
-      !/[\w]/.test(source[index - 1] ?? "")
-    ) {
-      const hashes = source.slice(index + 1).match(/^#*/)[0];
-      const close = source.indexOf(`"${hashes}`, index + hashes.length + 2);
-      index = close < 0 ? source.length : close + hashes.length + 1;
+    if (char === '"' || char === "'") {
+      index = skipQuoted(source, index, char);
       continue;
     }
-    if (char === '"') {
-      index = skipQuoted(source, index, '"');
-      continue;
-    }
-    if (char === "'") {
-      if (!rust) {
-        index = skipQuoted(source, index, "'");
-        continue;
-      }
-      const literal = source.slice(index).match(/^'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'])'/);
-      index += literal ? literal[0].length : 1;
-      continue;
-    }
-    if (char === "/" && !rust && regexCanStart(source, index)) {
+    if (char === "/" && regexCanStart(source, index)) {
       index = skipRegex(source, index);
       continue;
     }
@@ -116,7 +85,7 @@ const scan = (source, rust) => {
 };
 
 const failures = tracked.flatMap((file) =>
-  scan(readFileSync(`${ROOT}${file}`, "utf8"), file.endsWith(".rs")).map((line) => `${file}:${line}`),
+  scan(readFileSync(`${ROOT}${file}`, "utf8")).map((line) => `${file}:${line}`),
 );
 
 if (failures.length > 0) {

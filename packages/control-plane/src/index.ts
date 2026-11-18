@@ -187,9 +187,8 @@ import { personaFileKey, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
-import { CLI_REPOSITORY, cliAsset, releaseAssetUrl, SUPERVISOR_REPOSITORY, supervisorAsset } from "./release-assets.ts";
 import { noticeRelease } from "./release-notices.ts";
-import { type HostArchitecture, type ReleaseManifest, readRelease } from "./releases";
+import { readRelease } from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
@@ -788,32 +787,16 @@ const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promi
 
 const RELEASE_DOWNLOAD_PATH = /^\/v1\/releases\/(supervisor|cli)\/([^/]+)$/;
 
-type ReleasedBinary = { architecture: HostArchitecture; version: string | undefined; asset: string };
-
 const RELEASE_BINARIES = {
   supervisor: {
     pathSchema: ReleaseSupervisorPathSchema,
-    repository: SUPERVISOR_REPOSITORY,
-    binaries: (manifest: ReleaseManifest): ReleasedBinary[] =>
-      manifest.supervisors.map((supervisor) => ({
-        architecture: supervisor.architecture,
-        version: supervisor.supervisorVersion,
-        asset: supervisorAsset(supervisor.architecture),
-      })),
-    plural: "supervisors",
+    key: "supervisors",
     title: "No supervisor for this architecture",
     fix: "Run the host on one of those architectures, or publish a release that carries the supervisor for it",
   },
   cli: {
     pathSchema: ReleaseCliPathSchema,
-    repository: CLI_REPOSITORY,
-    binaries: (manifest: ReleaseManifest): ReleasedBinary[] =>
-      manifest.clis.map((cli) => ({
-        architecture: cli.architecture,
-        version: cli.cliVersion,
-        asset: cliAsset(cli.architecture),
-      })),
-    plural: "CLIs",
+    key: "clis",
     title: "No CLI for this architecture",
     fix: "Run the CLI on one of those architectures, or publish a release that carries the CLI for it",
   },
@@ -876,7 +859,7 @@ const handleReleaseDownload = async (request: Request, url: URL, env: Env): Prom
     if (!browser) return unreadableRelease(release.detail);
     return htmlPage(env, url, 503, (links) => unreadableReleasePage(links, url.href, release.detail));
   }
-  const published = binary.binaries(release.manifest);
+  const published = release.manifest[binary.key];
   const found = published.find((each) => each.architecture === architecture);
   if (found === undefined) {
     if (browser) {
@@ -888,17 +871,11 @@ const handleReleaseDownload = async (request: Request, url: URL, env: Env): Prom
     return problem(404, {
       code: "NotFound",
       title: binary.title,
-      detail: `release ${release.manifest.releaseVersion} carries ${binary.plural} for ${published.map((each) => each.architecture).join(", ")}, not ${architecture}`,
+      detail: `release ${release.manifest.releaseVersion} carries ${binary.key} for ${published.map((each) => each.architecture).join(", ")}, not ${architecture}`,
       fix: binary.fix,
     });
   }
-  if (found.version === undefined) {
-    const detail = `release ${release.manifest.releaseVersion} names its ${architecture} ${kind} without the version of the GitHub release that carries it`;
-    if (!browser) return unreadableRelease(detail);
-    return htmlPage(env, url, 503, (links) => unreadableReleasePage(links, url.href, detail));
-  }
-  const location = releaseAssetUrl(binary.repository, found.version, found.asset);
-  return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
+  return new Response(null, { status: 302, headers: { location: found.downloadUrl, "cache-control": "no-store" } });
 };
 
 const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/labels)?$/;

@@ -22,10 +22,19 @@ const RELEASE: ReleaseManifest = {
       sha256: SUPERVISOR_SHA,
       sizeBytes: 4096,
       supervisorVersion: "0.1.0",
+      downloadUrl: "https://github.com/tumpel/supervisor/releases/download/v0.1.0/tumpel-supervisor-x86_64-linux",
       guestProtocolVersion: 11,
     },
   ],
-  clis: [{ architecture: "Amd64", sha256: CLI_SHA, sizeBytes: 2048, cliVersion: "0.2.1" }],
+  clis: [
+    {
+      architecture: "Amd64",
+      sha256: CLI_SHA,
+      sizeBytes: 2048,
+      cliVersion: "0.2.1",
+      downloadUrl: "https://github.com/tumpel/cli/releases/download/v0.2.1/tumpel-x86_64-linux",
+    },
+  ],
   images: [
     {
       harness: "ClaudeCode",
@@ -177,7 +186,7 @@ test("with no current.json the release reads NoRelease, a malformed one ReleaseU
   assert.equal((await get("/v1/releases/supervisor/Sparc")).status, 400);
 });
 
-test("the CLI download redirects to the GitHub release asset of the current release's CLI for the architecture", async () => {
+test("the CLI download redirects to the download URL the current release stores for the architecture's CLI", async () => {
   await (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
   const redirect = await get("/v1/releases/cli/Amd64");
   assert.equal(redirect.status, 302);
@@ -189,6 +198,6 @@ test("the CLI download redirects to the GitHub release asset of the current rele
 
   const arm = await get("/v1/releases/cli/Arm64");
   assert.equal(arm.status, 404);
-  assert.match(ProblemSchema.parse(await arm.json()).detail, /release 0\.2\.0 carries CLIs for Amd64, not Arm64/);
+  assert.match(ProblemSchema.parse(await arm.json()).detail, /release 0\.2\.0 carries clis for Amd64, not Arm64/);
   assert.equal((await get("/v1/releases/cli/Sparc")).status, 400);
 });
