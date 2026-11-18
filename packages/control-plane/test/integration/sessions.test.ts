@@ -1649,6 +1649,59 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
   });
 
+  test("a goal reaches Claude Code as one /goal prompt with a turn cap and reads back on the turn", async () => {
+    const { tenantId, bearer, host, getJson, tool, completedTurn } = await tenant();
+    const { session, offer } = await completedTurn("set up the repository");
+    const { sessionId } = session;
+    assert.equal(offer.prompt, "set up the repository");
+    await until(
+      "the first turn reading Completed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+
+    const tooLong = await postJson(
+      `/v1/sessions/${sessionId}/turns`,
+      { prompt: "p".repeat(3990), goal: "the tests pass" },
+      bearer,
+    );
+    assert.equal(tooLong.status, 400);
+    const refusal = ProblemSchema.parse(await tooLong.json());
+    assert.equal(
+      refusal.detail,
+      "the prompt and goal make a goal message of 4048 characters, and ClaudeCode takes at most 4000",
+    );
+    assert.equal(refusal.fix, "Shorten the prompt or the goal by 48 characters, then send again");
+
+    const sent = await tool(
+      "tumpel_turn_send",
+      { sessionId, prompt: "fix the flaky test", goal: "npm test passes three times in a row" },
+      TurnSchema,
+    );
+    assert.equal(sent.goal, "npm test passes three times in a row");
+    const goalOffer = await host.next("TurnOffer");
+    assert.equal(
+      goalOffer.prompt,
+      "/goal fix the flaky test\n\nDone when: npm test passes three times in a row. Or stop after 20 turns.",
+    );
+    assert.deepEqual(
+      (await getJson(`/v1/sessions/${sessionId}/turns`, TurnSchema.array())).map((turn) => [turn.prompt, turn.goal]),
+      [
+        ["set up the repository", undefined],
+        ["fix the flaky test", "npm test passes three times in a row"],
+      ],
+    );
+    assert.equal((await getJson(`/v1/turns/${sent.turnId}`, TurnSchema)).goal, "npm test passes three times in a row");
+
+    await tenantSql(tenantId, "UPDATE sessions SET harness = 'Codex' WHERE session_id = ?", sessionId);
+    const codex = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "go on", goal: "done" }, bearer);
+    assert.equal(codex.status, 400);
+    assert.match(
+      ProblemSchema.parse(await codex.json()).detail,
+      /runs Codex, which takes no goal; ClaudeCode takes one$/,
+    );
+  });
+
   test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
     const { host, getJson, tool, sessionStart } = await tenant();
     const started = await tool(

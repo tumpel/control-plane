@@ -11,6 +11,21 @@ const CODEX_SIBLING_BINARY_PATHS = ["codex-code-mode-host", "codex-exec-server"]
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
 
+const GOAL_TURN_CAP = 20;
+
+export type GoalFold = { fold: (prompt: string, goal: string) => string; limit: number };
+
+export const GOAL_FOLDS: ReadonlyMap<string, GoalFold> = new Map([
+  [
+    "ClaudeCode",
+    {
+      fold: (prompt: string, goal: string): string =>
+        `/goal ${prompt}\n\nDone when: ${goal}. Or stop after ${GOAL_TURN_CAP} turns.`,
+      limit: 4000,
+    },
+  ],
+]);
+
 const codexProvider = (id: string, settings: Record<string, string | boolean>): string[] => {
   const fields = Object.entries({
     ...settings,
@@ -26,7 +41,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "ClaudeCode",
     compactTranscript: compactorOf("ClaudeCode") !== null,
-    goals: false,
+    goals: GOAL_FOLDS.has("ClaudeCode"),
     harnessVersion: CLAUDE_CODE_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
@@ -61,7 +76,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "Codex",
     compactTranscript: compactorOf("Codex") !== null,
-    goals: false,
+    goals: GOAL_FOLDS.has("Codex"),
     harnessVersion: CODEX_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
@@ -124,7 +139,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "OpenCode",
     compactTranscript: compactorOf("OpenCode") !== null,
-    goals: false,
+    goals: GOAL_FOLDS.has("OpenCode"),
     harnessVersion: OPENCODE_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [
@@ -171,7 +186,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "PiDev",
     compactTranscript: compactorOf("PiDev") !== null,
-    goals: false,
+    goals: GOAL_FOLDS.has("PiDev"),
     harnessVersion: PI_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [

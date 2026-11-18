@@ -22,6 +22,7 @@ import {
   TurnFailureSchema,
   TurnImageSchema,
   TurnSchema,
+  type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import type {
@@ -57,7 +58,7 @@ import {
   withOwnerTokens,
 } from "./github.ts";
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
-import { catalogEntry } from "./harness-catalog";
+import { catalogEntry, GOAL_FOLDS } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
@@ -74,6 +75,7 @@ import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-met
 
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
+export type TurnSend = z.infer<typeof TurnSendSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
 type TurnImage = z.infer<typeof TurnImageSchema>;
@@ -176,6 +178,7 @@ type SessionViewRow = SessionRow & {
   last_turn_host_id: string;
   last_turn_box_id: string;
   last_turn_prompt: string;
+  last_turn_goal: string | null;
   last_turn_state: string;
   last_turn_line_count: number;
   last_turn_created_at: number;
@@ -195,6 +198,7 @@ type TurnRow = {
   host_id: string;
   box_id: string;
   prompt: string;
+  goal: string | null;
   state: string;
   line_count: number;
   created_at: number;
@@ -308,11 +312,11 @@ type SnapshotRequestRow = {
 const SESSION_SELECT =
   "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, created_at, updated_at FROM sessions";
 const TURN_SELECT = `SELECT * FROM (
-  SELECT turn_id, turns.session_id, host_id, box_id, prompt, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
+  SELECT turn_id, turns.session_id, host_id, box_id, prompt, (SELECT goal FROM turn_goals WHERE turn_goals.turn_id = turns.turn_id) AS goal, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
   FROM turns LEFT JOIN turn_failures USING (turn_id)
 )`;
 const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.box_memory_mib, s.created_at, s.updated_at,
-  t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.state AS last_turn_state,
+  t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.goal AS last_turn_goal, t.state AS last_turn_state,
   t.line_count AS last_turn_line_count, t.created_at AS last_turn_created_at, t.updated_at AS last_turn_at,
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
   i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch
@@ -395,6 +399,7 @@ const toSession = (
         host_id: row.last_turn_host_id,
         box_id: row.last_turn_box_id,
         prompt: row.last_turn_prompt,
+        goal: row.last_turn_goal,
         state: row.last_turn_state,
         line_count: row.last_turn_line_count,
         created_at: row.last_turn_created_at,
@@ -418,6 +423,7 @@ const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null):
     sessionId: row.session_id,
     boxId: row.box_id,
     prompt: row.prompt,
+    ...(row.goal === null ? {} : { goal: row.goal }),
     state: row.state,
     lineCount: row.line_count,
     ...(row.state === "Failed" ? { reason: row.reason, detail: row.detail, failedAt: row.failed_at } : {}),
@@ -425,6 +431,13 @@ const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null):
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+
+const offerPrompt = (harness: string, turn: TurnRow): string => {
+  if (turn.goal === null) return turn.prompt;
+  const goalFold = GOAL_FOLDS.get(harness);
+  if (goalFold === undefined) throw new Error(`turn ${turn.turn_id} carries a goal, and ${harness} takes none`);
+  return goalFold.fold(turn.prompt, turn.goal);
+};
 
 const toSnapshot = (tenantId: string, row: SnapshotRow): Snapshot =>
   SnapshotSchema.parse({
@@ -959,19 +972,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
       harness: SessionSchema.shape.harness.parse(session.harness),
       harnessVersion: session.harness_version,
       model: session.model,
-      prompt: turn.prompt,
+      prompt: offerPrompt(session.harness, turn),
       boxMemoryMib: session.box_memory_mib,
       ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
   }
 
-  private insertTurn(sessionId: string, hostId: string, boxId: string, prompt: string, now: number): TurnRow {
+  private insertTurn(sessionId: string, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
     const turn: TurnRow = {
       turn_id: crypto.randomUUID(),
       session_id: sessionId,
       host_id: hostId,
       box_id: boxId,
-      prompt,
+      prompt: send.prompt,
+      goal: send.goal ?? null,
       state: "Offered",
       line_count: 0,
       created_at: now,
@@ -992,6 +1006,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turn.created_at,
       turn.updated_at,
     );
+    if (turn.goal !== null) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO turn_goals (turn_id, goal, created_at) VALUES (?, ?, ?)",
+        turn.turn_id,
+        turn.goal,
+        now,
+      );
+    }
     return turn;
   }
 
@@ -1251,7 +1273,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.updated_at,
       );
       record(session.session_id);
-      return this.insertTurn(session.session_id, session.host_id, session.box_id, start.prompt, now);
+      return this.insertTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
     });
     await this.offer(tenantId, session, turn);
     return {
@@ -1260,7 +1282,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  async sendTurn(tenantId: string, sessionId: string, prompt: string, hosts: HostRecord[], now: number): Promise<Sent> {
+  async sendTurn(tenantId: string, sessionId: string, send: TurnSend, hosts: HostRecord[], now: number): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -1273,7 +1295,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
     if (hosts.some((host) => host.hostId === session.host_id && host.state === "Online")) {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
-      const turn = this.runTurn(session, session.host_id, boxId, prompt, now);
+      const turn = this.runTurn(session, session.host_id, boxId, send, now);
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
       return { kind: "Sent", turn: toTurn(tenantId, turn) };
     }
@@ -1282,7 +1304,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       : null;
     if (backBy !== null && backBy > now) {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
-      const turn = this.runTurn(session, session.host_id, boxId, prompt, now);
+      const turn = this.runTurn(session, session.host_id, boxId, send, now);
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
       await this.timers(tenantId, sessionId, { HostOffline: { turnId: turn.turn_id, at: backBy } });
       return { kind: "Sent", turn: toTurn(tenantId, turn) };
@@ -1297,7 +1319,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
-    const turn = this.runTurn(session, hostId, boxId, prompt, now);
+    const turn = this.runTurn(session, hostId, boxId, send, now);
     await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
@@ -1372,7 +1394,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return offers;
   }
 
-  private runTurn(session: SessionRow, hostId: string, boxId: string, prompt: string, now: number): TurnRow {
+  private runTurn(session: SessionRow, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
     return this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
@@ -1381,7 +1403,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         session.session_id,
       );
-      return this.insertTurn(session.session_id, hostId, boxId, prompt, now);
+      return this.insertTurn(session.session_id, hostId, boxId, send, now);
     });
   }
 
