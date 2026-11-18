@@ -30,6 +30,7 @@ import {
   listOpenIssues,
   mintInstallationToken,
   mintInstallationWideToken,
+  mintOwnerTokens,
   pkcs8FromPem,
   readState,
   repositoryCredential,
@@ -38,6 +39,7 @@ import {
   uncovered,
   verifyInstaller,
   verifyWebhookSignature,
+  withOwnerTokens,
   withRepositoryToken,
 } from "../src/github.ts";
 import { GitHubInstallStateSchema, GitHubManifestStateSchema } from "../src/github-schemas.ts";
@@ -275,6 +277,95 @@ test("a repository outside the installation names the fix, and only a 404 or 422
   );
   assert.match(suspended.kind === "Outside" ? suspended.detail : "", /suspended/);
   assert.equal(elsewhere.calls.length, 0);
+});
+
+test("a turn gets an unscoped token for every active installation, routed by owner", async () => {
+  const now = Date.parse("2026-11-15T10:00:00Z");
+  const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
+  const calls: Call[] = [];
+  const fetcher: Fetch = async (url, init) => {
+    calls.push({ url, init });
+    const token = url.endsWith("/installations/7/access_tokens") ? "ghs_mine" : "ghs_org";
+    return Response.json({ token, expires_at: "2026-11-15T11:00:00Z", permissions: {} }, { status: 201 });
+  };
+
+  const minted = await mintOwnerTokens(
+    fetcher,
+    "https://api.github.com",
+    app,
+    [
+      { installationId: 7, accountLogin: "mvhenten", status: "Active" },
+      { installationId: 8, accountLogin: "Tumpel", status: "Active" },
+      { installationId: 9, accountLogin: "paused", status: "Suspended" },
+    ],
+    { owner: "Tumpel", name: "protocol" },
+    now,
+  );
+  assert.deepEqual(calls.map(({ url, init }) => [url, init.body ?? null]).sort(), [
+    ["https://api.github.com/app/installations/7/access_tokens", null],
+    ["https://api.github.com/app/installations/8/access_tokens", null],
+  ]);
+  assert.ok(minted.ok);
+  assert.deepEqual(
+    withOwnerTokens(
+      [
+        { name: "ANTHROPIC_API_KEY", value: "sk-ant" },
+        { name: "GITHUB_TOKEN", value: "ghs_scoped" },
+      ],
+      minted.value,
+      { owner: "Tumpel", name: "protocol" },
+    ),
+    [
+      { name: "ANTHROPIC_API_KEY", value: "sk-ant" },
+      { name: "GITHUB_TOKEN", value: "ghs_org" },
+      { name: "GH_TOKEN", value: "ghs_org" },
+      { name: "TUMPEL_GITHUB_TOKENS", value: "mvhenten=ghs_mine tumpel=ghs_org" },
+    ],
+  );
+});
+
+test("an installation that fails to mint leaves the turn the other owners, unless it is the session owner", async () => {
+  const now = Date.parse("2026-11-15T10:00:00Z");
+  const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
+  const fetcher: Fetch = async (url) =>
+    url.endsWith("/installations/8/access_tokens")
+      ? Response.json({ message: "Bad credentials" }, { status: 401 })
+      : Response.json(
+          { token: `ghs_${url.split("/")[5]}`, expires_at: "2026-11-15T11:00:00Z", permissions: {} },
+          { status: 201 },
+        );
+  const installations = [
+    { installationId: 7, accountLogin: "mvhenten", status: "Active" as const },
+    { installationId: 8, accountLogin: "broken", status: "Active" as const },
+    { installationId: 9, accountLogin: "tumpel", status: "Active" as const },
+  ];
+
+  const minted = await mintOwnerTokens(
+    fetcher,
+    "https://api.github.com",
+    app,
+    installations,
+    { owner: "mvhenten", name: "tumpel" },
+    now,
+  );
+  assert.deepEqual(minted, {
+    ok: true,
+    value: [
+      { owner: "mvhenten", token: "ghs_7" },
+      { owner: "tumpel", token: "ghs_9" },
+    ],
+  });
+
+  const own = await mintOwnerTokens(
+    fetcher,
+    "https://api.github.com",
+    app,
+    installations,
+    { owner: "broken", name: "x" },
+    now,
+  );
+  assert.ok(!own.ok);
+  assert.match(own.detail, /installation token for broken/);
 });
 
 test("a repository outside the installation uses the secret set's GITHUB_TOKEN, and is refused without one", () => {

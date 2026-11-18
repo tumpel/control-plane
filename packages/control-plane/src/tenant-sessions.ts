@@ -38,14 +38,18 @@ import {
   botUserId,
   type CommitIdentity,
   commitIdentity,
+  type GitHubAnswer,
   type GitHubRepository,
   githubRepository,
   type Minted,
   mintInstallationToken,
+  mintOwnerTokens,
+  type OwnerToken,
   REPOSITORY_TOKEN,
   type RepositoryCredentialSource,
   repositoryCredential,
   uncovered,
+  withOwnerTokens,
 } from "./github.ts";
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry } from "./harness-catalog";
@@ -745,6 +749,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
       repository,
       now,
       permissions,
+    );
+  }
+
+  private async ownerTokens(
+    tenantId: string,
+    target: GitHubRepository,
+    now: number,
+  ): Promise<GitHubAnswer<OwnerToken[]>> {
+    const app = await appKey(this.env.DB, keyStoreOf(this.env));
+    if (app === null) {
+      throw new Error(
+        `tenant ${tenantId} holds GitHub installations, and the stage holds no GitHub App; create it again and connect GitHub`,
+      );
+    }
+    return mintOwnerTokens(
+      (url, init) => fetch(url, init),
+      this.env.GITHUB_API_ORIGIN,
+      app,
+      await installationsOf(this.env.DB, tenantId),
+      target,
+      now,
     );
   }
 
@@ -1662,7 +1687,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", credential.detail, iso(now));
       return { kind: "Withdrawn" };
     }
-    const { variables, source } = credential;
+    const { source } = credential;
+    const owners =
+      prebuild === null && target !== null && minted.kind === "Minted"
+        ? await this.ownerTokens(tenantId, target, now)
+        : null;
+    if (owners !== null && !owners.ok) {
+      await this.failTurn(
+        tenantId,
+        turnId,
+        "RepositoryTokenRefused",
+        `${owners.detail}; send the turn again once GitHub answers, and check https://www.githubstatus.com if it keeps failing`,
+        iso(now),
+      );
+      return { kind: "Withdrawn" };
+    }
+    const variables =
+      owners === null || target === null
+        ? credential.variables
+        : withOwnerTokens(credential.variables, owners.value, target);
     const identity = await this.commitIdentityOf(minted, source, secretSetId, this.secretSetName(session));
     if (identity.kind === "Refused") {
       await this.failTurn(tenantId, turnId, "RepositoryTokenRefused", identity.detail, iso(now));
