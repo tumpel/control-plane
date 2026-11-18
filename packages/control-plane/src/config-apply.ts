@@ -32,7 +32,7 @@ import { json, type Problem, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
 import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-files.ts";
-import { unreadableSecretSet } from "./secret-members.ts";
+import { keyPrefixMismatch, unreadableSecretSet } from "./secret-members.ts";
 import type { ConfigApplied } from "./tenant.ts";
 import { personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
@@ -143,6 +143,8 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
     case "UpdateSecretSet":
     case "RewriteSecretSet": {
       const secrets = secretValuesOf(step.secretSet, prepare.values);
+      const mismatch = keyPrefixMismatch(secrets, OPERATION);
+      if (mismatch !== null) return { ok: false, response: problem(422, mismatch) };
       const user = await repositoryTokenUser(prepare.env, secrets, OPERATION);
       if (!user.ok) return user;
       return {

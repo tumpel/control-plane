@@ -374,7 +374,9 @@ test("Connect OpenRouter spends one code into the secret set, fails on its deadl
 
   const other = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {
     name: "pasted openrouter",
-    secrets: [{ kind: "ApiKey", name: "OTHER_OPENROUTER_KEY", provider: "OpenRouter", value: "pasted-openrouter-key" }],
+    secrets: [
+      { kind: "ApiKey", name: "OTHER_OPENROUTER_KEY", provider: "OpenRouter", value: "sk-or-pasted-openrouter-key" },
+    ],
   });
   assert.equal((await refused("POST", authorize, { secretSetId: other.secretSetId }, 409)).code, "Conflict");
 });

@@ -342,11 +342,21 @@ test("tumpel config validate names every key that breaks the schema, a pasted se
   assert.ok(!validated.stderr.includes(SECRET));
 });
 
-test("a taken name, a repeated member, two credentials for one provider and deleting a set in use are refused with 409 Conflict, and a persona on a set without a key its harness reads with 422", async () => {
+test("a taken name, a repeated member, two credentials for one provider and deleting a set in use are refused with 409 Conflict, and a persona on a set without a key its harness reads or an OpenRouter key on an Anthropic member with 422", async () => {
   const key = { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET };
   const created = await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer);
   assert.equal(created.status, 200);
   const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const openRouterKey = "sk-or-v1-e2e-never-printed";
+  const misfiled = await server.fetch(`${origin}/v1/secret-sets/${secretSetId}/members`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", ...bearer },
+    body: JSON.stringify({ ...key, value: openRouterKey }),
+  });
+  assert.equal(misfiled.status, 422);
+  const mismatch = await misfiled.text();
+  assert.match(ProblemSchema.parse(JSON.parse(mismatch)).detail, /Anthropic, whose keys start with sk-ant-/);
+  assert.ok(!mismatch.includes(openRouterKey));
   const taken = await postJson("/v1/secret-sets", { name: "twin", secrets: [key] }, bearer);
   assert.equal(taken.status, 409);
   assert.equal(ProblemSchema.parse(await taken.json()).code, "Conflict");
