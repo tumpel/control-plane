@@ -6,11 +6,9 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCOPES = [
   ["packages/dashboard/src/**.ts", "packages/dashboard/src/**.tsx"],
-  ["crates/tumpel/src/**.rs"],
   ["packages/control-plane/src/**.ts"],
 ];
 const OUT_OF_SCOPE = [/\/stories\//, /\.test\.tsx?$/, /\.stories\.tsx$/];
-const RUST_TESTS = "#[cfg(test)]";
 const SHAPES = [
   ["a gap id", /\bG\d{1,3}\b/],
   ["a requirement id", /\b(?:N?FR|OR)-\d+/],
@@ -27,14 +25,8 @@ const files = SCOPES.flatMap((patterns) =>
   execFileSync("git", ["ls-files", "--", ...patterns], { cwd: ROOT, encoding: "utf8" }).split("\n"),
 ).filter((file) => file && !OUT_OF_SCOPE.some((pattern) => pattern.test(file)));
 
-const shipped = (file, source) => {
-  if (!file.endsWith(".rs")) return source;
-  const at = source.indexOf(RUST_TESTS);
-  return at === -1 ? source : source.slice(0, at);
-};
-
 const failures = files.flatMap((file) =>
-  shipped(file, readFileSync(`${ROOT}${file}`, "utf8"))
+  readFileSync(`${ROOT}${file}`, "utf8")
     .split("\n")
     .flatMap((line, index) =>
       line.trimStart().startsWith("import ")

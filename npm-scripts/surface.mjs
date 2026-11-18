@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { cliSource, RELEASE_CACHE, releasePins } from "./release-download.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const OPENAPI = join(ROOT, "build/openapi/openapi.json");
+const OPENAPI = join(ROOT, "node_modules/@tumpel/openapi/openapi.json");
 const MCP = join(ROOT, "packages/control-plane/src/mcp.ts");
 const CLI = await cliSource(releasePins().cli, RELEASE_CACHE);
 const DOC = join(ROOT, "doc/surface.md");

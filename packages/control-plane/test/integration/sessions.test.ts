@@ -40,6 +40,7 @@ import { ControlEnvelopeSchema, helloBytes } from "../../src/channel/protocol.ts
 import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
 import { workersSecretKeyStore } from "../../src/key-store.ts";
+import type { ReleaseManifest } from "../../src/releases.ts";
 import {
   type ChunkLedger,
   type ChunkStore,
@@ -47,6 +48,7 @@ import {
   decodeLines,
   type TranscriptLine,
 } from "../../src/transcript.ts";
+import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
 import { GIVE_UP_MS, TEST_SETTINGS, until } from "../timing.ts";
 
 const AUDIENCE = "tumpel-sessions-e2e";
@@ -98,38 +100,13 @@ const signal = (): { promise: Promise<void>; resolve: () => void } => {
   return { promise, resolve };
 };
 
-const IMAGE_DIGEST = "b".repeat(64);
 const KERNEL_DIGEST = "c".repeat(64);
-const MANIFEST_DIGEST = "d".repeat(64);
 const BASE_DIGEST = "3".repeat(64);
 const BASE_MANIFEST_DIGEST = "4".repeat(64);
-const RELEASE = {
-  releaseVersion: "0.2.0",
-  commit: "e".repeat(40),
-  channelProtocolVersion: ChannelProtocol.Version,
-  supervisors: [{ architecture: "Amd64", sha256: "a".repeat(64), sizeBytes: 4096, guestProtocolVersion: 11 }],
-  clis: [{ architecture: "Amd64", sha256: "f".repeat(64), sizeBytes: 2048 }],
-  images: [
-    {
-      harness: "ClaudeCode",
-      harnessVersion: CLAUDE_CODE_VERSION,
-      architecture: "Amd64",
-      imageDigest: IMAGE_DIGEST,
-      kernelDigest: KERNEL_DIGEST,
-      manifestDigest: MANIFEST_DIGEST,
-      ociDigest: "e".repeat(64),
-      rootfsDigest: "9".repeat(64),
-    },
-  ],
+const RELEASE: ReleaseManifest = {
+  ...CLAUDE_CODE_AMD64_RELEASE,
   harnessLayers: [
-    {
-      harness: "ClaudeCode",
-      harnessVersion: CLAUDE_CODE_VERSION,
-      architecture: "Amd64",
-      layerDigest: "1".repeat(64),
-      manifestDigest: "2".repeat(64),
-      sizeBytes: 65536,
-    },
+    ...CLAUDE_CODE_AMD64_RELEASE.harnessLayers,
     {
       harness: "Codex",
       harnessVersion: CODEX_VERSION,
@@ -137,16 +114,6 @@ const RELEASE = {
       layerDigest: "7".repeat(64),
       manifestDigest: "8".repeat(64),
       sizeBytes: 65536,
-    },
-  ],
-  bases: [
-    {
-      architecture: "Amd64",
-      imageDigest: BASE_DIGEST,
-      kernelDigest: KERNEL_DIGEST,
-      manifestDigest: BASE_MANIFEST_DIGEST,
-      ociDigest: "5".repeat(64),
-      rootfsDigest: "6".repeat(64),
     },
   ],
 };

@@ -12,10 +12,19 @@ export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
       sha256: "a".repeat(64),
       sizeBytes: 4096,
       supervisorVersion: "0.1.0",
+      downloadUrl: "https://github.com/tumpel/supervisor/releases/download/v0.1.0/tumpel-supervisor-x86_64-linux",
       guestProtocolVersion: 11,
     },
   ],
-  clis: [{ architecture: "Amd64", sha256: "f".repeat(64), sizeBytes: 2048, cliVersion: "0.2.1" }],
+  clis: [
+    {
+      architecture: "Amd64",
+      sha256: "f".repeat(64),
+      sizeBytes: 2048,
+      cliVersion: "0.2.1",
+      downloadUrl: "https://github.com/tumpel/cli/releases/download/v0.2.1/tumpel-x86_64-linux",
+    },
+  ],
   images: [
     {
       harness: "ClaudeCode",

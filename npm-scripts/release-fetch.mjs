@@ -5,11 +5,13 @@ import { fileURLToPath } from "node:url";
 import {
   CLI_REPOSITORY,
   cliAsset,
+  downloadAsset,
   guestAsset,
+  RELEASE_CACHE,
+  releasePins,
   SUPERVISOR_REPOSITORY,
   supervisorAsset,
-} from "../packages/control-plane/src/release-assets.ts";
-import { downloadAsset, RELEASE_CACHE, releasePins } from "./release-download.mjs";
+} from "./release-download.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const RELEASE_BINARIES = join(ROOT, ".tmp", "release-binaries");
