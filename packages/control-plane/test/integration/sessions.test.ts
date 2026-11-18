@@ -3705,6 +3705,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   const prebuilt = { layer: "Prebuild", prebuildId: started.prebuildId, layerDigest: done.status.layerDigest };
   assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, prebuilt);
   assert.ok(consumer.image.kind === "Layered");
+  assert.equal(started.guestImageDigest, consumer.image.base.imageDigest);
   assert.deepEqual((await getJson(`/v1/turns/${consumer.turnId}`, TurnSchema)).image, {
     kind: "Layered",
     baseImageDigest: consumer.image.base.imageDigest,
