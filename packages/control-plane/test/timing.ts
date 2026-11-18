@@ -9,7 +9,7 @@ export const TEST_SETTINGS: Settings = {
   dispatchGrantTtlSeconds: 300,
   snapshotDelaySeconds: 30,
   snapshotDeadlineSeconds: 900,
-  turnClaimBudgetSeconds: 60,
+  turnOfferTtlSeconds: 60,
   turnImageFetchBudgetSeconds: 900,
   turnFirstLineBudgetSeconds: 120,
   turnTotalBudgetSeconds: 3600,

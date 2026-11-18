@@ -6,8 +6,10 @@ import {
   type DispatchGrant,
   decodeBase64,
   type Frame,
+  HELD_SESSIONS_VERSION,
   type Hello,
   HelloVersionSchema,
+  HostEnvelopeBeforeHeldSessionsSchema,
   HostEnvelopeSchema,
   type HostMessage,
   type HostUsage,
@@ -32,12 +34,15 @@ export type ControlConnection =
   | { phase: "Open"; protocolVersion: number }
   | { phase: "Closed" };
 
+export const TURN_CANCEL_VERSION = 23;
+
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
 export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   TurnOffer: ChannelProtocol.Oldest,
   TurnWithdrawn: ChannelProtocol.Oldest,
   TurnClaimed: ChannelProtocol.Oldest,
+  TurnCancel: TURN_CANCEL_VERSION,
   SnapshotRequest: ChannelProtocol.Oldest,
   SnapshotChunksHeld: ChannelProtocol.Oldest,
   SnapshotPackUploads: ChannelProtocol.Oldest,
@@ -265,7 +270,10 @@ export const receive = async (
       );
     }
   }
-  const parsed = parseEnvelope(HostEnvelopeSchema, text);
+  const parsed =
+    connection.phase === "Open" && connection.protocolVersion < HELD_SESSIONS_VERSION
+      ? parseEnvelope(HostEnvelopeBeforeHeldSessionsSchema, text)
+      : parseEnvelope(HostEnvelopeSchema, text);
   if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;

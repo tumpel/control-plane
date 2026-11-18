@@ -3,7 +3,14 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { PersonaFileLimit } from "@tumpel/schemas";
 import { CLAUDE_CODE_VERSION, catalogEntry } from "../src/harness-catalog.ts";
-import { type BlobStore, checkFiles, type PersonaFileWrite, personaFileKey, storeFiles } from "../src/persona-files.ts";
+import {
+  type BlobStore,
+  checkFiles,
+  type PersonaFileWrite,
+  personaFileKey,
+  readPersona,
+  storeFiles,
+} from "../src/persona-files.ts";
 
 const claudeCode = catalogEntry("ClaudeCode", CLAUDE_CODE_VERSION);
 if (claudeCode === undefined) throw new Error(`the catalog lists no ClaudeCode ${CLAUDE_CODE_VERSION}`);
@@ -115,4 +122,61 @@ test("a stored file whose bytes do not hash to its digest is refused, and one th
     ok: true,
     files: [{ path: ".claude/settings.json", digest, sizeBytes: bytes.byteLength }],
   });
+});
+
+test("a read returns a file at the inline cap as an Inline write with its bytes, and a larger one as a Stored write with a download URL of its digest", async () => {
+  const small = new Uint8Array(Buffer.alloc(PersonaFileLimit.InlineFileBytes, "s"));
+  const large = new Uint8Array(Buffer.alloc(PersonaFileLimit.InlineFileBytes + 1, "l"));
+  const smallDigest = createHash("sha256").update(small).digest("hex");
+  const largeDigest = createHash("sha256").update(large).digest("hex");
+  const store = new MemoryBlobs();
+  store.blobs.set(personaFileKey("tenant-1", smallDigest), small);
+  store.blobs.set(personaFileKey("tenant-1", largeDigest), large);
+  const now = Date.parse("2026-11-17T12:00:00Z");
+
+  const persona = await readPersona(
+    { STORE: store, R2_BUCKET_NAME: "tumpel-sessions", R2_STUB_ORIGIN: "https://r2.example.test" },
+    {
+      personaId: "persona-1",
+      tenantId: "tenant-1",
+      name: "Reviewer",
+      harness: "ClaudeCode",
+      secretSetId: "set-1",
+      files: [
+        { path: ".claude/CLAUDE.md", digest: smallDigest, sizeBytes: small.byteLength, createdAt: now, updatedAt: now },
+        {
+          path: ".claude/settings.json",
+          digest: largeDigest,
+          sizeBytes: large.byteLength,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    },
+    now,
+  );
+
+  assert.deepEqual(persona.files, [
+    {
+      source: "Inline",
+      path: ".claude/CLAUDE.md",
+      content: Buffer.from(small).toString("base64"),
+      digest: smallDigest,
+      sizeBytes: small.byteLength,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      source: "Stored",
+      path: ".claude/settings.json",
+      digest: largeDigest,
+      sizeBytes: large.byteLength,
+      downloadUrl: `https://r2.example.test/tumpel-sessions/tenant-1/persona-files/${largeDigest}?X-Tumpel-Method=GET&X-Tumpel-Expires=${now / 1000 + 900}`,
+      downloadExpiresAt: "2026-11-17T12:15:00.000Z",
+      createdAt: now,
+      updatedAt: now,
+    },
+  ]);
 });

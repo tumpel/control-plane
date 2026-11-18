@@ -19,4 +19,4 @@ export const apiOriginOf = (env: { API_ORIGIN: string }): string => {
 };
 
 export const turnCredentialSeconds = (settings: Settings): number =>
-  Math.max(settings.dispatchGrantTtlSeconds, settings.turnClaimBudgetSeconds + settings.turnImageFetchBudgetSeconds);
+  Math.max(settings.dispatchGrantTtlSeconds, settings.turnOfferTtlSeconds + settings.turnImageFetchBudgetSeconds);

@@ -13,6 +13,7 @@ import {
   ClaudeSetupSchema,
   CompactTranscriptPageSchema,
   CredentialHandoverSchema,
+  FailedTurnSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
@@ -71,7 +72,7 @@ const SETTINGS = {
   dispatchGrantTtlSeconds: CLAIM_BUDGET_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
   snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
-  turnClaimBudgetSeconds: CLAIM_BUDGET_SECONDS,
+  turnOfferTtlSeconds: CLAIM_BUDGET_SECONDS,
   turnImageFetchBudgetSeconds: IMAGE_FETCH_BUDGET_SECONDS,
   turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
@@ -235,7 +236,7 @@ class HostSide {
   }
 
   private beat(): void {
-    this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE });
+    this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE, heldSessionIds: [] });
   }
 
   static async connect(
@@ -597,7 +598,12 @@ const tenant = async () => {
     const offer = await host.next("TurnOffer");
     assert.equal(offer.sessionId, started.session.sessionId);
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     return { session: started.session, offer };
   };
@@ -967,20 +973,23 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(pending.cursor, 3);
     assert.equal(pending.finished, false);
 
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 3, completedAt: new Date().toISOString() });
+    const result = JSON.stringify({ type: "result", subtype: "success", is_error: false });
+    host.send({ type: "TurnLine", turnId, lineSeq: 4, text: result });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 4, completedAt: new Date().toISOString() });
     const completed = await until(
       "the turn reading Completed",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
       (turn) => turn.state === "Completed",
     );
-    assert.equal(completed.lineCount, 3);
-    assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
-    assert.deepEqual(await readAll(sessionId, turnId, 1), expected);
+    assert.equal(completed.lineCount, 4);
+    const all = [...expected, { lineSeq: 4, text: result }];
+    assert.deepEqual(await readAll(sessionId, turnId, 10), all);
+    assert.deepEqual(await readAll(sessionId, turnId, 1), all);
     const first = await tool("tumpel_transcript_read", { sessionId, limit: 1 }, RawTranscriptPageSchema);
     assert.equal(first.cursor, 1);
     assert.equal(first.finished, false);
     const last = await tool("tumpel_transcript_read", { sessionId, after: 2 }, RawTranscriptPageSchema);
-    assert.equal(last.cursor, 3);
+    assert.equal(last.cursor, 4);
     assert.equal(last.finished, true);
     const pastDropped = await tool(
       "tumpel_transcript_read",
@@ -1025,7 +1034,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
     await tool("tumpel_turn_send", { sessionId, prompt: "and now the tests" }, TurnSchema);
     const next = await host.next("TurnOffer");
-    assert.equal(next.lastLineSeq, 3);
+    assert.equal(next.lastLineSeq, 4);
     assert.deepEqual(
       next.snapshots.map(({ snapshotId, snapshotSeq, storageKey }) => ({ snapshotId, snapshotSeq, storageKey })),
       [{ snapshotId: request.snapshotId, snapshotSeq: 1, storageKey: request.storageKey }],
@@ -1056,22 +1065,23 @@ suite("sessions", { concurrency: 8 }, () => {
     const texts = Array.from({ length: 7 }, (_, index) =>
       JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `line ${index + 1}` }] } }),
     );
-    texts.forEach((text, index) => {
+    const result = JSON.stringify({ type: "result", subtype: "success", is_error: false });
+    [...texts, result].forEach((text, index) => {
       host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
     });
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: texts.length, completedAt: new Date().toISOString() });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 8, completedAt: new Date().toISOString() });
     const completed = await until(
       "the turn reading Completed",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
       (turn) => turn.state === "Completed",
     );
-    assert.equal(completed.lineCount, texts.length);
+    assert.equal(completed.lineCount, 8);
     const raw = await tool("tumpel_transcript_read", { sessionId, turnId, limit: 100 }, RawTranscriptPageSchema);
     assert.deepEqual(
       raw.lines.map(({ lineSeq, text }) => ({ lineSeq, text })),
-      texts.map((text, index) => ({ lineSeq: index + 1, text })),
+      [...texts, result].map((text, index) => ({ lineSeq: index + 1, text })),
     );
-    assert.equal(raw.cursor, texts.length);
+    assert.equal(raw.cursor, 8);
     assert.equal(raw.finished, true);
     const compact = await tool(
       "tumpel_transcript_read",
@@ -1516,7 +1526,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(inFlight.code, "TurnInFlight");
     assert.match(inFlight.detail, new RegExp(turnId));
 
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     await until(
       "the turn reading Completed",
@@ -1532,6 +1542,7 @@ suite("sessions", { concurrency: 8 }, () => {
       assert.equal(session?.lastTurnId, turnId);
       assert.equal(session?.lastTurnState, "Completed");
       assert.equal(session?.lastTurnAt, new Date(completed.updatedAt).toISOString());
+      assert.deepEqual(session?.origin, { kind: "Prompt" });
     }
     const notStopped = await refused(`/v1/sessions/${sessionId}/archive`);
     assert.equal(notStopped.code, "SessionNotStopped");
@@ -1565,7 +1576,9 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(archived.state, "Archived");
     assert.equal(await store.text(request.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
-    assert.deepEqual(await readAll(sessionId, turnId, 10), [{ lineSeq: 1, text: '{"type":"result"}' }]);
+    assert.deepEqual(await readAll(sessionId, turnId, 10), [
+      { lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' },
+    ]);
     const archivedSend = await refused(`/v1/sessions/${sessionId}/turns`, {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: "one more" }),
@@ -1586,7 +1599,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const warm = await host.next("SnapshotRequest");
     await store.put(warm.storageKey, '{"entries":[]}');
@@ -1637,7 +1650,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const warm = await host.next("SnapshotRequest");
 
@@ -1709,6 +1722,15 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/turns/${restoring.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
+    const afterRestore = await host.next("SnapshotRequest");
+    assert.equal(afterRestore.turnId, restoring.turnId);
+    host.send({
+      type: "SnapshotFailed",
+      snapshotId: afterRestore.snapshotId,
+      reason: "BoxNotFound",
+      detail: "this host runs no box of the session",
+      failedAt: new Date().toISOString(),
+    });
 
     await tool(
       "tumpel_turn_send",
@@ -1727,8 +1749,26 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/turns/${reusing.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
+    const afterReuse = await host.next("SnapshotRequest");
+    assert.equal(afterReuse.turnId, reusing.turnId);
+    host.send({
+      type: "SnapshotFailed",
+      snapshotId: afterReuse.snapshotId,
+      reason: "BoxNotFound",
+      detail: "this host runs no box of the session",
+      failedAt: new Date().toISOString(),
+    });
 
     await tool("tumpel_session_stop", { sessionId: first.session.sessionId }, SessionSchema);
+    const atStop = await host.next("SnapshotRequest");
+    assert.equal(atStop.turnId, restoring.turnId);
+    host.send({
+      type: "SnapshotFailed",
+      snapshotId: atStop.snapshotId,
+      reason: "BoxNotFound",
+      detail: "this host runs no box of the session",
+      failedAt: new Date().toISOString(),
+    });
     const teardown = await host.next("BoxTeardown");
     host.send({ type: "BoxGone", sessionId: first.session.sessionId, boxId: teardown.boxId });
     await until(
@@ -1768,6 +1808,39 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(failure.reason, "NotClaimed");
     assert.match(failure.detail, new RegExp(`did not claim the turn within ${CLAIM_BUDGET_SECONDS} seconds`));
     assert.doesNotMatch(failure.detail, UUID);
+    const read = FailedTurnSchema.parse(failed);
+    assert.deepEqual(
+      { reason: read.reason, detail: read.detail, failedAt: read.failedAt },
+      { reason: failure.reason, detail: failure.detail, failedAt: failure.failedAt },
+    );
+    const session = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
+    assert.deepEqual(session.lastTurn, read);
+  });
+
+  test("a turn whose harness exits without a successful result fails HarnessExitedWithoutResult on every read, and a snapshot of its box follows", async () => {
+    const { bearer, host, getJson, tool, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "stops mid-work" }, bearer);
+    assert.equal(response.status, 200);
+    const { session } = StartedSessionSchema.parse(await response.json());
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"error_during_execution","is_error":false}',
+    });
+    host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.turnId, offer.turnId);
+    assert.equal(request.boxId, offer.boxId);
+    const read = await getJson(`/v1/turns/${offer.turnId}`, FailedTurnSchema);
+    assert.equal(read.reason, "HarnessExitedWithoutResult");
+    assert.match(read.detail, /exited without printing a successful result/);
+    assert.deepEqual(await tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema), read);
+    assert.deepEqual(await getJson(`/v1/sessions/${session.sessionId}/turns`, TurnSchema.array()), [read]);
+    assert.deepEqual((await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema)).lastTurn, read);
   });
 
   test("a session timer stored before its owner field was dropped still fails an unclaimed turn NotClaimed", async () => {
@@ -1789,8 +1862,8 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(failure.reason, "NotClaimed");
   });
 
-  test("a start from an issue over MCP refuses a missing or closed issue, and an open one saves the issue and offers its prompt", async () => {
-    const { bearer, host, tool, toolRefusal, sessionStart } = await tenant();
+  test("a start from an issue over MCP refuses a missing or closed issue, and an open one offers its prompt and reads back the issue", async () => {
+    const { bearer, host, tool, toolRefusal, sessionStart, getJson } = await tenant();
     const { personaId, model } = await sessionStart();
     const fromIssue = { personaId, model, owner: "Acme", name: "App" };
 
@@ -1811,7 +1884,7 @@ suite("sessions", { concurrency: 8 }, () => {
       { ...fromIssue, issueNumber: 12 },
       StartedSessionFromIssueSchema,
     );
-    const { sessionId, tenantId } = started.session;
+    const { sessionId } = started.session;
     assert.equal(started.session.repository, "https://github.com/acme/app");
     const issue = {
       sessionId,
@@ -1826,13 +1899,13 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(offer.turnId, started.turn.turnId);
     assert.ok(offer.prompt.includes(`Closes ${issue.htmlUrl}`));
 
+    const { sessionId: _parent, ...issued } = issue;
+    const origin = { kind: "Issue", ...issued };
+    assert.deepEqual((await tool("tumpel_session_get", { sessionId }, SessionSchema)).origin, origin);
+    const listed = await getJson("/v1/sessions", SessionSchema.array());
     assert.deepEqual(
-      await tenantSql(
-        tenantId,
-        "SELECT session_id, issue_number, title, html_url, branch FROM session_issues WHERE session_id = ?",
-        sessionId,
-      ),
-      [{ session_id: sessionId, issue_number: 12, title: issue.title, html_url: issue.htmlUrl, branch: issue.branch }],
+      listed.map((session) => [session.sessionId, session.origin]),
+      [[sessionId, origin]],
     );
   });
 
@@ -1980,7 +2053,12 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(started.session.hostId, first.id);
     const offer = await from.next("TurnOffer");
     from.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    from.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
+    from.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
     from.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const request = await from.next("SnapshotRequest");
 
@@ -2196,7 +2274,12 @@ suite("sessions", { concurrency: 8 }, () => {
     const { session } = StartedSessionSchema.parse(await response.json());
     const first = await restarting.next("TurnOffer");
     restarting.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
-    restarting.send({ type: "TurnLine", turnId: first.turnId, lineSeq: 1, text: '{"type":"result"}' });
+    restarting.send({
+      type: "TurnLine",
+      turnId: first.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
     restarting.send({
       type: "TurnComplete",
       turnId: first.turnId,

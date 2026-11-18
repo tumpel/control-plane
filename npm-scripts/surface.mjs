@@ -106,6 +106,7 @@ const ALLOWLIST = {
   PrebuildInputs_read: BUILD_JOB,
   CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
   ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
+  Turns_wait: "no route serves it yet; it leaves this list with its MCP tool and CLI command",
 };
 
 const CLI_ONLY = {

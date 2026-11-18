@@ -26,6 +26,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "ClaudeCode",
     compactTranscript: compactorOf("ClaudeCode") !== null,
+    goals: false,
     harnessVersion: CLAUDE_CODE_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
@@ -60,6 +61,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "Codex",
     compactTranscript: compactorOf("Codex") !== null,
+    goals: false,
     harnessVersion: CODEX_VERSION,
     credentialChoice: "CatalogOrder",
     credentials: [
@@ -122,6 +124,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "OpenCode",
     compactTranscript: compactorOf("OpenCode") !== null,
+    goals: false,
     harnessVersion: OPENCODE_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [
@@ -168,6 +171,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
   {
     harness: "PiDev",
     compactTranscript: compactorOf("PiDev") !== null,
+    goals: false,
     harnessVersion: PI_VERSION,
     credentialChoice: "ModelProvider",
     credentials: [

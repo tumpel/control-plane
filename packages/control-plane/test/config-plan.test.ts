@@ -5,13 +5,13 @@ import {
   EffectiveHarnessVersionSchema,
   HostSchema,
   PersonaFileLimit,
-  PersonaSchema,
   SecretSetSchema,
   SessionSchema,
   TenantConfigSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { type Desired, type Live, type Planned, planOf, type SentFile, type Step } from "../src/configs.ts";
+import { StoredPersonaSchema } from "../src/persona-files.ts";
 
 type TenantConfig = z.infer<typeof TenantConfigSchema>;
 type ConfigPersona = TenantConfig["personas"][number];
@@ -40,7 +40,7 @@ const config = (parts: Partial<Omit<TenantConfig, "$schema">> = {}): TenantConfi
   });
 
 const livePersona = (personaId: string, name: string, harness: string, secretSetId: string, files: unknown[] = []) =>
-  PersonaSchema.parse({
+  StoredPersonaSchema.parse({
     personaId,
     tenantId: "t1",
     name,
@@ -89,6 +89,7 @@ const liveSession = (sessionId: string, personaId: string, state: string) =>
     boxId: "b1",
     personaId,
     repository: "https://github.com/acme/app.git",
+    origin: { kind: "Prompt" },
     harness: "ClaudeCode",
     harnessVersion: "2.0.0",
     model: "claude-test",
@@ -96,6 +97,17 @@ const liveSession = (sessionId: string, personaId: string, state: string) =>
     lastTurnId: "turn1",
     lastTurnState: "Completed",
     lastTurnAt: "2026-11-15T12:00:00+01:00",
+    lastTurn: {
+      turnId: "turn1",
+      tenantId: "t1",
+      sessionId,
+      boxId: "b1",
+      prompt: "work",
+      state: "Completed",
+      lineCount: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    },
     createdAt: 1,
     updatedAt: 1,
   });

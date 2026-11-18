@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Compactor, compactorOf } from "../src/compact.ts";
+import { type Compactor, compactorOf, successResultOf } from "../src/compact.ts";
 
 const compactorFor = (harness: "Codex" | "OpenCode" | "PiDev"): Compactor => {
   const compactor = compactorOf(harness);
@@ -233,4 +233,34 @@ test("a Codex turn keeps each tool call once when it starts, the agent's text, t
     "[error] unexpected status 401 Unauthorized",
     "[error] stream disconnected before completion",
   ]);
+});
+
+test("a harness's successful result is the line that ends its run well, never an error or a mid-run step", () => {
+  const succeeded = (harness: "ClaudeCode" | "Codex" | "OpenCode" | "PiDev", lines: unknown[]): unknown[] => {
+    const success = successResultOf(harness);
+    assert.ok(success);
+    return lines.filter(success);
+  };
+  const claudeSuccess = { type: "result", subtype: "success", is_error: false, result: "done" };
+  assert.deepEqual(
+    succeeded("ClaudeCode", [
+      { type: "result", subtype: "error_during_execution", is_error: false },
+      { type: "result", subtype: "success", is_error: true },
+      claudeSuccess,
+    ]),
+    [claudeSuccess],
+  );
+  assert.deepEqual(succeeded("Codex", CODEX_TURN), [
+    { type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 3 } },
+  ]);
+  assert.deepEqual(succeeded("PiDev", PI_TURN), [
+    { type: "agent_end", messages: [piToolCalls, piToolResult, piDone], willRetry: false },
+  ]);
+  assert.deepEqual(
+    succeeded("PiDev", [{ type: "agent_end", messages: [{ ...piDone, stopReason: "error" }], willRetry: false }]),
+    [],
+  );
+  const openCodeStop = { type: "step_finish", part: { reason: "stop", cost: 0, tokens: openCodeTokens } };
+  assert.deepEqual(succeeded("OpenCode", [...OPENCODE_TURN, openCodeStop]), [openCodeStop]);
+  assert.equal(successResultOf("MistralAgent"), null);
 });
