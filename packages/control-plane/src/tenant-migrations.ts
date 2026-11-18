@@ -60,6 +60,7 @@ import tenant0059 from "../migrations/tenant/0059_turn_images_and_session_layers
 import tenant0060 from "../migrations/tenant/0060_turn_goals.sql";
 import tenant0061 from "../migrations/tenant/0061_box_disk.sql";
 import tenant0062 from "../migrations/tenant/0062_session_placements.sql";
+import tenant0063 from "../migrations/tenant/0063_restore_session_chunks.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -125,4 +126,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0060_turn_goals", sql: tenant0060 },
   { name: "0061_box_disk", sql: tenant0061 },
   { name: "0062_session_placements", sql: tenant0062 },
+  { name: "0063_restore_session_chunks", sql: tenant0063 },
 ];
