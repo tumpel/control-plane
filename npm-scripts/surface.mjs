@@ -38,6 +38,7 @@ const NOUNS = {
   ClaudeSetups: "claude-setup",
   OpenRouterConnections: "openrouter",
   Connectors: "connector",
+  Events: "events",
   StaticConnectors: "connector",
   OAuthConnectors: "connector",
 };
@@ -52,6 +53,7 @@ const VERBS = {
   Prebuilds_getFailure: "failure",
   StaticConnectors_create: "create-static",
   OAuthConnectors_create: "create-oauth",
+  Events_list: "wait",
 };
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 

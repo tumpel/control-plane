@@ -7,7 +7,7 @@ names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, StaticConnectors `connector`, OAuthConnectors `connector`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
 `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`
 the verbs `create-static` and `create-oauth`,
@@ -48,6 +48,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `EnrolmentTokens_list`                   | `tumpel_host_list_tokens`                    | `tumpel host list-tokens`                    |
 | `EnrolmentTokens_mint`                   | `tumpel_host_mint_token`                     | `tumpel host mint-token`                     |
 | `EnrolmentTokens_revoke`                 | `tumpel_host_revoke_token`                   | `tumpel host revoke-token`                   |
+| `Events_list`                            | `tumpel_events_wait`                         | `tumpel events wait`                         |
 | `GitHubActionsConnections_delete`        | `tumpel_github_actions_delete`               | `tumpel github-actions delete`               |
 | `GitHubActionsConnections_get`           | `tumpel_github_actions_get`                  | `tumpel github-actions get`                  |
 | `GitHubActionsConnections_start`         | `tumpel_github_actions_start`                | `tumpel github-actions start`                |

@@ -24,6 +24,7 @@ import {
 } from "./supervisor-updates";
 import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
+import { listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 
@@ -169,10 +170,17 @@ export class Tenant extends TenantConnectors {
     });
   }
 
-  handle(request: TenantRequest): Promise<TenantResponse> {
-    return serveTenantRequest(request, this.operations, () =>
+  async handle(request: TenantRequest): Promise<TenantResponse> {
+    const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
+    if (this.eventsAppended) {
+      this.eventsAppended = false;
+      const tenantId = this.ctx.id.name;
+      if (tenantId === undefined) throw new Error("the tenant Durable Object appended events but has no name");
+      this.ctx.waitUntil(this.env.EVENTS.getByName(tenantId).wake());
+    }
+    return response;
   }
 
   private readonly operations: TenantHandlers = {
@@ -385,6 +393,7 @@ export class Tenant extends TenantConnectors {
     waitTurns: async ({ tenantId, turnIds, timeoutSeconds }) => ({
       waited: await this.waitTurns(tenantId, turnIds, timeoutSeconds),
     }),
+    listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
