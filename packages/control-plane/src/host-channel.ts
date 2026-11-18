@@ -164,8 +164,10 @@ export class HostChannel extends DurableObject<Env> {
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.failLostTurns(host.host_id, event.heldSessionIds, now);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat")
+    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
       await this.report(host.host_id, event.usage, now);
+      await this.sendDeferredOffers(host.host_id, attachment, context);
+    }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
       connection.phase === "Open" &&
@@ -208,8 +210,9 @@ export class HostChannel extends DurableObject<Env> {
     context: control.ControlContext,
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    for (const offer of await this.env.TENANT.getByName(tenantId).deferredOffers(tenantId, hostId)) {
-      await control.send(attachment.connection, offer, context);
+    for (const handoff of await this.env.TENANT.getByName(tenantId).deferredOffers(tenantId, hostId)) {
+      if (handoff.hostId === hostId) await control.send(attachment.connection, handoff.offer, context);
+      else await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
     }
   }
 

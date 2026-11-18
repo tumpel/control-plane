@@ -965,7 +965,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
     await this.timers(tenantId, session.session_id, {
       FirstLine: null,
-      Total: { turnId: turn.turn_id, at: Date.now() + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      Total: { turnId: turn.turn_id, at: turn.created_at + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
       Snapshot: null,
       HostOffline: null,
     });
@@ -1333,18 +1333,35 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
-  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
+  private offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
+    return this.placeOffered(tenantId, session, turn, false);
+  }
+
+  private async placeOffered(
+    tenantId: string,
+    session: SessionRow,
+    turn: TurnRow,
+    staying: boolean,
+  ): Promise<TurnHandoff | null> {
     const now = Date.now();
     const stay = (): null => this.deferOffer(session, turn, now);
-    if (this.unsnapshottedTurns(session.session_id).length > 0) return stay();
+    const movable = this.unsnapshottedTurns(session.session_id).length === 0;
     const prebuild = this.hostPrebuild(session.session_id) !== null;
     const hosts = (await listHosts(this.env.DB, tenantId)).filter(
-      (host) => host.hostId !== session.host_id && (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
+      (host) =>
+        (host.hostId === session.host_id ? staying : movable) &&
+        (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
     );
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return stay();
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image, session.box_memory_mib);
+    const usages = this.listHostUsage(tenantId).map((usage) =>
+      usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
+    );
+    const placement = placeSession(hosts, usages, image.image, session.box_memory_mib);
     if (placement.kind === "Refused") return stay();
+    if (placement.host.hostId === session.host_id) {
+      return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
+    }
     const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
@@ -1381,21 +1398,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return null;
   }
 
-  async deferredOffers(tenantId: string, hostId: string): Promise<StoredTurnOffer[]> {
+  async deferredOffers(tenantId: string, hostId: string): Promise<TurnHandoff[]> {
     const sql = this.ctx.storage.sql;
     const turnIds = sql
       .exec<{ turn_id: string }>("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId)
       .toArray()
       .map((row) => row.turn_id);
-    const offers: StoredTurnOffer[] = [];
+    const handoffs: TurnHandoff[] = [];
     for (const turnId of turnIds) {
       sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
       const turn = this.turnRow(turnId);
       const session = turn === null ? null : this.sessionRow(turn.session_id);
       if (turn === null || session === null || turn.state !== "Offered") continue;
-      offers.push(await this.armOffer(tenantId, session, turn));
+      const handoff = await this.placeOffered(tenantId, session, turn, true);
+      if (handoff !== null) handoffs.push(handoff);
     }
-    return offers;
+    return handoffs;
   }
 
   private runTurn(session: SessionRow, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
@@ -2399,17 +2417,32 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
-    if (message.reason === "HostUpdating" && turn.state === "Offered") {
+    const now = Date.now();
+    if (message.reason === "PoolExhausted" && turn.state === "Offered") return this.deferOffer(session, turn, now);
+    if (message.reason === "HostUpdating" && turn.state === "Offered")
       return this.offerElsewhere(tenantId, session, turn);
-    }
-    if (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state)) {
-      const now = Date.now();
-      this.ctx.storage.sql.exec(
-        "UPDATE turns SET state = 'Offered', updated_at = ? WHERE turn_id = ?",
-        now,
-        turn.turn_id,
-      );
-      return this.offerMessage(session, turn);
+    const stopped = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
+    if (stopped || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
+      const boxId = stopped ? crypto.randomUUID() : turn.box_id;
+      const sql = this.ctx.storage.sql;
+      this.ctx.storage.transactionSync(() => {
+        sql.exec(
+          "UPDATE turns SET state = 'Offered', box_id = ?, updated_at = ? WHERE turn_id = ?",
+          boxId,
+          now,
+          turn.turn_id,
+        );
+        if (stopped)
+          sql.exec(
+            "UPDATE sessions SET box_id = ?, updated_at = ? WHERE session_id = ?",
+            boxId,
+            now,
+            session.session_id,
+          );
+      });
+      const offeredAgain = { ...turn, state: "Offered" as const, box_id: boxId };
+      if (stopped) return this.offerElsewhere(tenantId, { ...session, box_id: boxId }, offeredAgain);
+      return this.offerMessage(session, offeredAgain);
     }
     const detail =
       message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
@@ -2575,7 +2608,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "Undelivered",
-        `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its offer, so it never ran; host ${host} ${presence}. Check that its supervisor runs and reads Online, then send the turn again`,
+        `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${host} ${presence}. Check that its supervisor runs and reads Online, then send the turn again`,
         failedAt,
       );
     }

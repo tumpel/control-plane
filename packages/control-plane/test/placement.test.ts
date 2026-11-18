@@ -28,7 +28,7 @@ const placed = (placement: Placement): string => {
   return placement.kind === "Placed" ? placement.host.name : "";
 };
 
-test("a session goes to the online host with the most free box slots, ignoring offline and full hosts", () => {
+test("a session goes to the online host least busy across box slots, load and memory, ignoring offline and full hosts", () => {
   const hosts: Host[] = [
     { ...HOST, hostId: "offline", name: "offline", state: "Offline" },
     { ...HOST, hostId: "full", name: "full" },
@@ -85,40 +85,43 @@ test("a session goes to the online host with the most free box slots, ignoring o
       updatedAt: 0,
     },
   ];
-  assert.equal(placed(placeSession(hosts, usages, AMD64_IMAGES, BOX_MEMORY_MIB)), "freer");
+  assert.equal(placed(placeSession(hosts, usages, AMD64_IMAGES, BOX_MEMORY_MIB)), "free");
 });
 
-test("equal free slots go to the host with the most memory available, and warm slots count as taken", () => {
+test("a loaded host with many free slots loses to an idle host with few", () => {
   const hosts: Host[] = [
-    { ...HOST, hostId: "pi", name: "pi" },
-    { ...HOST, hostId: "pentium", name: "pentium" },
+    { ...HOST, hostId: "box", name: "box", cpuCount: 16, memoryBytes: 58 * 1024 ** 3 },
+    { ...HOST, hostId: "homelab", name: "homelab", cpuCount: 2, memoryBytes: 8 * 1024 ** 3 },
   ];
-  const pi = {
-    hostId: "pi",
+  const box = {
+    hostId: "box",
+    tenantId: "tenant-placement",
+    boxCapacity: 32,
+    boxesRunning: 10,
+    boxesWarm: 0,
+    loadAverage: 14,
+    memoryAvailableMib: 3072,
+    channelProtocol: 18,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const homelab = {
+    hostId: "homelab",
     tenantId: "tenant-placement",
     boxCapacity: 2,
     boxesRunning: 0,
     boxesWarm: 0,
-    loadAverage: 0.1,
-    memoryAvailableMib: 900,
+    loadAverage: 0.05,
+    memoryAvailableMib: 6144,
     channelProtocol: 18,
     createdAt: 0,
     updatedAt: 0,
   };
-  const pentium = {
-    hostId: "pentium",
-    tenantId: "tenant-placement",
-    boxCapacity: 4,
-    boxesRunning: 0,
-    boxesWarm: 2,
-    loadAverage: 1.5,
-    memoryAvailableMib: 3000,
-    channelProtocol: 18,
-    createdAt: 0,
-    updatedAt: 0,
-  };
-  assert.equal(placed(placeSession(hosts, [pi, pentium], AMD64_IMAGES, BOX_MEMORY_MIB)), "pentium");
-  assert.equal(placed(placeSession(hosts, [pi, { ...pentium, boxesWarm: 3 }], AMD64_IMAGES, BOX_MEMORY_MIB)), "pi");
+  assert.equal(placed(placeSession(hosts, [box, homelab], AMD64_IMAGES, BOX_MEMORY_MIB)), "homelab");
+  assert.equal(
+    placed(placeSession(hosts, [box, { ...homelab, boxesWarm: 1, loadAverage: 3.9 }], AMD64_IMAGES, BOX_MEMORY_MIB)),
+    "box",
+  );
 });
 
 test("a host whose every slot is warm and whose memory is low still takes a default-memory session, since the supervisor evicts a warm box", () => {
