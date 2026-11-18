@@ -874,6 +874,13 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(reads(), 1, "the control plane reads the token's GitHub user once, when the secret set is written");
     const { image } = offer;
     assert.ok(image.kind === "Layered", "a release with a base and the harness layer boots layered");
+    const booted = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
+    assert.deepEqual(booted.lastTurnImage, {
+      kind: "Layered",
+      baseImageDigest: image.base.imageDigest,
+      harnessLayerDigest: image.layer.layer.layerDigest,
+    });
+    assert.equal(booted.prebuildLayer?.layer === "None" && booted.prebuildLayer.reason, "NoPrebuild");
     assert.deepEqual(
       [image.base.imageDigest, image.base.kernelDigest, image.base.manifestDigest, image.layer.layer.layerDigest],
       [BASE_DIGEST, KERNEL_DIGEST, BASE_MANIFEST_DIGEST, "1".repeat(64)],
@@ -2379,6 +2386,12 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     { name: "GH_TOKEN", value: "installation-token" },
   ]);
   assert.deepEqual({ files: offer.personaFiles, snapshots: offer.snapshots }, { files: [], snapshots: [] });
+  const building = await getJson(`/v1/sessions/${offer.sessionId}`, SessionSchema);
+  assert.deepEqual(building.prebuildLayer, {
+    layer: "None",
+    reason: "BuildsPrebuild",
+    detail: `the session builds a prebuild of ${repository}, so its box starts from the guest image alone`,
+  });
   assert.deepEqual(installationTokenRequests.at(-1), { repositories: ["app"], permissions: { contents: "read" } });
   assert.equal(new URL(started.logUrl).pathname, `/v1/sessions/${offer.sessionId}/transcript`);
   const busy = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI", rebuild: true }, bearer);
@@ -2419,6 +2432,36 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     consumer.snapshots.map((snapshot) => snapshot.snapshotId),
     [request.snapshotId],
   );
+  const prebuilt = { layer: "Prebuild", prebuildId: started.prebuildId, layerDigest: done.status.layerDigest };
+  assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, prebuilt);
+  assert.ok(consumer.image.kind === "Layered");
+  assert.deepEqual((await getJson(`/v1/turns/${consumer.turnId}`, TurnSchema)).image, {
+    kind: "Layered",
+    baseImageDigest: consumer.image.base.imageDigest,
+    harnessLayerDigest: consumer.image.layer.layer.layerDigest,
+  });
+
+  host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
+  await host.next("TurnClaimed");
+  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
+  host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const own = await host.next("SnapshotRequest");
+  assert.equal(own.sessionId, consumer.sessionId);
+  await store.put(own.storageKey, '{"entries":[]}');
+  host.send({ type: "SnapshotDone", snapshotId: own.snapshotId, uploadedBytes: 14 });
+  await until(
+    "the consumer's own snapshot stored",
+    () => getJson(`/v1/sessions/${consumer.sessionId}/snapshots`, SnapshotSchema.array()),
+    (snapshots) => snapshots.length === 1,
+  );
+  const sent = await postJson(`/v1/sessions/${consumer.sessionId}/turns`, { prompt: "after my snapshot" }, bearer);
+  assert.equal(sent.status, 200, await sent.clone().text());
+  const restoring = await host.next("TurnOffer");
+  assert.deepEqual(
+    restoring.snapshots.map((snapshot) => snapshot.snapshotId),
+    [own.snapshotId],
+  );
+  assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, prebuilt);
 });
 
 test("a preview reads a supplied config's commands in run order, refuses a repository without one, and stores no prebuild", async () => {

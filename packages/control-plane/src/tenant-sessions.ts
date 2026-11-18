@@ -11,6 +11,7 @@ import {
   HarnessSchema,
   type PrebuildFailurePhaseSchema,
   type SessionIssueSchema,
+  SessionPrebuildLayerSchema,
   SessionSchema,
   type SessionStartSchema,
   SnapshotSchema,
@@ -19,6 +20,7 @@ import {
   StopFailureSchema,
   TranscriptLineSchema,
   TurnFailureSchema,
+  TurnImageSchema,
   TurnSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
@@ -62,7 +64,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import { type ImageAvailability, placeSession, type ReportedHostUsage, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
-import { bootArchitectures, bootFor, bootImage, imagesFor, readRelease } from "./releases";
+import { bootArchitectures, bootFor, bootImage, imagesFor, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { settingsOf, turnCredentialSeconds } from "./settings";
@@ -73,6 +75,8 @@ import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-met
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
+type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
+type TurnImage = z.infer<typeof TurnImageSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
 export type SessionStart = z.infer<typeof SessionStartSchema>;
@@ -276,6 +280,21 @@ type HostPrebuildRow = {
 
 type StoredSnapshotRow = { snapshot_id: string; snapshot_seq: number; storage_key: string };
 
+type LayerRow = {
+  prebuild_id: string | null;
+  layer_digest: string | null;
+  reason: string | null;
+  detail: string | null;
+};
+
+type ImageRow = { kind: string; digest: string; harness_layer_digest: string | null };
+
+type LayerAbsence = Extract<SessionPrebuildLayer, { layer: "None" }>;
+
+type LayerRecord = { layer: "Prebuild"; prebuildId: string } | LayerAbsence;
+
+type PrebuildLayer = { record: LayerRecord; restored: StoredSnapshotRow[] };
+
 type SnapshotRequestRow = {
   snapshot_id: string;
   session_id: string;
@@ -336,7 +355,12 @@ const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chun
 const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
   AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
 
-const toSession = (tenantId: string, row: SessionViewRow): Session =>
+const toSession = (
+  tenantId: string,
+  row: SessionViewRow,
+  lastTurnImage: TurnImage | null,
+  prebuildLayer: SessionPrebuildLayer | null,
+): Session =>
   SessionSchema.parse({
     sessionId: row.session_id,
     tenantId,
@@ -362,25 +386,31 @@ const toSession = (tenantId: string, row: SessionViewRow): Session =>
     lastTurnId: row.last_turn_id,
     lastTurnState: row.last_turn_state,
     lastTurnAt: new Date(row.last_turn_at).toISOString(),
-    lastTurn: toTurn(tenantId, {
-      turn_id: row.last_turn_id,
-      session_id: row.session_id,
-      host_id: row.last_turn_host_id,
-      box_id: row.last_turn_box_id,
-      prompt: row.last_turn_prompt,
-      state: row.last_turn_state,
-      line_count: row.last_turn_line_count,
-      created_at: row.last_turn_created_at,
-      updated_at: row.last_turn_at,
-      reason: row.last_turn_reason,
-      detail: row.last_turn_detail,
-      failed_at: row.last_turn_failed_at,
-    }),
+    lastTurn: toTurn(
+      tenantId,
+      {
+        turn_id: row.last_turn_id,
+        session_id: row.session_id,
+        host_id: row.last_turn_host_id,
+        box_id: row.last_turn_box_id,
+        prompt: row.last_turn_prompt,
+        state: row.last_turn_state,
+        line_count: row.last_turn_line_count,
+        created_at: row.last_turn_created_at,
+        updated_at: row.last_turn_at,
+        reason: row.last_turn_reason,
+        detail: row.last_turn_detail,
+        failed_at: row.last_turn_failed_at,
+      },
+      lastTurnImage,
+    ),
+    lastTurnImage: lastTurnImage ?? undefined,
+    prebuildLayer: prebuildLayer ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
 
-const toTurn = (tenantId: string, row: TurnRow): Turn =>
+const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null): Turn =>
   TurnSchema.parse({
     turnId: row.turn_id,
     tenantId,
@@ -390,6 +420,7 @@ const toTurn = (tenantId: string, row: TurnRow): Turn =>
     state: row.state,
     lineCount: row.line_count,
     ...(row.state === "Failed" ? { reason: row.reason, detail: row.detail, failedAt: row.failed_at } : {}),
+    image: image ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -505,23 +536,30 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  private async prebuildLayer(
-    tenantId: string,
-    session: SessionRow,
-    hostId: string,
-    now: number,
-  ): Promise<StoredSnapshotRow[]> {
-    const host = await hostOf(this.env.DB, tenantId, hostId);
-    const release = await readRelease(this.env.RELEASES, now);
-    if (host?.architecture !== PREBUILD_ARCHITECTURE || release.kind === "Unreadable") return [];
+  private prebuildLayer(session: SessionRow, host: HostRecord, release: ReleaseRead): PrebuildLayer {
+    const none = (reason: LayerAbsence["reason"], detail: string): PrebuildLayer => ({
+      record: { layer: "None", reason, detail },
+      restored: [],
+    });
+    if (host.architecture !== PREBUILD_ARCHITECTURE) {
+      return none(
+        "HostNotAmd64",
+        `host ${host.name} is ${host.architecture}, and prebuilds build on ${PREBUILD_ARCHITECTURE} alone; run the session on an ${PREBUILD_ARCHITECTURE} host to start from a prebuild`,
+      );
+    }
     const image = imagesFor(release, session.harness, session.harness_version).find(
       (each) => each.architecture === PREBUILD_ARCHITECTURE,
     );
-    if (image === undefined) return [];
+    if (image === undefined) {
+      return none(
+        "NoAmd64Image",
+        `the current release carries no ${session.harness} ${session.harness_version} guest image for ${PREBUILD_ARCHITECTURE}, the image prebuilds build on; pin a harness version the release carries for ${PREBUILD_ARCHITECTURE} to start from a prebuild`,
+      );
+    }
     const sql = this.ctx.storage.sql;
     const [layer] = sql
-      .exec<StoredSnapshotRow & { session_id: string }>(
-        `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, snapshots.session_id FROM prebuilds
+      .exec<StoredSnapshotRow & { session_id: string; prebuild_id: string }>(
+        `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, snapshots.session_id, prebuilds.prebuild_id FROM prebuilds
         JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
         WHERE prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
         ORDER BY prebuilds.created_at DESC, snapshots.snapshot_seq DESC LIMIT 1`,
@@ -529,13 +567,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
         image.imageDigest,
       )
       .toArray();
-    if (layer === undefined) return [];
+    if (layer === undefined) {
+      const [other] = sql
+        .exec("SELECT 1 FROM prebuilds WHERE repository = ? AND state = 'Done' LIMIT 1", session.repository)
+        .toArray();
+      if (other === undefined) {
+        return none(
+          "NoPrebuild",
+          `${session.repository} has no stored prebuild; start a prebuild of it so later sessions start from its layer`,
+        );
+      }
+      return none(
+        "OtherGuestImage",
+        `every stored prebuild of ${session.repository} is built on another guest image than ${image.imageDigest}, the image of ${session.harness} ${session.harness_version}; start a prebuild of it again so later sessions start from its layer`,
+      );
+    }
     sql.exec(
       "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?, digest FROM session_chunks WHERE session_id = ?",
       session.session_id,
       layer.session_id,
     );
-    return [layer];
+    return { record: { layer: "Prebuild", prebuildId: layer.prebuild_id }, restored: [layer] };
   }
 
   private readonly chunks = new ChunkWriter(
@@ -1062,7 +1114,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     claimSeconds: number,
     fetchSeconds: number,
     now: number,
-  ): Promise<{ kind: "Released"; image: BootImage } | { kind: "NotReleased"; detail: string }> {
+  ): Promise<
+    | { kind: "Released"; image: BootImage; host: HostRecord; release: ReleaseRead }
+    | { kind: "NotReleased"; detail: string }
+  > {
     const host = await hostOf(this.env.DB, tenantId, hostId);
     if (host === null)
       throw new Error(
@@ -1088,7 +1143,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.env.RELEASES_ACCESS_KEY_ID,
       this.env.RELEASES_SECRET_ACCESS_KEY,
     );
-    return { kind: "Released", image: await bootImage(signer, boot, claimSeconds + fetchSeconds, fetchSeconds, now) };
+    return {
+      kind: "Released",
+      image: await bootImage(signer, boot, claimSeconds + fetchSeconds, fetchSeconds, now),
+      host,
+      release,
+    };
   }
 
   startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
@@ -1482,7 +1542,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
-    return row === undefined ? null : toSession(tenantId, row);
+    return row === undefined
+      ? null
+      : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id));
   }
 
   listSessions(tenantId: string, filter: SessionFilter): Session[] {
@@ -1495,7 +1557,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         filter.hostId ?? null,
       )
       .toArray()
-      .map((row) => toSession(tenantId, row));
+      .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));
   }
 
   listTurns(tenantId: string, sessionId: string): Turn[] | null {
@@ -1503,12 +1565,93 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec<TurnRow>(`${TURN_SELECT} WHERE session_id = ? ORDER BY created_at, turn_id`, sessionId)
       .toArray()
-      .map((row) => toTurn(tenantId, row));
+      .map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id)));
   }
 
   getTurn(tenantId: string, turnId: string): Turn | null {
     const row = this.turnRow(turnId);
-    return row === null ? null : toTurn(tenantId, row);
+    return row === null ? null : toTurn(tenantId, row, this.turnImage(turnId));
+  }
+
+  private turnImage(turnId: string): TurnImage | null {
+    const [row] = this.ctx.storage.sql
+      .exec<ImageRow>(
+        `SELECT 'Full' AS kind, guest_image_digest AS digest, NULL AS harness_layer_digest FROM turn_full_images WHERE turn_id = ?1
+        UNION ALL SELECT 'Layered', base_image_digest, harness_layer_digest FROM turn_layered_images WHERE turn_id = ?1`,
+        turnId,
+      )
+      .toArray();
+    if (row === undefined) return null;
+    return TurnImageSchema.parse(
+      row.kind === "Full"
+        ? { kind: "Full", guestImageDigest: row.digest }
+        : { kind: "Layered", baseImageDigest: row.digest, harnessLayerDigest: row.harness_layer_digest },
+    );
+  }
+
+  private sessionLayer(sessionId: string): SessionPrebuildLayer | null {
+    const [row] = this.ctx.storage.sql
+      .exec<LayerRow>(
+        `SELECT p.prebuild_id, l.layer_digest, NULL AS reason, NULL AS detail FROM session_prebuild_layers AS p
+        JOIN prebuild_layers AS l ON l.prebuild_id = p.prebuild_id WHERE p.session_id = ?1
+        UNION ALL SELECT NULL, NULL, reason, detail FROM session_layer_absences WHERE session_id = ?1`,
+        sessionId,
+      )
+      .toArray();
+    if (row === undefined) return null;
+    return SessionPrebuildLayerSchema.parse(
+      row.prebuild_id === null
+        ? { layer: "None", reason: row.reason, detail: row.detail }
+        : { layer: "Prebuild", prebuildId: row.prebuild_id, layerDigest: row.layer_digest },
+    );
+  }
+
+  private recordImage(turnId: string, image: BootImage, now: number): void {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM turn_full_images WHERE turn_id = ?", turnId);
+      sql.exec("DELETE FROM turn_layered_images WHERE turn_id = ?", turnId);
+      if (image.kind === "Full") {
+        sql.exec(
+          "INSERT INTO turn_full_images (turn_id, guest_image_digest, created_at) VALUES (?, ?, ?)",
+          turnId,
+          image.imageDigest,
+          now,
+        );
+        return;
+      }
+      sql.exec(
+        "INSERT INTO turn_layered_images (turn_id, base_image_digest, harness_layer_digest, created_at) VALUES (?, ?, ?, ?)",
+        turnId,
+        image.base.imageDigest,
+        image.layer.layer.layerDigest,
+        now,
+      );
+    });
+  }
+
+  private recordLayer(sessionId: string, layer: LayerRecord, now: number): void {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM session_prebuild_layers WHERE session_id = ?", sessionId);
+      sql.exec("DELETE FROM session_layer_absences WHERE session_id = ?", sessionId);
+      if (layer.layer === "Prebuild") {
+        sql.exec(
+          "INSERT INTO session_prebuild_layers (session_id, prebuild_id, created_at) VALUES (?, ?, ?)",
+          sessionId,
+          layer.prebuildId,
+          now,
+        );
+        return;
+      }
+      sql.exec(
+        "INSERT INTO session_layer_absences (session_id, reason, detail, created_at) VALUES (?, ?, ?, ?)",
+        sessionId,
+        layer.reason,
+        layer.detail,
+        now,
+      );
+    });
   }
 
   getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {
@@ -1782,8 +1925,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
       )
       .toArray();
+    this.recordImage(turnId, guest.image, now);
     const restored =
-      stored.length === 0 && prebuild === null ? await this.prebuildLayer(tenantId, session, hostId, now) : stored;
+      stored.length > 0 ? stored : this.firstBox(session, prebuild !== null, guest.host, guest.release, now);
     const credentialSeconds = turnCredentialSeconds(settings);
     const snapshots = await this.downloads(restored, credentialSeconds, now);
     const personaFiles =
@@ -1803,6 +1947,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
       image: guest.image,
       ...identity.identity,
     };
+  }
+
+  private firstBox(
+    session: SessionRow,
+    buildsPrebuild: boolean,
+    host: HostRecord,
+    release: ReleaseRead,
+    now: number,
+  ): StoredSnapshotRow[] {
+    const picked: PrebuildLayer = buildsPrebuild
+      ? {
+          record: {
+            layer: "None",
+            reason: "BuildsPrebuild",
+            detail: `the session builds a prebuild of ${session.repository}, so its box starts from the guest image alone`,
+          },
+          restored: [],
+        }
+      : this.prebuildLayer(session, host, release);
+    this.recordLayer(session.session_id, picked.record, now);
+    return picked.restored;
   }
 
   private async personaFiles(
