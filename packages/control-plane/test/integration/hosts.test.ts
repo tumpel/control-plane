@@ -105,7 +105,10 @@ const rawHost = (hostId: string, privateKey: KeyObject, boxCapacity: number, wel
     if (envelope.type === "Welcome") {
       welcomed(socket);
       beat = setInterval(
-        () => socket.send(JSON.stringify({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE })),
+        () =>
+          socket.send(
+            JSON.stringify({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE, heldSessionIds: [] }),
+          ),
         TEST_SETTINGS.heartbeatIntervalSeconds * 1000,
       );
     }

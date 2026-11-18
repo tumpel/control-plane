@@ -1,7 +1,6 @@
 import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
-  PersonaSchema,
   type SecretSetCreateSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
@@ -13,7 +12,7 @@ import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import type { StoredFile } from "./persona-files";
+import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import { type MemberUpdate, memberWith, planUpdate, storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
 import {
   recordSupervisorUpdate,
@@ -25,8 +24,7 @@ import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { TenantOpenRouterAuthorizations } from "./tenant-openrouter-authorizations";
 import { memberRows, sealContext } from "./tenant-sessions";
 
-export type Persona = z.infer<typeof PersonaSchema>;
-export type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & {
+export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId"> & {
   boxMemoryMib: number;
   files: StoredFile[];
 };
@@ -127,8 +125,8 @@ export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFile
     )
     .toArray();
 
-const toPersona = (row: PersonaRow, files: PersonaFileRow[]): Persona =>
-  PersonaSchema.parse({
+const toPersona = (row: PersonaRow, files: PersonaFileRow[]): StoredPersona =>
+  StoredPersonaSchema.parse({
     personaId: row.persona_id,
     tenantId: row.tenant_id,
     name: row.name,
@@ -244,18 +242,18 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     });
   }
 
-  private persona(row: PersonaRow): Persona {
+  private persona(row: PersonaRow): StoredPersona {
     return toPersona(row, personaFileRows(this.ctx.storage.sql, row.persona_id));
   }
 
-  listPersonas(tenantId: string): Persona[] {
+  listPersonas(tenantId: string): StoredPersona[] {
     return this.ctx.storage.sql
       .exec<PersonaRow>(`${PERSONA_SELECT} WHERE tenant_id = ? ORDER BY created_at, persona_id`, tenantId)
       .toArray()
       .map((row) => this.persona(row));
   }
 
-  getPersona(tenantId: string, personaId: string): Persona | null {
+  getPersona(tenantId: string, personaId: string): StoredPersona | null {
     const [row] = this.ctx.storage.sql
       .exec<PersonaRow>(`${PERSONA_SELECT} WHERE tenant_id = ? AND persona_id = ?`, tenantId, personaId)
       .toArray();
@@ -283,7 +281,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     }
   }
 
-  createPersona(tenantId: string, persona: PersonaWrite, now: number): Written<Persona> {
+  createPersona(tenantId: string, persona: PersonaWrite, now: number): Written<StoredPersona> {
     const personaId = crypto.randomUUID();
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
@@ -307,7 +305,12 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     return { ok: true, value: created };
   }
 
-  updatePersona(tenantId: string, personaId: string, persona: PersonaChange, now: number): Written<Persona | null> {
+  updatePersona(
+    tenantId: string,
+    personaId: string,
+    persona: PersonaChange,
+    now: number,
+  ): Written<StoredPersona | null> {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(

@@ -13,6 +13,7 @@ import {
   EffectiveHarnessVersionSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
+  PersonaFileLimit,
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
@@ -23,7 +24,10 @@ import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
 import { pollInterval, TEST_SETTINGS } from "../timing.ts";
 
-type Bucket = { put(key: string, value: string): Promise<unknown> };
+type Bucket = {
+  put(key: string, value: string | Uint8Array): Promise<unknown>;
+  get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null>;
+};
 
 const AUDIENCE = "tumpel-config-e2e";
 const KID = "config-e2e-key";
@@ -136,6 +140,7 @@ before(async () => {
           ACCESS_AUD: AUDIENCE,
           SECRETS_KEK,
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          R2_STUB_ORIGIN: "https://r2.example.test",
           TUMPEL_SETTINGS: TEST_SETTINGS,
         },
       },
@@ -397,7 +402,7 @@ test("a taken name, a repeated member, two credentials for one provider and dele
   assert.match(ProblemSchema.parse(await inUse.json()).detail, /Twin/);
 });
 
-test("a persona file at a path its harness does not read is refused, and a stored file must be in the store", async () => {
+test("a persona file at a path its harness does not read is refused, a stored file must be in the store, and a read returns every file's bytes", async () => {
   const [set] = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.ok(set);
   const content = Buffer.from("{}").toString("base64");
@@ -441,6 +446,91 @@ test("a persona file at a path its harness does not read is refused, and a store
   const missing = await put([{ source: "Stored", path: ".claude/CLAUDE.md", digest: "f".repeat(64), sizeBytes: 2 }]);
   assert.equal(missing.status, 422);
   assert.equal(ProblemSchema.parse(await missing.json()).title, "Persona file not uploaded");
+
+  const large = Buffer.alloc(PersonaFileLimit.InlineFileBytes + 1, "l");
+  const largeDigest = createHash("sha256").update(large).digest("hex");
+  const { STORE } = await server.getWorker<{ STORE: Bucket }>().getEnv();
+  await STORE.put(`${tenant}/persona-files/${largeDigest}`, large);
+  const both = await put([
+    { source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from(REVIEWER_MEMORY).toString("base64") },
+    { source: "Stored", path: ".claude/settings.json", digest: largeDigest, sizeBytes: large.byteLength },
+  ]);
+  assert.equal(both.status, 200);
+  const [memory, settings] = PersonaSchema.parse(await getJson(`/v1/personas/${persona.personaId}`)).files;
+  assert.ok(memory?.source === "Inline");
+  assert.equal(memory.content, Buffer.from(REVIEWER_MEMORY).toString("base64"));
+  assert.ok(settings?.source === "Stored");
+  const download = new URL(settings.downloadUrl);
+  assert.equal(download.searchParams.get("X-Tumpel-Method"), "GET");
+  const blob = await STORE.get(decodeURIComponent(download.pathname).replace(/^\/tumpel-sessions\//, ""));
+  assert.ok(blob);
+  assert.equal(
+    createHash("sha256")
+      .update(new Uint8Array(await blob.arrayBuffer()))
+      .digest("hex"),
+    settings.digest,
+  );
+});
+
+test("tumpel persona get output without its server fields creates a copy with the same files, and persona list returns every file's bytes", async () => {
+  const [set] = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
+  assert.ok(set);
+  const large = Buffer.alloc(PersonaFileLimit.InlineFileBytes + 1, "l");
+  const largeDigest = createHash("sha256").update(large).digest("hex");
+  const { STORE } = await server.getWorker<{ STORE: Bucket }>().getEnv();
+  await STORE.put(`${tenant}/persona-files/${largeDigest}`, large);
+  const created = await postJson(
+    "/v1/personas",
+    {
+      name: "Original",
+      harness: "ClaudeCode",
+      secretSetId: set.secretSetId,
+      files: [
+        { source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from(REVIEWER_MEMORY).toString("base64") },
+        { source: "Stored", path: ".claude/settings.json", digest: largeDigest, sizeBytes: large.byteLength },
+      ],
+    },
+    bearer,
+  );
+  assert.equal(created.status, 200);
+  const { personaId } = PersonaSchema.parse(await created.json());
+
+  const read = await tumpel(["persona", "get", personaId]);
+  assert.equal(read.code, 0, read.stderr);
+  const original = PersonaSchema.parse(JSON.parse(read.stdout));
+  const [memory] = original.files;
+  assert.ok(memory?.source === "Inline");
+  assert.equal(Buffer.from(memory.content, "base64").toString(), REVIEWER_MEMORY);
+
+  const { personaId: _id, tenantId: _tenant, createdAt: _created, updatedAt: _updated, ...written } = original;
+  const copy = {
+    ...written,
+    name: "Copy",
+    files: written.files.map((file) =>
+      file.source === "Inline"
+        ? { source: file.source, path: file.path, content: file.content }
+        : { source: file.source, path: file.path, digest: file.digest, sizeBytes: file.sizeBytes },
+    ),
+  };
+  const copyFile = join(scratch, "persona-copy.json");
+  writeFileSync(copyFile, JSON.stringify(copy));
+  const copied = await tumpel(["persona", "create", "--file", copyFile]);
+  assert.equal(copied.code, 0, copied.stderr);
+  assert.deepEqual(
+    PersonaSchema.parse(JSON.parse(copied.stdout)).files.map((file) => [file.source, file.path, file.digest]),
+    [
+      ["Inline", ".claude/CLAUDE.md", sha256(REVIEWER_MEMORY)],
+      ["Stored", ".claude/settings.json", largeDigest],
+    ],
+  );
+
+  const listed = await tumpel(["persona", "list"]);
+  assert.equal(listed.code, 0, listed.stderr);
+  const [listedMemory] =
+    PersonaSchema.array()
+      .parse(JSON.parse(listed.stdout))
+      .find((persona) => persona.personaId === personaId)?.files ?? [];
+  assert.deepEqual(listedMemory, memory);
 });
 
 test("secret-set set-member writes one member from stdin and keeps the rest, and remove-member drops one", async () => {

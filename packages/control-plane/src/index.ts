@@ -44,7 +44,6 @@ import {
   PersonaFileUploadRequestSchema,
   PersonaFileUploadSchema,
   PersonaPathSchema,
-  PersonaSchema,
   PersonaUpdateSchema,
   ReleaseCliPathSchema,
   ReleaseSupervisorPathSchema,
@@ -184,7 +183,7 @@ import {
   SIGN_UP_PATH,
   wantsHtml,
 } from "./pages";
-import { personaFileKey, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { personaFileKey, readPersona, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildTemplates } from "./prebuild-templates.ts";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
@@ -386,7 +385,8 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const personas = await env.TENANT.getByName(caller.tenantId).listPersonas(caller.tenantId);
-  return json(PersonaSchema.array().parse(personas));
+  const now = Date.now();
+  return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
 };
 
 const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
@@ -494,7 +494,7 @@ const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promi
   const tenant = env.TENANT.getByName(caller.tenantId);
   const created = await tenant.createPersona(caller.tenantId, write.value, Date.now());
   if (!created.ok) return conflict("personas.create", body.value.name, created.constraint);
-  return json(PersonaSchema.parse(created.value));
+  return json(await readPersona(env, created.value, Date.now()));
 };
 
 const PERSONA_PATH = /^\/v1\/personas\/([^/]+)$/;
@@ -536,10 +536,12 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     const { harness: _fixed, ...change } = write.value;
     const updated = await tenant.updatePersona(caller.tenantId, personaId, change, Date.now());
     if (!updated.ok) return conflict("personas.update", body.value.name, updated.constraint);
-    return updated.value === null ? personaNotFound(personaId) : json(PersonaSchema.parse(updated.value));
+    return updated.value === null
+      ? personaNotFound(personaId)
+      : json(await readPersona(env, updated.value, Date.now()));
   }
   const persona = await tenant.getPersona(caller.tenantId, personaId);
-  return persona === null ? personaNotFound(personaId) : json(PersonaSchema.parse(persona));
+  return persona === null ? personaNotFound(personaId) : json(await readPersona(env, persona, Date.now()));
 };
 
 const handlePersonaFileUpload = async (request: Request, _url: URL, env: Env): Promise<Response> => {

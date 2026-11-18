@@ -8,6 +8,7 @@ import {
 } from "@tumpel/api/credentials";
 import {
   CredentialHandoverSchema,
+  HarnessSchema,
   type PrebuildFailurePhaseSchema,
   type SessionIssueSchema,
   SessionSchema,
@@ -30,6 +31,7 @@ import type {
   SnapshotDownload,
   StoredControlMessage,
 } from "./channel/protocol.ts";
+import { successResultOf } from "./compact.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
@@ -45,6 +47,7 @@ import {
   mintInstallationToken,
   mintOwnerTokens,
   type OwnerToken,
+  parseJson,
   REPOSITORY_TOKEN,
   type RepositoryCredentialSource,
   repositoryCredential,
@@ -165,8 +168,20 @@ type SessionRow = {
 
 type SessionViewRow = SessionRow & {
   last_turn_id: string;
+  last_turn_host_id: string;
+  last_turn_box_id: string;
+  last_turn_prompt: string;
   last_turn_state: string;
+  last_turn_line_count: number;
+  last_turn_created_at: number;
   last_turn_at: number;
+  last_turn_reason: string | null;
+  last_turn_detail: string | null;
+  last_turn_failed_at: string | null;
+  issue_number: number | null;
+  issue_title: string | null;
+  issue_html_url: string | null;
+  issue_branch: string | null;
 };
 
 type TurnRow = {
@@ -179,6 +194,9 @@ type TurnRow = {
   line_count: number;
   created_at: number;
   updated_at: number;
+  reason: string | null;
+  detail: string | null;
+  failed_at: string | null;
 };
 
 type FailureRow = {
@@ -269,12 +287,18 @@ type SnapshotRequestRow = {
 
 const SESSION_SELECT =
   "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, created_at, updated_at FROM sessions";
+const TURN_SELECT = `SELECT * FROM (
+  SELECT turn_id, turns.session_id, host_id, box_id, prompt, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
+  FROM turns LEFT JOIN turn_failures USING (turn_id)
+)`;
 const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.box_memory_mib, s.created_at, s.updated_at,
-  t.turn_id AS last_turn_id, t.state AS last_turn_state, t.updated_at AS last_turn_at
+  t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.state AS last_turn_state,
+  t.line_count AS last_turn_line_count, t.created_at AS last_turn_created_at, t.updated_at AS last_turn_at,
+  t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
+  i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch
   FROM sessions AS s
-  JOIN turns AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)`;
-const TURN_SELECT =
-  "SELECT turn_id, session_id, host_id, box_id, prompt, state, line_count, created_at, updated_at FROM turns";
+  JOIN (${TURN_SELECT}) AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
+  LEFT JOIN session_issues AS i ON i.session_id = s.session_id`;
 const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, NULL AS reason, NULL AS detail, NULL AS failed_at, created_at, updated_at FROM snapshots
   UNION ALL
@@ -321,6 +345,16 @@ const toSession = (tenantId: string, row: SessionViewRow): Session =>
     boxId: row.box_id,
     personaId: row.persona_id,
     repository: row.repository,
+    origin:
+      row.issue_number === null
+        ? { kind: "Prompt" }
+        : {
+            kind: "Issue",
+            issueNumber: row.issue_number,
+            title: row.issue_title,
+            htmlUrl: row.issue_html_url,
+            branch: row.issue_branch,
+          },
     harness: row.harness,
     harnessVersion: row.harness_version,
     model: row.model,
@@ -328,6 +362,20 @@ const toSession = (tenantId: string, row: SessionViewRow): Session =>
     lastTurnId: row.last_turn_id,
     lastTurnState: row.last_turn_state,
     lastTurnAt: new Date(row.last_turn_at).toISOString(),
+    lastTurn: toTurn(tenantId, {
+      turn_id: row.last_turn_id,
+      session_id: row.session_id,
+      host_id: row.last_turn_host_id,
+      box_id: row.last_turn_box_id,
+      prompt: row.last_turn_prompt,
+      state: row.last_turn_state,
+      line_count: row.last_turn_line_count,
+      created_at: row.last_turn_created_at,
+      updated_at: row.last_turn_at,
+      reason: row.last_turn_reason,
+      detail: row.last_turn_detail,
+      failed_at: row.last_turn_failed_at,
+    }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -341,6 +389,7 @@ const toTurn = (tenantId: string, row: TurnRow): Turn =>
     prompt: row.prompt,
     state: row.state,
     lineCount: row.line_count,
+    ...(row.state === "Failed" ? { reason: row.reason, detail: row.detail, failedAt: row.failed_at } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -842,7 +891,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const now = Date.now();
     const prebuild = this.hostPrebuild(session.session_id);
     await this.timers(tenantId, session.session_id, {
-      Claim: { turnId: turn.turn_id, at: now + settings.turnClaimBudgetSeconds * 1000 },
+      Claim: { turnId: turn.turn_id, at: now + settings.turnOfferTtlSeconds * 1000 },
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: now + settings.turnTotalBudgetSeconds * 1000 },
       Snapshot: null,
@@ -874,6 +923,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       line_count: 0,
       created_at: now,
       updated_at: now,
+      reason: null,
+      detail: null,
+      failed_at: null,
     };
     this.ctx.storage.sql.exec(
       "INSERT INTO turns (turn_id, session_id, host_id, box_id, prompt, state, line_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1342,20 +1394,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     if (pending !== undefined) return;
     const now = Date.now();
-    const completed = this.latestTurn(session.session_id, "Completed");
-    if (completed === null)
-      return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
     const [held] = this.ctx.storage.sql
       .exec<{ snapshot_id: string }>(
         "SELECT snapshot_id FROM snapshots WHERE session_id = ? AND turn_id = ? LIMIT 1",
         session.session_id,
-        completed.turn_id,
+        latest.turn_id,
       )
       .toArray();
     if (held !== undefined) {
       return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
     }
-    return this.timers(tenantId, session.session_id, { Snapshot: { turnId: completed.turn_id, at: now } });
+    return this.timers(tenantId, session.session_id, { Snapshot: { turnId: latest.turn_id, at: now } });
   }
 
   private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
@@ -1422,7 +1471,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async rearmSnapshot(tenantId: string, sessionId: string): Promise<void> {
     const now = Date.now();
-    const turn = this.latestTurn(sessionId, "Completed") ?? this.latestTurn(sessionId, null);
+    const turn = this.latestTurn(sessionId, null);
     if (turn === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
     await this.timers(tenantId, sessionId, {
       Snapshot: { turnId: turn.turn_id, at: now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
@@ -1658,7 +1707,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       tenantId,
       session,
       hostId,
-      settings.turnClaimBudgetSeconds,
+      settings.turnOfferTtlSeconds,
       settings.turnImageFetchBudgetSeconds,
       now,
     );
@@ -2139,9 +2188,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
       );
     }
-    await this.chunks.write(tenantId, session.session_id, turn.turn_id, 1);
     const prebuild = this.hostPrebuild(session.session_id) !== null;
-    this.ctx.storage.transactionSync(() => {
+    if (
+      !prebuild &&
+      successResultOf(HarnessSchema.parse(session.harness)) !== null &&
+      !this.printedResult(turn.turn_id)
+    ) {
+      return this.failTurn(
+        tenantId,
+        turn.turn_id,
+        "HarnessExitedWithoutResult",
+        "the harness exited without printing a successful result, so the turn stopped before it finished; the session's next snapshot keeps the work done so far, so send the turn again to continue it",
+        iso(now),
+      );
+    }
+    await this.endTurn(tenantId, turn, now, () => {
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
       sql.exec(
         "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
@@ -2150,12 +2211,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
       );
     });
-    await this.timers(tenantId, session.session_id, {
+  }
+
+  private printedResult(turnId: string): boolean {
+    const [row] = this.ctx.storage.sql
+      .exec<{ turn_id: string }>("SELECT turn_id FROM turn_results WHERE turn_id = ?", turnId)
+      .toArray();
+    return row !== undefined;
+  }
+
+  private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
+    await this.chunks.write(tenantId, turn.session_id, turn.turn_id, 1);
+    this.ctx.storage.transactionSync(record);
+    const delay = this.hostPrebuild(turn.session_id) === null ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
+    await this.timers(tenantId, turn.session_id, {
       Claim: null,
       FirstLine: null,
       Total: null,
       HostOffline: null,
-      Snapshot: { turnId: turn.turn_id, at: prebuild ? now : now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
+      Snapshot: { turnId: turn.turn_id, at: now + delay },
     });
   }
 
@@ -2203,7 +2277,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "NotClaimed",
-        `host ${host} did not claim the turn within ${settings.turnClaimBudgetSeconds} seconds; check that its supervisor runs, then send the turn again`,
+        `host ${host} did not claim the turn within ${settings.turnOfferTtlSeconds} seconds; check that its supervisor runs, then send the turn again`,
         failedAt,
       );
     }
@@ -2246,6 +2320,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
       );
     }
+    const succeeded = successResultOf(HarnessSchema.parse(session.harness))?.(parseJson(text)) === true;
     const pending = this.ctx.storage.transactionSync(() => {
       const [current] = sql
         .exec<{ last_line_seq: number }>("SELECT last_line_seq FROM sessions WHERE session_id = ?", session.session_id)
@@ -2260,6 +2335,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
       sql.exec("UPDATE turns SET line_count = line_count + 1, updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
+      if (succeeded) {
+        sql.exec("INSERT OR IGNORE INTO turn_results (turn_id, created_at) VALUES (?, ?)", turn.turn_id, now);
+      }
       sql.exec(
         "UPDATE sessions SET last_line_seq = ?, updated_at = ? WHERE session_id = ?",
         lineSeq,
@@ -2291,10 +2369,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
-    await this.chunks.write(tenantId, turn.session_id, turnId, 1);
     const now = Date.now();
     const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
+    await this.endTurn(tenantId, turn, now, () => {
       sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
       sql.exec(
         "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
@@ -2311,12 +2388,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
         now,
       );
-    });
-    await this.timers(tenantId, turn.session_id, {
-      Claim: null,
-      FirstLine: null,
-      Total: null,
-      HostOffline: null,
     });
     const prebuild = this.hostPrebuild(turn.session_id);
     if (prebuild === null) return;

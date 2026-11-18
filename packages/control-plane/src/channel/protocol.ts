@@ -3,15 +3,23 @@ import {
   type ControlFrameSchema,
   HelloSchema,
   HostEnvelopeSchema,
-  type HostFrameSchema,
+  HostFrameSchema,
+  HostHeartbeatSchema,
   type HostUsageSchema,
 } from "@tumpel/schemas";
-import type { z } from "zod";
+import { z } from "zod";
 
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true });
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
+
+export const HELD_SESSIONS_VERSION = 22;
+export const HostEnvelopeBeforeHeldSessionsSchema = z.discriminatedUnion("type", [
+  HelloSchema,
+  HostHeartbeatSchema.omit({ heldSessionIds: true }),
+  HostFrameSchema,
+]);
 
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;

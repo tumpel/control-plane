@@ -5,7 +5,6 @@ import {
   type EffectiveHarnessVersionSchema,
   type HarnessPinCreateSchema,
   PersonaFileLimit,
-  type PersonaSchema,
   type SecretSetCreateSchema,
   type SecretSetSchema,
   type SecretValueSchema,
@@ -16,7 +15,7 @@ import type { z } from "zod";
 import type { GitHubUser } from "./github.ts";
 import type { HostRecord } from "./host-record.ts";
 import { problem } from "./http.ts";
-import type { StoredFile } from "./persona-files.ts";
+import type { StoredFile, StoredPersona } from "./persona-files.ts";
 
 export type PlanRequest = z.infer<typeof TenantConfigPlanRequestSchema>;
 export type TenantConfig = PlanRequest["config"];
@@ -26,7 +25,6 @@ type ConfigSecret = ConfigSecretSet["secrets"][number];
 type ConfigHost = TenantConfig["hosts"][number];
 export type HarnessPinCreate = TenantConfig["harnessPins"][number];
 type ConfigChange = z.infer<typeof ConfigChangeSchema>;
-type Persona = z.infer<typeof PersonaSchema>;
 type SecretSet = z.infer<typeof SecretSetSchema>;
 type SecretKey = SecretSet["keys"][number];
 export type SecretMember = z.infer<typeof SecretValueSchema>;
@@ -35,7 +33,7 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & {
+type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId"> & {
   boxMemoryMib: number;
   files: StoredFile[];
 };
@@ -51,7 +49,7 @@ export type ConfigWrite =
   | { kind: "Unpin"; harness: string };
 
 export interface Live {
-  personas: Persona[];
+  personas: StoredPersona[];
   secretSets: SecretSet[];
   pins: Pin[];
   hosts: HostRecord[];

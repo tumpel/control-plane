@@ -1,8 +1,15 @@
-import { type PersonaCreateSchema, PersonaFileLimit } from "@tumpel/schemas";
+import {
+  InlinePersonaFileReadSchema,
+  type PersonaCreateSchema,
+  PersonaFileLimit,
+  type PersonaFileSchema,
+  PersonaSchema,
+} from "@tumpel/schemas";
 import type { z } from "zod";
-import { decodeBase64 } from "./channel/protocol.ts";
+import { decodeBase64, encodeBase64 } from "./channel/protocol.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
 import type { Problem } from "./http.ts";
+import { type SignerEnv, signerOf } from "./presign.ts";
 
 export type PersonaFileWrite = NonNullable<z.infer<typeof PersonaCreateSchema>["files"]>[number];
 
@@ -21,9 +28,24 @@ export interface BlobStore {
   get(key: string): Promise<{ size: number; arrayBuffer(): Promise<ArrayBuffer> } | null>;
 }
 
+const StoredPersonaFileRowSchema = InlinePersonaFileReadSchema.omit({ source: true, content: true });
+type StoredPersonaFileRow = z.infer<typeof StoredPersonaFileRowSchema>;
+export const StoredPersonaSchema = PersonaSchema.extend({ files: StoredPersonaFileRowSchema.array() });
+export type StoredPersona = z.infer<typeof StoredPersonaSchema>;
+export type Persona = z.infer<typeof PersonaSchema>;
+type PersonaFile = z.infer<typeof PersonaFileSchema>;
+
+export interface PersonaReadEnv extends SignerEnv {
+  STORE: BlobStore;
+  R2_BUCKET_NAME: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+}
+
 export type Checked = { ok: true; files: CheckedFile[] } | { ok: false; problem: Problem };
 
 export const UPLOAD_TTL_SECONDS = 900;
+export const DOWNLOAD_TTL_SECONDS = 900;
 
 export const UPLOAD_FIX = `Upload a file larger than ${PersonaFileLimit.InlineFileBytes} bytes first, then name it as a Stored file by digest`;
 
@@ -154,3 +176,30 @@ export const storeFiles = async (
   }
   return { ok: true, files: files.map(({ path, digest, sizeBytes }) => ({ path, digest, sizeBytes })) };
 };
+
+const fileRead = async (
+  env: PersonaReadEnv,
+  tenantId: string,
+  file: StoredPersonaFileRow,
+  now: number,
+): Promise<PersonaFile> => {
+  const key = personaFileKey(tenantId, file.digest);
+  if (file.sizeBytes > PersonaFileLimit.InlineFileBytes) {
+    const signer = signerOf(env, env.R2_BUCKET_NAME, env.R2_ACCESS_KEY_ID, env.R2_SECRET_ACCESS_KEY);
+    return {
+      ...file,
+      source: "Stored",
+      downloadUrl: await signer.presign("GET", key, DOWNLOAD_TTL_SECONDS, new Date(now)),
+      downloadExpiresAt: new Date(now + DOWNLOAD_TTL_SECONDS * 1000).toISOString(),
+    };
+  }
+  const held = await env.STORE.get(key);
+  if (held === null) throw new Error(`the store holds no bytes for ${file.path} under digest ${file.digest}`);
+  return { ...file, source: "Inline", content: encodeBase64(new Uint8Array(await held.arrayBuffer())) };
+};
+
+export const readPersona = async (env: PersonaReadEnv, persona: StoredPersona, now: number): Promise<Persona> =>
+  PersonaSchema.parse({
+    ...persona,
+    files: await Promise.all(persona.files.map((file) => fileRead(env, persona.tenantId, file, now))),
+  });

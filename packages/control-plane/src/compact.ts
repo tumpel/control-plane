@@ -218,3 +218,38 @@ const COMPACTORS: Record<Harness, Compactor | null> = {
 };
 
 export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[harness];
+
+export type SuccessResult = (line: unknown) => boolean;
+
+const ClaudeCodeSuccessSchema = z.object({
+  type: z.literal("result"),
+  subtype: z.literal("success"),
+  is_error: z.literal(false),
+});
+
+const CodexSuccessSchema = z.object({ type: z.literal("turn.completed") });
+
+const OpenCodeSuccessSchema = z.object({
+  type: z.literal("step_finish"),
+  part: z.object({ reason: z.literal("stop") }),
+});
+
+const PiAgentEndSchema = z.object({
+  type: z.literal("agent_end"),
+  messages: z.array(z.object({ stopReason: z.string().optional() })),
+});
+
+const piSucceeded = (line: unknown): boolean => {
+  const parsed = PiAgentEndSchema.safeParse(line);
+  return parsed.success && parsed.data.messages.at(-1)?.stopReason === "stop";
+};
+
+const SUCCESS_RESULTS: Record<Harness, SuccessResult | null> = {
+  ClaudeCode: (line) => ClaudeCodeSuccessSchema.safeParse(line).success,
+  Codex: (line) => CodexSuccessSchema.safeParse(line).success,
+  OpenCode: (line) => OpenCodeSuccessSchema.safeParse(line).success,
+  PiDev: piSucceeded,
+  MistralAgent: null,
+};
+
+export const successResultOf = (harness: Harness): SuccessResult | null => SUCCESS_RESULTS[harness];
