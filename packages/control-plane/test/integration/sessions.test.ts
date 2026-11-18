@@ -368,6 +368,9 @@ const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
 const GITHUB_USER = { id: 4242, login: "ticket-worker" };
 const PREBUILT_HEAD = "5".repeat(40);
 const PREBUILT_TREE = "6".repeat(40);
+const PREBUILT_DEVCONTAINER_TREE = "9".repeat(40);
+const PREBUILT_DEVCONTAINER = "8".repeat(40);
+const BARE_TREE = "a".repeat(40);
 const installationTokenRequests: unknown[] = [];
 
 const prebuiltRepository = (method: string, path: string): { status: number; body: unknown } | null => {
@@ -383,6 +386,28 @@ const prebuiltRepository = (method: string, path: string): { status: number; bod
     return { status: 200, body: { sha: PREBUILT_HEAD, commit: { tree: { sha: PREBUILT_TREE } } } };
   }
   if (path === `/repos/prebuilt/app/git/trees/${PREBUILT_TREE}`) {
+    return {
+      status: 200,
+      body: {
+        tree: [
+          { path: ".devcontainer", type: "tree", sha: PREBUILT_DEVCONTAINER_TREE },
+          { path: "package-lock.json", type: "blob", sha: "7".repeat(40) },
+        ],
+      },
+    };
+  }
+  if (path === `/repos/prebuilt/app/git/trees/${PREBUILT_DEVCONTAINER_TREE}?recursive=1`) {
+    return { status: 200, body: { tree: [{ path: "devcontainer.json", type: "blob", sha: PREBUILT_DEVCONTAINER }] } };
+  }
+  if (path === `/repos/prebuilt/app/git/blobs/${PREBUILT_DEVCONTAINER}`) {
+    const content = Buffer.from('{ "onCreateCommand": "npm ci" }\n').toString("base64");
+    return { status: 200, body: { content, encoding: "base64" } };
+  }
+  if (path === "/repos/prebuilt/bare") return { status: 200, body: { default_branch: "main" } };
+  if (path === "/repos/prebuilt/bare/commits/main") {
+    return { status: 200, body: { sha: PREBUILT_HEAD, commit: { tree: { sha: BARE_TREE } } } };
+  }
+  if (path === `/repos/prebuilt/bare/git/trees/${BARE_TREE}`) {
     return { status: 200, body: { tree: [{ path: "package-lock.json", type: "blob", sha: "7".repeat(40) }] } };
   }
   return null;
@@ -2317,7 +2342,20 @@ test("a preview reads a supplied config's commands in run order, refuses a repos
   const { bearer, getJson, tool, sessionStart } = await tenant();
   const { personaId } = await sessionStart();
   const repository = "https://github.com/prebuilt/app";
-  const missing = await postJson("/v1/prebuilds/preview", { source: "RepositoryFile", repository, personaId }, bearer);
+  const own = await tool(
+    "tumpel_prebuild_preview",
+    { source: "RepositoryFile", repository, personaId },
+    PrebuildPreviewSchema,
+  );
+  assert.equal(own.configSource, "RepositoryFile");
+  assert.deepEqual(own.commands, [
+    { lifecycle: "OnCreateCommand", label: "onCreateCommand", argv: ["/bin/sh", "-c", "npm ci"] },
+  ]);
+  const missing = await postJson(
+    "/v1/prebuilds/preview",
+    { source: "RepositoryFile", repository: "https://github.com/prebuilt/bare", personaId },
+    bearer,
+  );
   assert.equal(missing.status, 409, await missing.clone().text());
   const refusal = ProblemSchema.parse(await missing.json());
   assert.equal(refusal.code, "DevcontainerMissing");
@@ -2372,4 +2410,14 @@ test("templates list with their versions, an unknown one lists the valid ids, an
   const refusal = ProblemSchema.parse(await opened.json());
   assert.equal(refusal.code, "GitHubNotConnected");
   assert.match(refusal.fix, /^Connect GitHub for elsewhere/);
+});
+
+test("a start on a repository without a devcontainer.json refuses and stores no prebuild", async () => {
+  const { bearer, getJson, sessionStart } = await tenant();
+  const { personaId } = await sessionStart();
+  const repository = "https://github.com/prebuilt/bare";
+  const response = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI" }, bearer);
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.equal(ProblemSchema.parse(await response.json()).code, "DevcontainerMissing");
+  assert.deepEqual(await getJson(`/v1/prebuilds?repository=${repository}`, PrebuildSchema.array()), []);
 });

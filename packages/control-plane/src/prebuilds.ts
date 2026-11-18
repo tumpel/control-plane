@@ -380,6 +380,7 @@ export const startPrebuild = async (
     const held = await tenant.heldPrebuild(caller.tenantId, key);
     if (held !== null) return ok(held);
   }
+  if (inputs.configSource === "Default") return devcontainerMissing(target);
   const prebuildId = crypto.randomUUID();
   const started = await tenant.startHostPrebuild(
     caller.tenantId,

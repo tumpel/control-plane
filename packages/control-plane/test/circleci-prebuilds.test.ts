@@ -26,6 +26,7 @@ const SECRETS_KEK = Buffer.alloc(32, 9).toString("base64");
 const INSTALLATION_ID = 88;
 const HEAD_SHA = "c".repeat(40);
 const TREE_SHA = "1".repeat(40);
+const DEVCONTAINER_TREE_SHA = "5".repeat(40);
 const REPOSITORY = "https://github.com/acme/app";
 const TOKEN = "circleci-personal-token";
 const ORGANIZATION = "6f1c2b3a-0d4e-4f5a-9b8c-7d6e5f4a3b2c";
@@ -91,7 +92,15 @@ const fakeGitHub = (request: IncomingMessage, response: ServerResponse, path: st
     return reply(response, 200, { sha: HEAD_SHA, commit: { tree: { sha: TREE_SHA } } });
   }
   if (path === `/repos/acme/app/git/trees/${TREE_SHA}`) {
-    return reply(response, 200, { tree: [{ path: "package-lock.json", type: "blob", sha: "2".repeat(40) }] });
+    return reply(response, 200, {
+      tree: [
+        { path: ".devcontainer", type: "tree", sha: DEVCONTAINER_TREE_SHA },
+        { path: "package-lock.json", type: "blob", sha: "2".repeat(40) },
+      ],
+    });
+  }
+  if (path === `/repos/acme/app/git/trees/${DEVCONTAINER_TREE_SHA}?recursive=1`) {
+    return reply(response, 200, { tree: [{ path: "devcontainer.json", type: "blob", sha: "4".repeat(40) }] });
   }
   return reply(response, 404, { message: "Not Found" });
 };
