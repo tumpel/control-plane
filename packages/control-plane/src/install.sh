@@ -33,7 +33,7 @@ main() {
 
   actual=$(sha256sum "$download" | cut -d ' ' -f 1)
   [ "$actual" = "$expected" ] ||
-    fail "the downloaded CLI does not match the checksum the release publishes. Run this command again; if it fails again, report it at https://github.com/mvhenten/tumpel/issues/new."
+    fail "the downloaded CLI does not match the checksum the release publishes. Run this command again; if it fails again, report it at https://github.com/tumpel/cli/issues/new."
 
   chmod 755 "$download"
   mv -f "$download" "$dir/tumpel"

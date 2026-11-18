@@ -6,8 +6,16 @@ export const CLAUDE_CODE_AMD64_RELEASE: ReleaseManifest = {
   releaseVersion: "0.2.0",
   commit: "e".repeat(40),
   channelProtocolVersion: ChannelProtocol.Version,
-  supervisors: [{ architecture: "Amd64", sha256: "a".repeat(64), sizeBytes: 4096, guestProtocolVersion: 11 }],
-  clis: [{ architecture: "Amd64", sha256: "f".repeat(64), sizeBytes: 2048 }],
+  supervisors: [
+    {
+      architecture: "Amd64",
+      sha256: "a".repeat(64),
+      sizeBytes: 4096,
+      supervisorVersion: "0.1.0",
+      guestProtocolVersion: 11,
+    },
+  ],
+  clis: [{ architecture: "Amd64", sha256: "f".repeat(64), sizeBytes: 2048, cliVersion: "0.2.1" }],
   images: [
     {
       harness: "ClaudeCode",

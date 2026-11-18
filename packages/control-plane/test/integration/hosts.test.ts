@@ -28,8 +28,8 @@ const AUDIENCE = "tumpel-hosts-e2e";
 const KID = "hosts-e2e-key";
 const EMAIL = "hosts@example.test";
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
-const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
-const TUMPEL = join(ROOT, "target", "debug", "tumpel");
+const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
+const TUMPEL = join(ROOT, ".tmp", "release-binaries", "tumpel");
 
 type WorkerConfig = Extract<
   Extract<Parameters<typeof createTestHarness>[0], object>["workers"][number],

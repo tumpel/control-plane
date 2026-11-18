@@ -17,7 +17,7 @@ const PROOF_CLIENT_ID = "0123456789abcdef.access";
 const PROOF_CLIENT_SECRET = "proof-secret-never-printed-0123456789abcdef";
 const OTHER_COMMON_NAME = "fedcba9876543210.access";
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
-const TUMPEL = join(ROOT, "target", "debug", "tumpel");
+const TUMPEL = join(ROOT, ".tmp", "release-binaries", "tumpel");
 const BROWSER_PATHS = ["/device", "/v1/tenants", "/v1/device/approve", "/v1/device/deny", "/oauth/consent"];
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
