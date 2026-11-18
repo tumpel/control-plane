@@ -60,7 +60,7 @@ const DEPLOYED_COMMIT = "7".repeat(40);
 const KID = "sessions-e2e-key";
 const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-ant-sessions-e2e-key";
-const CLAIM_BUDGET_SECONDS = 3;
+const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
@@ -69,10 +69,10 @@ const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
   ...TEST_SETTINGS,
-  dispatchGrantTtlSeconds: CLAIM_BUDGET_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
+  dispatchGrantTtlSeconds: OFFER_TTL_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
   snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
-  turnOfferTtlSeconds: CLAIM_BUDGET_SECONDS,
+  turnOfferTtlSeconds: OFFER_TTL_SECONDS,
   turnImageFetchBudgetSeconds: IMAGE_FETCH_BUDGET_SECONDS,
   turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
@@ -824,6 +824,13 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
     assert.match(startRefusal.detail, /a deploy of the control plane is in progress/);
     assert.equal(startRefusal.fix, "Once the dashboard shows the new release, start again");
 
+    host.send({
+      type: "TurnFailed",
+      turnId: offer.turnId,
+      reason: "BoxBootFailed",
+      detail: "the box did not boot",
+      failedAt: new Date().toISOString(),
+    });
     await until(
       "the offered turn reading Failed",
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
@@ -1831,8 +1838,15 @@ suite("sessions", { concurrency: 8 }, () => {
         [packTwo, CHUNK_BYTES, "GET"],
       ],
     );
+    host.send({
+      type: "TurnFailed",
+      turnId: restoring.turnId,
+      reason: "BoxBootFailed",
+      detail: "the box did not boot",
+      failedAt: new Date().toISOString(),
+    });
     await until(
-      "the unclaimed restore turn reading Failed",
+      "the restore turn reading Failed",
       () => getJson(`/v1/turns/${restoring.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
@@ -1858,8 +1872,15 @@ suite("sessions", { concurrency: 8 }, () => {
       reused.packs.map((pack) => pack.packDigest),
       [packTwo],
     );
+    host.send({
+      type: "TurnFailed",
+      turnId: reusing.turnId,
+      reason: "BoxBootFailed",
+      detail: "the box did not boot",
+      failedAt: new Date().toISOString(),
+    });
     await until(
-      "the unclaimed shared restore turn reading Failed",
+      "the shared restore turn reading Failed",
       () => getJson(`/v1/turns/${reusing.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
@@ -1904,30 +1925,82 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(again.uploaded, [packOne]);
   });
 
-  test("a turn the host never claims fails NotClaimed once the claim budget runs out", async () => {
+  test("a turn whose host goes offline before claiming it stays Offered, is offered again at the next Welcome and runs", async () => {
+    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
+    const flaky = await enrol("flaky");
+    const before = await connect(flaky.id, flaky.key, 16);
+    await hostState(flaky.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a reset" }, bearer);
+    assert.equal(response.status, 200);
+    const started = StartedSessionSchema.parse(await response.json());
+    assert.equal(started.session.hostId, flaky.id);
+    assert.equal((await before.next("TurnOffer")).turnId, started.turn.turnId);
+    before.close();
+    await hostState(flaky.id, "Offline");
+    await wait((Math.max(SETTINGS.heartbeatDeadlineSeconds, OFFER_TTL_SECONDS) + 1) * 1000);
+    assert.equal((await getJson(`/v1/turns/${started.turn.turnId}`, TurnSchema)).state, "Offered");
+
+    const after = await connect(flaky.id, flaky.key, 16);
+    const offer = await after.next("TurnOffer");
+    assert.equal(offer.turnId, started.turn.turnId);
+    after.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await after.next("TurnClaimed")).turnId, offer.turnId);
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
+    after.close();
+  });
+
+  test("a turn the host reports NotClaimed after its claim is offered again and runs on the next claim", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "claim lost" }, bearer);
+    assert.equal(response.status, 200);
+    const started = StartedSessionSchema.parse(await response.json());
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    await host.next("TurnClaimed");
+    host.send({
+      type: "TurnFailed",
+      turnId: offer.turnId,
+      reason: "NotClaimed",
+      detail: "the control plane did not answer the claim in time",
+      failedAt: new Date().toISOString(),
+    });
+
+    const again = await host.next("TurnOffer");
+    assert.equal(again.turnId, started.turn.turnId);
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Offered");
+    host.send({ type: "TurnClaim", turnId: again.turnId, boxId: again.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
+  });
+
+  test("a turn no host claims by its whole-turn deadline dead-letters Undelivered on turn and session reads, also from a timer stored before its owner field was dropped", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
     assert.equal(response.status, 200);
     const started = StartedSessionSchema.parse(await response.json());
     const offer = await host.next("TurnOffer");
-    assert.equal(offer.turnId, started.turn.turnId);
+    const { sessionId, tenantId } = started.session;
+    const at = Date.now() + 500;
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
 
     const failed = await until(
       "the turn reading Failed",
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
-    assert.ok(failed.updatedAt - started.turn.createdAt >= CLAIM_BUDGET_SECONDS * 1000);
     const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "NotClaimed");
-    assert.match(failure.detail, new RegExp(`did not claim the turn within ${CLAIM_BUDGET_SECONDS} seconds`));
+    assert.equal(failure.reason, "Undelivered");
+    assert.match(
+      failure.detail,
+      /^no host took the turn within 60 seconds of its offer, so it never ran; host box is online but never claimed it\./,
+    );
     assert.doesNotMatch(failure.detail, UUID);
     const read = FailedTurnSchema.parse(failed);
     assert.deepEqual(
       { reason: read.reason, detail: read.detail, failedAt: read.failedAt },
       { reason: failure.reason, detail: failure.detail, failedAt: failure.failedAt },
     );
-    const session = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
+    const session = await getJson(`/v1/sessions/${sessionId}`, SessionSchema);
     assert.deepEqual(session.lastTurn, read);
   });
 
@@ -1972,7 +2045,14 @@ suite("sessions", { concurrency: 8 }, () => {
       { ...(await sessionStart()), prompt: "never claimed" },
       StartedSessionSchema,
     );
-    await host.next("TurnOffer");
+    const unclaimedOffer = await host.next("TurnOffer");
+    const { sessionId, tenantId } = unclaimed.session;
+    const at = Date.now() + 500;
+    await storeTimers(
+      sessionId,
+      { tenantId, sessionId, deadlines: { Total: { turnId: unclaimedOffer.turnId, at } } },
+      at,
+    );
 
     const firstWait = Date.now();
     const failed = await tool(
@@ -1990,7 +2070,7 @@ suite("sessions", { concurrency: 8 }, () => {
     );
     assert.equal(
       (await tool("tumpel_turn_failure", { turnId: unclaimed.turn.turnId }, TurnFailureSchema)).reason,
-      "NotClaimed",
+      "Undelivered",
     );
 
     const timedOut = await tool(
@@ -2024,25 +2104,6 @@ suite("sessions", { concurrency: 8 }, () => {
       await toolRefusal("tumpel_turn_wait", { turnId: [running.turn.turnId, "no-such-turn"], timeoutSeconds: 1 }),
       /your tenant has no turn no-such-turn/,
     );
-  });
-
-  test("a session timer stored before its owner field was dropped still fails an unclaimed turn NotClaimed", async () => {
-    const { bearer, host, getJson, sessionStart } = await tenant();
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "stored timer" }, bearer);
-    assert.equal(response.status, 200);
-    const started = StartedSessionSchema.parse(await response.json());
-    const offer = await host.next("TurnOffer");
-    const { sessionId, tenantId } = started.session;
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Claim: { turnId: offer.turnId, at } } }, at);
-
-    await until(
-      "the turn reading Failed",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "NotClaimed");
   });
 
   test("a start from an issue over MCP refuses a missing or closed issue, and an open one offers its prompt and reads back the issue", async () => {
@@ -2315,14 +2376,16 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/sessions/${sessionId}/snapshots`, SnapshotSchema.array()),
       (snapshots) => snapshots.length === 1,
     );
-    const unclaimed = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "never claimed" }, bearer);
-    assert.equal(unclaimed.status, 200, await unclaimed.clone().text());
-    const lost = TurnSchema.parse(await unclaimed.json());
+    const claimed = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "lost with its host" }, bearer);
+    assert.equal(claimed.status, 200, await claimed.clone().text());
+    const lost = TurnSchema.parse(await claimed.json());
     assert.equal((await from.next("TurnOffer")).turnId, lost.turnId);
+    from.send({ type: "TurnClaim", turnId: lost.turnId, boxId: offer.boxId });
+    await from.next("TurnClaimed");
     from.close();
     await hostState(first.id, "Offline");
     await until(
-      "the unclaimed turn reading Failed",
+      "the claimed turn reading Failed",
       () => getJson(`/v1/turns/${lost.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
@@ -2348,7 +2411,6 @@ suite("sessions", { concurrency: 8 }, () => {
     await hostState(first.id, "Online");
     const discard = await from.next("BoxDiscard");
     assert.deepEqual({ sessionId: discard.sessionId, boxId: discard.boxId }, { sessionId, boxId: offer.boxId });
-    from.send({ type: "TurnClaim", turnId: lost.turnId, boxId: offer.boxId });
     from.send({
       type: "TurnFailed",
       turnId: lost.turnId,
@@ -2369,7 +2431,7 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/turns/${afterOffer.turnId}`, TurnSchema),
       (turn) => turn.state === "Running",
     );
-    assert.equal((await getJson(`/v1/turns/${lost.turnId}/failure`, TurnFailureSchema)).reason, "NotClaimed");
+    assert.equal((await getJson(`/v1/turns/${lost.turnId}/failure`, TurnFailureSchema)).reason, "HostOffline");
     from.close();
     to.close();
   });
