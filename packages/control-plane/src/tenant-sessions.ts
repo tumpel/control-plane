@@ -558,7 +558,6 @@ export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
 export const sealContext = (secretSetId: string, name: string): string => `${secretSetId}/${name}`;
 
 export abstract class TenantSessions extends DurableObject<Env> {
-  private readonly turnEndWaiters = new Set<() => void>();
   protected eventsAppended = false;
   private readonly offering = new Set<string>();
 
@@ -2246,34 +2245,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  protected async waitTurns(tenantId: string, turnIds: string[], timeoutSeconds: number): Promise<WaitedTurns> {
+  protected readTurns(tenantId: string, turnIds: string[]): WaitedTurns {
     const missing = turnIds.find((turnId) => this.turnRow(turnId) === null);
     if (missing !== undefined) return { kind: "NotFound", turnId: missing };
-    const oneEnded = (): boolean => turnIds.some((turnId) => !IN_FLIGHT.includes(this.turnRow(turnId)?.state ?? ""));
-    if (!oneEnded()) {
-      await new Promise<void>((resolve) => {
-        const finish = (): void => {
-          clearTimeout(timer);
-          this.turnEndWaiters.delete(wake);
-          resolve();
-        };
-        const wake = (): void => {
-          if (oneEnded()) finish();
-        };
-        const timer = setTimeout(finish, timeoutSeconds * 1000);
-        this.turnEndWaiters.add(wake);
-      });
-    }
     const turns = turnIds.map((turnId) => {
       const turn = this.getTurn(tenantId, turnId);
-      if (turn === null) throw new Error(`turn ${turnId} vanished while the wait read it back`);
+      if (turn === null) throw new Error(`turn ${turnId} vanished while the read collected it`);
       return turn;
     });
     return { kind: "Read", turns };
-  }
-
-  private turnEnded(): void {
-    for (const wake of this.turnEndWaiters) wake();
   }
 
   protected getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {
@@ -3101,7 +3081,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       record();
       releaseConnectorCredentials(this.ctx.storage.sql);
     });
-    this.turnEnded();
     const session = this.sessionRow(turn.session_id);
     const release = session?.state === "Idle" && session.box_retention === "Off";
     if (release) this.startAfterTurnRelease(session, now);

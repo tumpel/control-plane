@@ -390,9 +390,7 @@ export class Tenant extends TenantConnectors {
     listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
     listTurns: ({ tenantId, sessionId }) => ({ turns: this.listTurns(tenantId, sessionId) }),
     getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
-    waitTurns: async ({ tenantId, turnIds, timeoutSeconds }) => ({
-      waited: await this.waitTurns(tenantId, turnIds, timeoutSeconds),
-    }),
+    waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),

@@ -16,6 +16,7 @@ import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
 import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
+import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
@@ -554,13 +555,32 @@ export const waitTurns = async (
   turnIds: string[],
   timeoutSeconds: number,
 ): Promise<Outcome<Turn[]>> => {
-  const { waited } = await tenantOf(env, caller).call("waitTurns", {
-    tenantId: caller.tenantId,
-    turnIds,
-    timeoutSeconds,
+  const tenant = tenantOf(env, caller);
+  const { tenantId } = caller;
+  const { listed } = await tenant.call("listEvents", {
+    tenantId,
+    afterEventId: null,
+    events: [],
+    sessionId: null,
+    waitSeconds: 0,
   });
-  return waited.kind === "Read" ? ok(waited.turns) : turnNotFound(waited.turnId);
+  if (listed.kind !== "Read") throw new Error(`tenant ${tenantId} refused a read from the end of its event log`);
+  const read = () => tenant.call("waitTurns", { tenantId, turnIds, timeoutSeconds: 0 });
+  const first = (await read()).waited;
+  if (first.kind === "NotFound") return turnNotFound(first.turnId);
+  if (timeoutSeconds === 0 || first.turns.some((turn) => !IN_FLIGHT_TURNS.includes(turn.state))) return ok(first.turns);
+  const subscription = {
+    tenantId,
+    cursor: listed.page.lastEventId,
+    events: ["TurnCompleted" as const, "TurnFailed" as const],
+    sessionId: null,
+  };
+  await waitOnChannel(env, subscription, timeoutSeconds, (event) => turnIds.includes(String(event.turnId)));
+  const next = (await read()).waited;
+  return next.kind === "Read" ? ok(next.turns) : turnNotFound(next.turnId);
 };
+
+const IN_FLIGHT_TURNS: readonly string[] = ["Offered", "Running"];
 
 export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<TurnFailure>> => {
   const tenant = tenantOf(env, caller);
