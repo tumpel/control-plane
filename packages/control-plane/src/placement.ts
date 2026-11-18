@@ -1,4 +1,4 @@
-import type { ReportedHostUsageSchema } from "@tumpel/schemas";
+import { BoxMemoryLimit, type ReportedHostUsageSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { HostRecord as Host } from "./host-record.ts";
 import type { HostArchitecture } from "./releases.ts";
@@ -14,7 +14,8 @@ export interface ImageAvailability {
 export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
-  | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage };
+  | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
+  | { kind: "Unplaceable"; host: Host; reason: "NoMemory"; usage: ReportedHostUsage; boxMemoryMib: number };
 
 type Candidate = { kind: "Candidate"; host: Host; usage: ReportedHostUsage };
 
@@ -26,6 +27,7 @@ const assess = (
   host: Host,
   usages: ReadonlyMap<string, ReportedHostUsage>,
   image: ImageAvailability,
+  boxMemoryMib: number,
 ): Candidate | Unplaceable => {
   if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
@@ -36,6 +38,8 @@ const assess = (
     );
   }
   if (usage.boxesRunning >= usage.boxCapacity) return { kind: "Unplaceable", host, reason: "Full", usage };
+  if (boxMemoryMib > BoxMemoryLimit.DefaultMib && usage.memoryAvailableMib < boxMemoryMib)
+    return { kind: "Unplaceable", host, reason: "NoMemory", usage, boxMemoryMib };
   return { kind: "Candidate", host, usage };
 };
 
@@ -43,9 +47,10 @@ export const placeSession = (
   hosts: readonly Host[],
   usages: readonly ReportedHostUsage[],
   image: ImageAvailability,
+  boxMemoryMib: number,
 ): Placement => {
   const byHost = new Map(usages.map((usage) => [usage.hostId, usage]));
-  const assessed = hosts.map((host) => assess(host, byHost, image));
+  const assessed = hosts.map((host) => assess(host, byHost, image, boxMemoryMib));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
     .sort((a, b) => freeSlots(b.usage) - freeSlots(a.usage) || b.usage.memoryAvailableMib - a.usage.memoryAvailableMib);

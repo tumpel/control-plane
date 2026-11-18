@@ -1,3 +1,4 @@
+import { BoxMemoryLimit } from "@tumpel/schemas";
 import type {
   BootImage,
   HostMessage,
@@ -136,11 +137,16 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (other !== null) return { kind: "OtherCredential", name: other };
     const release = await readRelease(this.env.RELEASES, now);
     if (release.kind === "Unreadable") return { kind: "ReleaseUnreadable", detail: release.detail };
-    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), {
-      harness: input.harness,
-      harnessVersion: input.harnessVersion,
-      architectures: bootArchitectures(release, input.harness, input.harnessVersion),
-    });
+    const placement = placeSession(
+      input.hosts,
+      this.listHostUsage(tenantId),
+      {
+        harness: input.harness,
+        harnessVersion: input.harnessVersion,
+        architectures: bootArchitectures(release, input.harness, input.harnessVersion),
+      },
+      BoxMemoryLimit.DefaultMib,
+    );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);
     const claudeSetupId = crypto.randomUUID();

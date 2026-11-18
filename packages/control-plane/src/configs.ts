@@ -1,4 +1,5 @@
 import {
+  BoxMemoryLimit,
   type ConfigChangeSchema,
   type ConfigSecretSetSchema,
   type EffectiveHarnessVersionSchema,
@@ -34,7 +35,10 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & { files: StoredFile[] };
+type PersonaWrite = Pick<Persona, "name" | "harness" | "secretSetId"> & {
+  boxMemoryMib: number;
+  files: StoredFile[];
+};
 
 export type ConfigWrite =
   | { kind: "CreateSecretSet"; secretSetId: string; secretSet: SecretSetWrite; githubUser: GitHubUser | null }
@@ -312,6 +316,7 @@ const planPersonas = (
     const removed = [...held.keys()].filter((path) => !wanted.has(path)).sort();
     const unchanged =
       setIds.get(persona.secretSetName) === current.secretSetId &&
+      (persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib) === current.boxMemoryMib &&
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {

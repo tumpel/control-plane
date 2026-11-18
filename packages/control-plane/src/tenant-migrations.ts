@@ -54,6 +54,7 @@ import tenant0053 from "../migrations/tenant/0053_prebuild_sessions.sql";
 import tenant0054 from "../migrations/tenant/0054_claude_setup_harness.sql";
 import tenant0055 from "../migrations/tenant/0055_turn_metric_dimensions.sql";
 import tenant0056 from "../migrations/tenant/0056_deferred_offers.sql";
+import tenant0057 from "../migrations/tenant/0057_persona_box_memory.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -113,4 +114,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0054_claude_setup_harness", sql: tenant0054 },
   { name: "0055_turn_metric_dimensions", sql: tenant0055 },
   { name: "0056_deferred_offers", sql: tenant0056 },
+  { name: "0057_persona_box_memory", sql: tenant0057 },
 ];

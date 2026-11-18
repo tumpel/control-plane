@@ -154,6 +154,7 @@ type SessionRow = {
   state: string;
   last_line_seq: number;
   endpoint: string;
+  box_memory_mib: number;
   created_at: number;
   updated_at: number;
 };
@@ -263,8 +264,8 @@ type SnapshotRequestRow = {
 };
 
 const SESSION_SELECT =
-  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at FROM sessions";
-const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.created_at, s.updated_at,
+  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, created_at, updated_at FROM sessions";
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, s.box_memory_mib, s.created_at, s.updated_at,
   t.turn_id AS last_turn_id, t.state AS last_turn_state, t.updated_at AS last_turn_at
   FROM sessions AS s
   JOIN turns AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)`;
@@ -570,11 +571,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  protected personaRow(personaId: string): { secretSetId: string } | null {
+  protected personaRow(personaId: string): { secretSetId: string; boxMemoryMib: number } | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM personas WHERE persona_id = ?", personaId)
+      .exec<{ secret_set_id: string; box_memory_mib: number }>(
+        "SELECT secret_set_id, box_memory_mib FROM personas WHERE persona_id = ?",
+        personaId,
+      )
       .toArray();
-    return row === undefined ? null : { secretSetId: row.secret_set_id };
+    if (row === undefined) return null;
+    return { secretSetId: row.secret_set_id, boxMemoryMib: row.box_memory_mib };
+  }
+
+  private boxMemoryMib(personaId: string): number {
+    const persona = this.personaRow(personaId);
+    if (persona === null) throw new Error(`persona ${personaId} is gone, so its box memory is unknown`);
+    return persona.boxMemoryMib;
   }
 
   private secretSetName(session: SessionRow): string {
@@ -822,6 +833,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       harnessVersion: session.harness_version,
       model: session.model,
       prompt: turn.prompt,
+      boxMemoryMib: session.box_memory_mib,
       ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
   }
@@ -1039,7 +1051,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image);
+    const boxMemoryMib = this.boxMemoryMib(start.personaId);
+    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image, boxMemoryMib);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
@@ -1054,13 +1067,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       state: "Starting",
       last_line_seq: 0,
       endpoint: input.endpoint,
+      box_memory_mib: boxMemoryMib,
       created_at: now,
       updated_at: now,
     };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_memory_mib, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         session.session_id,
         session.principal_id,
         session.host_id,
@@ -1073,6 +1087,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.state,
         session.last_line_seq,
         session.endpoint,
+        session.box_memory_mib,
         session.created_at,
         session.updated_at,
       );
@@ -1118,7 +1133,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return image;
     const from = await this.hostName(tenantId, session.host_id);
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image);
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image, session.box_memory_mib);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
@@ -1142,7 +1157,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return stay();
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image);
+    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image, session.box_memory_mib);
     if (placement.kind === "Refused") return stay();
     const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;

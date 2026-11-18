@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { BoxMemoryLimit } from "@tumpel/schemas";
 import type { HostRecord as Host } from "../src/host-record.ts";
 import { type ImageAvailability, type Placement, placeSession } from "../src/placement.ts";
 
@@ -19,6 +20,8 @@ const HOST: Host = {
 };
 
 const AMD64_IMAGES: ImageAvailability = { harness: "ClaudeCode", harnessVersion: "2.0.0", architectures: ["Amd64"] };
+
+const BOX_MEMORY_MIB = BoxMemoryLimit.DefaultMib;
 
 const placed = (placement: Placement): string => {
   assert.equal(placement.kind, "Placed", JSON.stringify(placement));
@@ -82,7 +85,7 @@ test("a session goes to the online host with the most free box slots, ignoring o
       updatedAt: 0,
     },
   ];
-  assert.equal(placed(placeSession(hosts, usages, AMD64_IMAGES)), "freer");
+  assert.equal(placed(placeSession(hosts, usages, AMD64_IMAGES, BOX_MEMORY_MIB)), "freer");
 });
 
 test("equal free slots go to the host with the most memory available, and warm slots count as taken", () => {
@@ -114,11 +117,11 @@ test("equal free slots go to the host with the most memory available, and warm s
     createdAt: 0,
     updatedAt: 0,
   };
-  assert.equal(placed(placeSession(hosts, [pi, pentium], AMD64_IMAGES)), "pentium");
-  assert.equal(placed(placeSession(hosts, [pi, { ...pentium, boxesWarm: 3 }], AMD64_IMAGES)), "pi");
+  assert.equal(placed(placeSession(hosts, [pi, pentium], AMD64_IMAGES, BOX_MEMORY_MIB)), "pentium");
+  assert.equal(placed(placeSession(hosts, [pi, { ...pentium, boxesWarm: 3 }], AMD64_IMAGES, BOX_MEMORY_MIB)), "pi");
 });
 
-test("a host whose every slot is warm still takes a session, since the supervisor evicts a warm box", () => {
+test("a host whose every slot is warm and whose memory is low still takes a default-memory session, since the supervisor evicts a warm box", () => {
   const usage = {
     hostId: "warm",
     tenantId: "tenant-placement",
@@ -131,7 +134,10 @@ test("a host whose every slot is warm still takes a session, since the superviso
     createdAt: 0,
     updatedAt: 0,
   };
-  assert.equal(placed(placeSession([{ ...HOST, hostId: "warm", name: "warm" }], [usage], AMD64_IMAGES)), "warm");
+  assert.equal(
+    placed(placeSession([{ ...HOST, hostId: "warm", name: "warm" }], [usage], AMD64_IMAGES, BOX_MEMORY_MIB)),
+    "warm",
+  );
 });
 
 test("a tenant whose hosts all run a turn in every slot is refused with each host's reason", () => {
@@ -152,7 +158,7 @@ test("a tenant whose hosts all run a turn in every slot is refused with each hos
     createdAt: 0,
     updatedAt: 0,
   };
-  const placement = placeSession(hosts, [full], AMD64_IMAGES);
+  const placement = placeSession(hosts, [full], AMD64_IMAGES, BOX_MEMORY_MIB);
   assert.deepEqual(placement.kind === "Refused" ? placement.hosts.map(({ host, reason }) => [host.name, reason]) : [], [
     ["full", "Full"],
     ["arm", "NoImage"],
@@ -180,7 +186,7 @@ test("a host whose architecture has no image of the session's harness version in
     [{ harness: "ClaudeCode", harnessVersion: "2.0.0", architectures: [] }, []],
   ];
   for (const [image, architectures] of cases) {
-    const placement = placeSession([HOST], [usage], image);
+    const placement = placeSession([HOST], [usage], image, BOX_MEMORY_MIB);
     assert.deepEqual(
       placement.kind === "Refused"
         ? placement.hosts.map((each) => [each.reason, each.reason === "NoImage" ? [...each.image.architectures] : []])
@@ -188,5 +194,33 @@ test("a host whose architecture has no image of the session's harness version in
       [["NoImage", architectures]],
     );
   }
-  assert.equal(placed(placeSession([{ ...HOST, architecture: "Arm64" }], [usage], arm)), "base");
+  assert.equal(placed(placeSession([{ ...HOST, architecture: "Arm64" }], [usage], arm, BOX_MEMORY_MIB)), "base");
+});
+
+test("a host whose available memory is below a persona's box memory above the default is refused NoMemory", () => {
+  const usage = (hostId: string, memoryAvailableMib: number) => ({
+    hostId,
+    tenantId: "tenant-placement",
+    boxCapacity: 4,
+    boxesRunning: 0,
+    boxesWarm: 0,
+    loadAverage: 0,
+    memoryAvailableMib,
+    channelProtocol: 18,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+  const small = { ...HOST, hostId: "small", name: "small" };
+  const large = { ...HOST, hostId: "large", name: "large" };
+  const refused = placeSession([small], [usage("small", 6144)], AMD64_IMAGES, 8192);
+  assert.deepEqual(
+    refused.kind === "Refused"
+      ? refused.hosts.map((each) => [each.reason, each.reason === "NoMemory" ? each.boxMemoryMib : 0])
+      : refused,
+    [["NoMemory", 8192]],
+  );
+  assert.equal(
+    placed(placeSession([small, large], [usage("small", 6144), usage("large", 16384)], AMD64_IMAGES, 8192)),
+    "large",
+  );
 });
