@@ -60,6 +60,7 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
+  TurnWaitQuerySchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
@@ -77,7 +78,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
+  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -761,6 +762,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/turns/{turnId}",
     TurnPathSchema,
     "Read one turn; state is Offered, Running, Completed or Failed.",
+  ),
+  rest(
+    "tumpel_turn_wait",
+    "GET",
+    "/v1/turns/wait",
+    TurnWaitQuerySchema,
+    "Wait on up to 50 turns of any of the tenant's sessions until the first one is Completed or Failed, or until timeoutSeconds (at most 50) pass; answers at once when one has already ended. Returns every turn in the order asked, with its state, and a Failed turn with its failure {reason, detail}. Call it again with the turns still Offered or Running to wait on. Refused NotFound, naming the turn, when a turnId names no turn of the tenant.",
   ),
   rest(
     "tumpel_turn_failure",

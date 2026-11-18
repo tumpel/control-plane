@@ -1957,6 +1957,75 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual((await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema)).lastTurn, read);
   });
 
+  test("a turn wait over MCP answers when the first of several turns ends, with every turn's state and a failed turn's reason", async () => {
+    const { host, tool, toolRefusal, sessionStart } = await tenant();
+    const running = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "keeps running" },
+      StartedSessionSchema,
+    );
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, running.turn.turnId);
+    const unclaimed = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "never claimed" },
+      StartedSessionSchema,
+    );
+    await host.next("TurnOffer");
+
+    const firstWait = Date.now();
+    const failed = await tool(
+      "tumpel_turn_wait",
+      { turnId: [running.turn.turnId, unclaimed.turn.turnId], timeoutSeconds: 50 },
+      TurnSchema.array(),
+    );
+    assert.ok(Date.now() - firstWait < 20_000);
+    assert.deepEqual(
+      failed.map((turn) => [turn.turnId, turn.state]),
+      [
+        [running.turn.turnId, "Running"],
+        [unclaimed.turn.turnId, "Failed"],
+      ],
+    );
+    assert.equal(
+      (await tool("tumpel_turn_failure", { turnId: unclaimed.turn.turnId }, TurnFailureSchema)).reason,
+      "NotClaimed",
+    );
+
+    const timedOut = await tool(
+      "tumpel_turn_wait",
+      { turnId: [running.turn.turnId], timeoutSeconds: 1 },
+      TurnSchema.array(),
+    );
+    assert.deepEqual(
+      timedOut.map((turn) => turn.state),
+      ["Running"],
+    );
+
+    const secondWait = Date.now();
+    const waiting = tool("tumpel_turn_wait", { turnId: [running.turn.turnId], timeoutSeconds: 50 }, TurnSchema.array());
+    await wait(500);
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const completed = await waiting;
+    assert.ok(Date.now() - secondWait < 20_000);
+    assert.deepEqual(
+      completed.map((turn) => [turn.turnId, turn.state]),
+      [[running.turn.turnId, "Completed"]],
+    );
+
+    assert.match(
+      await toolRefusal("tumpel_turn_wait", { turnId: [running.turn.turnId, "no-such-turn"], timeoutSeconds: 1 }),
+      /your tenant has no turn no-such-turn/,
+    );
+  });
+
   test("a session timer stored before its owner field was dropped still fails an unclaimed turn NotClaimed", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "stored timer" }, bearer);

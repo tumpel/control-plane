@@ -118,6 +118,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_getFailure`                       | `tumpel_turn_failure`                        | `tumpel turn failure`                        |
 | `Turns_list`                             | `tumpel_turn_list`                           | `tumpel turn list`                           |
 | `Turns_send`                             | `tumpel_turn_send`                           | `tumpel turn send`                           |
+| `Turns_wait`                             | `tumpel_turn_wait`                           | `tumpel turn wait`                           |
 
 CLI only: tenant operations with a CLI command and no MCP tool:
 
@@ -153,4 +154,3 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `PrebuildInputs_read`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
-- `Turns_wait`: no route serves it yet; it leaves this list with its MCP tool and CLI command.
