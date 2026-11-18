@@ -9,6 +9,7 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
+  TurnWaitQuerySchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
@@ -467,6 +468,16 @@ export const getTurn = async (env: Env, caller: Caller, turnId: string): Promise
   return turn === null ? turnNotFound(turnId) : ok(turn);
 };
 
+export const waitTurns = async (
+  env: Env,
+  caller: Caller,
+  turnIds: string[],
+  timeoutSeconds: number,
+): Promise<Outcome<Turn[]>> => {
+  const waited = await tenantOf(env, caller).waitTurns(caller.tenantId, turnIds, timeoutSeconds);
+  return waited.kind === "Read" ? ok(waited.turns) : turnNotFound(waited.turnId);
+};
+
 export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<TurnFailure>> => {
   const tenant = tenantOf(env, caller);
   const failure = await tenant.getTurnFailure(caller.tenantId, turnId);
@@ -636,6 +647,7 @@ const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-ha
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure)?$/;
+const TURN_WAIT_PATH = "/v1/turns/wait";
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -707,6 +719,14 @@ export const handleSessions = async (
   }
   if (session?.[1] !== undefined) {
     return sessionRoute(request, url, env, caller, decodeURIComponent(session[1]), session[2]);
+  }
+  if (pathname === TURN_WAIT_PATH) {
+    const query = TurnWaitQuerySchema.safeParse({
+      ...queryOf(url, ["timeoutSeconds"]),
+      turnId: url.searchParams.getAll("turnId"),
+    });
+    if (!query.success) return invalidQuery("turns.wait", query.error);
+    return answer(await waitTurns(env, caller, query.data.turnId, query.data.timeoutSeconds));
   }
   if (turn?.[1] !== undefined) {
     const raw = decodeURIComponent(turn[1]);

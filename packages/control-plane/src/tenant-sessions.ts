@@ -143,6 +143,8 @@ export type Stop =
   | { kind: "InFlight"; turnId: string }
   | { kind: "Archived" };
 
+export type WaitedTurns = { kind: "Read"; turns: Turn[] } | { kind: "NotFound"; turnId: string };
+
 export type Archive =
   | { kind: "Archived"; session: Session }
   | { kind: "NotFound" }
@@ -497,6 +499,8 @@ export const memberRows = (sql: SqlStorage, secretSetId: string): MemberRow[] =>
 export const sealContext = (secretSetId: string, name: string): string => `${secretSetId}/${name}`;
 
 export abstract class TenantSessions extends DurableObject<Env> {
+  private readonly turnEndWaiters = new Set<() => void>();
+
   protected abstract failPrebuild(
     tenantId: string,
     prebuildId: string,
@@ -1703,6 +1707,36 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
+  async waitTurns(tenantId: string, turnIds: string[], timeoutSeconds: number): Promise<WaitedTurns> {
+    const missing = turnIds.find((turnId) => this.turnRow(turnId) === null);
+    if (missing !== undefined) return { kind: "NotFound", turnId: missing };
+    const oneEnded = (): boolean => turnIds.some((turnId) => !IN_FLIGHT.includes(this.turnRow(turnId)?.state ?? ""));
+    if (!oneEnded()) {
+      await new Promise<void>((resolve) => {
+        const finish = (): void => {
+          clearTimeout(timer);
+          this.turnEndWaiters.delete(wake);
+          resolve();
+        };
+        const wake = (): void => {
+          if (oneEnded()) finish();
+        };
+        const timer = setTimeout(finish, timeoutSeconds * 1000);
+        this.turnEndWaiters.add(wake);
+      });
+    }
+    const turns = turnIds.map((turnId) => {
+      const turn = this.getTurn(tenantId, turnId);
+      if (turn === null) throw new Error(`turn ${turnId} vanished while the wait read it back`);
+      return turn;
+    });
+    return { kind: "Read", turns };
+  }
+
+  private turnEnded(): void {
+    for (const wake of this.turnEndWaiters) wake();
+  }
+
   getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {
     const [row] = this.ctx.storage.sql
       .exec<FailureRow>(
@@ -2437,6 +2471,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
     await this.chunks.write(tenantId, turn.session_id, turn.turn_id, 1);
     this.ctx.storage.transactionSync(record);
+    this.turnEnded();
     const delay = this.hostPrebuild(turn.session_id) === null ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
     await this.timers(tenantId, turn.session_id, {
       Claim: null,
