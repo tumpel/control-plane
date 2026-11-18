@@ -18,6 +18,7 @@ import {
   unreadableReleasePage,
 } from "@tumpel/pages";
 import {
+  BoxDiskLimit,
   BoxMemoryLimit,
   DeviceApprovalSchema,
   DeviceAuthorizationSchema,
@@ -479,6 +480,7 @@ const personaWrite = async (
       harness: body.harness,
       secretSetId: body.secretSetId,
       boxMemoryMib: body.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
+      boxDiskMib: body.boxDiskMib ?? BoxDiskLimit.DefaultMib,
       files: stored.value,
     },
   };

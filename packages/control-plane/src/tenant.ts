@@ -26,6 +26,7 @@ import { memberRows, sealContext } from "./tenant-sessions";
 
 export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId"> & {
   boxMemoryMib: number;
+  boxDiskMib: number;
   files: StoredFile[];
 };
 export type PersonaChange = Omit<PersonaWrite, "harness">;
@@ -102,6 +103,7 @@ type PersonaRow = {
   harness: string;
   secret_set_id: string;
   box_memory_mib: number;
+  box_disk_mib: number;
   created_at: number;
   updated_at: number;
 };
@@ -115,7 +117,7 @@ type PersonaFileRow = {
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at FROM personas";
 
 export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
   sql
@@ -133,6 +135,7 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[]): StoredPersona =>
     harness: row.harness,
     secretSetId: row.secret_set_id,
     boxMemoryMib: row.box_memory_mib,
+    boxDiskMib: row.box_disk_mib,
     files: files.map((file) => ({
       path: file.path,
       digest: file.digest,
@@ -286,13 +289,14 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           persona.name,
           persona.harness,
           persona.secretSetId,
           persona.boxMemoryMib,
+          persona.boxDiskMib,
           now,
           now,
         );
@@ -314,10 +318,11 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
           persona.secretSetId,
           persona.boxMemoryMib,
+          persona.boxDiskMib,
           now,
           tenantId,
           personaId,
@@ -632,13 +637,14 @@ export class Tenant extends TenantOpenRouterAuthorizations {
       case "CreatePersona": {
         const personaId = crypto.randomUUID();
         sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           write.persona.name,
           write.persona.harness,
           write.persona.secretSetId,
           write.persona.boxMemoryMib,
+          write.persona.boxDiskMib,
           now,
           now,
         );
@@ -647,10 +653,11 @@ export class Tenant extends TenantOpenRouterAuthorizations {
       }
       case "UpdatePersona": {
         sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           write.persona.name,
           write.persona.secretSetId,
           write.persona.boxMemoryMib,
+          write.persona.boxDiskMib,
           now,
           tenantId,
           write.personaId,

@@ -47,6 +47,7 @@ const livePersona = (personaId: string, name: string, harness: string, secretSet
     harness,
     secretSetId,
     boxMemoryMib: 4096,
+    boxDiskMib: 32768,
     files,
     createdAt: 1,
     updatedAt: 1,
