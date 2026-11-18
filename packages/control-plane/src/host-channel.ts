@@ -6,6 +6,7 @@ import * as control from "./channel/control.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
+  type Frame,
   type HostMessage,
   type HostUsage,
   type Ledger,
@@ -18,7 +19,7 @@ import { problem } from "./http";
 import type { Env } from "./index";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
-import type { HostReply, TurnHandoff } from "./tenant-sessions";
+import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
 const HOST_MIGRATIONS = [
@@ -52,6 +53,7 @@ const isAttachment = (value: unknown): value is Attachment =>
 
 export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
+  private inbound: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -133,7 +135,16 @@ export class HostChannel extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const handled = this.inbound.then(() => this.handle(socket, message));
+    this.inbound = handled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return handled;
+  }
+
+  private async handle(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const host = this.host();
     if (host === null) throw new Error("a message reached a host object that was never registered");
     const attachment = this.attachment(socket);
@@ -147,26 +158,12 @@ export class HostChannel extends DurableObject<Env> {
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
     this.keep(socket, attachment);
-    if (event.kind === "Message") {
-      const { message: received } = event;
-      const handoff = await this.ctx.blockConcurrencyWhile(async (): Promise<TurnHandoff | null> => {
-        const reply = await this.forward(host.host_id, received);
-        if (reply === null) return null;
-        if (reply.type === "TurnHandoff") return reply;
-        await control.send(attachment.connection, reply, context);
-        return null;
-      });
-      if (handoff !== null) await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
-      if (received.type === "SupervisorUpdateFailed") await this.sendDeferredOffers(host.host_id, attachment, context);
-    }
+    if (event.kind === "Message") await this.deliver(host.host_id, event.frame, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") {
-      const { heldSessionIds } = event;
-      await this.ctx.blockConcurrencyWhile(() => this.failLostTurns(host.host_id, heldSessionIds, now));
-    }
+    if (event.kind === "FirstHeartbeat") await this.failLostTurns(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat")
       await this.report(host.host_id, event.usage, now);
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
@@ -184,6 +181,25 @@ export class HostChannel extends DurableObject<Env> {
     await this.presence("Online");
     await this.sendDeferredOffers(host.host_id, attachment, context);
     this.keep(socket, attachment);
+  }
+
+  private async deliver(
+    hostId: string,
+    frame: Frame<HostMessage>,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
+    const reply = await this.forward(hostId, frame.message);
+    control.acknowledge(context, frame);
+    if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
+    if (reply === null) return;
+    if (reply.type === "TurnHandoff")
+      return this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
+    if (reply.type === "Refused") {
+      console.error(`FrameRefused: host ${hostId} frame ${frame.seq}: ${reply.reason}`);
+      return control.refuseFrame(context.port, frame.seq, reply.reason);
+    }
+    return control.send(attachment.connection, reply, context);
   }
 
   private async sendDeferredOffers(
@@ -335,7 +351,7 @@ export class HostChannel extends DurableObject<Env> {
   private ledger(): LedgerStore<StoredControlMessage> {
     const sql = this.ctx.storage.sql;
     return {
-      load: async (): Promise<Ledger<StoredControlMessage>> => {
+      load: (): Ledger<StoredControlMessage> => {
         const [row] = sql
           .exec<{ received: number; sent: number; unacked: string }>(
             "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
@@ -344,7 +360,7 @@ export class HostChannel extends DurableObject<Env> {
         if (row === undefined) return emptyLedger();
         return { received: row.received, sent: row.sent, unacked: JSON.parse(row.unacked) };
       },
-      save: async (ledger: Ledger<StoredControlMessage>): Promise<void> => {
+      save: (ledger: Ledger<StoredControlMessage>): void => {
         sql.exec(
           "INSERT OR REPLACE INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)",
           ledger.received,

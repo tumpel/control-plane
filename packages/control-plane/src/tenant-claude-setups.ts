@@ -388,9 +388,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (!isClaudeSetupMessage(message)) return super.hostMessage(tenantId, hostId, message);
     const row = this.claudeSetupRow(message.claudeSetupId);
     if (row === null || row.host_id !== hostId) {
-      throw new Error(
-        `host ${hostId} sent ${message.type} for Claude setup ${message.claudeSetupId}, which tenant ${tenantId} did not offer it`,
-      );
+      return {
+        type: "Refused",
+        reason: `host ${hostId} sent ${message.type} for Claude setup ${message.claudeSetupId}, which tenant ${tenantId} did not offer it`,
+      };
     }
     const event: ClaudeSetupEvent =
       message.type === "ClaudeSetupBoxUrl"

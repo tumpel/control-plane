@@ -28,8 +28,8 @@ const keyPair = (): { publicKey: string; privateKey: KeyObject } => {
 const memoryLedger = <M>(): LedgerStore<M> & { current: Ledger<M> } => {
   const store = {
     current: emptyLedger<M>(),
-    load: async () => structuredClone(store.current),
-    save: async (ledger: Ledger<M>) => {
+    load: () => structuredClone(store.current),
+    save: (ledger: Ledger<M>) => {
       store.current = structuredClone(ledger);
     },
   };
@@ -134,6 +134,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
       deliver: async (envelope: HostEnvelope) => {
         const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
         link.connection = received.connection;
+        if (received.event.kind === "Message") control.acknowledge(link.context, received.event.frame);
         if (received.event.kind !== "None") link.events.push(received.event);
       },
       hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
@@ -195,7 +196,7 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   await control.send(link.connection, snapshotRequest("snap-1"), link.context);
   assert.deepEqual(frames(link.sent), [{ type: "Frame", seq: 1, ack: 0, message: snapshotRequest("snap-1") }]);
   await link.deliver(frame(1, 1, snapshotDone("snap-1")));
-  assert.deepEqual(link.events.at(-1), { kind: "Message", message: snapshotDone("snap-1") });
+  assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 1, snapshotDone("snap-1")) });
   assert.deepEqual(channel.ledger.current, { received: 1, sent: 1, unacked: [] });
   assert.equal(link.closed, null);
 });
@@ -260,7 +261,7 @@ test("a duplicate frame is dropped and a gap closes the connection", async () =>
   await link.deliver(frame(1, 0, snapshotDone("snap-1")));
   assert.deepEqual(
     link.events.filter((event) => event.kind === "Message"),
-    [{ kind: "Message", message: snapshotDone("snap-1") }],
+    [{ kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) }],
   );
   assert.equal(link.closed, null);
 
@@ -322,7 +323,7 @@ test("a frame and message carrying fields this control plane does not know are r
   };
   await link.deliver(extended);
   assert.equal(link.closed, null);
-  assert.deepEqual(link.events.at(-1), { kind: "Message", message: snapshotDone("snap-1") });
+  assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
   assert.equal(channel.ledger.current.received, 1);
 });
 
@@ -362,7 +363,7 @@ test("a TelemetryBatch on a connection that speaks its version is accepted as a 
   await link.hello(undefined, control.TELEMETRY_BATCH_VERSION);
   await link.deliver(frame(1, 0, telemetryBatch));
   assert.equal(link.closed, null);
-  assert.deepEqual(link.events.at(-1), { kind: "Message", message: telemetryBatch });
+  assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 0, telemetryBatch) });
 });
 
 test("after a reconnect the control plane resends unacked frames, each turn offer with a freshly minted grant", async () => {
@@ -401,12 +402,61 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   assert.deepEqual(
     [...first.events, ...second.events].filter((event) => event.kind === "Message"),
     [
-      { kind: "Message", message: snapshotDone("snap-1") },
-      { kind: "Message", message: snapshotDone("snap-2") },
+      { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) },
+      { kind: "Message", frame: frame(2, 2, snapshotDone("snap-2")) },
     ],
   );
   assert.deepEqual(channel.ledger.current, { received: 2, sent: 2, unacked: [] });
   assert.equal(second.closed, null);
+});
+
+test("a frame whose handling failed stays unacknowledged, so its resend is handled again and the next frame waits for it", async () => {
+  const channel = setup();
+  const link = channel.connect();
+  await link.hello();
+  const failed = await control.receive(
+    link.connection,
+    JSON.stringify(frame(1, 0, snapshotDone("snap-1"))),
+    link.context,
+  );
+  assert.deepEqual(failed.event, { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
+  assert.equal(channel.ledger.current.received, 0);
+
+  const resent = await control.receive(
+    failed.connection,
+    JSON.stringify(frame(1, 0, snapshotDone("snap-1"))),
+    link.context,
+  );
+  assert.deepEqual(resent.event, { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
+  assert.ok(resent.event.kind === "Message");
+  control.acknowledge(link.context, resent.event.frame);
+  assert.equal(channel.ledger.current.received, 1);
+  assert.equal(link.closed, null);
+});
+
+test("two sends never take the same seq, and a frame sent while an offer is prepared goes out ahead of it in seq order", async () => {
+  const channel = setup();
+  const link = channel.connect();
+  await link.hello();
+  let release = (): void => undefined;
+  const prepared = link.context.prepareOffer;
+  link.context.prepareOffer = async () => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return prepared();
+  };
+  const offering = control.send(link.connection, turnOffer, link.context);
+  await control.send(link.connection, { type: "TurnClaimed", turnId: "turn-0" }, link.context);
+  release();
+  await offering;
+  assert.deepEqual(
+    frames(link.sent).map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.message.type]),
+    [
+      [1, "TurnClaimed"],
+      [2, "TurnOffer"],
+    ],
+  );
 });
 
 test("a Hello below an unacked frame's version is closed as an unsupported version, and the frames stay for a newer one", async () => {

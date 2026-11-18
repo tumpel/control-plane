@@ -225,6 +225,8 @@ class HostSide {
   private readonly resend: HostMessage[];
   private welcomed = false;
   private readonly inbox: ControlMessage[] = [];
+  private readonly refusals: { seq: number; reason: string }[] = [];
+  private closedWith: { code: number; wasClean: boolean } | null = null;
   private readonly waiters: (() => void)[] = [];
   private readonly heartbeat: NodeJS.Timeout;
 
@@ -237,6 +239,10 @@ class HostSide {
     this.held = new Set(carried.held);
     this.resend = resend;
     socket.addEventListener("message", (event) => this.receive(String(event.data)));
+    socket.addEventListener("close", (event) => {
+      this.closedWith = { code: event.code, wasClean: event.wasClean };
+      for (const wake of this.waiters.splice(0)) wake();
+    });
     this.heartbeat = setInterval(() => this.beat(), SETTINGS.heartbeatIntervalSeconds * 1000);
   }
 
@@ -282,6 +288,11 @@ class HostSide {
       this.welcomed = true;
       for (const message of this.resend) this.send(message);
     }
+    if (envelope.type === "FrameRefused") {
+      this.refusals.push({ seq: envelope.seq, reason: envelope.reason });
+      for (const wake of this.waiters.splice(0)) wake();
+      return;
+    }
     if (envelope.type !== "Frame" || envelope.seq <= this.received) return;
     assert.equal(envelope.seq, this.received + 1, "the control plane skipped a frame");
     this.received = envelope.seq;
@@ -300,6 +311,7 @@ class HostSide {
     for (;;) {
       const at = this.inbox.findIndex((message) => message.type === type);
       if (at !== -1) return this.inbox.splice(at, 1)[0] as Extract<ControlMessage, { type: K }>;
+      this.assertOpen(`waiting for ${type}`);
       const left = deadline - Date.now();
       if (left <= 0) assert.fail(`no ${type} reached the host`);
       await Promise.race([
@@ -307,6 +319,29 @@ class HostSide {
         wait(left, undefined, { ref: false }),
       ]);
     }
+  }
+
+  async refusal(): Promise<{ seq: number; reason: string }> {
+    const deadline = Date.now() + GIVE_UP_MS;
+    for (;;) {
+      const refused = this.refusals.shift();
+      if (refused !== undefined) return refused;
+      this.assertOpen("waiting for FrameRefused");
+      const left = deadline - Date.now();
+      if (left <= 0) assert.fail("no FrameRefused reached the host");
+      await Promise.race([
+        new Promise<void>((resolve) => this.waiters.push(resolve)),
+        wait(left, undefined, { ref: false }),
+      ]);
+    }
+  }
+
+  assertOpen(when: string): void {
+    if (this.closedWith === null) return;
+    const { code, wasClean } = this.closedWith;
+    assert.fail(
+      `the control plane closed the channel ${wasClean ? "cleanly" : "without a close frame"} with ${code} ${when}`,
+    );
   }
 
   snapshotRequestsFor(sessionId: string): number {
@@ -447,7 +482,8 @@ const installPrebuiltApp = async (tenantId: string): Promise<void> => {
   await storePrebuiltApp();
   await d1Run(
     `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at)
-    VALUES (77, ?, 'prebuilt', 'Organization', 'Active', ?, ?)`,
+    VALUES (77, ?, 'prebuilt', 'Organization', 'Active', ?, ?)
+    ON CONFLICT (installation_id) DO UPDATE SET tenant_id = excluded.tenant_id`,
     tenantId,
     Date.now(),
     Date.now(),
@@ -2459,6 +2495,22 @@ suite("sessions", { concurrency: 8 }, () => {
     for (const side of sides) side.close();
   });
 
+  test("a host frame the tenant cannot place is refused by name and the channel carries the next turn", async () => {
+    const { bearer, host, sessionStart } = await tenant();
+    const stray = crypto.randomUUID();
+    host.send({ type: "TurnClaim", turnId: stray, boxId: crypto.randomUUID() });
+    const refused = await host.refusal();
+    assert.equal(refused.seq, host.carried().sent);
+    assert.match(refused.reason, new RegExp(`sent TurnClaim for turn ${stray}, which is not offered to it`));
+
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "after the refusal" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
+    host.assertOpen("after the refusal");
+  });
+
   test("a turn a host refuses HostUpdating is offered to another host at once", async () => {
     const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("updating-1");
@@ -2752,6 +2804,46 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     [own.snapshotId],
   );
   assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, prebuilt);
+});
+
+test("a prebuild whose snapshot fails reads Failed and its box is discarded over the channel the failure came in on", async () => {
+  const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
+  await installPrebuiltApp(tenantId);
+  const { personaId } = await sessionStart();
+  const response = await postJson(
+    "/v1/prebuilds",
+    { repository: "https://github.com/prebuilt/app", personaId, provider: "CircleCI" },
+    bearer,
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  const started = PrebuildSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  await host.next("TurnClaimed");
+  host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
+  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+  host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const request = await host.next("SnapshotRequest");
+  host.send({
+    type: "SnapshotFailed",
+    snapshotId: request.snapshotId,
+    reason: "UploadRejected",
+    detail: "the store refused the upload",
+    failedAt: new Date().toISOString(),
+  });
+
+  const discard = await host.next("BoxDiscard");
+  assert.deepEqual(
+    { sessionId: discard.sessionId, boxId: discard.boxId },
+    { sessionId: offer.sessionId, boxId: offer.boxId },
+  );
+  host.assertOpen("after the BoxDiscard");
+  const failed = await until(
+    "the prebuild reading Failed",
+    () => getJson(`/v1/prebuilds/${started.prebuildId}`, PrebuildSchema),
+    (prebuild) => prebuild.status.state === "Failed",
+  );
+  assert.equal(failed.status.state === "Failed" && failed.status.phase, "Upload");
 });
 
 test("a preview reads a supplied config's commands in run order, refuses a repository without one, and stores no prebuild", async () => {
