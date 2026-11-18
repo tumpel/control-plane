@@ -27,7 +27,7 @@ import {
 } from "./prebuild-inputs.ts";
 import { SHIPPED_TEMPLATES } from "./prebuild-templates.ts";
 import { signerOf } from "./presign";
-import { imagesFor, type ReleaseImage, readRelease, releaseUnreadable, rootfsKey } from "./releases";
+import { type ReleaseBaseImage, readRelease, releaseUnreadable, rootfsKey } from "./releases";
 import { placed } from "./sessions";
 import { settingsOf } from "./settings";
 import { TEMPLATE_PATH } from "./template-pull-request.ts";
@@ -173,7 +173,7 @@ export interface Dispatch {
   target: GitHubRepository;
   defaultBranch: string;
   headSha: string;
-  image: ReleaseImage;
+  image: ReleaseBaseImage;
   apiOrigin: string;
 }
 
@@ -182,7 +182,7 @@ interface GitHubActionsRequest {
   personaId: string;
   target: GitHubRepository;
   repository: string;
-  image: ReleaseImage;
+  image: ReleaseBaseImage;
   apiOrigin: string;
   rebuild: boolean;
 }
@@ -277,38 +277,33 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
   return ok(dispatched.prebuild);
 };
 
-const guestImage = async (
-  env: Env,
-  harness: string,
-  harnessVersion: string,
-  now: number,
-): Promise<Outcome<ReleaseImage>> => {
+const baseImage = async (env: Env, now: number): Promise<Outcome<ReleaseBaseImage>> => {
   const release = await readRelease(env.RELEASES, now);
   if (release.kind === "Unreadable") return refuse(422, releaseUnreadable(release.detail, "start the prebuild again"));
   if (release.kind === "Unpublished") {
     return refuse(409, {
       code: "NoRelease",
       title: "No release published",
-      detail: "the release bucket of this stage holds no current.json, so no guest image exists to build a prebuild on",
+      detail: "the release bucket of this stage holds no current.json, so no base image exists to build a prebuild on",
       fix: "Ask the operator to publish a release with the release workflow, then start the prebuild again",
     });
   }
-  const image = imagesFor(release, harness, harnessVersion).find((each) => each.architecture === PREBUILD_ARCHITECTURE);
-  if (image === undefined) {
+  const base = release.manifest.bases.find((each) => each.architecture === PREBUILD_ARCHITECTURE);
+  if (base === undefined) {
     return refuse(422, {
       code: "ImageNotReleased",
-      title: "Harness version not in the current release",
-      detail: `release ${release.manifest.releaseVersion} carries no ${harness} ${harnessVersion} guest image for ${PREBUILD_ARCHITECTURE}, the architecture prebuilds build on`,
-      fix: `Pin a harness version the current release carries for ${PREBUILD_ARCHITECTURE}, then start the prebuild again`,
+      title: "No base image in the current release",
+      detail: `release ${release.manifest.releaseVersion} carries no base image for ${PREBUILD_ARCHITECTURE}, the architecture prebuilds build on`,
+      fix: `Ask the operator to publish a release with a ${PREBUILD_ARCHITECTURE} base image, then start the prebuild again`,
     });
   }
-  return ok(image);
+  return ok(base);
 };
 
 interface PersonaImage {
   harness: HarnessCatalogEntry["harness"];
   harnessVersion: string;
-  image: ReleaseImage;
+  image: ReleaseBaseImage;
 }
 
 const personaImage = async (
@@ -338,7 +333,7 @@ const personaImage = async (
       fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
     });
   }
-  const image = await guestImage(env, entry.harness, entry.harnessVersion, now);
+  const image = await baseImage(env, now);
   if (!image.ok) return image;
   return ok({ harness: entry.harness, harnessVersion: entry.harnessVersion, image: image.value });
 };
