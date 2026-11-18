@@ -711,7 +711,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions",
     SessionListQuerySchema,
-    "List the tenant's sessions, optionally only those in one state or on one host.",
+    "List the tenant's sessions, optionally only those in one state, on one host, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset).",
   ),
   rest(
     "tumpel_session_get",
@@ -732,7 +732,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions/{sessionId}/archive",
     SessionPathSchema,
-    "Archive a Stopped or Failed session: delete its snapshots, keep its transcript readable and refuse every later send. Final. Returns the archived session.",
+    "Archive an Idle, Stopped or Failed session: discard an Idle session's box without a snapshot, delete its snapshots, keep its transcript readable and refuse every later send. Final; archiving an Archived session returns it as it is. Refused while a turn runs or the session stops, and while an Idle session's host is offline. Returns the archived session.",
   ),
   rest(
     "tumpel_session_stop_failures",

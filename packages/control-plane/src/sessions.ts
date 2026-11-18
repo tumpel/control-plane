@@ -332,6 +332,7 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   const filter: SessionFilter = {};
   if (query.state !== undefined) filter.state = query.state;
   if (query.hostId !== undefined) filter.hostId = query.hostId;
+  if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   return ok(await tenantOf(env, caller).listSessions(caller.tenantId, filter));
 };
 
@@ -414,14 +415,21 @@ export const archiveSession = async (
   sessionId: string,
   now: number,
 ): Promise<Outcome<Session>> => {
-  const archived = await tenantOf(env, caller).archiveSession(caller.tenantId, sessionId, now);
+  const tenant = tenantOf(env, caller);
+  const session = await tenant.getSession(caller.tenantId, sessionId);
+  if (session === null) return sessionNotFound(sessionId);
+  if (session.state === "Idle") {
+    const offline = await hostOffline(env, caller, session, "archive the session again");
+    if (offline !== null) return offline;
+  }
+  const archived = await tenant.archiveSession(caller.tenantId, sessionId, now);
   if (archived.kind === "Archived") return ok(archived.session);
   if (archived.kind === "NotFound") return sessionNotFound(sessionId);
   return refuse(409, {
     code: "SessionNotStopped",
     title: "Session not stopped",
-    detail: `session ${sessionId} is ${archived.state}, and only a Stopped or Failed session can be archived`,
-    fix: `Stop session ${sessionId}, wait until it reads Stopped, then archive again`,
+    detail: `session ${sessionId} is ${archived.state}, and only an Idle, Stopped or Failed session can be archived`,
+    fix: `Wait until session ${sessionId} reads Idle or Stopped, then archive again`,
   });
 };
 

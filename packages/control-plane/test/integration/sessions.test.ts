@@ -1544,6 +1544,9 @@ suite("sessions", { concurrency: 8 }, () => {
     const inFlight = await refused(`/v1/sessions/${sessionId}/stop`);
     assert.equal(inFlight.code, "TurnInFlight");
     assert.match(inFlight.detail, new RegExp(turnId));
+    const running = await refused(`/v1/sessions/${sessionId}/archive`);
+    assert.equal(running.code, "SessionNotStopped");
+    assert.match(running.detail, /is Running/);
 
     host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
@@ -1563,10 +1566,6 @@ suite("sessions", { concurrency: 8 }, () => {
       assert.equal(session?.lastTurnAt, new Date(completed.updatedAt).toISOString());
       assert.deepEqual(session?.origin, { kind: "Prompt" });
     }
-    const notStopped = await refused(`/v1/sessions/${sessionId}/archive`);
-    assert.equal(notStopped.code, "SessionNotStopped");
-    assert.match(notStopped.detail, /is Idle/);
-
     const stopping = await tool("tumpel_session_stop", { sessionId }, SessionSchema);
     assert.equal(stopping.state, "Stopping");
     const request = await host.next("SnapshotRequest");
@@ -1605,6 +1604,49 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(archivedSend.code, "SessionArchived");
     assert.match(archivedSend.detail, new RegExp(`session ${sessionId} is archived`));
     assert.equal((await deletePersona(start.personaId ?? "")).status, 409);
+  });
+
+  test("an archive discards an idle session's box without a snapshot and deletes its snapshots, and the list keeps sessions with no turn since a time", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "archive me" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const warm = await host.next("SnapshotRequest");
+    await store.put(warm.storageKey, '{"entries":[]}');
+    host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
+    await until(
+      "a stored snapshot",
+      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+      (snapshots) => snapshots.length === 1,
+    );
+
+    const idle = await tool("tumpel_session_get", { sessionId }, SessionSchema);
+    assert.equal(idle.state, "Idle");
+    const lastTurnAt = Date.parse(idle.lastTurnAt);
+    const listed = async (lastTurnBefore: number) =>
+      (
+        await tool(
+          "tumpel_session_list",
+          { lastTurnBefore: new Date(lastTurnBefore).toISOString() },
+          SessionSchema.array(),
+        )
+      ).map((session) => session.sessionId);
+    assert.deepEqual(await listed(lastTurnAt), [sessionId]);
+    assert.deepEqual(await listed(lastTurnAt - 1), []);
+
+    const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
+    assert.equal(archived.state, "Archived");
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
+    assert.equal(await store.text(warm.storageKey), null);
+    assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
   });
 
   test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {

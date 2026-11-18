@@ -101,6 +101,7 @@ export interface NewSession {
 export interface SessionFilter {
   state?: SessionState;
   hostId?: string;
+  lastTurnBefore?: number;
 }
 
 export type ReleaseUnreadable = { kind: "ReleaseUnreadable"; detail: string };
@@ -1405,14 +1406,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
   async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
-    if (session.state !== "Stopped" && session.state !== "Failed" && session.state !== "Archived") {
+    if (!["Idle", "Stopped", "Failed", "Archived"].includes(session.state)) {
       return { kind: "NotStopped", state: SessionSchema.shape.state.parse(session.state) };
     }
     const sql = this.ctx.storage.sql;
     if (session.state !== "Archived") this.setSessionState(sessionId, "Archived", now);
     const keys = sql
       .exec<{ storage_key: string }>(
-        "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
+        "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
         sessionId,
       )
       .toArray()
@@ -1442,6 +1443,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       TeardownAnswer: null,
       HostOffline: null,
     });
+    if (session.state === "Idle") {
+      await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
+    }
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -1572,10 +1576,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec<SessionViewRow>(
         `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2)
+        AND (?3 IS NULL OR t.updated_at <= ?3)
         AND NOT EXISTS (SELECT 1 FROM prebuild_sessions WHERE prebuild_sessions.session_id = s.session_id)
         ORDER BY s.created_at, s.session_id`,
         filter.state ?? null,
         filter.hostId ?? null,
+        filter.lastTurnBefore ?? null,
       )
       .toArray()
       .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));
