@@ -1,5 +1,10 @@
 import type { SecretKey, SecretMember } from "@tumpel/api/credentials";
-import { type SecretMemberUpdateSchema, SecretSetCreateSchema, SecretSetSchema } from "@tumpel/schemas";
+import {
+  type ModelProviderSchema,
+  type SecretMemberUpdateSchema,
+  SecretSetCreateSchema,
+  SecretSetSchema,
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { REPOSITORY_TOKEN } from "./github.ts";
 import { issues, type Problem } from "./http.ts";
@@ -87,4 +92,31 @@ export const planUpdate = (stored: readonly MemberRow[], updates: readonly Membe
     members.push({ kind: "Kept", update, from });
   }
   return { kind: "Planned", members, keepsGitHubUser };
+};
+
+const KEY_PREFIXES: readonly { provider: z.infer<typeof ModelProviderSchema>; prefix: string }[] = [
+  { provider: "Anthropic", prefix: "sk-ant-" },
+  { provider: "OpenRouter", prefix: "sk-or-" },
+  { provider: "OpenAi", prefix: "sk-" },
+];
+
+export const keyPrefixMismatch = (
+  members: readonly { kind: string; name: string; provider?: string; value?: string }[],
+  operation: string,
+): Problem | null => {
+  for (const { kind, name, provider, value } of members) {
+    if (kind !== "ApiKey" || value === undefined) continue;
+    const expected = KEY_PREFIXES.find((known) => known.provider === provider);
+    if (expected === undefined) continue;
+    const issuer = KEY_PREFIXES.find((known) => value.startsWith(known.prefix));
+    if (issuer?.provider === expected.provider) continue;
+    const found = issuer === undefined ? "the value does not" : `the value is shaped like a key for ${issuer.provider}`;
+    return {
+      code: "InvalidRequest",
+      title: "API key does not match its provider",
+      detail: `${operation} refused member ${name}: it is an API key for ${expected.provider}, whose keys start with ${expected.prefix}, and ${found}`,
+      fix: `Write an API key from ${expected.provider} into ${name}, or declare the provider that issued the key`,
+    };
+  }
+  return null;
 };

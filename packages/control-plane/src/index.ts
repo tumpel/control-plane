@@ -191,7 +191,7 @@ import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
-import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
+import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
@@ -576,6 +576,8 @@ const handleSecretSetCreate = async (request: Request, _url: URL, env: Env): Pro
   if (caller instanceof Response) return caller;
   const body = await parseBody(request, SecretSetCreateSchema, "secretSets.create");
   if (!body.ok) return body.response;
+  const mismatch = keyPrefixMismatch(body.value.secrets, "secretSets.create");
+  if (mismatch !== null) return problem(422, mismatch);
   const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.create");
   if (!githubUser.ok) return githubUser.response;
   const created = await env.TENANT.getByName(caller.tenantId).createSecretSet(
@@ -614,6 +616,8 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
   if (request.method === "PUT") {
     const body = await parseBody(request, SecretSetUpdateSchema, "secretSets.update");
     if (!body.ok) return body.response;
+    const mismatch = keyPrefixMismatch(body.value.secrets, "secretSets.update");
+    if (mismatch !== null) return problem(422, mismatch);
     const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.update");
     if (!githubUser.ok) return githubUser.response;
     const updated = await tenant.updateSecretSet(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
@@ -659,6 +663,8 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
   if (setting) {
     const body = await parseBody(request, SecretValueSchema, "secretSets.setMember");
     if (!body.ok) return body.response;
+    const mismatch = keyPrefixMismatch([body.value], "secretSets.setMember");
+    if (mismatch !== null) return problem(422, mismatch);
     const githubUser = await repositoryTokenUser(env, [body.value], "secretSets.setMember");
     if (!githubUser.ok) return githubUser.response;
     const written = await tenant.setSecretMember(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());

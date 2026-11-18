@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type MemberRow, planUpdate, storedKeys } from "../src/secret-members.ts";
+import { keyPrefixMismatch, type MemberRow, planUpdate, storedKeys } from "../src/secret-members.ts";
 
 const row = (fields: Partial<MemberRow> & Pick<MemberRow, "name" | "kind">): MemberRow => ({
   sealed: "sealed",
@@ -99,4 +99,55 @@ test("a member without a value and nothing stored to keep is refused, as is a va
     kind: "UncheckedToken",
     source: "NPM_TOKEN",
   });
+});
+
+test("an ApiKey value shaped for another provider is refused with the expected prefix, never the value", () => {
+  const openRouterKey = "sk-or-v1-0000000000000000";
+  const refused = keyPrefixMismatch(
+    [
+      { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-token" },
+      { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: openRouterKey },
+    ],
+    "secretSets.setMember",
+  );
+  assert.deepEqual(refused, {
+    code: "InvalidRequest",
+    title: "API key does not match its provider",
+    detail:
+      "secretSets.setMember refused member ANTHROPIC_API_KEY: it is an API key for Anthropic, whose keys start with sk-ant-, and the value is shaped like a key for OpenRouter",
+    fix: "Write an API key from Anthropic into ANTHROPIC_API_KEY, or declare the provider that issued the key",
+  });
+  assert.doesNotMatch(JSON.stringify(refused), /0123456789abcdef/);
+
+  const anthropicAsOpenAi = keyPrefixMismatch(
+    [{ kind: "ApiKey", name: "OPENAI_API_KEY", provider: "OpenAi", value: "sk-ant-api03-key" }],
+    "secretSets.create",
+  );
+  assert.match(
+    anthropicAsOpenAi?.detail ?? "",
+    /OpenAi, whose keys start with sk-, and the value is shaped like a key for Anthropic/,
+  );
+
+  const unknownShape = keyPrefixMismatch(
+    [{ kind: "ApiKey", name: "OPENROUTER_API_KEY", provider: "OpenRouter", value: "pasted-key" }],
+    "tenantConfigs.apply",
+  );
+  assert.match(unknownShape?.detail ?? "", /whose keys start with sk-or-, and the value does not$/);
+});
+
+test("an ApiKey value matching its provider, a provider without a known prefix, or a kept value passes", () => {
+  assert.equal(
+    keyPrefixMismatch(
+      [
+        { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: "sk-ant-api03-key" },
+        { kind: "ApiKey", name: "OPENROUTER_API_KEY", provider: "OpenRouter", value: "sk-or-v1-key" },
+        { kind: "ApiKey", name: "OPENAI_API_KEY", provider: "OpenAi", value: "sk-proj-key" },
+        { kind: "ApiKey", name: "MISTRAL_API_KEY", provider: "Mistral", value: "sk-ant-api03-key" },
+        { kind: "ApiKey", name: "KEPT_KEY", provider: "Anthropic" },
+        { kind: "SubscriptionToken", name: "CLAUDE_CODE_OAUTH_TOKEN", provider: "Anthropic", value: "token" },
+      ],
+      "secretSets.update",
+    ),
+    null,
+  );
 });
