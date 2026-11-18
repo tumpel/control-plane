@@ -796,6 +796,51 @@ export type RepositoryCredential =
   | { kind: "Ready"; variables: DispatchVariable[]; source: RepositoryCredentialSource }
   | { kind: "Refused"; detail: string };
 
+export const OWNER_TOKENS = "TUMPEL_GITHUB_TOKENS";
+
+export interface OwnerToken {
+  owner: string;
+  token: string;
+}
+
+export const mintOwnerTokens = async (
+  fetcher: Fetch,
+  api: string,
+  app: AppKey,
+  installations: Installation[],
+  target: GitHubRepository,
+  now: number,
+): Promise<GitHubAnswer<OwnerToken[]>> => {
+  const active = installations.filter((installation) => installation.status === "Active");
+  const answers = await Promise.all(
+    active.map(async (installation) => ({
+      owner: installation.accountLogin.toLowerCase(),
+      answer: await mintInstallationWideToken(fetcher, api, app, installation.installationId, now),
+    })),
+  );
+  const tokens: OwnerToken[] = [];
+  for (const { owner, answer } of answers) {
+    if (!answer.ok && owner === target.owner.toLowerCase()) {
+      return { ...answer, detail: `the installation token for ${owner}: ${answer.detail}` };
+    }
+    if (!answer.ok) continue;
+    tokens.push({ owner, token: answer.value });
+  }
+  return { ok: true, value: tokens };
+};
+
+export const withOwnerTokens = (
+  variables: DispatchVariable[],
+  tokens: OwnerToken[],
+  target: GitHubRepository,
+): DispatchVariable[] => {
+  const own = tokens.find(({ owner }) => owner === target.owner.toLowerCase());
+  const kept = variables.filter((variable) => variable.name !== OWNER_TOKENS);
+  const routed = { name: OWNER_TOKENS, value: tokens.map(({ owner, token }) => `${owner}=${token}`).join(" ") };
+  if (own === undefined) return [...kept, routed];
+  return [...withRepositoryToken(kept, own.token).variables, routed];
+};
+
 export const repositoryCredential = (variables: DispatchVariable[], minted: Minted): RepositoryCredential => {
   if (minted.kind === "Refused") return { kind: "Refused", detail: minted.detail };
   if (minted.kind === "Minted") return { kind: "Ready", ...withRepositoryToken(variables, minted.token) };
