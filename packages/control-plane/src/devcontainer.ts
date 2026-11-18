@@ -4,7 +4,11 @@ export const START_COMMANDS = ["postStartCommand"] as const;
 
 export type LifecycleCommand = (typeof SETUP_COMMANDS)[number] | (typeof START_COMMANDS)[number];
 
-export type FindingCode = "DevcontainerInvalid" | "PrebuildImageUnsupported" | "PrebuildFeaturesUnsupported";
+export type FindingCode =
+  | "DevcontainerInvalid"
+  | "PrebuildImageUnsupported"
+  | "PrebuildFeaturesUnsupported"
+  | "ToolchainMismatch";
 
 export interface Finding {
   code: FindingCode;

@@ -1,0 +1,9 @@
+{
+  "name": "rust",
+  "containerEnv": {
+    "CARGO_PROFILE_DEV_DEBUG": "false",
+    "CARGO_PROFILE_DEV_INCREMENTAL": "false"
+  },
+  "onCreateCommand": "cargo fetch --locked",
+  "updateContentCommand": "cargo build --workspace --all-targets --locked"
+}

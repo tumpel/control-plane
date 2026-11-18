@@ -27,6 +27,7 @@ const NOUNS = {
   Transcripts: "transcript",
   Snapshots: "snapshot",
   Prebuilds: "prebuild",
+  PrebuildTemplates: "prebuild-template",
   Connections: "connection",
   GitHubActionsConnections: "github-actions",
   CircleCIConnections: "circleci",

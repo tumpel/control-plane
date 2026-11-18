@@ -1,0 +1,4 @@
+{
+  "name": "npm",
+  "onCreateCommand": "npm ci"
+}

@@ -185,6 +185,7 @@ import {
   wantsHtml,
 } from "./pages";
 import { personaFileKey, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { handlePrebuildTemplates } from "./prebuild-templates.ts";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
@@ -1451,7 +1452,9 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handlePrebuildInputs(request, url, env)) ??
     (await handleCircleCIEvents(request, url, env));
   if (uploads) return uploads;
-  const prebuilds = await handlePrebuilds(request, url, env, deviceCaller);
+  const prebuilds =
+    (await handlePrebuilds(request, url, env, deviceCaller)) ??
+    (await handlePrebuildTemplates(request, url, env, deviceCaller));
   if (prebuilds) return prebuilds;
   const metrics = await handleMetrics(request, url, env, deviceCaller);
   if (metrics) return metrics;

@@ -18,7 +18,10 @@ import {
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
+  PrebuildPreviewSchema,
   PrebuildSchema,
+  PrebuildTemplateSchema,
+  PrebuildTemplateVersionSchema,
   ProblemSchema,
   RawTranscriptPageSchema,
   ReleaseRolloutSchema,
@@ -385,13 +388,13 @@ const prebuiltRepository = (method: string, path: string): { status: number; bod
   return null;
 };
 
-const installPrebuiltApp = async (tenantId: string): Promise<void> => {
+const storePrebuiltApp = async (): Promise<void> => {
   const keyStore = workersSecretKeyStore(Buffer.alloc(32, 7).toString("base64"));
   const dataKey = await generateDataKey();
   const appKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
   const privateKey = appKey.export({ type: "pkcs8", format: "der" }).toString("base64");
   await d1Run(
-    `INSERT INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
+    `INSERT OR IGNORE INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
     client_secret_sealed, webhook_secret_sealed, private_key_sealed, bot_user_id, created_at)
     VALUES (1, 1, 'tumpel-sessions', 'Iv1.sessions', 'prebuilt', 'https://github.com/apps/tumpel-sessions', ?, ?, ?, ?, 4343, ?)`,
     await keyStore.wrap(dataKey),
@@ -400,6 +403,10 @@ const installPrebuiltApp = async (tenantId: string): Promise<void> => {
     await seal(dataKey, privateKey, "github-app/private_key"),
     Date.now(),
   );
+};
+
+const installPrebuiltApp = async (tenantId: string): Promise<void> => {
+  await storePrebuiltApp();
   await d1Run(
     `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at)
     VALUES (77, ?, 'prebuilt', 'Organization', 'Active', ?, ?)`,
@@ -2304,4 +2311,65 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     consumer.snapshots.map((snapshot) => snapshot.snapshotId),
     [request.snapshotId],
   );
+});
+
+test("a preview reads a supplied config's commands in run order, refuses a repository without one, and stores no prebuild", async () => {
+  const { bearer, getJson, tool, sessionStart } = await tenant();
+  const { personaId } = await sessionStart();
+  const repository = "https://github.com/prebuilt/app";
+  const missing = await postJson("/v1/prebuilds/preview", { source: "RepositoryFile", repository, personaId }, bearer);
+  assert.equal(missing.status, 409, await missing.clone().text());
+  const refusal = ProblemSchema.parse(await missing.json());
+  assert.equal(refusal.code, "DevcontainerMissing");
+  assert.match(refusal.fix, /npm, python, rust/);
+  const devcontainer = `{
+  // JSON with comments
+  "containerEnv": { "MODE": "prebuild" },
+  "postStartCommand": ["npm", "run", "dev"],
+  "onCreateCommand": { "install": "npm ci", "fetch": ["cargo", "fetch"] },
+}`;
+  const preview = await tool(
+    "tumpel_prebuild_preview",
+    { source: "Supplied", repository, personaId, devcontainer },
+    PrebuildPreviewSchema,
+  );
+  assert.equal(preview.configSource, "Supplied");
+  assert.deepEqual(preview.commands, [
+    { lifecycle: "OnCreateCommand", label: "onCreateCommand.install", argv: ["/bin/sh", "-c", "npm ci"] },
+    { lifecycle: "OnCreateCommand", label: "onCreateCommand.fetch", argv: ["cargo", "fetch"] },
+    { lifecycle: "PostStartCommand", label: "postStartCommand", argv: ["npm", "run", "dev"] },
+  ]);
+  assert.deepEqual(preview.containerEnv, { MODE: "prebuild" });
+  assert.deepEqual(preview.findings, []);
+  assert.match(preview.inputDigest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(await getJson(`/v1/prebuilds?repository=${repository}`, PrebuildSchema.array()), []);
+});
+
+test("templates list with their versions, an unknown one lists the valid ids, and a pull request on an owner without an installation names Connect GitHub", async () => {
+  const { getJson, bearer } = await tenant();
+  await storePrebuiltApp();
+  const templates = await getJson("/v1/prebuild-templates", PrebuildTemplateSchema.array());
+  assert.deepEqual(
+    templates.map((template) => template.prebuildTemplateId),
+    ["npm", "python", "rust"],
+  );
+  const npm = await getJson("/v1/prebuild-templates/npm/versions/1", PrebuildTemplateVersionSchema);
+  assert.match(npm.devcontainer, /npm ci/);
+  const unknown = await call("/v1/prebuild-templates/go/versions/1", { headers: bearer });
+  assert.equal(unknown.status, 404);
+  assert.match(ProblemSchema.parse(await unknown.json()).detail, /the templates are npm, python, rust/);
+  const opened = await postJson(
+    "/v1/prebuild-templates/pull-request",
+    {
+      repository: "https://github.com/elsewhere/app",
+      prebuildTemplateId: "npm",
+      prebuildTemplateVersion: 1,
+      replace: false,
+    },
+    bearer,
+  );
+  assert.equal(opened.status, 409, await opened.clone().text());
+  const refusal = ProblemSchema.parse(await opened.json());
+  assert.equal(refusal.code, "GitHubNotConnected");
+  assert.match(refusal.fix, /^Connect GitHub for elsewhere/);
 });

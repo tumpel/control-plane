@@ -66,7 +66,7 @@
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] }
   ],
-  "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh"], "fallthrough": true }],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
     "dev": {
       "d1_databases": [

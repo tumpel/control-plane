@@ -79,8 +79,10 @@ test("the inputs are the root lockfiles and every blob under .devcontainer of th
       { path: ".devcontainer/Dockerfile", blobSha: "b1" },
       { path: ".devcontainer/scripts/setup.sh", blobSha: "b5" },
     ],
+    toolchainFiles: [],
     configSource: "RepositoryFile",
     headSha: HEAD,
+    treeSha: ROOT,
   });
   assert.deepEqual(
     calls.map((call) => call.url),
@@ -108,8 +110,10 @@ test("a repository without a devcontainer.json builds with the default config, w
   assert.deepEqual(bare, {
     kind: "Read",
     files: [],
+    toolchainFiles: [],
     configSource: "Default",
     headSha: HEAD,
+    treeSha: ROOT,
   });
   const npm = await readInputs(
     github({

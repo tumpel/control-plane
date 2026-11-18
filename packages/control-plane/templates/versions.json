@@ -1,0 +1,17 @@
+[
+  {
+    "prebuildTemplateId": "npm",
+    "prebuildTemplateVersion": 1,
+    "digest": "de38901f46808d7dc995917cede58004402856d01c9f69a2f1dfb3f4488b70a0"
+  },
+  {
+    "prebuildTemplateId": "python",
+    "prebuildTemplateVersion": 1,
+    "digest": "d6feb20ddb2929cb2c335425dcb7fafa83343dc67cc254930a5c5fdc11ead010"
+  },
+  {
+    "prebuildTemplateId": "rust",
+    "prebuildTemplateVersion": 1,
+    "digest": "e3c5af21f5b77a09c6812f8f58c7d1a53c0784c36e2fef19234a171a1707ec92"
+  }
+]
