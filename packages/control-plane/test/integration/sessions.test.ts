@@ -216,34 +216,41 @@ const GITHUB_ISSUES: Record<string, { state: string; title: string; body: string
 const GITHUB_TOKEN_PREFIX = "ghp-e2e-";
 const userReads = new Map<string, number>();
 
-type Counters = { received: number; sent: number };
+type Carried = { received: number; sent: number; held: string[] };
 
 class HostSide {
   private received: number;
   private sent: number;
+  private readonly held: Set<string>;
+  private readonly resend: HostMessage[];
+  private welcomed = false;
   private readonly inbox: ControlMessage[] = [];
   private readonly waiters: (() => void)[] = [];
   private readonly heartbeat: NodeJS.Timeout;
 
   private readonly socket: WebSocket;
 
-  private constructor(socket: WebSocket, counters: Counters) {
+  private constructor(socket: WebSocket, carried: Carried, resend: HostMessage[]) {
     this.socket = socket;
-    this.received = counters.received;
-    this.sent = counters.sent;
+    this.received = carried.received;
+    this.sent = carried.sent;
+    this.held = new Set(carried.held);
+    this.resend = resend;
     socket.addEventListener("message", (event) => this.receive(String(event.data)));
     this.heartbeat = setInterval(() => this.beat(), SETTINGS.heartbeatIntervalSeconds * 1000);
   }
 
   private beat(): void {
-    this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE, heldSessionIds: [] });
+    if (!this.welcomed) return;
+    this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE, heldSessionIds: [...this.held] });
   }
 
   static async connect(
     id: string,
     key: KeyObject,
     boxCapacity = 8,
-    counters: Counters = { received: 0, sent: 0 },
+    carried: Carried = { received: 0, sent: 0, held: [] },
+    resend: HostMessage[] = [],
   ): Promise<HostSide> {
     const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${id}/channel`);
     const challenge = await new Promise<string>((resolve, reject) => {
@@ -252,7 +259,7 @@ class HostSide {
     });
     const parsed = ControlEnvelopeSchema.parse(JSON.parse(challenge));
     assert.equal(parsed.type, "Challenge");
-    const side = new HostSide(socket, counters);
+    const side = new HostSide(socket, carried, resend);
     side.raw({
       type: "Hello",
       hostId: id,
@@ -271,9 +278,14 @@ class HostSide {
 
   private receive(text: string): void {
     const envelope = ControlEnvelopeSchema.parse(JSON.parse(text));
+    if (envelope.type === "Welcome") {
+      this.welcomed = true;
+      for (const message of this.resend) this.send(message);
+    }
     if (envelope.type !== "Frame" || envelope.seq <= this.received) return;
     assert.equal(envelope.seq, this.received + 1, "the control plane skipped a frame");
     this.received = envelope.seq;
+    if (envelope.message.type === "TurnOffer") this.held.add(envelope.message.sessionId);
     this.inbox.push(envelope.message);
     for (const wake of this.waiters.splice(0)) wake();
   }
@@ -301,8 +313,8 @@ class HostSide {
     return this.inbox.filter((message) => message.type === "SnapshotRequest" && message.sessionId === sessionId).length;
   }
 
-  counters(): Counters {
-    return { received: this.received, sent: this.sent };
+  carried(): Carried {
+    return { received: this.received, sent: this.sent, held: [...this.held] };
   }
 
   close(): void {
@@ -2048,6 +2060,58 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.doesNotMatch(offline.detail, UUID);
   });
 
+  test("the first heartbeat after a reconnect fails BoxLost each Running turn whose box the host no longer holds, after the turns its resent frames settle", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const lost = await enrol("lost");
+    const first = await connect(lost.id, lost.key);
+    await hostState(lost.id, "Online");
+    const claimed = async (prompt: string) => {
+      const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt }, bearer);
+      assert.equal(response.status, 200, await response.clone().text());
+      const { session } = StartedSessionSchema.parse(await response.json());
+      const offer = await first.next("TurnOffer");
+      first.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+      await first.next("TurnClaimed");
+      return { sessionId: session.sessionId, turnId: offer.turnId };
+    };
+    const held = await claimed("box survives");
+    const gone = await claimed("box goes away");
+    const finished = await claimed("finished while disconnected");
+
+    first.close();
+    await hostState(lost.id, "Offline");
+    const back = await connect(lost.id, lost.key, 8, { ...first.carried(), held: [held.sessionId] }, [
+      {
+        type: "TurnLine",
+        turnId: finished.turnId,
+        lineSeq: 1,
+        text: '{"type":"result","subtype":"success","is_error":false}',
+      },
+      { type: "TurnComplete", turnId: finished.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() },
+    ]);
+    await until(
+      "the turn whose box is gone failing",
+      () => getJson(`/v1/turns/${gone.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    const failure = await getJson(`/v1/turns/${gone.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "BoxLost");
+    assert.match(failure.detail, /^host lost reconnected without the box that ran the turn/);
+    assert.equal((await getJson(`/v1/turns/${held.turnId}`, TurnSchema)).state, "Running");
+    assert.equal((await getJson(`/v1/turns/${finished.turnId}`, TurnSchema)).state, "Completed");
+    const session = await getJson(`/v1/sessions/${gone.sessionId}`, SessionSchema);
+    assert.equal(session.state, "Idle");
+    assert.equal(session.lastTurnState, "Failed");
+
+    const sent = await postJson(`/v1/sessions/${gone.sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const next = TurnSchema.parse(await sent.json());
+    assert.equal((await back.next("TurnOffer")).turnId, next.turnId);
+    back.close();
+  });
+
   test("a session moves off its offline host once a snapshot holds its last completed turn, and the old host's late frames leave its channel working", async () => {
     const { bearer, refused, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("move-from");
@@ -2078,7 +2142,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(stranded.code, "HostOffline");
     assert.match(stranded.detail, /host move-from, which is Offline, and its snapshots miss 1 completed turn,/);
 
-    from = await connect(first.id, first.key, 16, from.counters());
+    from = await connect(first.id, first.key, 16, from.carried());
     await hostState(first.id, "Online");
     await store.put(request.storageKey, '{"entries":[]}');
     from.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
@@ -2116,7 +2180,7 @@ suite("sessions", { concurrency: 8 }, () => {
       [request.snapshotId],
     );
 
-    from = await connect(first.id, first.key, 16, from.counters());
+    from = await connect(first.id, first.key, 16, from.carried());
     await hostState(first.id, "Online");
     const discard = await from.next("BoxDiscard");
     assert.deepEqual({ sessionId: discard.sessionId, boxId: discard.boxId }, { sessionId, boxId: offer.boxId });
@@ -2226,7 +2290,7 @@ suite("sessions", { concurrency: 8 }, () => {
     swapping.close();
     await hostState(only.id, "Offline");
     assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
-    const swapped = await connect(only.id, only.key, 32, swapping.counters());
+    const swapped = await connect(only.id, only.key, 32, swapping.carried());
     const offer = await swapped.next("TurnOffer");
     assert.equal(offer.turnId, turn.turnId);
     swapped.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
@@ -2313,7 +2377,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(sent.status, 200, await sent.clone().text());
     const turn = TurnSchema.parse(await sent.json());
     assert.equal(turn.state, "Offered");
-    const restarted = await connect(only.id, only.key, 32, restarting.counters());
+    const restarted = await connect(only.id, only.key, 32, restarting.carried());
     const offer = await restarted.next("TurnOffer");
     assert.equal(offer.turnId, turn.turnId);
     restarted.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });

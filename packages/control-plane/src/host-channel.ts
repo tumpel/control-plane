@@ -163,7 +163,12 @@ export class HostChannel extends DurableObject<Env> {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "Heartbeat") await this.report(host.host_id, event.usage, now);
+    if (event.kind === "FirstHeartbeat") {
+      const { heldSessionIds } = event;
+      await this.ctx.blockConcurrencyWhile(() => this.failLostTurns(host.host_id, heldSessionIds, now));
+    }
+    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat")
+      await this.report(host.host_id, event.usage, now);
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
       connection.phase === "Open" &&
@@ -242,6 +247,11 @@ export class HostChannel extends DurableObject<Env> {
   private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
     await this.env.TENANT.getByName(tenantId).hostUsage(hostId, usage, now);
+  }
+
+  private async failLostTurns(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+    const tenantId = await this.tenantOf(hostId);
+    await this.env.TENANT.getByName(tenantId).failLostTurns(tenantId, hostId, heldSessionIds, now);
   }
 
   private async tenantOf(hostId: string): Promise<string> {

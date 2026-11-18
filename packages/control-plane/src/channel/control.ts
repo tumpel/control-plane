@@ -21,6 +21,7 @@ import {
   type PreparedOffer,
   parseEnvelope,
   randomNonce,
+  reportsHeldSessions,
   resend,
   type StoredClaudeSetupCode,
   type StoredClaudeSetupOffer,
@@ -31,7 +32,7 @@ import {
 
 export type ControlConnection =
   | { phase: "AwaitingHello"; nonce: string }
-  | { phase: "Open"; protocolVersion: number }
+  | { phase: "Open"; protocolVersion: number; heldReported: boolean }
   | { phase: "Closed" };
 
 export const TURN_CANCEL_VERSION = 23;
@@ -102,6 +103,7 @@ export type ControlEvent =
   | { kind: "None" }
   | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string; protocolVersion: number }
   | { kind: "Heartbeat"; usage: HostUsage }
+  | { kind: "FirstHeartbeat"; usage: HostUsage; heldSessionIds: string[] }
   | { kind: "Message"; message: HostMessage }
   | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
@@ -219,7 +221,7 @@ const hello = async (
   context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: envelope.protocolVersion });
   for (const frame of resent) context.port.send(frame);
   return {
-    connection: { phase: "Open", protocolVersion: envelope.protocolVersion },
+    connection: { phase: "Open", protocolVersion: envelope.protocolVersion, heldReported: false },
     event: {
       kind: "Welcomed",
       boxCapacity: envelope.boxCapacity,
@@ -286,7 +288,15 @@ export const receive = async (
   if (envelope.type === "Hello") {
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
-  if (envelope.type === "Heartbeat") return { connection, event: { kind: "Heartbeat", usage: envelope.usage } };
+  if (envelope.type === "Heartbeat") {
+    if (connection.heldReported || !reportsHeldSessions(envelope)) {
+      return { connection, event: { kind: "Heartbeat", usage: envelope.usage } };
+    }
+    return {
+      connection: { ...connection, heldReported: true },
+      event: { kind: "FirstHeartbeat", usage: envelope.usage, heldSessionIds: envelope.heldSessionIds },
+    };
+  }
   const needed = HOST_MESSAGE_VERSIONS[envelope.message.type];
   if (needed > connection.protocolVersion) {
     return refuse(

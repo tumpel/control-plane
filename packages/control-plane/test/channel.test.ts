@@ -6,6 +6,7 @@ import * as control from "../src/channel/control.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
+  HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
@@ -477,4 +478,36 @@ test("revoke closes a live connection, and a revoked host's next Hello is closed
     ["Challenge"],
   );
   assert.deepEqual(channel.ledger.current, before);
+});
+
+test("only the first heartbeat after Welcome reports the held sessions, once per connection", async () => {
+  const channel = setup();
+  const first = channel.connect();
+  await first.hello();
+  const beat = (heldSessionIds: string[]): HostEnvelope => ({
+    type: "Heartbeat",
+    sentAt: "2026-11-18T10:00:00+01:00",
+    usage: USAGE,
+    heldSessionIds,
+  });
+  await first.deliver(beat(["session-1"]));
+  await first.deliver(beat([]));
+  assert.deepEqual(first.events.slice(1), [
+    { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: ["session-1"] },
+    { kind: "Heartbeat", usage: USAGE },
+  ]);
+
+  const second = channel.connect();
+  await second.hello();
+  await second.deliver(beat([]));
+  assert.deepEqual(second.events.at(-1), { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: [] });
+});
+
+test("a heartbeat from a host before the held sessions version reports nothing", async () => {
+  const link = setup().connect();
+  await link.hello(undefined, HELD_SESSIONS_VERSION - 1);
+  const heartbeat = { type: "Heartbeat", sentAt: "2026-11-18T10:00:00+01:00", usage: USAGE };
+  const received = await control.receive(link.connection, JSON.stringify(heartbeat), link.context);
+  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE });
+  assert.equal(link.closed, null);
 });

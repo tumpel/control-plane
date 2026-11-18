@@ -24,6 +24,9 @@ export const HostEnvelopeBeforeHeldSessionsSchema = z.discriminatedUnion("type",
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
+export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
+export const reportsHeldSessions = (heartbeat: Omit<HostHeartbeat, "heldSessionIds">): heartbeat is HostHeartbeat =>
+  "heldSessionIds" in heartbeat;
 export type HostUsage = z.infer<typeof HostUsageSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
