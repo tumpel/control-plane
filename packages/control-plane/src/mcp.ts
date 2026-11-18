@@ -746,7 +746,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions/{sessionId}/turns",
     SessionPathSchema.extend(TurnSendSchema.shape),
-    "Send a session its next prompt. Returns the turn; the turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused while another turn of the session runs.",
+    "Send a session its next prompt. Pass goal to name when the work is done: the harness keeps working toward it until it holds. Only a harness that tumpel_harness_list shows with goals true takes a goal. Returns the turn, with its goal; the turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused while another turn of the session runs.",
   ),
   rest(
     "tumpel_turn_list",

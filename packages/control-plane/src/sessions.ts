@@ -14,7 +14,7 @@ import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
 import { deployInProgress } from "./deploy-drain";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
-import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
+import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
@@ -37,6 +37,7 @@ import type {
   TranscriptCursor,
   Turn,
   TurnFailure,
+  TurnSend,
 } from "./tenant-sessions";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
 import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type TranscriptLine } from "./transcript";
@@ -336,19 +337,42 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   return ok(await tenantOf(env, caller).listSessions(caller.tenantId, filter));
 };
 
+const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
+  if (send.goal === undefined) return null;
+  const goalFold = GOAL_FOLDS.get(session.harness);
+  if (goalFold === undefined) {
+    return refuse(400, {
+      code: "InvalidRequest",
+      title: "The harness takes no goal",
+      detail: `session ${session.sessionId} runs ${session.harness}, which takes no goal; ${[...GOAL_FOLDS.keys()].join(", ")} takes one`,
+      fix: "Send the turn without goal, and state the condition in the prompt",
+    });
+  }
+  const length = goalFold.fold(send.prompt, send.goal).length;
+  if (length <= goalFold.limit) return null;
+  return refuse(400, {
+    code: "InvalidRequest",
+    title: "Prompt and goal too long",
+    detail: `the prompt and goal make a goal message of ${length} characters, and ${session.harness} takes at most ${goalFold.limit}`,
+    fix: `Shorten the prompt or the goal by ${length - goalFold.limit} characters, then send again`,
+  });
+};
+
 export const sendTurn = async (
   env: Env,
   caller: Caller,
   sessionId: string,
-  prompt: string,
+  send: TurnSend,
   now: number,
 ): Promise<Outcome<Turn>> => {
   const tenant = tenantOf(env, caller);
   const session = await tenant.getSession(caller.tenantId, sessionId);
   if (session === null) return sessionNotFound(sessionId);
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
+  const goal = refusedGoal(session, send);
+  if (goal !== null) return goal;
   const hosts = await listHosts(env.DB, caller.tenantId);
-  const sent = await tenant.sendTurn(caller.tenantId, sessionId, prompt, hosts, now);
+  const sent = await tenant.sendTurn(caller.tenantId, sessionId, send, hosts, now);
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
   if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
@@ -630,7 +654,7 @@ const sessionRoute = async (
   if (action === "/turns" && request.method === "POST") {
     const body = await parseBody(request, TurnSendSchema, "sessions.sendTurn");
     if (!body.ok) return body.response;
-    return answer(await sendTurn(env, caller, sessionId, body.value.prompt, Date.now()));
+    return answer(await sendTurn(env, caller, sessionId, body.value, Date.now()));
   }
   if (action === "/stop") return answer(await stopSession(env, caller, sessionId, Date.now()));
   if (action === "/archive") return answer(await archiveSession(env, caller, sessionId, Date.now()));
