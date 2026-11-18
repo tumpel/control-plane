@@ -88,11 +88,15 @@ interface Finished {
   stderr: string;
 }
 
-const tumpel = (args: string[], extra: Record<string, string> = {}, input = ""): Promise<Finished> => {
+const tumpel = (args: string[], extra: Record<string, string> = {}, input?: string): Promise<Finished> => {
   const child = spawn(TUMPEL, args, {
     env: { PATH: process.env.PATH ?? "", HOME: scratch, TUMPEL_ENV_FILE: envFile, ...extra },
   });
-  child.stdin.end(input);
+  if (input === undefined) {
+    child.stdin.destroy();
+  } else {
+    child.stdin.end(input);
+  }
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => {
