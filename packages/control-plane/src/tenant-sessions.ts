@@ -1026,6 +1026,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
   }
 
+  async failLostTurns(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+    const lost = this.ctx.storage.sql
+      .exec<{ turn_id: string }>(
+        "SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running' AND session_id NOT IN (SELECT value FROM json_each(?))",
+        hostId,
+        JSON.stringify(heldSessionIds),
+      )
+      .toArray();
+    if (lost.length === 0) return;
+    const host = await this.hostName(tenantId, hostId);
+    for (const { turn_id } of lost) {
+      await this.failTurn(
+        tenantId,
+        turn_id,
+        "BoxLost",
+        `host ${host} reconnected without the box that ran the turn, so the turn's work since the last snapshot is gone; send the turn again`,
+        iso(now),
+      );
+    }
+  }
+
   forgetHostUsage(hostId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
     this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE host_id = ?", hostId);
