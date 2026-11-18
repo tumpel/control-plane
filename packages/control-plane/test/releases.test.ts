@@ -16,8 +16,16 @@ const RELEASE: ReleaseManifest = {
   releaseVersion: "0.2.0",
   commit: "e".repeat(40),
   channelProtocolVersion: ChannelProtocol.Version,
-  supervisors: [{ architecture: "Amd64", sha256: SUPERVISOR_SHA, sizeBytes: 4096, guestProtocolVersion: 11 }],
-  clis: [{ architecture: "Amd64", sha256: CLI_SHA, sizeBytes: 2048 }],
+  supervisors: [
+    {
+      architecture: "Amd64",
+      sha256: SUPERVISOR_SHA,
+      sizeBytes: 4096,
+      supervisorVersion: "0.1.0",
+      guestProtocolVersion: 11,
+    },
+  ],
+  clis: [{ architecture: "Amd64", sha256: CLI_SHA, sizeBytes: 2048, cliVersion: "0.2.1" }],
   images: [
     {
       harness: "ClaudeCode",
@@ -155,10 +163,10 @@ test("with no current.json the release reads NoRelease, a malformed one ReleaseU
 
   const redirect = await get("/v1/releases/supervisor/Amd64");
   assert.equal(redirect.status, 302);
-  const location = new URL(redirect.headers.get("location") ?? "");
-  assert.equal(location.origin, R2_STUB_ORIGIN);
-  assert.equal(location.pathname, `/tumpel-releases/supervisor/amd64/${SUPERVISOR_SHA}`);
-  assert.equal(location.searchParams.get("X-Tumpel-Method"), "GET");
+  assert.equal(
+    redirect.headers.get("location"),
+    "https://github.com/tumpel/supervisor/releases/download/v0.1.0/tumpel-supervisor-x86_64-linux",
+  );
 
   const arm = await get("/v1/releases/supervisor/Arm64");
   assert.equal(arm.status, 404);
@@ -169,15 +177,15 @@ test("with no current.json the release reads NoRelease, a malformed one ReleaseU
   assert.equal((await get("/v1/releases/supervisor/Sparc")).status, 400);
 });
 
-test("the CLI download redirects to the current release's CLI binary for the architecture", async () => {
+test("the CLI download redirects to the GitHub release asset of the current release's CLI for the architecture", async () => {
   await (await server.getWorker<{ RELEASES: Bucket }>().getEnv()).RELEASES.put("current.json", JSON.stringify(RELEASE));
   const redirect = await get("/v1/releases/cli/Amd64");
   assert.equal(redirect.status, 302);
   assert.equal(redirect.headers.get("cache-control"), "no-store");
-  const location = new URL(redirect.headers.get("location") ?? "");
-  assert.equal(location.origin, R2_STUB_ORIGIN);
-  assert.equal(location.pathname, `/tumpel-releases/cli/amd64/${CLI_SHA}`);
-  assert.equal(location.searchParams.get("X-Tumpel-Method"), "GET");
+  assert.equal(
+    redirect.headers.get("location"),
+    "https://github.com/tumpel/cli/releases/download/v0.2.1/tumpel-x86_64-linux",
+  );
 
   const arm = await get("/v1/releases/cli/Arm64");
   assert.equal(arm.status, 404);

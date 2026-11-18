@@ -8,8 +8,6 @@ export type ReleaseManifest = z.infer<typeof ReleaseManifestSchema>;
 export type ReleaseImage = ReleaseManifest["images"][number];
 export type ReleaseBaseImage = ReleaseManifest["bases"][number];
 export type ReleaseHarnessLayer = ReleaseManifest["harnessLayers"][number];
-export type ReleaseSupervisor = ReleaseManifest["supervisors"][number];
-export type ReleaseCli = ReleaseManifest["clis"][number];
 export type HostArchitecture = z.infer<typeof HostArchitectureSchema>;
 
 export interface ReleaseBucket {
@@ -27,11 +25,6 @@ export const CURRENT_RELEASE_KEY = "current.json";
 export const RELEASE_CACHE_MS = 30_000;
 
 const arch = (architecture: HostArchitecture): string => architecture.toLowerCase();
-
-export const supervisorKey = (supervisor: Pick<ReleaseSupervisor, "architecture" | "sha256">): string =>
-  `supervisor/${arch(supervisor.architecture)}/${supervisor.sha256}`;
-
-export const cliKey = (cli: ReleaseCli): string => `cli/${arch(cli.architecture)}/${cli.sha256}`;
 
 const imagePrefix = (image: ReleaseImage): string =>
   `images/${image.harness}/${image.harnessVersion}/${arch(image.architecture)}`;

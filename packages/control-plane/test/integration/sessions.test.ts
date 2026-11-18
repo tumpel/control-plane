@@ -60,7 +60,7 @@ const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const USAGE = { boxesWarm: 0, loadAverage: 0.25, memoryAvailableMib: 6144 };
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
-const SUPERVISOR = join(ROOT, "target", "debug", "tumpel-supervisor");
+const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
   ...TEST_SETTINGS,
   dispatchGrantTtlSeconds: CLAIM_BUDGET_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,

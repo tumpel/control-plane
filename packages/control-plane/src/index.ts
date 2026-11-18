@@ -187,8 +187,9 @@ import { personaFileKey, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
+import { CLI_REPOSITORY, cliAsset, releaseAssetUrl, SUPERVISOR_REPOSITORY, supervisorAsset } from "./release-assets.ts";
 import { noticeRelease } from "./release-notices.ts";
-import { cliKey, type ReleaseManifest, readRelease, supervisorKey } from "./releases";
+import { type HostArchitecture, type ReleaseManifest, readRelease } from "./releases";
 import { type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
@@ -785,25 +786,36 @@ const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promi
   return json(await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId));
 };
 
-const RELEASE_DOWNLOAD_SECONDS = 300;
 const RELEASE_DOWNLOAD_PATH = /^\/v1\/releases\/(supervisor|cli)\/([^/]+)$/;
+
+type ReleasedBinary = { architecture: HostArchitecture; version: string | undefined; asset: string };
 
 const RELEASE_BINARIES = {
   supervisor: {
     pathSchema: ReleaseSupervisorPathSchema,
-    binaries: (manifest: ReleaseManifest) => manifest.supervisors,
-    key: supervisorKey,
+    repository: SUPERVISOR_REPOSITORY,
+    binaries: (manifest: ReleaseManifest): ReleasedBinary[] =>
+      manifest.supervisors.map((supervisor) => ({
+        architecture: supervisor.architecture,
+        version: supervisor.supervisorVersion,
+        asset: supervisorAsset(supervisor.architecture),
+      })),
     plural: "supervisors",
     title: "No supervisor for this architecture",
-    fix: "Run the host on one of those architectures, or publish a release that builds the supervisor for it",
+    fix: "Run the host on one of those architectures, or publish a release that carries the supervisor for it",
   },
   cli: {
     pathSchema: ReleaseCliPathSchema,
-    binaries: (manifest: ReleaseManifest) => manifest.clis,
-    key: cliKey,
+    repository: CLI_REPOSITORY,
+    binaries: (manifest: ReleaseManifest): ReleasedBinary[] =>
+      manifest.clis.map((cli) => ({
+        architecture: cli.architecture,
+        version: cli.cliVersion,
+        asset: cliAsset(cli.architecture),
+      })),
     plural: "CLIs",
     title: "No CLI for this architecture",
-    fix: "Run the CLI on one of those architectures, or publish a release that builds the CLI for it",
+    fix: "Run the CLI on one of those architectures, or publish a release that carries the CLI for it",
   },
 } as const;
 
@@ -880,12 +892,12 @@ const handleReleaseDownload = async (request: Request, url: URL, env: Env): Prom
       fix: binary.fix,
     });
   }
-  const location = await signerOf(
-    env,
-    env.RELEASES_BUCKET_NAME,
-    env.RELEASES_ACCESS_KEY_ID,
-    env.RELEASES_SECRET_ACCESS_KEY,
-  ).presign("GET", binary.key(found), RELEASE_DOWNLOAD_SECONDS, new Date());
+  if (found.version === undefined) {
+    const detail = `release ${release.manifest.releaseVersion} names its ${architecture} ${kind} without the version of the GitHub release that carries it`;
+    if (!browser) return unreadableRelease(detail);
+    return htmlPage(env, url, 503, (links) => unreadableReleasePage(links, url.href, detail));
+  }
+  const location = releaseAssetUrl(binary.repository, found.version, found.asset);
   return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
 };
 

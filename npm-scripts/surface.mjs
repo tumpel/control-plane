@@ -2,11 +2,12 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cliSource, RELEASE_CACHE, releasePins } from "./release-download.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const OPENAPI = join(ROOT, "build/openapi/openapi.json");
 const MCP = join(ROOT, "packages/control-plane/src/mcp.ts");
-const CLI = join(ROOT, "crates/tumpel/src/main.rs");
+const CLI = await cliSource(releasePins().cli, RELEASE_CACHE);
 const DOC = join(ROOT, "doc/surface.md");
 
 const NOUNS = {
