@@ -56,6 +56,7 @@ import tenant0055 from "../migrations/tenant/0055_turn_metric_dimensions.sql";
 import tenant0056 from "../migrations/tenant/0056_deferred_offers.sql";
 import tenant0057 from "../migrations/tenant/0057_persona_box_memory.sql";
 import tenant0058 from "../migrations/tenant/0058_turn_results.sql";
+import tenant0059 from "../migrations/tenant/0059_turn_images_and_session_layers.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -117,4 +118,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0056_deferred_offers", sql: tenant0056 },
   { name: "0057_persona_box_memory", sql: tenant0057 },
   { name: "0058_turn_results", sql: tenant0058 },
+  { name: "0059_turn_images_and_session_layers", sql: tenant0059 },
 ];
