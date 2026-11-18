@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ChannelProtocol, ProblemSchema, ReleaseManifestSchema } from "@tumpel/schemas";
+import { ChannelProtocol, ProblemSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { bootArchitectures, bootFor, parseRelease, type ReleaseManifest } from "../src/releases.ts";
 
@@ -127,7 +127,7 @@ test("a turn boots layered where the release carries a base and the harness laye
   assert.deepEqual(bootArchitectures(layerOnly, "OpenCode", "1.0.0"), []);
 });
 
-test("with no current.json the release reads NoRelease, a malformed one ReleaseUnreadable, and a published one of an older protocol reads back and redirects to its supervisor", async () => {
+test("with no current.json the release reads NoRelease, a malformed one ReleaseUnreadable, and a published one of an older protocol reads back with the fields this control plane does not know and redirects to its supervisor", async () => {
   const missing = await get("/v1/releases/current");
   assert.equal(missing.status, 404);
   assert.equal(ProblemSchema.parse(await missing.json()).code, "NoRelease");
@@ -143,11 +143,15 @@ test("with no current.json the release reads NoRelease, a malformed one ReleaseU
     assert.match(body.detail, /the published release is unreadable: current\.json .* commit/);
   }
 
-  const older = { ...RELEASE, channelProtocolVersion: ChannelProtocol.Version - 1 };
+  const older = {
+    ...RELEASE,
+    channelProtocolVersion: ChannelProtocol.Version - 1,
+    supervisors: RELEASE.supervisors.map((supervisor) => ({ ...supervisor, unknownToThisControlPlane: 7 })),
+  };
   await releases.put("current.json", JSON.stringify(older));
   const current = await get("/v1/releases/current");
   assert.equal(current.status, 200);
-  assert.deepEqual(ReleaseManifestSchema.parse(await current.json()), older);
+  assert.deepEqual(await current.json(), older);
 
   const redirect = await get("/v1/releases/supervisor/Amd64");
   assert.equal(redirect.status, 302);
