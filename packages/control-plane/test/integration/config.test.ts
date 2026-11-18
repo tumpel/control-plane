@@ -306,7 +306,7 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
     await server.getWorker<{ TENANT: { getByName(name: string): ConfigApplier } }>().getEnv()
   ).TENANT.getByName(tenant);
   const secretSetId = crypto.randomUUID();
-  const persona = { name: "Rollback", harness: "ClaudeCode", secretSetId, files: [] };
+  const persona = { name: "Rollback", harness: "ClaudeCode", secretSetId, boxMemoryMib: 4096, files: [] };
   const applied = await stub.applyConfig(
     tenant,
     [

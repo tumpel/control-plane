@@ -1,4 +1,5 @@
 import {
+  BoxMemoryLimit,
   type ConfigFileDigestSchema,
   ConfigPlanSchema,
   ProblemResponseSchema,
@@ -164,7 +165,13 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
         ok: true,
         value: {
           kind: "CreatePersona",
-          persona: { name: step.persona.name, harness: step.persona.harness, secretSetId, files: files.value },
+          persona: {
+            name: step.persona.name,
+            harness: step.persona.harness,
+            secretSetId,
+            boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
+            files: files.value,
+          },
         },
       };
     }
@@ -178,7 +185,12 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
         value: {
           kind: "UpdatePersona",
           personaId: step.personaId,
-          persona: { name: step.persona.name, secretSetId, files: files.value },
+          persona: {
+            name: step.persona.name,
+            secretSetId,
+            boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
+            files: files.value,
+          },
         },
       };
     }

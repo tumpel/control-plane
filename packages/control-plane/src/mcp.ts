@@ -323,7 +323,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/personas",
     PersonaCreateSchema,
-    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, and the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to 65536 bytes) or Stored (digest and sizeBytes of an uploaded file).",
+    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to 65536 bytes) or Stored (digest and sizeBytes of an uploaded file), and optionally boxMemoryMib, the memory of each box its sessions boot, from 4096 (the default) up to 65536.",
   ),
   rest(
     "tumpel_persona_upload_file",
@@ -339,7 +339,7 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, secret set and whole file set; its harness is fixed at create and a file left out is deleted. Name an unchanged file as Stored by its digest and sizeBytes.",
+    "Replace a persona's name, secret set, box memory and whole file set; its harness is fixed at create, a file left out is deleted and a boxMemoryMib left out goes back to the 4096 MiB default. Name an unchanged file as Stored by its digest and sizeBytes.",
   ),
   rest(
     "tumpel_persona_delete",
