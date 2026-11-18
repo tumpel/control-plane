@@ -102,7 +102,18 @@ import {
   setHostLabels,
   withSupervisorUpdates,
 } from "./hosts";
-import { issues, json, oauthError, parseBody, problem, readJson, readParams, seeOther, signedOut } from "./http";
+import {
+  issues,
+  json,
+  oauthError,
+  parseBody,
+  problem,
+  readJson,
+  readParams,
+  seeOther,
+  signedOut,
+  storedJson,
+} from "./http";
 import {
   bearerOf,
   type Caller,
@@ -808,7 +819,7 @@ const handleCurrentRelease = async (_request: Request, _url: URL, env: Env): Pro
   const release = await readRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") return noRelease();
   if (release.kind === "Unreadable") return unreadableRelease(release.detail);
-  return json(release.manifest);
+  return storedJson(release.stored);
 };
 
 const handleInstallScript = async (_request: Request, url: URL, env: Env): Promise<Response> => {

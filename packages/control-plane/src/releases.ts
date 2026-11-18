@@ -18,7 +18,10 @@ export interface ReleaseBucket {
 
 export type ReleaseRead = { kind: "Published"; manifest: ReleaseManifest } | { kind: "Unpublished" };
 
-export type ReleaseLookup = ReleaseRead | { kind: "Unreadable"; detail: string };
+export type ReleaseLookup =
+  | { kind: "Published"; manifest: ReleaseManifest; stored: string }
+  | { kind: "Unpublished" }
+  | { kind: "Unreadable"; detail: string };
 
 export const CURRENT_RELEASE_KEY = "current.json";
 export const RELEASE_CACHE_MS = 30_000;
@@ -84,18 +87,19 @@ export const parseRelease = (text: string): ReleaseParse => {
   return { ok: true, manifest };
 };
 
-let cached: { readAt: number; manifest: ReleaseManifest } | undefined;
+let cached: { readAt: number; manifest: ReleaseManifest; stored: string } | undefined;
 
 export const readRelease = async (bucket: ReleaseBucket, now: number): Promise<ReleaseLookup> => {
   if (cached !== undefined && now - cached.readAt < RELEASE_CACHE_MS) {
-    return { kind: "Published", manifest: cached.manifest };
+    return { kind: "Published", manifest: cached.manifest, stored: cached.stored };
   }
   const object = await bucket.get(CURRENT_RELEASE_KEY);
   if (object === null) return { kind: "Unpublished" };
-  const parsed = parseRelease(await object.text());
+  const stored = await object.text();
+  const parsed = parseRelease(stored);
   if (!parsed.ok) return { kind: "Unreadable", detail: parsed.detail };
-  cached = { readAt: now, manifest: parsed.manifest };
-  return { kind: "Published", manifest: parsed.manifest };
+  cached = { readAt: now, manifest: parsed.manifest, stored };
+  return { kind: "Published", manifest: parsed.manifest, stored };
 };
 
 export const releaseUnreadable = (detail: string, retry: string): Problem => ({
