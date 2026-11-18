@@ -5,6 +5,7 @@ import {
   SessionPathSchema,
   SessionStartFromIssueSchema,
   SessionStartSchema,
+  SessionStopQuerySchema,
   TranscriptPageSchema,
   TranscriptQuerySchema,
   TurnPathSchema,
@@ -18,7 +19,7 @@ import { githubRepository, notARepository, readIssue, repositoryUrl } from "./gi
 import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
-import type { Caller } from "./identity";
+import { type Caller, whoamiOf } from "./identity";
 import type { Env } from "./index";
 import type { Unplaceable } from "./placement";
 import { releaseUnreadable } from "./releases";
@@ -47,6 +48,7 @@ export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 type CompactTranscriptTurn = z.infer<typeof CompactTranscriptTurnSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
 export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+type SessionStopQuery = z.infer<typeof SessionStopQuerySchema>;
 export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
 
 const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused => ({
@@ -412,6 +414,7 @@ export const stopSession = async (
   env: Env,
   caller: Caller,
   sessionId: string,
+  query: SessionStopQuery,
   now: number,
 ): Promise<Outcome<Session>> => {
   const tenant = tenantOf(env, caller);
@@ -422,15 +425,24 @@ export const stopSession = async (
     const offline = await hostOffline(env, caller, session, "stop the session again");
     if (offline !== null) return offline;
   }
-  const stopped = await tenant.stopSession(caller.tenantId, sessionId, now);
+  const cancelledBy = query.cancelTurn === true ? (await whoamiOf(env.DB, caller)).principal.email : null;
+  const stopped = await tenant.stopSession(caller.tenantId, sessionId, cancelledBy, now);
   if (stopped.kind === "Stopping") return ok(stopped.session);
   if (stopped.kind === "NotFound") return sessionNotFound(sessionId);
   if (stopped.kind === "Archived") return sessionArchived(sessionId, "stop");
+  if (stopped.kind === "CancelUnspoken") {
+    return refuse(409, {
+      code: "TurnInFlight",
+      title: "A turn is running",
+      detail: `session ${sessionId} is running turn ${stopped.turnId} on host ${stopped.host}, whose supervisor is too old to cancel a turn`,
+      fix: `Wait for turn ${stopped.turnId} to finish, then stop again; the host updates its supervisor on its own once no box runs`,
+    });
+  }
   return refuse(409, {
     code: "TurnInFlight",
     title: "A turn is running",
-    detail: `session ${sessionId} is still running turn ${stopped.turnId}, and a stop waits for no turn`,
-    fix: `Wait for turn ${stopped.turnId} to finish, then stop again`,
+    detail: `session ${sessionId} is still running turn ${stopped.turnId}, and a stop without cancelTurn waits for no turn`,
+    fix: `Wait for turn ${stopped.turnId} to finish and stop again, or stop with cancelTurn true to cancel it`,
   });
 };
 
@@ -668,7 +680,11 @@ const sessionRoute = async (
     if (!body.ok) return body.response;
     return answer(await sendTurn(env, caller, sessionId, body.value, Date.now()));
   }
-  if (action === "/stop") return answer(await stopSession(env, caller, sessionId, Date.now()));
+  if (action === "/stop") {
+    const query = SessionStopQuerySchema.safeParse(queryOf(url, [], ["cancelTurn"]));
+    if (!query.success) return invalidQuery("sessions.stop", query.error);
+    return answer(await stopSession(env, caller, sessionId, query.data, Date.now()));
+  }
   if (action === "/archive") return answer(await archiveSession(env, caller, sessionId, Date.now()));
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
   if (action === "/snapshots") return answer(await listSnapshots(env, caller, sessionId));

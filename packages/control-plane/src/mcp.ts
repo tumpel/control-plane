@@ -53,6 +53,7 @@ import {
   SessionPathSchema,
   SessionStartFromIssueSchema,
   SessionStartSchema,
+  SessionStopQuerySchema,
   SnapshotPathSchema,
   SubscriptionTokenMemberSchema,
   TenantConfigApplySchema,
@@ -101,7 +102,7 @@ interface ToolDefinition {
   name: string;
   description: string;
   input: z.ZodObject;
-  request: { method: Method; path: string } | null;
+  request: { method: Method; path: string; query?: string[] } | null;
   answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand";
 }
 
@@ -721,13 +722,14 @@ export const TOOLS: ToolDefinition[] = [
     SessionPathSchema,
     "Read one session; state is Starting, Idle, Running, Stopping, Stopped, Failed or Archived. A Failed session could not clone its repository and takes no more turns.",
   ),
-  rest(
-    "tumpel_session_stop",
-    "POST",
-    "/v1/sessions/{sessionId}/stop",
-    SessionPathSchema,
-    "Stop a session with no turn running: its host snapshots it and frees its box, and the next tumpel_turn_send boots a fresh box from the snapshots. Returns the session, Stopping until the box is gone and then Stopped; refused while a turn runs or the host is offline.",
-  ),
+  {
+    name: "tumpel_session_stop",
+    description:
+      "Stop a session: its host snapshots it and frees its box, and the next tumpel_turn_send boots a fresh box from the snapshots. Returns the session, Stopping until the box is gone and then Stopped. Refused TurnInFlight while a turn runs, unless cancelTurn is true: the running turn then ends at once and fails Cancelled, and the box is snapshotted and freed. Refused while the host is offline.",
+    input: SessionPathSchema.extend(SessionStopQuerySchema.shape),
+    request: { method: "POST", path: "/v1/sessions/{sessionId}/stop", query: ["cancelTurn"] },
+    answer: "rest",
+  },
   rest(
     "tumpel_session_archive",
     "POST",
@@ -835,18 +837,21 @@ const pathKeys = (path: string): string[] => [...path.matchAll(PATH_KEY)].map((m
 
 const toolRequest = (
   tool: ToolDefinition,
-  request: { method: Method; path: string },
+  request: { method: Method; path: string; query?: string[] },
   args: Record<string, unknown>,
   origin: string,
 ): Request => {
   const keys = pathKeys(request.path);
   const path = request.path.replace(PATH_KEY, (_, key: string) => encodeURIComponent(String(args[key])));
   const carriesBody = tool.answer === "rest" && (request.method === "POST" || request.method === "PUT");
-  const body = Object.fromEntries(Object.entries(args).filter(([key]) => !keys.includes(key)));
+  const rest = Object.entries(args).filter(([key]) => !keys.includes(key));
+  const queried = (key: string): boolean => request.method === "GET" || (request.query ?? []).includes(key);
+  const body = Object.fromEntries(rest.filter(([key]) => !queried(key)));
+  const params = rest.filter(([key]) => queried(key));
   const query =
-    request.method === "GET" && Object.keys(body).length > 0
+    params.length > 0
       ? `?${new URLSearchParams(
-          Object.entries(body).flatMap(([key, value]) =>
+          params.flatMap(([key, value]) =>
             Array.isArray(value) ? value.map((entry) => [key, String(entry)]) : [[key, String(value)]],
           ),
         )}`
