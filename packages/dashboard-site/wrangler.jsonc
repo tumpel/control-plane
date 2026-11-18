@@ -1,0 +1,17 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "tumpel-dashboard",
+  "compatibility_date": "2026-10-01",
+  "main": "./worker.ts",
+  "workers_dev": false,
+  "assets": {
+    "directory": "../../node_modules/@tumpel/dashboard/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  },
+  "env": {
+    "dev": { "name": "tumpel-dashboard-dev" },
+    "prod": { "name": "tumpel-dashboard-prod" }
+  }
+}
