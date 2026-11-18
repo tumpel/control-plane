@@ -1,0 +1,5 @@
+{
+  "summary": "Fetches the crates Cargo.lock names and builds the workspace in the dev profile without debug info or incremental builds, on Rust 1.100.0.",
+  "installs": ["The crates Cargo.lock names, in the cargo registry", "The workspace's dev build, in target"],
+  "toolchains": [{ "toolchain": "Rust", "toolchainVersion": "1.100.0" }]
+}

@@ -1,0 +1,5 @@
+{
+  "summary": "Installs the npm dependencies package-lock.json names with npm ci, on Node 26.13.1.",
+  "installs": ["The npm dependencies package-lock.json names, in node_modules"],
+  "toolchains": [{ "toolchain": "Node", "toolchainVersion": "26.13.1" }]
+}

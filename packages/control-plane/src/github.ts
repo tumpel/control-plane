@@ -231,7 +231,13 @@ const failed = (error: unknown): Error => (error instanceof Error ? error : new 
 
 export const callGitHub = async <T>(
   fetcher: Fetch,
-  request: { method: "GET" | "POST" | "PUT"; url: string; accept: string; bearer: string | null; body: unknown },
+  request: {
+    method: "GET" | "POST" | "PUT" | "PATCH";
+    url: string;
+    accept: string;
+    bearer: string | null;
+    body: unknown;
+  },
   schema: z.ZodType<T>,
   answerName: string,
 ): Promise<GitHubAnswer<T>> => {

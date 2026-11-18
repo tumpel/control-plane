@@ -116,7 +116,7 @@ const expiry = (now: number): string => new Date(now + STATE_TTL_MS).toISOString
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; ");
 
-const appMissing = (origin: string): Response =>
+export const appMissing = (origin: string): Response =>
   problem(409, {
     code: "GitHubAppMissing",
     title: "No GitHub App",

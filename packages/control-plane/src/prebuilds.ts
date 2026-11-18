@@ -1,27 +1,49 @@
-import { PrebuildListQuerySchema, PrebuildPathSchema, PrebuildStartSchema } from "@tumpel/schemas";
+import {
+  PrebuildListQuerySchema,
+  PrebuildPathSchema,
+  type PrebuildPreviewRequestSchema,
+  type PrebuildPreviewSchema,
+  PrebuildStartSchema,
+  PrebuildPreviewRequestSchema as PreviewRequestSchema,
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { CIRCLECI_PARAMETER_LIMIT, circleCIParameters, overLongParameter } from "./circleci.ts";
+import { type LifecycleCommand, readDevcontainer } from "./devcontainer.ts";
 import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";
-import { HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
+import { GUEST_TOOLCHAINS } from "./guest-toolchains.ts";
+import { HARNESS_CATALOG, type HarnessCatalogEntry, pinnedEntry } from "./harness-catalog";
 import { listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import type { ConfigSource } from "./prebuild-inputs.ts";
-import { inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
+import {
+  DEVCONTAINER_CONFIGS,
+  gitBlobSha,
+  inputDigest,
+  readBlobText,
+  readDefaultBranch,
+  readInputs,
+} from "./prebuild-inputs.ts";
+import { SHIPPED_TEMPLATES } from "./prebuild-templates.ts";
 import { signerOf } from "./presign";
 import { imagesFor, type ReleaseImage, readRelease, releaseUnreadable, rootfsKey } from "./releases";
 import { placed } from "./sessions";
 import { settingsOf } from "./settings";
+import { TEMPLATE_PATH } from "./template-pull-request.ts";
 import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
 import { PREBUILD_ARCHITECTURE } from "./tenant-sessions";
+import { toolchainFindings } from "./toolchain-files.ts";
 
 export type PrebuildStart = z.infer<typeof PrebuildStartSchema>;
+export type PrebuildPreviewRequest = z.infer<typeof PrebuildPreviewRequestSchema>;
+export type PrebuildPreview = z.infer<typeof PrebuildPreviewSchema>;
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
 const PREBUILDS_PATH = "/v1/prebuilds";
 const LATEST_PATH = "/v1/prebuilds/latest";
+const PREVIEW_PATH = "/v1/prebuilds/preview";
 const PREBUILD_PATH = /^\/v1\/prebuilds\/([^/]+)(\/failure)?$/;
 const PREBUILD_MODEL = "prebuild";
 
@@ -284,23 +306,25 @@ const guestImage = async (
   return ok(image);
 };
 
-export const startPrebuild = async (
+interface PersonaImage {
+  harness: HarnessCatalogEntry["harness"];
+  harnessVersion: string;
+  image: ReleaseImage;
+}
+
+const personaImage = async (
   env: Env,
   caller: Caller,
-  start: PrebuildStart,
-  apiOrigin: string,
+  personaId: string,
   now: number,
-): Promise<Outcome<Prebuild>> => {
-  const target = githubRepository(start.repository);
-  if (target === null) return notGitHub(start.repository);
-  const repository = repositoryUrl(target);
+): Promise<Outcome<PersonaImage>> => {
   const tenant = tenantOf(env, caller);
-  const persona = await tenant.getPersona(caller.tenantId, start.personaId);
+  const persona = await tenant.getPersona(caller.tenantId, personaId);
   if (persona === null) {
     return refuse(404, {
       code: "NotFound",
       title: "No such persona",
-      detail: `your tenant has no persona ${start.personaId}`,
+      detail: `your tenant has no persona ${personaId}`,
       fix: "List your personas and use one of their ids",
     });
   }
@@ -315,6 +339,31 @@ export const startPrebuild = async (
   }
   const image = await guestImage(env, entry.harness, entry.harnessVersion, now);
   if (!image.ok) return image;
+  return ok({ harness: entry.harness, harnessVersion: entry.harnessVersion, image: image.value });
+};
+
+export const devcontainerMissing = (target: GitHubRepository): Refused =>
+  refuse(409, {
+    code: "DevcontainerMissing",
+    title: "No devcontainer.json",
+    detail: `${target.owner}/${target.name} holds neither .devcontainer/devcontainer.json nor .devcontainer.json on its default branch, so a prebuild has no commands to run`,
+    fix: `Open a pull request with one of the templates ${[...new Set(SHIPPED_TEMPLATES.map((template) => template.prebuildTemplateId))].join(", ")}, or commit a .devcontainer/devcontainer.json, then try again`,
+  });
+
+export const startPrebuild = async (
+  env: Env,
+  caller: Caller,
+  start: PrebuildStart,
+  apiOrigin: string,
+  now: number,
+): Promise<Outcome<Prebuild>> => {
+  const target = githubRepository(start.repository);
+  if (target === null) return notGitHub(start.repository);
+  const repository = repositoryUrl(target);
+  const tenant = tenantOf(env, caller);
+  const harness = await personaImage(env, caller, start.personaId, now);
+  if (!harness.ok) return harness;
+  const entry = harness.value;
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
@@ -325,7 +374,7 @@ export const startPrebuild = async (
   const key = {
     repository,
     inputDigest: await inputDigest(inputs.files),
-    guestImageDigest: image.value.imageDigest,
+    guestImageDigest: entry.image.imageDigest,
   };
   if (!start.rebuild) {
     const held = await tenant.heldPrebuild(caller.tenantId, key);
@@ -341,7 +390,7 @@ export const startPrebuild = async (
       configSource: inputs.configSource,
       defaultBranch: described.branch,
       headSha: inputs.headSha,
-      rootfsKey: rootfsKey(image.value),
+      rootfsKey: rootfsKey(entry.image),
     },
     start.provider,
     {
@@ -366,6 +415,76 @@ export const startPrebuild = async (
     title: "No host can take the prebuild",
     detail: `every ${PREBUILD_ARCHITECTURE} host of your tenant builds another prebuild, or your tenant has no ${PREBUILD_ARCHITECTURE} host; a host builds one prebuild at a time, on ${PREBUILD_ARCHITECTURE}`,
     fix: `Wait for the running prebuild to end, or enrol another ${PREBUILD_ARCHITECTURE} host, then start the prebuild again`,
+  });
+};
+
+const LIFECYCLE_NAMES: Record<LifecycleCommand, PrebuildPreview["commands"][number]["lifecycle"]> = {
+  onCreateCommand: "OnCreateCommand",
+  updateContentCommand: "UpdateContentCommand",
+  postCreateCommand: "PostCreateCommand",
+  postStartCommand: "PostStartCommand",
+};
+
+export const previewPrebuild = async (
+  env: Env,
+  caller: Caller,
+  request: PrebuildPreviewRequest,
+  now: number,
+): Promise<Outcome<PrebuildPreview>> => {
+  const target = githubRepository(request.repository);
+  if (target === null) return notGitHub(request.repository);
+  const harness = await personaImage(env, caller, request.personaId, now);
+  if (!harness.ok) return harness;
+  const token = await tenantOf(env, caller).repositoryReadToken(caller.tenantId, request.personaId, target, now);
+  if (token.kind === "Refused") return repositoryUnreadable(token.detail);
+  const fetcher = (url: string, init: RequestInit) => fetch(url, init);
+  const api = env.GITHUB_API_ORIGIN;
+  const described = await readDefaultBranch(fetcher, api, target, token.token);
+  if (described.kind === "Unreadable") return repositoryUnreadable(described.detail);
+  const inputs = await readInputs(fetcher, api, target, token.token, described.branch);
+  if (inputs.kind === "Unreadable") return repositoryUnreadable(inputs.detail);
+  const [repositoryFile] = DEVCONTAINER_CONFIGS.flatMap((path) => inputs.files.filter((file) => file.path === path));
+  const config =
+    request.source === "Supplied"
+      ? { kind: "Text" as const, path: TEMPLATE_PATH, text: request.devcontainer }
+      : repositoryFile === undefined
+        ? { kind: "Missing" as const }
+        : { ...(await readBlobText(fetcher, api, target, token.token, repositoryFile)), path: repositoryFile.path };
+  if (config.kind === "Missing") return devcontainerMissing(target);
+  if (config.kind === "Unreadable") return repositoryUnreadable(config.detail);
+  const files =
+    request.source === "Supplied"
+      ? [
+          ...inputs.files.filter((file) => file.path !== TEMPLATE_PATH),
+          { path: TEMPLATE_PATH, blobSha: await gitBlobSha(config.text) },
+        ]
+      : inputs.files;
+  const toolchainTexts = await Promise.all(
+    inputs.toolchainFiles.map(async (file) => ({
+      path: file.path,
+      read: await readBlobText(fetcher, api, target, token.token, file),
+    })),
+  );
+  const unreadableToolchain = toolchainTexts.find(({ read }) => read.kind === "Unreadable");
+  if (unreadableToolchain?.read.kind === "Unreadable") return repositoryUnreadable(unreadableToolchain.read.detail);
+  const devcontainer = readDevcontainer(config.text, config.path);
+  return ok({
+    repository: repositoryUrl(target),
+    configSource: request.source,
+    commands: devcontainer.commands.map((command) => ({
+      lifecycle: LIFECYCLE_NAMES[command.lifecycle],
+      label: command.label,
+      argv: [command.file, ...command.args],
+    })),
+    containerEnv: devcontainer.containerEnv,
+    inputDigest: await inputDigest(files),
+    findings: [
+      ...devcontainer.findings,
+      ...toolchainFindings(
+        toolchainTexts.flatMap(({ path, read }) => (read.kind === "Text" ? [{ path, text: read.text }] : [])),
+        GUEST_TOOLCHAINS,
+      ),
+    ],
   });
 };
 
@@ -433,12 +552,18 @@ export const handlePrebuilds = async (
 ): Promise<Response | null> => {
   const { pathname } = url;
   const latest = pathname === LATEST_PATH && request.method === "GET";
+  const preview = pathname === PREVIEW_PATH && request.method === "POST";
   const one = latest ? null : PREBUILD_PATH.exec(pathname);
   const collection = pathname === PREBUILDS_PATH && (request.method === "POST" || request.method === "GET");
-  if (!latest && !collection && !(one !== null && request.method === "GET")) return null;
+  if (!latest && !preview && !collection && !(one !== null && request.method === "GET")) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (latest) return json(await listLatestPrebuilds(env, caller));
+  if (preview) {
+    const body = await parseBody(request, PreviewRequestSchema, "prebuilds.preview");
+    if (!body.ok) return body.response;
+    return answer(await previewPrebuild(env, caller, body.value, Date.now()));
+  }
   if (collection && request.method === "POST") {
     const body = await parseBody(request, PrebuildStartSchema, "prebuilds.start");
     if (!body.ok) return body.response;

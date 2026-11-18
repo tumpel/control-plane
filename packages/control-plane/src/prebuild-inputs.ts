@@ -24,7 +24,8 @@ export const LOCKFILES = [
   "flake.lock",
 ];
 export const MANIFESTS = ["package.json"];
-const DEVCONTAINER_CONFIGS = [`${DEVCONTAINER_DIRECTORY}/devcontainer.json`, DEVCONTAINER_FILE];
+export const TOOLCHAIN_FILES = ["rust-toolchain.toml", ".nvmrc", ".python-version"];
+export const DEVCONTAINER_CONFIGS = [`${DEVCONTAINER_DIRECTORY}/devcontainer.json`, DEVCONTAINER_FILE];
 
 export type ConfigSource = z.infer<typeof PrebuildConfigSourceSchema>;
 
@@ -39,8 +40,10 @@ export type Inputs =
   | {
       kind: "Read";
       files: InputFile[];
+      toolchainFiles: InputFile[];
       configSource: ConfigSource;
       headSha: string;
+      treeSha: string;
     }
   | { kind: "Unreadable"; detail: string };
 
@@ -112,6 +115,9 @@ export const readInputs = async (
   const files: InputFile[] = root.value.tree
     .filter((entry) => entry.type === "blob" && countsAtRoot(entry.path))
     .map((entry) => ({ path: entry.path, blobSha: entry.sha }));
+  const toolchainFiles: InputFile[] = root.value.tree
+    .filter((entry) => entry.type === "blob" && TOOLCHAIN_FILES.includes(entry.path))
+    .map((entry) => ({ path: entry.path, blobSha: entry.sha }));
   const devcontainer = root.value.tree.find((entry) => entry.type === "tree" && entry.path === DEVCONTAINER_DIRECTORY);
   if (devcontainer !== undefined) {
     const subtree = await read(
@@ -127,5 +133,39 @@ export const readInputs = async (
     }
   }
   const configSource = files.some((file) => DEVCONTAINER_CONFIGS.includes(file.path)) ? "RepositoryFile" : "Default";
-  return { kind: "Read", files, configSource, headSha };
+  return { kind: "Read", files, toolchainFiles, configSource, headSha, treeSha: head.value.commit.tree.sha };
+};
+
+const BlobSchema = z.object({ content: z.string(), encoding: z.literal("base64") });
+
+const decoder = new TextDecoder();
+
+export type BlobText = { kind: "Text"; text: string } | { kind: "Unreadable"; detail: string };
+
+export const readBlobText = async (
+  fetcher: Fetch,
+  api: string,
+  target: GitHubRepository,
+  token: string,
+  file: InputFile,
+): Promise<BlobText> => {
+  const blob = await read(
+    fetcher,
+    `${repositoryBase(api, target)}/git/blobs/${file.blobSha}`,
+    token,
+    BlobSchema,
+    "git blob",
+  );
+  if (!blob.ok) return unreadable(target, `${blob.detail}, reading ${file.path}`);
+  const bytes = Uint8Array.from(atob(blob.value.content.replace(/\s/g, "")), (char) => char.charCodeAt(0));
+  return { kind: "Text", text: decoder.decode(bytes) };
+};
+
+export const gitBlobSha = async (text: string): Promise<string> => {
+  const content = encoder.encode(text);
+  const header = encoder.encode(`blob ${content.length}\0`);
+  const bytes = new Uint8Array(header.length + content.length);
+  bytes.set(header);
+  bytes.set(content, header.length);
+  return hex(await crypto.subtle.digest("SHA-1", bytes));
 };
