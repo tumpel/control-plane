@@ -76,8 +76,8 @@ export interface Ledger<M> {
 }
 
 export interface LedgerStore<M> {
-  load(): Promise<Ledger<M>>;
-  save(ledger: Ledger<M>): Promise<void>;
+  load(): Ledger<M>;
+  save(ledger: Ledger<M>): void;
 }
 
 export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });

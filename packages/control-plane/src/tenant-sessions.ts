@@ -342,19 +342,27 @@ type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "Snapshot
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
 type TurnFailed = Extract<SessionHostMessage, { type: "TurnFailed" }>;
 type TurnClaim = Extract<SessionHostMessage, { type: "TurnClaim" }>;
-type HostEvent = Exclude<SessionHostMessage, ChunkAsk | CloneFailed | TurnFailed | TurnClaim>;
-type TurnEvent = Exclude<HostEvent, { type: "SnapshotDone" | "SnapshotFailed" | "BoxGone" | "BoxTeardownFailed" }>;
+type HostEvent = Exclude<
+  SessionHostMessage,
+  ChunkAsk | CloneFailed | TurnFailed | TurnClaim | { type: "SnapshotDone" | "SnapshotFailed" }
+>;
+type TurnEvent = Exclude<HostEvent, { type: "BoxGone" | "BoxTeardownFailed" }>;
 type ChunkReply = Extract<
   StoredControlMessage,
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
 >;
 type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
 export type TurnHandoff = { type: "TurnHandoff"; hostId: string; offer: StoredTurnOffer };
+export type Refused = { type: "Refused"; reason: string };
+type OfferedTurn = { type: "Offered"; turn: TurnRow; session: SessionRow };
 export type HostReply =
+  | Refused
   | ChunkReply
   | Extract<StoredControlMessage, { type: "BoxDiscard" | "ClaudeSetupBoxDiscard" | "TurnClaimed" | "TurnWithdrawn" }>
   | StoredTurnOffer
   | TurnHandoff;
+
+const refused = (reason: string): Refused => ({ type: "Refused", reason });
 
 const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
 
@@ -807,12 +815,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     sql.exec("UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?", now, secretSetId);
   }
 
-  private async storeCredentialFile(
-    hostId: string,
-    message: Extract<SessionHostMessage, { type: "TurnComplete" | "TurnFailed" }>,
-    credentialFile: string,
-  ): Promise<void> {
-    const { session } = this.offeredTurn(hostId, message);
+  private async storeCredentialFile(session: SessionRow, credentialFile: string): Promise<void> {
     const persona = this.personaRow(session.persona_id);
     if (persona === null) return;
     const { secretSetId } = persona;
@@ -1528,22 +1531,26 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<HostMessage, { type: "BoxGone" | "BoxTeardownFailed" }>,
-  ): Promise<void> {
+  ): Promise<Refused | null> {
     const session = this.sessionRow(message.sessionId);
     const asked =
       session !== null &&
       (session.box_id === message.boxId ? session.host_id === hostId : this.ranBox(session, message.boxId, hostId));
     if (session === null || !asked) {
-      throw new Error(
+      return refused(
         `host ${hostId} answered the teardown of box ${message.boxId} of session ${message.sessionId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
-    if (session.box_id !== message.boxId || session.state !== "Stopping") return;
+    if (session.box_id !== message.boxId || session.state !== "Stopping") return null;
     await this.timers(tenantId, session.session_id, { TeardownAnswer: null });
-    if (message.type === "BoxGone") return this.setSessionState(session.session_id, "Stopped", Date.now());
+    if (message.type === "BoxGone") {
+      this.setSessionState(session.session_id, "Stopped", Date.now());
+      return null;
+    }
     this.recordStopFailure(session.session_id, message.reason, message.detail, message.failedAt);
     this.returnToIdle(session.session_id);
-    return this.rearmSnapshot(tenantId, session.session_id);
+    await this.rearmSnapshot(tenantId, session.session_id);
+    return null;
   }
 
   private ranBox(session: SessionRow, boxId: string, hostId: string): boolean {
@@ -2133,12 +2140,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
     if ((message.type === "TurnComplete" || message.type === "TurnFailed") && message.credentialFile !== undefined) {
-      await this.storeCredentialFile(hostId, message, message.credentialFile);
+      const offered = this.offeredTurn(hostId, message);
+      if (offered.type === "Refused") return offered;
+      await this.storeCredentialFile(offered.session, message.credentialFile);
     }
     if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
     if (message.type === "TurnFailed") return this.turnFailed(tenantId, hostId, message);
     if (message.type === "TurnClaim") return this.turnClaim(tenantId, hostId, message);
-    await this.hostEvent(tenantId, hostId, message);
+    if (message.type === "SnapshotDone" || message.type === "SnapshotFailed") {
+      return this.snapshotAnswer(tenantId, hostId, message);
+    }
+    if (message.type === "BoxGone" || message.type === "BoxTeardownFailed") {
+      return this.teardownAnswer(tenantId, hostId, message);
+    }
+    const offered = this.offeredTurn(hostId, message);
+    if (offered.type === "Refused") return offered;
+    await this.turnEvent(tenantId, offered, message);
     return null;
   }
 
@@ -2146,7 +2163,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     snapshotId: string,
-  ): { request: SnapshotRequestRow; now: number; expiresAt: number; seconds: number } | null {
+  ): { request: SnapshotRequestRow; now: number; expiresAt: number; seconds: number } | Refused | null {
     const [request] = this.ctx.storage.sql
       .exec<SnapshotRequestRow & { created_at: number }>(
         "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at FROM snapshot_requests WHERE snapshot_id = ?",
@@ -2155,7 +2172,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     if (request === undefined) return null;
     if (this.sessionRow(request.session_id)?.host_id !== hostId) {
-      throw new Error(
+      return refused(
         `host ${hostId} sent chunks of snapshot ${snapshotId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
@@ -2170,9 +2187,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotChunks" }>,
-  ): ChunkReply | null {
+  ): ChunkReply | Refused | null {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if (window === null) return null;
+    if (window === null || "type" in window) return window;
     const sql = this.ctx.storage.sql;
     const digests = JSON.stringify(message.digests);
     const held = this.ctx.storage.transactionSync(() => {
@@ -2205,13 +2222,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotPacks" }>,
-  ): Promise<ChunkReply | null> {
+  ): Promise<ChunkReply | Refused | null> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if (window === null) return null;
+    if (window === null || "type" in window) return window;
     const listed = new Set(message.packs.map((pack) => pack.packDigest));
     const unlisted = message.chunks.find((chunk) => !listed.has(chunk.packDigest));
     if (unlisted !== undefined) {
-      throw new Error(
+      return refused(
         `host ${hostId} placed chunk ${unlisted.digest} of snapshot ${message.snapshotId} in pack ${unlisted.packDigest}, which part ${message.part} does not list`,
       );
     }
@@ -2285,11 +2302,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "RestoreChunks" }>,
-  ): Promise<ChunkReply | null> {
+  ): Promise<ChunkReply | Refused | null> {
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || turn.host_id !== hostId) {
-      throw new Error(`host ${hostId} asked for the chunks of turn ${message.turnId}, which is not offered to it`);
+      return refused(`host ${hostId} asked for the chunks of turn ${message.turnId}, which is not offered to it`);
     }
     if (!IN_FLIGHT.includes(turn.state)) return null;
     const sql = this.ctx.storage.sql;
@@ -2300,7 +2317,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (offered?.offered_at === null || offered?.offered_at === undefined) {
-      throw new Error(`host ${hostId} asked for the chunks of turn ${message.turnId}, which was never sent to it`);
+      return refused(`host ${hostId} asked for the chunks of turn ${message.turnId}, which was never sent to it`);
     }
     const now = Date.now();
     const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
@@ -2349,7 +2366,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async cloneFailed(tenantId: string, hostId: string, message: CloneFailed): Promise<HostReply | null> {
-    const { turn, session } = this.offeredTurn(hostId, message);
+    const offered = this.offeredTurn(hostId, message);
+    if (offered.type === "Refused") return offered;
+    const { turn, session } = offered;
     if (!IN_FLIGHT.includes(turn.state)) return null;
     const detail = this.cloneFailureDetail(session, message.detail);
     await this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt, "Failed");
@@ -2357,7 +2376,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async turnFailed(tenantId: string, hostId: string, message: TurnFailed): Promise<HostReply | null> {
-    const { turn, session } = this.offeredTurn(hostId, message);
+    const offered = this.offeredTurn(hostId, message);
+    if (offered.type === "Refused") return offered;
+    const { turn, session } = offered;
     if (message.reason === "HostUpdating" && turn.state === "Offered") {
       return this.offerElsewhere(tenantId, session, turn);
     }
@@ -2379,17 +2400,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private offeredTurn(
     hostId: string,
     message: TurnEvent | CloneFailed | TurnFailed | TurnClaim,
-  ): { turn: TurnRow; session: SessionRow } {
+  ): OfferedTurn | Refused {
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || turn.host_id !== hostId) {
-      throw new Error(`host ${hostId} sent ${message.type} for turn ${message.turnId}, which is not offered to it`);
+      return refused(`host ${hostId} sent ${message.type} for turn ${message.turnId}, which is not offered to it`);
     }
-    return { turn, session };
+    return { type: "Offered", turn, session };
   }
 
   private async turnClaim(tenantId: string, hostId: string, message: TurnClaim): Promise<HostReply> {
-    const { turn, session } = this.offeredTurn(hostId, message);
+    const offered = this.offeredTurn(hostId, message);
+    if (offered.type === "Refused") return offered;
+    const { turn, session } = offered;
     if (turn.state !== "Offered") return { type: "TurnWithdrawn", turnId: turn.turn_id };
     const now = Date.now();
     const sql = this.ctx.storage.sql;
@@ -2409,14 +2432,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { type: "TurnClaimed", turnId: turn.turn_id };
   }
 
-  private async hostEvent(tenantId: string, hostId: string, message: HostEvent): Promise<void> {
-    if (message.type === "SnapshotDone" || message.type === "SnapshotFailed") {
-      return this.snapshotAnswer(tenantId, hostId, message);
-    }
-    if (message.type === "BoxGone" || message.type === "BoxTeardownFailed") {
-      return this.teardownAnswer(tenantId, hostId, message);
-    }
-    const { turn, session } = this.offeredTurn(hostId, message);
+  private async turnEvent(tenantId: string, { turn, session }: OfferedTurn, message: TurnEvent): Promise<void> {
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     if (message.type === "TurnImageFetching") return;
@@ -2773,7 +2789,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<HostMessage, { type: "SnapshotDone" | "SnapshotFailed" }>,
-  ): Promise<void> {
+  ): Promise<Refused | null> {
     const sql = this.ctx.storage.sql;
     const [request] = sql
       .exec<SnapshotRequestRow>(
@@ -2783,11 +2799,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     if (request === undefined) {
       if (message.type === "SnapshotDone") await this.lateSnapshotDone(hostId, message.snapshotId);
-      return;
+      return null;
     }
     const session = this.sessionRow(request.session_id);
     if (session?.host_id !== hostId) {
-      throw new Error(
+      return refused(
         `host ${hostId} answered snapshot ${message.snapshotId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
@@ -2799,18 +2815,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session,
         `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`,
       );
-      if (session.state !== "Stopping") return;
-      if (message.reason === "BoxNotFound") {
-        return this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
+      if (session.state === "Stopping" && message.reason === "BoxNotFound") {
+        await this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
       }
-      return this.returnToIdle(session.session_id);
+      if (session.state === "Stopping" && message.reason !== "BoxNotFound") this.returnToIdle(session.session_id);
+      return null;
     }
     if ((await this.env.STORE.head(request.storage_key)) === null) {
       const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
       this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
       await this.prebuildUnstored(tenantId, session, detail);
       if (session.state === "Stopping") this.returnToIdle(session.session_id);
-      return;
+      return null;
     }
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
@@ -2830,9 +2846,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     });
     await this.prebuildStored(request, message.uploadedBytes, now);
-    if (session.state !== "Stopping") return;
+    if (session.state !== "Stopping") return null;
     const latest = this.latestTurn(session.session_id, null);
     if (latest === null) throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
     await this.snapshotOrTeardown(tenantId, session, latest);
+    return null;
   }
 }

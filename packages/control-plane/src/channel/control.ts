@@ -104,7 +104,7 @@ export type ControlEvent =
   | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string; protocolVersion: number }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "FirstHeartbeat"; usage: HostUsage; heldSessionIds: string[] }
-  | { kind: "Message"; message: HostMessage }
+  | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
 
@@ -168,16 +168,23 @@ const outbound = async (
 
 const unspoken = (
   protocolVersion: number,
-  frame: Frame<StoredControlMessage>,
+  type: StoredControlMessage["type"],
+  seq: number,
   context: ControlContext,
 ): Received | null => {
-  const needed = context.messageVersions[frame.message.type];
+  const needed = context.messageVersions[type];
   if (needed <= protocolVersion) return null;
   return close(
     context.port,
     CloseCode.UnsupportedVersion,
-    `frame ${frame.seq} carries ${frame.message.type}, which needs protocol version ${needed}; this connection speaks ${protocolVersion}, update the supervisor`,
+    `frame ${seq} carries ${type}, which needs protocol version ${needed}; this connection speaks ${protocolVersion}, update the supervisor`,
   );
+};
+
+const store = (message: StoredControlMessage, context: ControlContext): Frame<StoredControlMessage> => {
+  const { ledger, frame } = sequence(context.ledger.load(), message);
+  context.ledger.save(ledger);
+  return frame;
 };
 
 export const send = async (
@@ -185,12 +192,22 @@ export const send = async (
   message: StoredControlMessage,
   context: ControlContext,
 ): Promise<void> => {
-  const { ledger, frame } = sequence(await context.ledger.load(), message);
-  await context.ledger.save(ledger);
-  if (connection.phase !== "Open") return;
-  if (unspoken(connection.protocolVersion, frame, context) !== null) return;
-  context.port.send({ ...frame, message: await outbound(frame.message, connection.protocolVersion, context) });
+  if (connection.phase !== "Open") {
+    store(message, context);
+    return;
+  }
+  const { protocolVersion } = connection;
+  const nextSeq = context.ledger.load().sent + 1;
+  if (unspoken(protocolVersion, message.type, nextSeq, context) !== null) {
+    store(message, context);
+    return;
+  }
+  const spoken = await outbound(message, protocolVersion, context);
+  context.port.send({ ...store(message, context), message: spoken });
 };
+
+export const refuseFrame = (port: Port<ControlEnvelope>, seq: number, reason: string): void =>
+  port.send({ type: "FrameRefused", seq, reason });
 
 export const revoke = (context: ControlContext, reason: string): Received =>
   close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked: ${reason}`);
@@ -212,9 +229,9 @@ const hello = async (
     );
   }
   if (context.host.revoked) return revoke(context, "the tenant revoked this host");
-  const ledger = await context.ledger.load();
+  const ledger = context.ledger.load();
   for (const frame of ledger.unacked) {
-    const refused = unspoken(envelope.protocolVersion, frame, context);
+    const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
     if (refused !== null) return refused;
   }
   const resent = await resend(ledger, (stored) => outbound(stored, envelope.protocolVersion, context));
@@ -242,7 +259,7 @@ const refuse = async (
 ): Promise<Received> => {
   const stored = parseEnvelope(StoredHostFrameSchema, text);
   if (!stored.ok) return close(context.port, CloseCode.ProtocolError, reason);
-  const outcome = accept(await context.ledger.load(), stored.value);
+  const outcome = accept(context.ledger.load(), stored.value);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -251,8 +268,8 @@ const refuse = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  await context.ledger.save(outcome.ledger);
-  context.port.send({ type: "FrameRefused", seq: stored.value.seq, reason });
+  context.ledger.save(outcome.ledger);
+  refuseFrame(context.port, stored.value.seq, reason);
   return { connection, event: { kind: "FrameRefused", seq: stored.value.seq, reason } };
 };
 
@@ -306,7 +323,7 @@ export const receive = async (
       context,
     );
   }
-  const outcome = accept(await context.ledger.load(), envelope);
+  const outcome = accept(context.ledger.load(), envelope);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -315,8 +332,21 @@ export const receive = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  await context.ledger.save(outcome.ledger);
-  return { connection, event: { kind: "Message", message: outcome.message } };
+  return {
+    connection,
+    event: {
+      kind: "Message",
+      frame: { type: "Frame", seq: envelope.seq, ack: envelope.ack, message: outcome.message },
+    },
+  };
+};
+
+export const acknowledge = (context: ControlContext, frame: Frame<HostMessage>): void => {
+  const outcome = accept(context.ledger.load(), frame);
+  if (outcome.kind !== "Accepted") {
+    throw new Error(`frame ${frame.seq} was handled but the ledger no longer takes it (${outcome.kind})`);
+  }
+  context.ledger.save(outcome.ledger);
 };
 
 export const beat = (context: ControlContext): void => context.port.send(heartbeat(context.now()));
