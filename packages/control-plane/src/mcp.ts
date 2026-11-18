@@ -18,6 +18,7 @@ import {
   DevicePathSchema,
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
+  EventQuerySchema,
   GitHubActionsConnectionStartSchema,
   GitHubInstallationPathSchema,
   GitHubRepositoryPathSchema,
@@ -848,6 +849,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/turns/wait",
     TurnWaitQuerySchema,
     "Wait on up to 50 turns of any of the tenant's sessions until the first one is Completed or Failed, or until timeoutSeconds (at most 50) pass; answers at once when one has already ended. Returns every turn in the order asked, with its state, and a Failed turn with its failure {reason, detail}. Call it again with the turns still Offered or Running to wait on. Refused NotFound, naming the turn, when a turnId names no turn of the tenant.",
+  ),
+  rest(
+    "tumpel_events_wait",
+    "GET",
+    "/v1/events",
+    EventQuerySchema,
+    "Wait up to waitSeconds (at most 50) for the tenant's next events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle, HostOffline or PrebuildDone; answers at once when one has already happened. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Leave afterEventId out to wait for events from now on. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
   ),
   rest(
     "tumpel_turn_failure",

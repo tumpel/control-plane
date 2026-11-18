@@ -1,0 +1,95 @@
+import { DurableObject } from "cloudflare:workers";
+import { TenantEventTypeSchema } from "@tumpel/schemas";
+import { z } from "zod";
+import type { Env } from "./index.ts";
+import { tenantApi } from "./tenant-api.ts";
+import type { NewTenantEvent } from "./tenant-events.ts";
+
+const SubscriptionSchema = z.object({
+  tenantId: z.string(),
+  cursor: z.int(),
+  events: z.array(TenantEventTypeSchema),
+  sessionId: z.string().nullable(),
+});
+export type Subscription = z.infer<typeof SubscriptionSchema>;
+
+const PAGE_SIZE = 100;
+
+export const channelUrl = (subscription: Subscription): string => {
+  const url = new URL("https://event-channel/");
+  url.searchParams.set("subscription", JSON.stringify(subscription));
+  return url.toString();
+};
+
+export const matches = (subscription: Subscription, event: NewTenantEvent): boolean =>
+  (subscription.events.length === 0 || subscription.events.includes(event.event)) &&
+  (subscription.sessionId === null || ("sessionId" in event && event.sessionId === subscription.sessionId));
+
+export class EventChannel extends DurableObject<Env> {
+  private delivering: Promise<void> = Promise.resolve();
+
+  override async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      throw new Error("the event channel answers WebSocket upgrades only, which the Worker sends");
+    }
+    const subscription = SubscriptionSchema.parse(
+      JSON.parse(new URL(request.url).searchParams.get("subscription") ?? "null"),
+    );
+    const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment(subscription);
+    await this.deliver();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async wake(): Promise<void> {
+    await this.deliver();
+  }
+
+  override webSocketMessage(socket: WebSocket): void {
+    socket.close(1003, "the event channel sends events and takes no messages");
+  }
+
+  override webSocketClose(socket: WebSocket, code: number, reason: string): void {
+    socket.close(code, reason);
+  }
+
+  private deliver(): Promise<void> {
+    const send = (): Promise<void> => this.sendPending();
+    this.delivering = this.delivering.then(send, send);
+    return this.delivering;
+  }
+
+  private async sendPending(): Promise<void> {
+    const sockets = this.ctx.getWebSockets().filter((socket) => socket.readyState === WebSocket.READY_STATE_OPEN);
+    const subscriptions = sockets.map((socket) => SubscriptionSchema.parse(socket.deserializeAttachment()));
+    const [first] = subscriptions;
+    if (first === undefined) return;
+    let cursor = Math.min(...subscriptions.map((subscription) => subscription.cursor));
+    for (;;) {
+      const { listed } = await tenantApi(this.env.TENANT, first.tenantId).call("listEvents", {
+        tenantId: first.tenantId,
+        afterEventId: cursor,
+        events: [],
+        sessionId: null,
+        waitSeconds: 0,
+      });
+      if (listed.kind === "CursorExpired") {
+        throw new Error(
+          `an event channel subscriber of tenant ${first.tenantId} fell behind event ${listed.oldestEventId}, which never happens while each wake moves every cursor to the end`,
+        );
+      }
+      sockets.forEach((socket, index) => {
+        const subscription = subscriptions[index];
+        if (subscription === undefined) return;
+        for (const event of listed.page.events) {
+          if (event.eventId > subscription.cursor && matches(subscription, event)) socket.send(JSON.stringify(event));
+        }
+        subscription.cursor = Math.max(subscription.cursor, listed.page.lastEventId);
+        socket.serializeAttachment(subscription);
+      });
+      cursor = listed.page.lastEventId;
+      if (listed.page.events.length < PAGE_SIZE) return;
+    }
+  }
+}

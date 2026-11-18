@@ -87,6 +87,8 @@ import {
   revokeDevice,
   startDeviceCode,
 } from "./device";
+import type { EventChannel } from "./event-channel.ts";
+import { handleEvents } from "./events.ts";
 import { REPOSITORY_TOKEN } from "./github.ts";
 import { handleGitHubConnection, handleGitHubPage, handleGitHubWebhook } from "./github-handlers.ts";
 import { effectiveVersions, HARNESS_CATALOG } from "./harness-catalog";
@@ -202,6 +204,7 @@ import { tenantApi, tenantSkewed } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
 import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
+export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
@@ -216,6 +219,7 @@ export interface Env extends SignerEnv {
   RELEASES_SECRET_ACCESS_KEY?: string;
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
+  EVENTS: DurableObjectNamespace<EventChannel>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
@@ -1542,7 +1546,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleSecretMember(request, url, env)) ??
     (await handleUnpin(request, url, env));
   if (resource) return resource;
-  const sessions = await handleSessions(request, url, env, deviceCaller);
+  const sessions =
+    (await handleSessions(request, url, env, deviceCaller)) ?? (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;
   const uploads =
     (await handlePrebuildUploads(request, url, env)) ??

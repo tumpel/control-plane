@@ -14,6 +14,7 @@ import {
   ClaudeSetupSchema,
   CompactTranscriptPageSchema,
   CredentialHandoverSchema,
+  EventPageSchema,
   FailedTurnSchema,
   HostSchema,
   type HostUsageSchema,
@@ -36,6 +37,7 @@ import {
   StartedSessionSchema,
   StopFailureSchema,
   SupervisorHostKeySchema,
+  TenantEventSchema,
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
@@ -2318,6 +2320,70 @@ suite("sessions", { concurrency: 8 }, () => {
       await toolRefusal("tumpel_turn_wait", { turnId: [running.turn.turnId, "no-such-turn"], timeoutSeconds: 1 }),
       /your tenant has no turn no-such-turn/,
     );
+  });
+
+  test("tenant events record a turn's start, completion and the idle session in order, wake an MCP wait and stream over a WebSocket", async () => {
+    const { bearer, host, tool, toolRefusal, sessionStart } = await tenant();
+    const start = await tool("tumpel_events_wait", { waitSeconds: 0 }, EventPageSchema);
+    assert.deepEqual(start.events, []);
+
+    const socket = new WebSocket(
+      `${origin.replace(/^http/, "ws")}/v1/events?waitSeconds=0&afterEventId=${start.lastEventId}&event=TurnCompleted`,
+      { headers: bearer } as unknown as string[],
+    );
+    const streamed = new Promise<unknown>((resolve) => {
+      socket.addEventListener("message", (message) => resolve(JSON.parse(String(message.data))));
+    });
+    await new Promise((resolve) => socket.addEventListener("open", resolve));
+
+    const waiting = tool(
+      "tumpel_events_wait",
+      { afterEventId: start.lastEventId, event: ["TurnCompleted"], waitSeconds: 50 },
+      EventPageSchema,
+    );
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "events" },
+      StartedSessionSchema,
+    );
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    await host.next("TurnClaimed");
+    await wait(500);
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+
+    const woken = await waiting;
+    assert.deepEqual(
+      woken.events.map((event) => event.event),
+      ["TurnCompleted"],
+    );
+    const pushed = TenantEventSchema.parse(await streamed);
+    assert.equal(pushed.event, "TurnCompleted");
+    assert.equal("turnId" in pushed && pushed.turnId, started.turn.turnId);
+    socket.close();
+
+    const { sessionId } = started.session;
+    const all = await tool(
+      "tumpel_events_wait",
+      { afterEventId: start.lastEventId, sessionId, waitSeconds: 0 },
+      EventPageSchema,
+    );
+    assert.deepEqual(
+      all.events.map((event) => event.event),
+      ["TurnStarted", "TurnCompleted", "SessionIdle"],
+    );
+    assert.deepEqual(
+      (await tool("tumpel_events_wait", { afterEventId: all.lastEventId, sessionId, waitSeconds: 0 }, EventPageSchema))
+        .events,
+      [],
+    );
+    assert.match(await toolRefusal("tumpel_events_wait", { waitSeconds: 51 }), /waitSeconds/);
   });
 
   test("a start from an issue over MCP refuses a missing or closed issue, and an open one offers its prompt and reads back the issue", async () => {

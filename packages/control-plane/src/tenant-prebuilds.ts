@@ -464,6 +464,10 @@ export class TenantPrebuilds extends TenantSessions {
         ...from,
       ).rowsWritten;
       if (moved === 0) return false;
+      this.appendEvent(
+        { event: "PrebuildFailed", prebuildId, repository: this.prebuildRepository(prebuildId), phase: report.phase },
+        now,
+      );
       this.ctx.storage.sql.exec(
         "INSERT INTO prebuild_failures (prebuild_id, phase, detail, fix, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         prebuildId,

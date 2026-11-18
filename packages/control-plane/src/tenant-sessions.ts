@@ -97,6 +97,7 @@ import {
   restartDeadline,
   type SupervisorUpdateMessage,
 } from "./supervisor-updates";
+import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-metrics.ts";
 
@@ -558,6 +559,7 @@ export const sealContext = (secretSetId: string, name: string): string => `${sec
 
 export abstract class TenantSessions extends DurableObject<Env> {
   private readonly turnEndWaiters = new Set<() => void>();
+  protected eventsAppended = false;
   private readonly offering = new Set<string>();
 
   protected abstract failPrebuild(
@@ -568,6 +570,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     logUrl: string,
     now: number,
   ): Promise<boolean>;
+
+  protected prebuildRepository(prebuildId: string): string {
+    return this.ctx.storage.sql
+      .exec<{ repository: string }>("SELECT repository FROM prebuilds WHERE prebuild_id = ?", prebuildId)
+      .one().repository;
+  }
 
   private hostPrebuild(sessionId: string): HostPrebuildRow | null {
     const [row] = this.ctx.storage.sql
@@ -602,6 +610,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
         prebuild.prebuild_id,
       ).rowsWritten;
       if (moved === 0) return;
+      this.appendEvent(
+        {
+          event: "PrebuildDone",
+          prebuildId: prebuild.prebuild_id,
+          repository: this.prebuildRepository(prebuild.prebuild_id),
+        },
+        now,
+      );
       sql.exec(
         "INSERT INTO prebuild_layers (prebuild_id, layer_digest, layer_size_bytes, finished_at, created_at) VALUES (?, ?, ?, ?, ?)",
         prebuild.prebuild_id,
@@ -753,6 +769,24 @@ export abstract class TenantSessions extends DurableObject<Env> {
       now,
       sessionId,
     );
+    this.sessionEntered(sessionId, state, now);
+  }
+
+  protected appendEvent(event: NewTenantEvent, now: number): void {
+    appendEvent(this.ctx.storage.sql, event, now);
+    this.eventsAppended = true;
+  }
+
+  private sessionEntered(sessionId: string, state: SessionState, now: number): void {
+    if (state === "Idle") {
+      const latest = this.latestTurn(sessionId, null);
+      if (latest === null)
+        throw new Error(`session ${sessionId} went Idle with no turn, though a start always offers one`);
+      this.appendEvent({ event: "SessionIdle", sessionId, turnId: latest.turn_id }, now);
+    }
+    if (state === "Stopped") this.appendEvent({ event: "SessionStopped", sessionId }, now);
+    if (state === "Failed") this.appendEvent({ event: "SessionFailed", sessionId }, now);
+    if (state === "Archived") this.appendEvent({ event: "SessionArchived", sessionId }, now);
   }
 
   protected personaRow(
@@ -1355,6 +1389,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         JSON.stringify(heldSessionIds),
       )
       .toArray();
+    for (const { session_id } of gone) this.sessionEntered(session_id, "Stopped", now);
     for (const { session_id } of gone) {
       await this.timers(tenantId, session_id, { Snapshot: null });
       await this.evictionSettled(tenantId, session_id);
@@ -2639,6 +2674,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     presence: "Online" | "Offline",
     now: number,
   ): Promise<void> {
+    this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
     const inFlight = this.ctx.storage.sql
       .exec<{ session_id: string; turn_id: string }>(
         "SELECT session_id, turn_id FROM turns WHERE host_id = ? AND state = 'Running'",
@@ -2980,6 +3016,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
+      this.appendEvent({ event: "TurnStarted", turnId: turn.turn_id, sessionId: session.session_id }, now);
       sql.exec(
         `UPDATE prebuilds SET state = 'Building', updated_at = ?1 WHERE state = 'Dispatched'
         AND prebuild_id IN (SELECT prebuild_id FROM prebuild_sessions WHERE session_id = ?2)`,
@@ -3046,6 +3083,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         session.session_id,
       );
+      this.appendEvent({ event: "TurnCompleted", turnId: turn.turn_id, sessionId: session.session_id }, now);
+      this.sessionEntered(session.session_id, prebuild ? "Stopping" : "Idle", now);
     });
   }
 
@@ -3239,6 +3278,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         turn.session_id,
       );
+      this.appendEvent({ event: "TurnFailed", turnId, sessionId: turn.session_id, reason, detail }, now);
+      this.sessionEntered(turn.session_id, sessionState, now);
       sql.exec(
         "INSERT INTO turn_failures (turn_id, session_id, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         turnId,
