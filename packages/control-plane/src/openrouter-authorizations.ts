@@ -8,6 +8,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { parseCallback, returnTo, STATE_PURPOSE, StateClaimsSchema, stateOfPath } from "./openrouter-oauth.ts";
 import { dashboardOrigin, htmlPage } from "./pages";
+import { tenantApi } from "./tenant-api.ts";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
@@ -23,12 +24,12 @@ const authorize = async (request: Request, url: URL, env: Env, caller: Caller): 
   const body = await parseBody(request, OpenRouterAuthorizationStartSchema, "openRouterConnections.authorize");
   if (!body.ok) return body.response;
   const { secretSetId } = body.value;
-  const started = await env.TENANT.getByName(caller.tenantId).startOpenRouterAuthorization(
-    caller.tenantId,
-    caller.principalId,
-    { secretSetId, controlPlaneOrigin: url.origin },
-    Date.now(),
-  );
+  const { started } = await tenantApi(env.TENANT, caller.tenantId).call("startOpenRouterAuthorization", {
+    tenantId: caller.tenantId,
+    principalId: caller.principalId,
+    input: { secretSetId, controlPlaneOrigin: url.origin },
+    now: Date.now(),
+  });
   if (started.kind === "Started") return json(started.authorization);
   if (started.kind === "NoSecretSet") {
     return problem(404, {
@@ -47,11 +48,11 @@ const authorize = async (request: Request, url: URL, env: Env, caller: Caller): 
 };
 
 const readAuthorization = async (env: Env, caller: Caller, openRouterAuthorizationId: string): Promise<Response> => {
-  const read = await env.TENANT.getByName(caller.tenantId).getOpenRouterAuthorization(
-    caller.tenantId,
-    caller.principalId,
+  const { read } = await tenantApi(env.TENANT, caller.tenantId).call("getOpenRouterAuthorization", {
+    tenantId: caller.tenantId,
+    principalId: caller.principalId,
     openRouterAuthorizationId,
-  );
+  });
   if (read.kind === "Found") return json(read.authorization);
   return problem(404, {
     code: "NotFound",
@@ -89,12 +90,12 @@ export const handleOpenRouterCallback = async (request: Request, url: URL, env: 
   const callback = parseCallback(url.searchParams);
   if (callback.kind === "Invalid") return refuse(callback.detail);
   const { tenantId, openRouterAuthorizationId } = checked.claims;
-  const settled = await env.TENANT.getByName(tenantId).openRouterCallback(
+  const { settled } = await tenantApi(env.TENANT, tenantId).call("openRouterCallback", {
     tenantId,
     openRouterAuthorizationId,
     callback,
-    Date.now(),
-  );
+    now: Date.now(),
+  });
   if (settled.kind === "NotFound") {
     return refuse(`tenant ${tenantId} holds no OpenRouter authorization ${openRouterAuthorizationId}`);
   }

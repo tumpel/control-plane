@@ -214,7 +214,7 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     return row?.name ?? null;
   }
 
-  async startOpenRouterAuthorization(
+  protected async startOpenRouterAuthorization(
     tenantId: string,
     principalId: string,
     input: NewOpenRouterAuthorization,
@@ -268,7 +268,7 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     return { kind: "Started", authorization: this.presentOpenRouterAuthorization(tenantId, row) };
   }
 
-  getOpenRouterAuthorization(
+  protected getOpenRouterAuthorization(
     tenantId: string,
     principalId: string,
     openRouterAuthorizationId: string,
@@ -278,7 +278,7 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     return { kind: "Found", authorization: this.presentOpenRouterAuthorization(tenantId, row) };
   }
 
-  async openRouterCallback(
+  protected async openRouterCallback(
     tenantId: string,
     openRouterAuthorizationId: string,
     callback: Exclude<OpenRouterCallback, { kind: "Invalid" }>,
@@ -382,7 +382,7 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     });
   }
 
-  openRouterAuthorizationDeadlineReached(deadline: OpenRouterAuthorizationDeadline): void {
+  protected openRouterAuthorizationDeadlineReached(deadline: OpenRouterAuthorizationDeadline): void {
     const id = deadline.openRouterAuthorizationId;
     const row = this.openRouterRow(id);
     if (row === null) return;
@@ -396,7 +396,7 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     }
   }
 
-  openRouterSecretSets(): string[] {
+  protected openRouterSecretSets(): string[] {
     return this.ctx.storage.sql
       .exec<{ name: string }>(
         `SELECT secret_sets.name FROM secret_credentials JOIN secret_sets USING (secret_set_id)

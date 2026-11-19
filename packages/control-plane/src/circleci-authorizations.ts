@@ -3,6 +3,7 @@ import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { ownerRequired } from "./members";
+import { tenantApi } from "./tenant-api.ts";
 import type { CircleCIAuthorizationStepped } from "./tenant-circleci-authorizations";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -60,10 +61,14 @@ export const handleCircleCIAuthorizations = async (
   if (caller instanceof Response) return caller;
   const refused = ownerRequired(caller, `circleCIConnections.${operation}`);
   if (refused) return refused;
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   const now = Date.now();
   if (operation === "authorize") {
-    const started = await tenant.startCircleCIAuthorization(caller.tenantId, caller.principalId, now);
+    const { started } = await tenant.call("startCircleCIAuthorization", {
+      tenantId: caller.tenantId,
+      principalId: caller.principalId,
+      now,
+    });
     if (started.kind === "Started") return json(started.authorization);
     return problem(409, {
       code: "CircleCIRefused",
@@ -76,24 +81,24 @@ export const handleCircleCIAuthorizations = async (
     const body = await parseBody(request, CircleCIAuthorizationCompleteSchema, "circleCIConnections.complete");
     if (!body.ok) return body.response;
     const { circleCIAuthorizationId, redirectedUrl } = body.value;
-    const stepped = await tenant.completeCircleCIAuthorization(
-      caller.tenantId,
-      caller.principalId,
+    const { stepped } = await tenant.call("completeCircleCIAuthorization", {
+      tenantId: caller.tenantId,
+      principalId: caller.principalId,
       circleCIAuthorizationId,
       redirectedUrl,
       now,
-    );
+    });
     return answer(stepped, circleCIAuthorizationId, operation);
   }
   const body = await parseBody(request, CircleCIAuthorizationChooseSchema, "circleCIConnections.choose");
   if (!body.ok) return body.response;
   const { circleCIAuthorizationId, organizationId } = body.value;
-  const stepped = await tenant.chooseCircleCIOrganization(
-    caller.tenantId,
-    caller.principalId,
+  const { stepped } = await tenant.call("chooseCircleCIOrganization", {
+    tenantId: caller.tenantId,
+    principalId: caller.principalId,
     circleCIAuthorizationId,
     organizationId,
     now,
-  );
+  });
   return answer(stepped, circleCIAuthorizationId, operation);
 };

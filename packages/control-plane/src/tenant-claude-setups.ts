@@ -129,7 +129,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return row?.name ?? null;
   }
 
-  async startClaudeSetup(tenantId: string, input: NewClaudeSetup, now: number): Promise<ClaudeSetupStarted> {
+  protected async startClaudeSetup(tenantId: string, input: NewClaudeSetup, now: number): Promise<ClaudeSetupStarted> {
     const sql = this.ctx.storage.sql;
     const [set] = sql.exec("SELECT 1 FROM secret_sets WHERE secret_set_id = ?", input.secretSetId).toArray();
     if (set === undefined) return { kind: "NoSecretSet" };
@@ -188,7 +188,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return { kind: "Started", setup: toClaudeSetup(tenantId, row) };
   }
 
-  async getClaudeSetup(tenantId: string, claudeSetupId: string, now: number): Promise<ClaudeSetup | null> {
+  protected async getClaudeSetup(tenantId: string, claudeSetupId: string, now: number): Promise<ClaudeSetup | null> {
     const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
     return row === null ? null : toClaudeSetup(tenantId, row);
   }
@@ -203,7 +203,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return row ?? null;
   }
 
-  async listClaudeSetups(tenantId: string, secretSetId: string, now: number): Promise<ClaudeSetup[]> {
+  protected async listClaudeSetups(tenantId: string, secretSetId: string, now: number): Promise<ClaudeSetup[]> {
     const running = this.runningClaudeSetupRow(secretSetId);
     if (running === null) return [];
     if (!overdue(running, now)) return [toClaudeSetup(tenantId, running)];
@@ -211,7 +211,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return [];
   }
 
-  async submitClaudeSetupCode(
+  protected async submitClaudeSetupCode(
     tenantId: string,
     claudeSetupId: string,
     code: string,
@@ -239,7 +239,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return { kind: "Coded", setup: this.presentClaudeSetup(tenantId, claudeSetupId) };
   }
 
-  async writeClaudeSetupToken(
+  protected async writeClaudeSetupToken(
     tenantId: string,
     claudeSetupId: string,
     credential: string,
@@ -402,7 +402,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return this.stepClaudeSetup(tenantId, row, event, Date.now());
   }
 
-  async claudeSetupDeadlineReached(tenantId: string, deadline: ClaudeSetupDeadline): Promise<void> {
+  protected async claudeSetupDeadlineReached(tenantId: string, deadline: ClaudeSetupDeadline): Promise<void> {
     const row = this.claudeSetupRow(deadline.claudeSetupId);
     if (row === null || row.phase_due_at !== deadline.at) return;
     await this.discardClaudeSetupBox(row, await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, Date.now()));
@@ -437,7 +437,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return bootImage(signer, boot, seconds, seconds, now);
   }
 
-  async prepareClaudeSetup(
+  protected async prepareClaudeSetup(
     tenantId: string,
     stored: StoredClaudeSetupOffer | StoredClaudeSetupCode,
     hostId: string,

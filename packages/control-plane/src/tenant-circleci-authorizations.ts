@@ -203,7 +203,7 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     return { kind: "Registered", clientId: kept.client_id };
   }
 
-  async startCircleCIAuthorization(
+  protected async startCircleCIAuthorization(
     tenantId: string,
     principalId: string,
     now: number,
@@ -241,7 +241,7 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     return { kind: "Started", authorization: presented.authorization };
   }
 
-  async completeCircleCIAuthorization(
+  protected async completeCircleCIAuthorization(
     tenantId: string,
     principalId: string,
     circleCIAuthorizationId: string,
@@ -406,7 +406,7 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     return this.present(tenantId, circleCIAuthorizationId);
   }
 
-  async chooseCircleCIOrganization(
+  protected async chooseCircleCIOrganization(
     tenantId: string,
     principalId: string,
     circleCIAuthorizationId: string,
@@ -446,7 +446,10 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     );
   }
 
-  async circleCIAuthorizationDeadlineReached(tenantId: string, deadline: CircleCIAuthorizationDeadline): Promise<void> {
+  protected async circleCIAuthorizationDeadlineReached(
+    tenantId: string,
+    deadline: CircleCIAuthorizationDeadline,
+  ): Promise<void> {
     const row = this.authorizationRow(deadline.circleCIAuthorizationId);
     if (row === null || row.phase_due_at !== deadline.at) return;
     await this.failAuthorization(tenantId, row.circleci_authorization_id, LIVE_PHASES, {

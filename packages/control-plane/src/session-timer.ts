@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index";
+import { tenantApi } from "./tenant-api.ts";
 
 export type DeadlineName =
   | "FirstLine"
@@ -94,12 +95,15 @@ export class SessionTimer extends DurableObject<Env> {
     for (const { name } of due) delete timers.deadlines[name];
     await this.save(timers);
     const tenant = this.env.TENANT.getByName(timers.tenantId);
+    const api = tenantApi(this.env.TENANT, timers.tenantId);
+    const { tenantId } = timers;
     for (const reached of due) {
-      if (reached.name === "ClaudeSetup") await tenant.claudeSetupDeadlineReached(timers.tenantId, reached.deadline);
+      if (reached.name === "ClaudeSetup")
+        await api.call("claudeSetupDeadlineReached", { tenantId, deadline: reached.deadline });
       else if (reached.name === "CircleCIAuthorization")
-        await tenant.circleCIAuthorizationDeadlineReached(timers.tenantId, reached.deadline);
+        await api.call("circleCIAuthorizationDeadlineReached", { tenantId, deadline: reached.deadline });
       else if (reached.name === "OpenRouterAuthorization")
-        await tenant.openRouterAuthorizationDeadlineReached(reached.deadline);
+        await api.call("openRouterAuthorizationDeadlineReached", { deadline: reached.deadline });
       else if (isPrebuildDeadline(reached)) await tenant.prebuildDeadlineReached(timers.tenantId, reached);
       else await tenant.deadlineReached(timers.tenantId, reached);
     }

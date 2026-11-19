@@ -24,6 +24,7 @@ import type { Env } from "./index";
 import { issuerSubject } from "./issuer.ts";
 import { ownerRequired } from "./members";
 import { apiOriginOf } from "./settings";
+import { tenantApi } from "./tenant-api.ts";
 import type { BuildProvider, CircleCIRow, NamespaceRow } from "./tenant-prebuilds";
 
 export type ConnectionSummary = z.infer<typeof ConnectionSummarySchema>;
@@ -82,7 +83,7 @@ export const listConnections = async (env: Env, caller: Caller): Promise<Connect
   const logins = installations.map((installation) => installation.accountLogin).join(", ");
   const tenant = tenantOf(env, caller);
   const accounts = await tenant.connectedAccounts();
-  const openRouter = (await tenant.openRouterSecretSets()).join(", ");
+  const openRouter = (await tenantApi(env.TENANT, caller.tenantId).call("openRouterSecretSets", {})).names.join(", ");
   return [
     summary("GitHub", logins === "" ? null : logins, app !== null),
     summary("GitHubActions", accounts.GitHubActions, true),
