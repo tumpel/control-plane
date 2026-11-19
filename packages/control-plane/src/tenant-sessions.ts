@@ -376,6 +376,8 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
+const CONTINUE_FIX =
+  "The session keeps the turn's files and the harness's conversation, so send another turn on it to continue where this one stopped";
 const STORE_DELETE_BATCH = 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
@@ -828,6 +830,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private cloneFailureDetail(session: SessionRow, hostDetail: string): string {
     return `${hostDetail}. Check that ${session.repository} exists and that the GitHub App installation or the GITHUB_TOKEN of secret set ${this.secretSetName(session)} can read it, then start a new session`;
+  }
+
+  private failureDetail(session: SessionRow, message: TurnFailed): string {
+    if (message.reason === "CredentialRefused") return this.refusedSetDetail(session, message.detail);
+    if (message.reason === "TurnTimedOut") return `${message.detail} ${CONTINUE_FIX}`;
+    return message.detail;
   }
 
   private refusedSetDetail(session: SessionRow, hostDetail: string): string {
@@ -2969,9 +2977,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (stopped) return this.offerElsewhere(tenantId, { ...session, box_id: boxId }, offeredAgain);
       return this.offerMessage(session, offeredAgain);
     }
-    const detail =
-      message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
-    await this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
+    await this.failTurn(tenantId, turn.turn_id, message.reason, this.failureDetail(session, message), message.failedAt);
     return null;
   }
 
@@ -3020,6 +3026,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const settings = settingsOf(this.env);
       return this.timers(tenantId, session.session_id, {
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
+        Total: {
+          turnId: turn.turn_id,
+          at: now + (settings.turnTotalBudgetSeconds + settings.heartbeatDeadlineSeconds) * 1000,
+        },
       });
     }
     if (turn.state !== "Running") return;
@@ -3174,7 +3184,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         tenantId,
         turnId,
         "TurnTimedOut",
-        `the turn did not finish within ${settings.turnTotalBudgetSeconds} seconds; send a smaller prompt or raise turnTotalBudgetSeconds`,
+        `host ${host} did not report the end of the turn past its ${settings.turnTotalBudgetSeconds} second budget; check that its supervisor runs. ${CONTINUE_FIX}`,
         failedAt,
       );
     }

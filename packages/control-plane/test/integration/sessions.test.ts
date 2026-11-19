@@ -2246,6 +2246,62 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual((await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema)).lastTurn, read);
   });
 
+  test("a turn the host times out ends on the host's report, not the control plane's deadline, and the next turn runs in its box from its snapshot", async () => {
+    const { bearer, host, getJson, tool, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "a long job" }, bearer);
+    assert.equal(response.status, 200);
+    const { session } = StartedSessionSchema.parse(await response.json());
+    const { sessionId } = session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, turnId);
+    const ready = Date.now();
+    host.send({ type: "TurnRepositoryReady", turnId });
+    const hostLimit = ready + SETTINGS.turnTotalBudgetSeconds * 1000;
+    await until(
+      "the whole-turn deadline past the host's own turn limit",
+      () => storedTimers(sessionId),
+      (timers) =>
+        z.object({ at: z.number() }).parse(timers?.deadlines.Total).at >=
+        hostLimit + SETTINGS.heartbeatDeadlineSeconds * 1000,
+    );
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"assistant"}' });
+    host.send({
+      type: "TurnFailed",
+      turnId,
+      reason: "TurnTimedOut",
+      detail: `turn ${turnId} ran past its 3600 s budget (budgets.turnSeconds in runtime.json).`,
+      failedAt: new Date().toISOString(),
+    });
+
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "TurnTimedOut");
+    assert.equal(
+      failure.detail,
+      `turn ${turnId} ran past its 3600 s budget (budgets.turnSeconds in runtime.json). The session keeps the turn's files and the harness's conversation, so send another turn on it to continue where this one stopped`,
+    );
+    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Idle");
+    const request = await host.next("SnapshotRequest");
+    assert.deepEqual({ turnId: request.turnId, boxId: request.boxId }, { turnId, boxId: offer.boxId });
+    await store.put(request.storageKey, '{"entries":[]}');
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+    await until(
+      "a stored snapshot",
+      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+      (snapshots) => snapshots.length === 1,
+    );
+
+    await tool("tumpel_turn_send", { sessionId, prompt: "continue" }, TurnSchema);
+    const next = await host.next("TurnOffer");
+    assert.equal(next.boxId, offer.boxId);
+    assert.equal(next.lastLineSeq, 1);
+    assert.deepEqual(
+      next.snapshots.map((snapshot) => snapshot.snapshotId),
+      [request.snapshotId],
+    );
+  });
+
   test("a turn wait over MCP answers when the first of several turns ends, with every turn's state and a failed turn's reason", async () => {
     const { host, tool, toolRefusal, sessionStart } = await tenant();
     const running = await tool(
