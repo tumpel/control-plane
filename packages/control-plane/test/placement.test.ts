@@ -331,3 +331,49 @@ test("a placement refusal captures each host's name and reason: Full, NoDisk, No
     ["offline-box", "NotOnline"],
   ]);
 });
+
+test("a host reporting a memory budget is refused only when the box's memory does not fit it, whatever its box slots; one without falls back to its slots", () => {
+  const usage = (hostId: string, memory: { memoryBudgetMib: number; memoryHeldMib: number } | object) => ({
+    hostId,
+    tenantId: "tenant-placement",
+    boxCapacity: 2,
+    boxesRunning: 5,
+    boxesWarm: 0,
+    loadAverage: 0,
+    memoryAvailableMib: 6144,
+    channelProtocol: 27,
+    createdAt: 0,
+    updatedAt: 0,
+    ...memory,
+  });
+  const fits = { ...HOST, hostId: "fits", name: "fits" };
+  const tight = { ...HOST, hostId: "tight", name: "tight" };
+  const slots = { ...HOST, hostId: "slots", name: "slots" };
+  const box = { boxMemoryMib: 2048, boxDiskMib: BoxDiskLimit.DefaultMib };
+  const placement = placeSession(
+    [tight, slots, fits],
+    [
+      usage("tight", { memoryBudgetMib: 10240, memoryHeldMib: 8193 }),
+      usage("slots", {}),
+      usage("fits", { memoryBudgetMib: 10240, memoryHeldMib: 8192 }),
+    ],
+    AMD64_IMAGES,
+    box,
+    false,
+  );
+  assert.equal(placed(placement), "fits");
+  const refused = placeSession(
+    [tight, slots],
+    [usage("tight", { memoryBudgetMib: 10240, memoryHeldMib: 8193 }), usage("slots", {})],
+    AMD64_IMAGES,
+    box,
+    false,
+  );
+  assert.deepEqual(
+    refused.kind === "Refused" ? refused.hosts.map(({ host, reason }) => [host.name, reason]) : refused,
+    [
+      ["tight", "MemoryFull"],
+      ["slots", "Full"],
+    ],
+  );
+});

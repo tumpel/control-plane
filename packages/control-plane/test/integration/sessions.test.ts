@@ -9,12 +9,14 @@ import { after, before, suite, test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
+  BoxMemoryLimit,
   ChannelProtocol,
   ClaudeSetupSchema,
   CompactTranscriptPageSchema,
   CredentialHandoverSchema,
   FailedTurnSchema,
   HostSchema,
+  type HostUsageSchema,
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
@@ -64,7 +66,15 @@ const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
 const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
-const USAGE = { boxesWarm: 0, loadAverage: 0.25, memoryAvailableMib: 6144, diskBudgetMib: 200000, diskHeldMib: 32768 };
+type HostUsage = z.infer<typeof HostUsageSchema>;
+
+const USAGE: HostUsage = {
+  boxesWarm: 0,
+  loadAverage: 0.25,
+  memoryAvailableMib: 6144,
+  diskBudgetMib: 200000,
+  diskHeldMib: 32768,
+};
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
@@ -223,6 +233,7 @@ class HostSide {
   private sent: number;
   private readonly held: Set<string>;
   private readonly resend: HostMessage[];
+  private usage: HostUsage;
   private welcomed = false;
   private readonly inbox: ControlMessage[] = [];
   private readonly refusals: { seq: number; reason: string }[] = [];
@@ -232,8 +243,9 @@ class HostSide {
 
   private readonly socket: WebSocket;
 
-  private constructor(socket: WebSocket, carried: Carried, resend: HostMessage[]) {
+  private constructor(socket: WebSocket, carried: Carried, resend: HostMessage[], usage: HostUsage) {
     this.socket = socket;
+    this.usage = usage;
     this.received = carried.received;
     this.sent = carried.sent;
     this.held = new Set(carried.held);
@@ -248,7 +260,21 @@ class HostSide {
 
   private beat(): void {
     if (!this.welcomed) return;
-    this.raw({ type: "Heartbeat", sentAt: new Date().toISOString(), usage: USAGE, heldSessionIds: [...this.held] });
+    this.raw({
+      type: "Heartbeat",
+      sentAt: new Date().toISOString(),
+      usage: this.usage,
+      heldSessionIds: [...this.held],
+    });
+  }
+
+  quiet(): void {
+    clearInterval(this.heartbeat);
+  }
+
+  report(usage: HostUsage): void {
+    this.usage = usage;
+    this.beat();
   }
 
   static async connect(
@@ -257,6 +283,7 @@ class HostSide {
     boxCapacity = 8,
     carried: Carried = { received: 0, sent: 0, held: [] },
     resend: HostMessage[] = [],
+    usage: HostUsage = USAGE,
   ): Promise<HostSide> {
     const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${id}/channel`);
     const challenge = await new Promise<string>((resolve, reject) => {
@@ -265,7 +292,7 @@ class HostSide {
     });
     const parsed = ControlEnvelopeSchema.parse(JSON.parse(challenge));
     assert.equal(parsed.type, "Challenge");
-    const side = new HostSide(socket, carried, resend);
+    const side = new HostSide(socket, carried, resend, usage);
     side.raw({
       type: "Hello",
       hostId: id,
@@ -273,7 +300,7 @@ class HostSide {
       supervisorVersion: "0.1.0",
       signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
       boxCapacity,
-      usage: USAGE,
+      usage,
     });
     return side;
   }
@@ -2995,6 +3022,47 @@ suite("sessions", { concurrency: 8 }, () => {
     side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
     assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
+    side.close();
+  });
+
+  test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
+    const { bearer, host, hostId, refused, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const budgeted = await enrol("budgeted");
+    const box = BoxMemoryLimit.DefaultMib;
+    const budget = 2 * box + 1024;
+    const side = await connect(budgeted.id, budgeted.key, 1, undefined, undefined, {
+      ...USAGE,
+      memoryBudgetMib: budget,
+      memoryHeldMib: 0,
+    });
+    await hostState(budgeted.id, "Online");
+    side.quiet();
+    const start = async (prompt: string) =>
+      postJson("/v1/sessions", { ...(await sessionStart()), prompt }, bearer).then(async (response) => {
+        assert.equal(response.status, 200, await response.clone().text());
+        return StartedSessionSchema.parse(await response.json()).session.hostId;
+      });
+    assert.deepEqual([await start("first"), await start("second")], [budgeted.id, budgeted.id]);
+    const full = await refused("/v1/sessions", {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...(await sessionStart()), prompt: "third" }),
+    });
+    assert.deepEqual(
+      [full.code, full.detail],
+      [
+        "PoolExhausted",
+        `no host of your tenant has memory for another box: box is Offline, budgeted gives boxes ${budget} MiB of memory and its boxes hold ${2 * box} MiB of it, and the persona's boxes need ${box} MiB`,
+      ],
+    );
+    side.report({ ...USAGE, memoryBudgetMib: budget, memoryHeldMib: box });
+    await until(
+      "the host's report of one held box",
+      () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
+      (usages) => usages.find((usage) => usage.hostId === budgeted.id)?.memoryHeldMib === box,
+    );
+    assert.equal(await start("third"), budgeted.id);
     side.close();
   });
 

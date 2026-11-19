@@ -131,6 +131,9 @@ export const why = (refused: Unplaceable): string => {
   if (refused.reason === "NoConnectors") {
     return `${named} runs a supervisor too old to serve connectors`;
   }
+  if (refused.reason === "MemoryFull") {
+    return `${named} gives boxes ${refused.usage.memoryBudgetMib} MiB of memory and its boxes hold ${refused.usage.memoryHeldMib} MiB of it, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
+  }
   if (refused.reason === "NoDisk") {
     return `${named} gives box disks ${refused.usage.diskBudgetMib} MiB and its boxes hold ${refused.usage.diskHeldMib} MiB of it, and the persona's boxes need ${refused.boxDiskMib} MiB`;
   }
@@ -168,6 +171,14 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
     });
   }
   const detail = hosts.map(why).join(", ");
+  if (hosts.some(({ reason }) => reason === "MemoryFull")) {
+    return refuse(409, {
+      code: "PoolExhausted",
+      title: "Every host's box memory is in use",
+      detail: `no host of your tenant has memory for another box: ${detail}`,
+      fix: `Wait for a running turn to finish, lower the persona's boxMemoryMib, or enrol another host, then ${retry}`,
+    });
+  }
   if (hosts.some(({ reason }) => reason === "Full")) {
     return refuse(409, {
       code: "PoolExhausted",
