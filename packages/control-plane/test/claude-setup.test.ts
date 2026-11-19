@@ -106,6 +106,7 @@ test("the setup offer carries the box's image, its token URL and credential, and
     "boxId",
     "claudeSetupId",
     "expiresAt",
+    "harness",
     "harnessVersion",
     "image",
     "tenantId",
