@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Env } from "./index";
+import { pruneReleases } from "./release-prune";
 import { CURRENT_RELEASE_KEY, readRelease } from "./releases";
 
 export const RELEASE_NOTICE_BUDGET_MS = 30_000;
@@ -40,4 +41,5 @@ export const noticeRelease = async (env: Env, bodies: unknown[], now: number): P
       `ReleaseNoticeTimedOut: telling ${hosts.length} Online hosts about release ${releaseVersion} ran past ${RELEASE_NOTICE_BUDGET_MS / 1000} s; each host reads the release at its next Welcome`,
     ),
   ]);
+  await pruneReleases(env.RELEASES, releaseVersion, release.stored, now);
 };

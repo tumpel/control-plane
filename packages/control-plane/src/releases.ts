@@ -26,7 +26,7 @@ export const RELEASE_CACHE_MS = 30_000;
 
 const arch = (architecture: HostArchitecture): string => architecture.toLowerCase();
 
-const imagePrefix = (image: ReleaseImage): string =>
+export const imagePrefix = (image: ReleaseImage): string =>
   `images/${image.harness}/${image.harnessVersion}/${arch(image.architecture)}`;
 
 export const imageKey = (image: ReleaseImage): string => `${imagePrefix(image)}/${image.imageDigest}`;
@@ -36,11 +36,11 @@ export const manifestKey = (image: ReleaseImage): string => `${imagePrefix(image
 export const kernelKey = (image: ReleaseImage | ReleaseBaseImage): string =>
   `kernels/${arch(image.architecture)}/${image.kernelDigest}`;
 
-const basePrefix = (base: ReleaseBaseImage): string => `images/base/${arch(base.architecture)}`;
+export const basePrefix = (base: ReleaseBaseImage): string => `images/base/${arch(base.architecture)}`;
 
 export const rootfsKey = (base: ReleaseBaseImage): string => `${basePrefix(base)}/rootfs/${base.rootfsDigest}`;
 
-const layerPrefix = (layer: ReleaseHarnessLayer): string =>
+export const layerPrefix = (layer: ReleaseHarnessLayer): string =>
   `layers/${layer.harness}/${layer.harnessVersion}/${arch(layer.architecture)}`;
 
 const duplicates = (keys: string[]): string[] => [...new Set(keys.filter((key, index) => keys.indexOf(key) !== index))];
