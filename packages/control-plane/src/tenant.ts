@@ -367,7 +367,7 @@ export class Tenant extends TenantConnectors {
     const sql = this.ctx.storage.sql;
     const sessions = sql
       .exec<{ session_id: string }>(
-        "SELECT session_id FROM sessions WHERE persona_id = ? AND state != 'Failed' ORDER BY created_at, session_id",
+        "SELECT session_id FROM sessions WHERE persona_id = ? AND state NOT IN ('Failed', 'Archived') ORDER BY created_at, session_id",
         personaId,
       )
       .toArray()
