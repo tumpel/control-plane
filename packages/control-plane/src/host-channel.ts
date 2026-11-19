@@ -15,6 +15,7 @@ import {
   type TelemetryBatch,
 } from "./channel/protocol.ts";
 import { migrateDurableObject } from "./durable-migrate";
+import { recordProtocols } from "./host-protocols.ts";
 import { problem } from "./http";
 import type { Env } from "./index";
 import { settingsOf } from "./settings";
@@ -253,9 +254,14 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
-    await this.env.DB.prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?")
-      .bind(welcomed.supervisorVersion, now, hostId)
-      .run();
+    await this.env.DB.batch([
+      this.env.DB.prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?").bind(
+        welcomed.supervisorVersion,
+        now,
+        hostId,
+      ),
+      ...recordProtocols(this.env.DB, hostId, welcomed, now),
+    ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
       hostId,

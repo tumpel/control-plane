@@ -1,6 +1,7 @@
 import { DeployDrainSchema, type ReleaseRolloutSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { sameSecret } from "./crypto";
+import { onlineChannelProtocols } from "./host-protocols.ts";
 import { issues, json, type Problem, problem } from "./http";
 import { bearerOf } from "./identity";
 import type { Env } from "./index";
@@ -79,6 +80,11 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
       ),
     )
   ).flat();
-  const rollout: ReleaseRollout = { deployedCommit: env.DEPLOYED_COMMIT, drained: hosts.length === 0, hosts };
+  const rollout: ReleaseRollout = {
+    deployedCommit: env.DEPLOYED_COMMIT,
+    drained: hosts.length === 0,
+    hosts,
+    channelProtocols: await onlineChannelProtocols(env.DB),
+  };
   return json(rollout);
 };

@@ -1,11 +1,13 @@
 import { ChannelProtocol, CloseCode, StoredHostFrameSchema } from "@tumpel/schemas";
 import {
   accept,
+  type ChannelProtocolReported,
   type ControlEnvelope,
   type ControlMessage,
   type DispatchGrant,
   decodeBase64,
   type Frame,
+  type GuestProtocolAnnounced,
   HELD_SESSIONS_VERSION,
   type Hello,
   HelloVersionSchema,
@@ -16,6 +18,7 @@ import {
   heartbeat,
   helloBytes,
   type LedgerStore,
+  type Parsed,
   type Port,
   type PreparedClaudeSetup,
   type PreparedOffer,
@@ -101,7 +104,15 @@ export interface ControlContext {
 
 export type ControlEvent =
   | { kind: "None" }
-  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string; protocolVersion: number }
+  | {
+      kind: "Welcomed";
+      boxCapacity: number;
+      usage: HostUsage;
+      supervisorVersion: string;
+      protocolVersion: number;
+      channelProtocol: ChannelProtocolReported;
+      guestProtocol: GuestProtocolAnnounced;
+    }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "FirstHeartbeat"; usage: HostUsage; heldSessionIds: string[] }
   | { kind: "Message"; frame: Frame<HostMessage> }
@@ -209,6 +220,41 @@ export const refuseFrame = (port: Port<ControlEnvelope>, seq: number, reason: st
 export const revoke = (context: ControlContext, reason: string): Received =>
   close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked: ${reason}`);
 
+type Announced = Pick<Welcomed, "channelProtocol" | "guestProtocol">;
+
+const announced = (envelope: Hello): Parsed<Announced> => {
+  const channelProtocolOldest = envelope.channelProtocolOldest ?? envelope.protocolVersion;
+  if (channelProtocolOldest > envelope.protocolVersion) {
+    return {
+      ok: false,
+      reason: `Hello names channelProtocolOldest ${channelProtocolOldest} above protocolVersion ${envelope.protocolVersion}; update the supervisor`,
+    };
+  }
+  const channelProtocol: ChannelProtocolReported = {
+    state: "Reported",
+    channelProtocolOldest,
+    channelProtocolVersion: envelope.protocolVersion,
+  };
+  const { guestProtocolOldest, guestProtocolVersion } = envelope;
+  if (guestProtocolOldest === undefined && guestProtocolVersion === undefined) {
+    return { ok: true, value: { channelProtocol, guestProtocol: { state: "NotReported" } } };
+  }
+  if (
+    guestProtocolOldest === undefined ||
+    guestProtocolVersion === undefined ||
+    guestProtocolOldest > guestProtocolVersion
+  ) {
+    return {
+      ok: false,
+      reason: `Hello names guest protocols ${guestProtocolOldest ?? "none"} to ${guestProtocolVersion ?? "none"}, not a range; update the supervisor`,
+    };
+  }
+  return {
+    ok: true,
+    value: { channelProtocol, guestProtocol: { state: "Reported", guestProtocolOldest, guestProtocolVersion } },
+  };
+};
+
 const hello = async (
   connection: { phase: "AwaitingHello"; nonce: string },
   envelope: Hello,
@@ -226,6 +272,8 @@ const hello = async (
     );
   }
   if (context.host.revoked) return revoke(context, "the tenant revoked this host");
+  const ranges = announced(envelope);
+  if (!ranges.ok) return close(context.port, CloseCode.ProtocolError, ranges.reason);
   const ledger = context.ledger.load();
   for (const frame of ledger.unacked) {
     const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
@@ -242,6 +290,7 @@ const hello = async (
       usage: envelope.usage,
       supervisorVersion: envelope.supervisorVersion,
       protocolVersion: envelope.protocolVersion,
+      ...ranges.value,
     },
   };
 };

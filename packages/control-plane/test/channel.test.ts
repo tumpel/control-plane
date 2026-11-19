@@ -7,6 +7,7 @@ import {
   type ControlEnvelope,
   emptyLedger,
   HELD_SESSIONS_VERSION,
+  type Hello,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
@@ -138,7 +139,11 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
         if (received.event.kind === "Message") control.acknowledge(link.context, received.event.frame);
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
+      hello: async (
+        privateKey: KeyObject = keys.privateKey,
+        protocolVersion: number = ChannelProtocol.Version,
+        ranges: Pick<Hello, "channelProtocolOldest" | "guestProtocolOldest" | "guestProtocolVersion"> = {},
+      ) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
@@ -149,6 +154,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
           usage: USAGE,
+          ...ranges,
         });
       },
       oldHello: async () => {
@@ -187,6 +193,12 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       usage: USAGE,
       supervisorVersion: "0.1.0",
       protocolVersion: ChannelProtocol.Version,
+      channelProtocol: {
+        state: "Reported",
+        channelProtocolOldest: ChannelProtocol.Version,
+        channelProtocolVersion: ChannelProtocol.Version,
+      },
+      guestProtocol: { state: "NotReported" },
     },
   ]);
   assert.deepEqual(
@@ -213,6 +225,12 @@ test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () =
     usage: USAGE,
     supervisorVersion: "0.1.0",
     protocolVersion: ChannelProtocol.Oldest,
+    channelProtocol: {
+      state: "Reported",
+      channelProtocolOldest: ChannelProtocol.Oldest,
+      channelProtocolVersion: ChannelProtocol.Oldest,
+    },
+    guestProtocol: { state: "NotReported" },
   });
 });
 
@@ -221,6 +239,46 @@ test("a Hello on ChannelProtocol.Version is welcomed on that version", async () 
   await link.hello(undefined, ChannelProtocol.Version);
   assert.equal(link.connection.phase, "Open");
   assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Version });
+});
+
+test("a Hello that announces its channel and guest protocol ranges is welcomed with both", async () => {
+  const link = setup().connect();
+  await link.hello(undefined, ChannelProtocol.Version, {
+    channelProtocolOldest: ChannelProtocol.Oldest,
+    guestProtocolOldest: 9,
+    guestProtocolVersion: 14,
+  });
+  assert.equal(link.connection.phase, "Open");
+  assert.deepEqual(link.events.at(-1), {
+    kind: "Welcomed",
+    boxCapacity: 8,
+    usage: USAGE,
+    supervisorVersion: "0.1.0",
+    protocolVersion: ChannelProtocol.Version,
+    channelProtocol: {
+      state: "Reported",
+      channelProtocolOldest: ChannelProtocol.Oldest,
+      channelProtocolVersion: ChannelProtocol.Version,
+    },
+    guestProtocol: { state: "Reported", guestProtocolOldest: 9, guestProtocolVersion: 14 },
+  });
+});
+
+test("a Hello whose announced ranges run backwards or name half a guest range is closed as a protocol error", async () => {
+  for (const ranges of [
+    { channelProtocolOldest: ChannelProtocol.Version + 1 },
+    { guestProtocolOldest: 9 },
+    { guestProtocolVersion: 14 },
+    { guestProtocolOldest: 14, guestProtocolVersion: 9 },
+  ]) {
+    const link = setup().connect();
+    await link.hello(undefined, ChannelProtocol.Version, ranges);
+    assert.equal(link.closed?.code, CloseCode.ProtocolError, JSON.stringify(ranges));
+    assert.deepEqual(
+      link.sent.map((envelope) => envelope.type),
+      ["Challenge"],
+    );
+  }
 });
 
 test("a Hello one below ChannelProtocol.Oldest is refused as an unsupported version", async () => {
