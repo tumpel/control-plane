@@ -1589,11 +1589,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
+  protected startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
     return this.begin(tenantId, input, now, () => undefined);
   }
 
-  async startSessionFromIssue(
+  protected async startSessionFromIssue(
     tenantId: string,
     input: NewSession,
     issue: IssueOfSession,
@@ -1700,7 +1700,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  async sendTurn(tenantId: string, sessionId: string, send: TurnSend, hosts: HostRecord[], now: number): Promise<Sent> {
+  protected async sendTurn(
+    tenantId: string,
+    sessionId: string,
+    send: TurnSend,
+    hosts: HostRecord[],
+    now: number,
+  ): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -1870,7 +1876,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async stopSession(tenantId: string, sessionId: string, cancelledBy: string | null, now: number): Promise<Stop> {
+  protected async stopSession(
+    tenantId: string,
+    sessionId: string,
+    cancelledBy: string | null,
+    now: number,
+  ): Promise<Stop> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -1906,7 +1917,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row.channel_protocol;
   }
 
-  async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
+  protected async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (!["Idle", "Stopped", "Failed", "Archived"].includes(session.state)) {
@@ -2071,7 +2082,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  getSession(tenantId: string, sessionId: string): Session | null {
+  protected getSession(tenantId: string, sessionId: string): Session | null {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
@@ -2080,7 +2091,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id));
   }
 
-  listSessions(tenantId: string, filter: SessionFilter): Session[] {
+  protected listSessions(tenantId: string, filter: SessionFilter): Session[] {
     return this.ctx.storage.sql
       .exec<SessionViewRow>(
         `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2)
@@ -2095,7 +2106,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));
   }
 
-  listTurns(tenantId: string, sessionId: string): Turn[] | null {
+  protected listTurns(tenantId: string, sessionId: string): Turn[] | null {
     if (this.sessionRow(sessionId) === null) return null;
     return this.ctx.storage.sql
       .exec<TurnRow>(`${TURN_SELECT} WHERE session_id = ? ORDER BY created_at, turn_id`, sessionId)
@@ -2103,7 +2114,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id)));
   }
 
-  getTurn(tenantId: string, turnId: string): Turn | null {
+  protected getTurn(tenantId: string, turnId: string): Turn | null {
     const row = this.turnRow(turnId);
     return row === null ? null : toTurn(tenantId, row, this.turnImage(turnId));
   }
@@ -2189,7 +2200,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async waitTurns(tenantId: string, turnIds: string[], timeoutSeconds: number): Promise<WaitedTurns> {
+  protected async waitTurns(tenantId: string, turnIds: string[], timeoutSeconds: number): Promise<WaitedTurns> {
     const missing = turnIds.find((turnId) => this.turnRow(turnId) === null);
     if (missing !== undefined) return { kind: "NotFound", turnId: missing };
     const oneEnded = (): boolean => turnIds.some((turnId) => !IN_FLIGHT.includes(this.turnRow(turnId)?.state ?? ""));
@@ -2219,7 +2230,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     for (const wake of this.turnEndWaiters) wake();
   }
 
-  getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {
+  protected getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {
     const [row] = this.ctx.storage.sql
       .exec<FailureRow>(
         "SELECT turn_id, session_id, reason, detail, failed_at, created_at FROM turn_failures WHERE turn_id = ?",
@@ -2238,7 +2249,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  listStopFailures(tenantId: string, sessionId: string): StopFailure[] | null {
+  protected listStopFailures(tenantId: string, sessionId: string): StopFailure[] | null {
     if (this.sessionRow(sessionId) === null) return null;
     return this.ctx.storage.sql
       .exec<StopFailureRow>(
@@ -2259,7 +2270,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
   }
 
-  listSnapshots(tenantId: string, sessionId: string): Snapshot[] | null {
+  protected listSnapshots(tenantId: string, sessionId: string): Snapshot[] | null {
     if (this.sessionRow(sessionId) === null) return null;
     return this.ctx.storage.sql
       .exec<SnapshotRow>(`${SNAPSHOT_SELECT} WHERE session_id = ? ORDER BY snapshot_seq`, sessionId)
@@ -2267,7 +2278,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => toSnapshot(tenantId, row));
   }
 
-  listCredentialHandovers(tenantId: string, sessionId: string): CredentialHandover[] | null {
+  protected listCredentialHandovers(tenantId: string, sessionId: string): CredentialHandover[] | null {
     if (this.sessionRow(sessionId) === null) return null;
     return this.ctx.storage.sql
       .exec<HandoverRow>(
@@ -2282,14 +2293,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => toHandover(tenantId, row));
   }
 
-  getSnapshot(tenantId: string, snapshotId: string): Snapshot | null {
+  protected getSnapshot(tenantId: string, snapshotId: string): Snapshot | null {
     const [row] = this.ctx.storage.sql
       .exec<SnapshotRow>(`${SNAPSHOT_SELECT} WHERE snapshot_id = ?`, snapshotId)
       .toArray();
     return row === undefined ? null : toSnapshot(tenantId, row);
   }
 
-  transcriptCursor(
+  protected transcriptCursor(
     tenantId: string,
     sessionId: string,
     after: number,

@@ -370,6 +370,36 @@ export class Tenant extends TenantConnectors {
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
       read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
     }),
+    startSession: async ({ tenantId, input, now }) => ({ started: await this.startSession(tenantId, input, now) }),
+    startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
+      started: await this.startSessionFromIssue(tenantId, input, issue, now),
+    }),
+    sendTurn: async ({ tenantId, sessionId, send, hosts, now }) => ({
+      sent: await this.sendTurn(tenantId, sessionId, send, hosts, now),
+    }),
+    stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
+      stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
+    }),
+    archiveSession: async ({ tenantId, sessionId, now }) => ({
+      archived: await this.archiveSession(tenantId, sessionId, now),
+    }),
+    getSession: ({ tenantId, sessionId }) => ({ session: this.getSession(tenantId, sessionId) }),
+    listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
+    listTurns: ({ tenantId, sessionId }) => ({ turns: this.listTurns(tenantId, sessionId) }),
+    getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
+    waitTurns: async ({ tenantId, turnIds, timeoutSeconds }) => ({
+      waited: await this.waitTurns(tenantId, turnIds, timeoutSeconds),
+    }),
+    getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
+    listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
+    listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
+    listCredentialHandovers: ({ tenantId, sessionId }) => ({
+      handovers: this.listCredentialHandovers(tenantId, sessionId),
+    }),
+    getSnapshot: ({ tenantId, snapshotId }) => ({ snapshot: this.getSnapshot(tenantId, snapshotId) }),
+    transcriptCursor: ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
+      cursor: this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
+    }),
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

@@ -281,7 +281,7 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
       secretSets: secretSets.secretSets,
       pins: effectiveVersions((await api.call("listPins", {})).pins),
       hosts: await listHosts(env.DB, tenantId),
-      sessions: await env.TENANT.getByName(tenantId).listSessions(tenantId, {}),
+      sessions: (await api.call("listSessions", { tenantId, filter: {} })).sessions,
     },
   };
 };
