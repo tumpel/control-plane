@@ -109,11 +109,12 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
-  withSupervisorUpdates,
+  withReports,
 } from "./hosts";
 import {
   issues,
   json,
+  noContent,
   oauthError,
   type Parsed,
   parseBody,
@@ -404,8 +405,6 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
 };
 
-const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
-
 const personaNotFound = (personaId: string): Response =>
   problem(404, {
     code: "NotFound",
@@ -614,7 +613,7 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
       code: "Conflict",
       title: "Persona in use",
       detail: `persona ${personaId} is still used by session ${deleted.sessions.join(", ")}, which is neither Failed nor Archived`,
-      fix: "Archive those sessions, then delete the persona again",
+      fix: "Archive or delete those sessions, then delete the persona again",
     });
   }
   if (request.method === "POST") {
@@ -1006,7 +1005,7 @@ const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Respo
 const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await withSupervisorUpdates(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
+  return json(await withReports(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
 };
 
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -1130,7 +1129,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
     if (!body.ok) return body.response;
     const labelled = await setHostLabels(env.DB, caller.tenantId, hostId, body.value.labels, Date.now());
     if (!labelled.ok) return refusal(labelled);
-    const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+    const [host] = await withReports(env, caller.tenantId, [labelled.value]);
     return json(host);
   }
   if (revoking) {
@@ -1139,7 +1138,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
   if (host === null) return refusal(hostNotFound(hostId));
-  const [withUpdates] = await withSupervisorUpdates(env, caller.tenantId, [host]);
+  const [withUpdates] = await withReports(env, caller.tenantId, [host]);
   return json(withUpdates);
 };
 
@@ -1154,7 +1153,7 @@ const handleHostLabelsPatch = async (request: Request, url: URL, env: Env): Prom
   if (!body.ok) return body.response;
   const labelled = await patchHostLabels(env.DB, caller.tenantId, decodeURIComponent(matched), body.value, Date.now());
   if (!labelled.ok) return refusal(labelled);
-  const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+  const [host] = await withReports(env, caller.tenantId, [labelled.value]);
   return json(host);
 };
 

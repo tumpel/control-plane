@@ -472,6 +472,7 @@ const connectorToken = async (tenantId: string, email: string): Promise<string> 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
+const SHARED = '{"model":"shared"}';
 const GITHUB_USER = { id: 4242, login: "ticket-worker" };
 const PREBUILT_HEAD = "5".repeat(40);
 const PREBUILT_TREE = "6".repeat(40);
@@ -661,7 +662,7 @@ const tenant = async () => {
     const personas = await getJson("/v1/personas", PersonaSchema.array());
     return {
       repository: "https://github.com/acme/app.git",
-      model: "claude-sonnet-test",
+      model: "claude-sonnet-5-5",
       personaId: personas.find((persona) => persona.name === name)?.personaId,
     };
   };
@@ -895,6 +896,23 @@ test("a start against a current.json of the previous shape is refused ImageNotRe
   assert.equal(problem.code, "ImageNotReleased");
   assert.match(problem.detail, /the published release is unreadable: current\.json .* bases/);
   assert.equal(problem.fix, "Ask the operator to publish a release with the release workflow, then start again");
+});
+
+test("a start naming a model the harness does not run is refused ModelUnsupported and places no session", async () => {
+  const { bearer, getJson, sessionStart } = await tenant();
+  const refusal = await postJson(
+    "/v1/sessions",
+    { ...(await sessionStart()), model: "gpt-5-codex", prompt: "wrong model" },
+    bearer,
+  );
+  assert.equal(refusal.status, 422);
+  const problem = ProblemSchema.parse(await refusal.json());
+  assert.equal(problem.code, "ModelUnsupported");
+  assert.match(
+    problem.detail,
+    /^ClaudeCode does not run model gpt-5-codex with ApiKey ANTHROPIC of .*; it runs opus, .*claude-sonnet-5-5/,
+  );
+  assert.deepEqual(await getJson("/v1/sessions", SessionSchema.array()), []);
 });
 
 test("a deploy drain refuses new sessions and turns DeployInProgress and counts each host's running turns until they end", async () => {
@@ -1493,6 +1511,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(started.status, 200, await started.clone().text());
     assert.equal(ClaudeSetupSchema.parse(await started.json()).harness, "Codex");
     const offer = await host.next("ClaudeSetupBoxOffer");
+    assert.equal(offer.harness, "Codex");
     assert.equal(offer.harnessVersion, CODEX_VERSION);
     const { claudeSetupId } = offer;
     const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
@@ -1549,7 +1568,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const { personaId } = PersonaSchema.parse(await persona.json());
     await tool(
       "tumpel_session_start",
-      { repository: "https://github.com/acme/app.git", model: "gpt-test", personaId, prompt: "refresh" },
+      { repository: "https://github.com/acme/app.git", model: "gpt-5.6-sol", personaId, prompt: "refresh" },
       StartedSessionSchema,
     );
     const turn = await host.next("TurnOffer");
@@ -1653,8 +1672,8 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(ProblemSchema.parse(await late.json()).code, "ClaudeSetupNotWaiting");
   });
 
-  test("a stop frees an idle session's box once a snapshot holds its last turn, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and frees its persona for delete", async () => {
-    const { github, host, refused, tool, readAll, sessionStart, createPersona, deletePersona } = await tenant();
+  test("a stop frees an idle session's box once a snapshot holds its last turn, and an archive deletes its snapshots, keeps its transcript and refuses later sends", async () => {
+    const { github, host, refused, tool, readAll, sessionStart, createPersona } = await tenant();
     await createPersona("Archivable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
       { kind: "Variable", name: "GITHUB_TOKEN", value: github },
@@ -1716,19 +1735,8 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Stopped",
     );
 
-    const inUse = await deletePersona(start.personaId ?? "");
-    assert.equal(inUse.status, 409);
-    assert.match(
-      ProblemSchema.parse(await inUse.json()).detail,
-      new RegExp(
-        `persona ${start.personaId} is still used by session ${sessionId}, which is neither Failed nor Archived$`,
-      ),
-    );
-
     const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
     assert.equal(archived.state, "Archived");
-    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
-    assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).personaId, start.personaId);
     assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
     assert.equal(await store.text(request.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
@@ -2708,6 +2716,62 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual((await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema)).lastTurn, read);
   });
 
+  test("a turn the host times out ends on the host's report, not the control plane's deadline, and the next turn runs in its box from its snapshot", async () => {
+    const { bearer, host, getJson, tool, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "a long job" }, bearer);
+    assert.equal(response.status, 200);
+    const { session } = StartedSessionSchema.parse(await response.json());
+    const { sessionId } = session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, turnId);
+    const ready = Date.now();
+    host.send({ type: "TurnRepositoryReady", turnId });
+    const hostLimit = ready + SETTINGS.turnTotalBudgetSeconds * 1000;
+    await until(
+      "the whole-turn deadline past the host's own turn limit",
+      () => storedTimers(sessionId),
+      (timers) =>
+        z.object({ at: z.number() }).parse(timers?.deadlines.Total).at >=
+        hostLimit + SETTINGS.heartbeatDeadlineSeconds * 1000,
+    );
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"assistant"}' });
+    host.send({
+      type: "TurnFailed",
+      turnId,
+      reason: "TurnTimedOut",
+      detail: `turn ${turnId} ran past its 3600 s budget (budgets.turnSeconds in runtime.json).`,
+      failedAt: new Date().toISOString(),
+    });
+
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "TurnTimedOut");
+    assert.equal(
+      failure.detail,
+      `turn ${turnId} ran past its 3600 s budget (budgets.turnSeconds in runtime.json). The session keeps the turn's files and the harness's conversation, so send another turn on it to continue where this one stopped`,
+    );
+    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Idle");
+    const request = await host.next("SnapshotRequest");
+    assert.deepEqual({ turnId: request.turnId, boxId: request.boxId }, { turnId, boxId: offer.boxId });
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+    await until(
+      "a stored snapshot",
+      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+      (snapshots) => snapshots.length === 1,
+    );
+
+    await tool("tumpel_turn_send", { sessionId, prompt: "continue" }, TurnSchema);
+    const next = await host.next("TurnOffer");
+    assert.equal(next.boxId, offer.boxId);
+    assert.equal(next.lastLineSeq, 1);
+    assert.deepEqual(
+      next.snapshots.map((snapshot) => snapshot.snapshotId),
+      [request.snapshotId],
+    );
+  });
+
   test("a turn wait over MCP answers when the first of several turns ends, with every turn's state and a failed turn's reason", async () => {
     const { host, tool, toolRefusal, sessionStart } = await tenant();
     const running = await tool(
@@ -3011,6 +3075,91 @@ suite("sessions", { concurrency: 8 }, () => {
     for (const sessionId of failed) {
       assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
     }
+  });
+
+  test("a session delete removes its rows, transcript chunks, snapshot and timers, and a persona delete keeps a file another persona holds", async () => {
+    const { github, bearer, host, refused, getJson, tool, sessionStart, createPersona, deletePersona } = await tenant();
+    const secrets = [
+      { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+      { kind: "Variable", name: "GITHUB_TOKEN", value: github },
+    ];
+    const notes = { source: "Inline", path: ".claude/settings.json", content: Buffer.from(SHARED).toString("base64") };
+    await createPersona("Deletable", secrets, [notes]);
+    await createPersona("Sharer", secrets, [notes]);
+    const start = await sessionStart("Deletable");
+    const started = await tool("tumpel_session_start", { ...start, prompt: "delete me" }, StartedSessionSchema);
+    const { sessionId, tenantId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const running = await refused(`/v1/sessions/${sessionId}`, { method: "DELETE" });
+    assert.equal(running.code, "SessionNotStopped");
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "a stored snapshot",
+      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+      (snapshots) => snapshots.length === 1,
+    );
+    const transcripts = await until(
+      "a stored transcript chunk",
+      async () =>
+        z
+          .object({ storage_key: z.string() })
+          .array()
+          .parse(await tenantSql(tenantId, "SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId))
+          .map((row) => row.storage_key),
+      (keys) => keys.length > 0,
+    );
+    const inUse = await deletePersona(start.personaId ?? "");
+    assert.equal(inUse.status, 409);
+    assert.equal(
+      ProblemSchema.parse(await inUse.json()).detail,
+      `persona ${start.personaId} is still used by session ${sessionId}, which is neither Failed nor Archived`,
+    );
+
+    const deleted = await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer });
+    assert.equal(deleted.status, 204, await deleted.text());
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
+    assert.equal((await call(`/v1/sessions/${sessionId}`, { headers: bearer })).status, 404);
+    assert.equal((await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer })).status, 404);
+    for (const key of [snapshot.storageKey, ...transcripts]) assert.equal(await store.text(key), null, key);
+    assert.equal(await storedTimers(sessionId), null);
+    const columns = z
+      .object({ tbl: z.string(), col: z.enum(["session_id", "turn_id"]) })
+      .array()
+      .parse(
+        await tenantSql(
+          tenantId,
+          "SELECT m.name AS tbl, p.name AS col FROM sqlite_master AS m JOIN pragma_table_info(m.name) AS p WHERE m.type = 'table' AND p.name IN ('session_id', 'turn_id')",
+        ),
+      );
+    assert.ok(columns.length > 20);
+    for (const { tbl, col } of columns) {
+      const rows = await tenantSql(
+        tenantId,
+        `SELECT 1 FROM ${tbl} WHERE ${col} = ?`,
+        col === "session_id" ? sessionId : turnId,
+      );
+      assert.deepEqual(rows, [], `${tbl}.${col}`);
+    }
+    assert.deepEqual(await tenantSql(tenantId, "SELECT 1 FROM events WHERE instr(payload, ?) > 0", sessionId), []);
+
+    const digest = createHash("sha256").update(SHARED).digest("hex");
+    const fileKey = `${tenantId}/persona-files/${digest}`;
+    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+    assert.equal(await store.text(fileKey), SHARED);
+    const sharer = (await getJson("/v1/personas", PersonaSchema.array())).find((persona) => persona.name === "Sharer");
+    assert.equal((await deletePersona(sharer?.personaId ?? "")).status, 204);
+    assert.equal(await store.text(fileKey), null);
   });
 
   test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {
@@ -3499,7 +3648,7 @@ suite("sessions", { concurrency: 8 }, () => {
         "/v1/sessions",
         {
           repository: "https://github.com/acme/app.git",
-          model: "claude-sonnet-test",
+          model: "claude-sonnet-5-5",
           personaId: persona.personaId,
           prompt: "build every repo",
         },
@@ -4309,7 +4458,7 @@ test("a newer prebuild archives the older one only once no session still restore
   assert.notEqual(await store.text(newer.request.storageKey), null);
 });
 
-test("archiving the current prebuild by hand keeps its root until the session restoring from it stores its own snapshot", async () => {
+test("deleting the session that built the current prebuild keeps its layer, and the next session restores it", async () => {
   const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
   await installPrebuiltApp(tenantId);
   const { personaId } = await sessionStart();
@@ -4324,7 +4473,7 @@ test("archiving the current prebuild by hand keeps its root until the session re
   host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
-  await storeRoot(request.storageKey);
+  const root = await storeRoot(request.storageKey);
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   const teardown = await host.next("BoxTeardown");
   host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
@@ -4334,6 +4483,15 @@ test("archiving the current prebuild by hand keeps its root until the session re
     (read) => read.status.state === "Done",
   );
 
+  const deleted = await call(`/v1/sessions/${offer.sessionId}`, { method: "DELETE", headers: bearer });
+  assert.equal(deleted.status, 204, await deleted.text());
+  assert.equal((await call(`/v1/sessions/${offer.sessionId}`, { headers: bearer })).status, 404);
+  assert.deepEqual(
+    await tenantSql(tenantId, "SELECT 1 FROM prebuild_sessions WHERE session_id = ?", offer.sessionId),
+    [],
+  );
+  assert.notEqual(await store.text(request.storageKey), null);
+
   const next = await postJson("/v1/sessions", { ...(await sessionStart()), repository, prompt: "restore it" }, bearer);
   assert.equal(next.status, 200, await next.clone().text());
   const consumer = await host.next("TurnOffer");
@@ -4341,23 +4499,11 @@ test("archiving the current prebuild by hand keeps its root until the session re
     consumer.snapshots.map((snapshot) => snapshot.snapshotId),
     [request.snapshotId],
   );
-  const archived = await postJson(`/v1/sessions/${offer.sessionId}/archive`, {}, bearer);
-  assert.equal(archived.status, 200, await archived.clone().text());
-  assert.equal(SessionSchema.parse(await archived.json()).state, "Archived");
-  assert.notEqual(await store.text(request.storageKey), null);
-
-  host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
-  await host.next("TurnClaimed");
-  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
-  host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-  const own = await host.next("SnapshotRequest");
-  await storeRoot(own.storageKey);
-  host.send({ type: "SnapshotDone", snapshotId: own.snapshotId, uploadedBytes: 14 });
-  await until(
-    "the archived prebuild's root deleted",
-    () => store.text(request.storageKey),
-    (text) => text === null,
-  );
+  assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, {
+    layer: "Prebuild",
+    prebuildId: started.prebuildId,
+    layerDigest: createHash("sha256").update(root).digest("hex"),
+  });
 });
 
 test("a prebuild whose snapshot fails reads Failed and its box is discarded over the channel the failure came in on", async () => {

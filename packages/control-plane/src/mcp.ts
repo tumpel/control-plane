@@ -131,6 +131,7 @@ const DONE: Record<string, string> = {
   tumpel_host_revoke_token: "Enrolment token revoked",
   tumpel_harness_unpin: "Pin removed",
   tumpel_persona_delete: "Persona deleted",
+  tumpel_session_delete: "Session deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
   tumpel_github_actions_delete: "GitHub Actions disconnected",
@@ -338,7 +339,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/harnesses",
     NO_ARGUMENTS,
-    "List the harness catalog: every harness and version a tenant can pin.",
+    "List the harness catalog: every harness and version a tenant can pin, and for each credential it accepts, its modelSupport: Listed with the models it runs with that credential, or ProviderChecked when it takes any model its provider serves.",
   ),
   rest(
     "tumpel_harness_list_pins",
@@ -416,7 +417,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona; refused while any session of the persona is neither Failed nor Archived. Archived sessions stay readable.",
+    "Delete a persona and its files; a file another persona holds stays. Refused while any session of the persona is neither Failed nor Archived, naming those sessions. Archived sessions stay readable.",
   ),
   {
     name: "tumpel_secret_set_create",
@@ -837,7 +838,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema.extend({ repository: SessionStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
+    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. A model that tumpel_harness_list does not list for the credential the turn uses is refused ModelUnsupported, before any box boots. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
   ),
   rest(
     "tumpel_session_start_from_issue",
@@ -874,6 +875,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/sessions/{sessionId}/archive",
     SessionPathSchema,
     "Archive an Idle, Stopped or Failed session: discard an Idle session's box without a snapshot, delete its snapshots, keep its transcript readable and refuse every later send. Final; archiving an Archived session returns it as it is. Refused while a turn runs or the session stops, and while an Idle session's host is offline. Returns the archived session.",
+  ),
+  rest(
+    "tumpel_session_delete",
+    "DELETE",
+    "/v1/sessions/{sessionId}",
+    SessionPathSchema,
+    "Delete an Idle, Stopped, Failed or Archived session and everything stored for it: its turns, transcript and snapshots; a snapshot chunk another session holds stays. A prebuild keeps the layer the session built. Refused as tumpel_session_archive is.",
   ),
   rest(
     "tumpel_session_stop_failures",

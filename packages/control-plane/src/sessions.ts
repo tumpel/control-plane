@@ -22,7 +22,7 @@ import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
-import { issues, json, parseBody, problem } from "./http.ts";
+import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { Unplaceable } from "./placement.ts";
@@ -527,12 +527,29 @@ export const archiveSession = async (
   const { archived } = await tenant.call("archiveSession", { tenantId: caller.tenantId, sessionId, now });
   if (archived.kind === "Archived") return ok(archived.session);
   if (archived.kind === "NotFound") return sessionNotFound(sessionId);
-  return refuse(409, {
+  return sessionNotStopped(sessionId, archived.state, "archive");
+};
+
+const sessionNotStopped = (sessionId: string, state: Session["state"], verb: "archive" | "delete"): Refused =>
+  refuse(409, {
     code: "SessionNotStopped",
     title: "Session not stopped",
-    detail: `session ${sessionId} is ${archived.state}, and only an Idle, Stopped or Failed session can be archived`,
-    fix: `Wait until session ${sessionId} reads Idle or Stopped, then archive again`,
+    detail: `session ${sessionId} is ${state}, and only an Idle, Stopped, Failed or Archived session can be ${verb}d`,
+    fix: `Wait until session ${sessionId} reads Idle or Stopped, then ${verb} again`,
   });
+
+export const deleteSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<null>> => {
+  const tenant = tenantOf(env, caller);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
+  if (session === null) return sessionNotFound(sessionId);
+  if (session.state === "Idle") {
+    const offline = await hostOffline(env, caller, session, "delete the session again");
+    if (offline !== null) return offline;
+  }
+  const { deleted } = await tenant.call("deleteSession", { tenantId: caller.tenantId, sessionId });
+  if (deleted.kind === "Deleted") return ok(null);
+  if (deleted.kind === "NotFound") return sessionNotFound(sessionId);
+  return sessionNotStopped(sessionId, deleted.state, "delete");
 };
 
 export const listTurns = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Turn[]>> => {
@@ -805,6 +822,7 @@ const SESSION_PATH =
   /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop-failures|\/stop|\/archive)?$/;
 const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers", "/stop-failures"];
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
+const SESSION_DELETES = [""];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel|\/steers)?$/;
 const TURN_WAIT_PATH = "/v1/turns/wait";
@@ -834,6 +852,10 @@ const sessionRoute = async (
     return answer(await stopSession(env, caller, sessionId, query.data, Date.now()));
   }
   if (action === "/archive") return answer(await archiveSession(env, caller, sessionId, Date.now()));
+  if (request.method === "DELETE") {
+    const deleted = await deleteSession(env, caller, sessionId);
+    return deleted.ok ? noContent() : problem(deleted.status, deleted.problem);
+  }
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
   if (action === "/snapshots") return answer(await listSnapshots(env, caller, sessionId));
   if (action === "/credential-handovers") return answer(await listCredentialHandovers(env, caller, sessionId));
@@ -861,7 +883,14 @@ export const handleSessions = async (
     (pathname === FROM_ISSUE_PATH && posting) ||
     (pathname === "/v1/sessions" && (posting || request.method === "GET")) ||
     (session !== null &&
-      (posting ? SESSION_POSTS : request.method === "GET" ? SESSION_GETS : []).includes(session[2] ?? "")) ||
+      (posting
+        ? SESSION_POSTS
+        : request.method === "GET"
+          ? SESSION_GETS
+          : request.method === "DELETE"
+            ? SESSION_DELETES
+            : []
+      ).includes(session[2] ?? "")) ||
     (turn !== null &&
       (posting ? turn[2] === "/cancel" || turn[2] === "/steers" : request.method === "GET" && turn[2] !== "/cancel")) ||
     (snapshot !== null && request.method === "GET");

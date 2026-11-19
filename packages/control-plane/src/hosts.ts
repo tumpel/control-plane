@@ -8,6 +8,7 @@ import {
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
+import { NO_PROTOCOLS, protocolsOf } from "./host-protocols.ts";
 import { type HostRecord, HostRecordSchema } from "./host-record";
 import type { Problem, ProblemStatus } from "./http";
 import type { Caller } from "./identity";
@@ -59,11 +60,6 @@ const toHost = (row: HostRow): HostRecord =>
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
-
-const NOT_REPORTED: Pick<Host, "channelProtocol" | "guestProtocol"> = {
-  channelProtocol: { state: "NotReported" },
-  guestProtocol: { state: "NotReported" },
-};
 
 const mintFix = "Mint a new enrolment token and enrol with it";
 
@@ -220,7 +216,7 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   if (!inserted?.meta.changes) return spent;
   const host = await hostOf(env.DB, token.tenant_id, hostId);
   if (host === null) throw new Error(`host ${hostId} was enrolled and then not found`);
-  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NOT_REPORTED } };
+  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
 };
 
 export const listHosts = async (db: D1Database, tenantId: string): Promise<HostRecord[]> => {
@@ -239,11 +235,15 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
   return row === null ? null : toHost(row);
 };
 
-export const withSupervisorUpdates = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
-  const { byHost: updates } = await tenantApi(env.TENANT, tenantId).call("supervisorUpdates", {
-    hostIds: hosts.map((host) => host.hostId),
-  });
-  return hosts.map((host) => ({ ...host, ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES), ...NOT_REPORTED }));
+export const withReports = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
+  const hostIds = hosts.map((host) => host.hostId);
+  const { byHost: updates } = await tenantApi(env.TENANT, tenantId).call("supervisorUpdates", { hostIds });
+  const protocols = await protocolsOf(env.DB, hostIds);
+  return hosts.map((host) => ({
+    ...host,
+    ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES),
+    ...(protocols[host.hostId] ?? NO_PROTOCOLS),
+  }));
 };
 
 export const hostNotFound = (hostId: string): Refused =>
@@ -262,7 +262,8 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
     .run();
   await tenantApi(env.TENANT, tenantId).call("forgetHostUsage", { hostId });
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
-  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NOT_REPORTED, state: "Revoked", updatedAt: now } };
+  const protocols = (await protocolsOf(env.DB, [hostId]))[hostId] ?? NO_PROTOCOLS;
+  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...protocols, state: "Revoked", updatedAt: now } };
 };
 
 const hostRevoked = (hostId: string): Refused =>
