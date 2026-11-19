@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   EffectiveHarnessVersionSchema,
-  HostSchema,
   PersonaFileLimit,
   SecretSetSchema,
   SessionSchema,
@@ -11,6 +10,7 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { type Desired, type Live, type Planned, planOf, type SentFile, type Step } from "../src/configs.ts";
+import { HostRecordSchema } from "../src/host-record.ts";
 import { StoredPersonaSchema } from "../src/persona-files.ts";
 
 type TenantConfig = z.infer<typeof TenantConfigSchema>;
@@ -72,7 +72,7 @@ const liveSecretSet = (secretSetId: string, name: string, keys: string[]) =>
   });
 
 const liveHost = (hostId: string, state: string, labels: string[]) =>
-  HostSchema.parse({
+  HostRecordSchema.parse({
     hostId,
     tenantId: "t1",
     name: hostId,
@@ -83,8 +83,6 @@ const liveHost = (hostId: string, state: string, labels: string[]) =>
     publicKey: "key",
     supervisorVersion: "0.1.0",
     labels,
-    supervisorUpdateStep: { state: "NotReported" },
-    supervisorUpdateFailure: { state: "NotReported" },
     createdAt: 1,
     updatedAt: 1,
   });

@@ -2,8 +2,10 @@ import {
   ControlEnvelopeSchema,
   type ControlFrameSchema,
   HelloSchema,
+  type HostChannelProtocolReportedSchema,
   HostEnvelopeSchema,
   HostFrameSchema,
+  type HostGuestProtocolSchema,
   HostHeartbeatSchema,
   type HostUsageSchema,
 } from "@tumpel/schemas";
@@ -28,6 +30,8 @@ export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
 export const reportsHeldSessions = (heartbeat: Omit<HostHeartbeat, "heldSessionIds">): heartbeat is HostHeartbeat =>
   "heldSessionIds" in heartbeat;
 export type HostUsage = z.infer<typeof HostUsageSchema>;
+export type ChannelProtocolReported = z.infer<typeof HostChannelProtocolReportedSchema>;
+export type GuestProtocolAnnounced = z.infer<typeof HostGuestProtocolSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];
