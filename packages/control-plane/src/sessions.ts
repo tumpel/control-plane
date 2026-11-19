@@ -231,13 +231,12 @@ const prepareStart = async (
 ): Promise<Outcome<NewSession>> => {
   const target = githubRepository(start.repository);
   if (target === null) return refuse(422, notARepository(start.repository));
-  const tenant = tenantOf(env, caller);
   const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
     tenantId: caller.tenantId,
     personaId: start.personaId,
   });
   if (persona === null) return personaNotFound(start.personaId);
-  const entry = pinnedEntry(await tenant.listPins(), persona.harness);
+  const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, persona.harness);
   if (entry === undefined) {
     return refuse(422, {
       code: "HarnessNotInCatalog",
@@ -246,7 +245,10 @@ const prepareStart = async (
       fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
     });
   }
-  const read = await tenant.getSecretSet(caller.tenantId, persona.secretSetId);
+  const { read } = await tenantApi(env.TENANT, caller.tenantId).call("getSecretSet", {
+    tenantId: caller.tenantId,
+    secretSetId: persona.secretSetId,
+  });
   if (read.kind === "NotFound") {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }

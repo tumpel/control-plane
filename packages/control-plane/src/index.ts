@@ -307,7 +307,9 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
   if (!body.ok) return body.response;
   const now = Date.now();
   const { whoami, created } = await signUp(env.DB, signed.email, body.value.name, now);
-  if (created) await env.TENANT.getByName(whoami.tenant.tenantId).open(whoami.tenant.tenantId, now);
+  if (created) {
+    await tenantApi(env.TENANT, whoami.tenant.tenantId).call("open", { tenantId: whoami.tenant.tenantId, now });
+  }
   return json(WhoamiSchema.parse(whoami));
 };
 
@@ -500,7 +502,10 @@ const personaWrite = async (
       }),
     };
   }
-  const read = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
+  const { read } = await tenantApi(env.TENANT, caller.tenantId).call("getSecretSet", {
+    tenantId: caller.tenantId,
+    secretSetId: body.secretSetId,
+  });
   if (read.kind === "NotFound") return { ok: false, response: unknownSecretSet(body.secretSetId) };
   if (read.kind === "Unreadable") return { ok: false, response: unreadable(operation, read) };
   const stored = await personaFiles(
@@ -511,7 +516,7 @@ const personaWrite = async (
       files: body.files ?? [],
       secretSetName: read.secretSet.name,
       members: read.secretSet.keys,
-      pins: await tenant.listPins(),
+      pins: (await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins,
       newSecretSet,
     },
     operation,
@@ -625,7 +630,7 @@ const handlePersonaFileUpload = async (request: Request, _url: URL, env: Env): P
 const handleSecretSetsList = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const read = await env.TENANT.getByName(caller.tenantId).listSecretSets(caller.tenantId);
+  const { read } = await tenantApi(env.TENANT, caller.tenantId).call("listSecretSets", { tenantId: caller.tenantId });
   if (read.kind === "Unreadable") return unreadable("secretSets.list", read);
   return json(SecretSetSchema.array().parse(read.secretSets));
 };
@@ -639,12 +644,12 @@ const handleSecretSetCreate = async (request: Request, _url: URL, env: Env): Pro
   if (mismatch !== null) return problem(422, mismatch);
   const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.create");
   if (!githubUser.ok) return githubUser.response;
-  const created = await env.TENANT.getByName(caller.tenantId).createSecretSet(
-    caller.tenantId,
-    body.value,
-    githubUser.user,
-    Date.now(),
-  );
+  const { written: created } = await tenantApi(env.TENANT, caller.tenantId).call("createSecretSet", {
+    tenantId: caller.tenantId,
+    secretSet: body.value,
+    githubUser: githubUser.user,
+    now: Date.now(),
+  });
   if (!created.ok) return conflict("secretSets.create", body.value.name, created.constraint);
   return json(SecretSetSchema.parse(created.value));
 };
@@ -660,9 +665,9 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
   const path = SecretSetPathSchema.safeParse({ secretSetId: raw });
   if (!path.success) return secretSetNotFound(raw);
   const { secretSetId } = path.data;
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   if (request.method === "DELETE") {
-    const deleted = await tenant.deleteSecretSet(secretSetId);
+    const { deleted } = await tenant.call("deleteSecretSet", { secretSetId });
     if (deleted.kind === "Deleted") return noContent();
     if (deleted.kind === "NotFound") return secretSetNotFound(secretSetId);
     return problem(409, {
@@ -679,7 +684,13 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
     if (mismatch !== null) return problem(422, mismatch);
     const githubUser = await repositoryTokenUser(env, body.value.secrets, "secretSets.update");
     if (!githubUser.ok) return githubUser.response;
-    const updated = await tenant.updateSecretSet(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
+    const { updated } = await tenant.call("updateSecretSet", {
+      tenantId: caller.tenantId,
+      secretSetId,
+      change: body.value,
+      githubUser: githubUser.user,
+      now: Date.now(),
+    });
     if (updated.kind === "Updated") return json(SecretSetSchema.parse(updated.secretSet));
     if (updated.kind === "SetNotFound") return secretSetNotFound(secretSetId);
     if (updated.kind === "Conflict") return conflict("secretSets.update", body.value.name, updated.constraint);
@@ -698,7 +709,7 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
       fix: `Enter the value of ${REPOSITORY_TOKEN}`,
     });
   }
-  const read = await tenant.getSecretSet(caller.tenantId, secretSetId);
+  const { read } = await tenant.call("getSecretSet", { tenantId: caller.tenantId, secretSetId });
   if (read.kind === "NotFound") return secretSetNotFound(secretSetId);
   if (read.kind === "Unreadable") return unreadable("secretSets.get", read);
   return json(SecretSetSchema.parse(read.secretSet));
@@ -718,7 +729,7 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
   const secretSetPath = SecretSetPathSchema.safeParse({ secretSetId: decodeURIComponent(rawSet) });
   if (!secretSetPath.success) return secretSetNotFound(decodeURIComponent(rawSet));
   const { secretSetId } = secretSetPath.data;
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   if (setting) {
     const body = await parseBody(request, SecretValueSchema, "secretSets.setMember");
     if (!body.ok) return body.response;
@@ -726,7 +737,13 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
     if (mismatch !== null) return problem(422, mismatch);
     const githubUser = await repositoryTokenUser(env, [body.value], "secretSets.setMember");
     if (!githubUser.ok) return githubUser.response;
-    const written = await tenant.setSecretMember(caller.tenantId, secretSetId, body.value, githubUser.user, Date.now());
+    const { set: written } = await tenant.call("setSecretMember", {
+      tenantId: caller.tenantId,
+      secretSetId,
+      member: body.value,
+      githubUser: githubUser.user,
+      now: Date.now(),
+    });
     if (written.kind === "Conflict") return conflict("secretSets.setMember", secretSetId, written.constraint);
     if (written.kind === "SetNotFound") return secretSetNotFound(secretSetId);
     if (written.kind === "Unreadable") return unreadable("secretSets.setMember", written);
@@ -735,7 +752,14 @@ const handleSecretMember = async (request: Request, url: URL, env: Env): Promise
   const name = decodeURIComponent(rawName ?? "");
   const memberPath = SecretMemberPathSchema.safeParse({ secretSetId, name });
   const removed = memberPath.success
-    ? await tenant.removeSecretMember(caller.tenantId, secretSetId, memberPath.data.name, Date.now())
+    ? (
+        await tenant.call("removeSecretMember", {
+          tenantId: caller.tenantId,
+          secretSetId,
+          name: memberPath.data.name,
+          now: Date.now(),
+        })
+      ).removed
     : { kind: "MemberNotFound" as const };
   if (removed.kind === "Removed") return json(SecretSetSchema.parse(removed.secretSet));
   if (removed.kind === "SetNotFound") return secretSetNotFound(secretSetId);
@@ -757,7 +781,7 @@ const handleHarnessCatalog = async (request: Request, _url: URL, env: Env): Prom
 const handlePinsList = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const pins = await env.TENANT.getByName(caller.tenantId).listPins();
+  const pins = (await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins;
   return json(EffectiveHarnessVersionSchema.array().parse(effectiveVersions(pins)));
 };
 
@@ -768,7 +792,10 @@ const handlePin = async (request: Request, _url: URL, env: Env): Promise<Respons
   if (!body.ok) return body.response;
   const refused = await pinRefusal(env, caller.tenantId, body.value);
   if (refused !== null) return refused;
-  const pinned = await env.TENANT.getByName(caller.tenantId).pin(body.value, Date.now());
+  const { pin: pinned } = await tenantApi(env.TENANT, caller.tenantId).call("pin", {
+    pin: body.value,
+    now: Date.now(),
+  });
   return json(HarnessPinSchema.parse(pinned));
 };
 
@@ -781,7 +808,9 @@ const handleUnpin = async (request: Request, url: URL, env: Env): Promise<Respon
   if (caller instanceof Response) return caller;
   const raw = decodeURIComponent(matched);
   const path = HarnessPathSchema.safeParse({ harness: raw });
-  const unpinned = path.success && (await env.TENANT.getByName(caller.tenantId).unpin(path.data.harness));
+  const unpinned =
+    path.success &&
+    (await tenantApi(env.TENANT, caller.tenantId).call("unpin", { harness: path.data.harness })).unpinned;
   if (unpinned) return noContent();
   return problem(404, {
     code: "NotFound",
@@ -1031,7 +1060,7 @@ const signerMemberships = async (
     const now = Date.now();
     const proof = await proofCaller(env.DB, signed.commonName, url.hostname, now);
     if (proof.created) {
-      await env.TENANT.getByName(proof.caller.tenantId).open(proof.caller.tenantId, now);
+      await tenantApi(env.TENANT, proof.caller.tenantId).call("open", { tenantId: proof.caller.tenantId, now });
     }
     return [await whoamiOf(env.DB, proof.caller)];
   }

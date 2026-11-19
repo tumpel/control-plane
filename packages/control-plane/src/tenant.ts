@@ -188,13 +188,41 @@ export class Tenant extends TenantConnectors {
       written: this.updatePersona(tenantId, personaId, persona, now),
     }),
     deletePersona: ({ tenantId, personaId }) => ({ deleted: this.deletePersona(tenantId, personaId) }),
+    open: ({ tenantId, now }) => {
+      this.open(tenantId, now);
+      return {};
+    },
+    supervisorUpdate: ({ hostId, message }) => {
+      this.supervisorUpdate(hostId, message);
+      return {};
+    },
+    supervisorUpdates: ({ hostIds }) => ({ byHost: this.supervisorUpdates(hostIds) }),
+    listSecretSets: ({ tenantId }) => ({ read: this.listSecretSets(tenantId) }),
+    getSecretSet: ({ tenantId, secretSetId }) => ({ read: this.getSecretSet(tenantId, secretSetId) }),
+    createSecretSet: async ({ tenantId, secretSet, githubUser, now }) => ({
+      written: await this.createSecretSet(tenantId, secretSet, githubUser, now),
+    }),
+    updateSecretSet: async ({ tenantId, secretSetId, change, githubUser, now }) => ({
+      updated: await this.updateSecretSet(tenantId, secretSetId, change, githubUser, now),
+    }),
+    setSecretMember: async ({ tenantId, secretSetId, member, githubUser, now }) => ({
+      set: await this.setSecretMember(tenantId, secretSetId, member, githubUser, now),
+    }),
+    removeSecretMember: ({ tenantId, secretSetId, name, now }) => ({
+      removed: this.removeSecretMember(tenantId, secretSetId, name, now),
+    }),
+    deleteSecretSet: ({ secretSetId }) => ({ deleted: this.deleteSecretSet(secretSetId) }),
+    applyConfig: async ({ tenantId, writes, now }) => ({ applied: await this.applyConfig(tenantId, writes, now) }),
+    listPins: () => ({ pins: this.listPins() }),
+    pin: ({ pin, now }) => ({ pin: this.pin(pin, now) }),
+    unpin: ({ harness }) => ({ unpinned: this.unpin(harness) }),
   };
 
-  supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
+  protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
     recordSupervisorUpdate(this.ctx.storage.sql, hostId, message);
   }
 
-  supervisorUpdates(hostIds: string[]): Record<string, SupervisorUpdates> {
+  protected supervisorUpdates(hostIds: string[]): Record<string, SupervisorUpdates> {
     return supervisorUpdatesByHost(this.ctx.storage.sql, hostIds);
   }
 
@@ -246,7 +274,7 @@ export class Tenant extends TenantConnectors {
     });
   }
 
-  open(tenantId: string, now: number): void {
+  protected open(tenantId: string, now: number): void {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       const [existing] = sql.exec<{ persona_id: string }>("SELECT persona_id FROM personas LIMIT 1").toArray();
@@ -434,11 +462,11 @@ export class Tenant extends TenantConnectors {
     return { kind: "Read", secretSets };
   }
 
-  listSecretSets(tenantId: string): SecretSetsRead {
+  protected listSecretSets(tenantId: string): SecretSetsRead {
     return this.secretSetsWhere(tenantId, "");
   }
 
-  getSecretSet(tenantId: string, secretSetId: string): SecretSetRead {
+  protected getSecretSet(tenantId: string, secretSetId: string): SecretSetRead {
     const read = this.secretSetsWhere(tenantId, " WHERE secret_set_id = ?", secretSetId);
     if (read.kind === "Unreadable") return read;
     const [secretSet] = read.secretSets;
@@ -519,7 +547,7 @@ export class Tenant extends TenantConnectors {
     for (const member of secrets) this.writeMember(secretSetId, member);
   }
 
-  async createSecretSet(
+  protected async createSecretSet(
     tenantId: string,
     secretSet: SecretSetWrite,
     githubUser: GitHubUser | null,
@@ -543,7 +571,7 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: this.rewrittenSecretSet(tenantId, secretSetId) };
   }
 
-  async updateSecretSet(
+  protected async updateSecretSet(
     tenantId: string,
     secretSetId: string,
     change: SecretSetChange,
@@ -599,7 +627,7 @@ export class Tenant extends TenantConnectors {
     return { kind: "Updated", secretSet: this.rewrittenSecretSet(tenantId, secretSetId) };
   }
 
-  async setSecretMember(
+  protected async setSecretMember(
     tenantId: string,
     secretSetId: string,
     member: SecretMember,
@@ -623,7 +651,7 @@ export class Tenant extends TenantConnectors {
     return read.kind === "NotFound" ? { kind: "SetNotFound" } : read;
   }
 
-  removeSecretMember(tenantId: string, secretSetId: string, name: string, now: number): SecretMemberRemoved {
+  protected removeSecretMember(tenantId: string, secretSetId: string, name: string, now: number): SecretMemberRemoved {
     const sql = this.ctx.storage.sql;
     const removed = this.ctx.storage.transactionSync(() => {
       const deleted = sql.exec("DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?", secretSetId, name);
@@ -638,7 +666,7 @@ export class Tenant extends TenantConnectors {
     return removed ? { kind: "Removed", secretSet: read.secretSet } : { kind: "MemberNotFound" };
   }
 
-  deleteSecretSet(secretSetId: string): SecretSetDeleted {
+  protected deleteSecretSet(secretSetId: string): SecretSetDeleted {
     const sql = this.ctx.storage.sql;
     const personas = sql
       .exec<{ name: string }>("SELECT name FROM personas WHERE secret_set_id = ? ORDER BY name", secretSetId)
@@ -745,7 +773,7 @@ export class Tenant extends TenantConnectors {
     return null;
   }
 
-  async applyConfig(tenantId: string, writes: ConfigWrite[], now: number): Promise<ConfigApplied> {
+  protected async applyConfig(tenantId: string, writes: ConfigWrite[], now: number): Promise<ConfigApplied> {
     const sealed = new Map<string, SealedMember[]>();
     for (const write of writes) {
       if (write.kind !== "CreateSecretSet" && write.kind !== "RewriteSecretSet") continue;
@@ -761,14 +789,14 @@ export class Tenant extends TenantConnectors {
     return written.ok ? { kind: "Applied" } : { kind: "Conflict", constraint: written.constraint };
   }
 
-  listPins(): HarnessPin[] {
+  protected listPins(): HarnessPin[] {
     return this.ctx.storage.sql
       .exec<HarnessPinRow>("SELECT harness, harness_version, updated_at FROM harness_pins ORDER BY harness")
       .toArray()
       .map(toPin);
   }
 
-  pin(pin: HarnessPinWrite, now: number): HarnessPin {
+  protected pin(pin: HarnessPinWrite, now: number): HarnessPin {
     this.ctx.storage.sql.exec(
       `INSERT INTO harness_pins (harness, harness_version, updated_at) VALUES (?, ?, ?)
       ON CONFLICT (harness) DO UPDATE SET harness_version = excluded.harness_version, updated_at = excluded.updated_at`,
@@ -779,7 +807,7 @@ export class Tenant extends TenantConnectors {
     return { ...pin, updatedAt: now };
   }
 
-  unpin(harness: string): boolean {
+  protected unpin(harness: string): boolean {
     return this.ctx.storage.sql.exec("DELETE FROM harness_pins WHERE harness = ?", harness).rowsWritten > 0;
   }
 }

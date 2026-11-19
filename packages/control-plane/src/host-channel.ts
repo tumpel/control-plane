@@ -19,6 +19,7 @@ import { problem } from "./http";
 import type { Env } from "./index";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
+import { tenantApi } from "./tenant-api.ts";
 import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
@@ -294,7 +295,7 @@ export class HostChannel extends DurableObject<Env> {
     const tenant = this.env.TENANT.getByName(tenantId);
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
-      await tenant.supervisorUpdate(hostId, message);
+      await tenantApi(this.env.TENANT, tenantId).call("supervisorUpdate", { hostId, message });
       if (message.type === "SupervisorUpdateStep" && message.phase === "Restarting") await this.presence("Offline");
       else await this.refreshPresence();
       return null;

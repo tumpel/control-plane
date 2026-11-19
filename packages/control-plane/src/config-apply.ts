@@ -264,20 +264,21 @@ const prepared = async (
 };
 const readLive = async (env: Env, tenantId: string, operation: string): Promise<Outcome<Live>> => {
   const tenant = env.TENANT.getByName(tenantId);
-  const secretSets = await tenant.listSecretSets(tenantId);
+  const api = tenantApi(env.TENANT, tenantId);
+  const { read: secretSets } = await api.call("listSecretSets", { tenantId });
   if (secretSets.kind === "Unreadable") {
     return { ok: false, response: problem(409, unreadableSecretSet(operation, secretSets)) };
   }
   return {
     ok: true,
     value: {
-      personas: (await tenantApi(env.TENANT, tenantId).call("listPersonas", { tenantId })).personas,
+      personas: (await api.call("listPersonas", { tenantId })).personas,
       connectors: (await tenant.listConnectors(tenantId, Date.now())).map(({ connectorId, name }) => ({
         connectorId,
         name,
       })),
       secretSets: secretSets.secretSets,
-      pins: effectiveVersions(await tenant.listPins()),
+      pins: effectiveVersions((await api.call("listPins", {})).pins),
       hosts: await listHosts(env.DB, tenantId),
       sessions: await tenant.listSessions(tenantId, {}),
     },
@@ -351,7 +352,10 @@ export const applyConfig = async (body: ApplyRequest, env: Env, caller: Caller):
   if (missing.length > 0) return stopped(missing);
   const writes = await prepared(planned.steps, live.value, body.config, values, env, tenantId);
   if (!writes.ok) return writes.response;
-  const refused = committed(await env.TENANT.getByName(tenantId).applyConfig(tenantId, writes.value, Date.now()));
+  const refused = committed(
+    (await tenantApi(env.TENANT, tenantId).call("applyConfig", { tenantId, writes: writes.value, now: Date.now() }))
+      .applied,
+  );
   if (refused !== null) return refused;
   const applied = planned.steps.filter((step) => step.kind !== "LabelHost").map(changeOf);
   for (const step of planned.steps) {

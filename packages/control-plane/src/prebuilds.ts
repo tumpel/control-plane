@@ -319,7 +319,6 @@ const personaImage = async (
   personaId: string,
   now: number,
 ): Promise<Outcome<PersonaImage>> => {
-  const tenant = tenantOf(env, caller);
   const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
     tenantId: caller.tenantId,
     personaId,
@@ -332,7 +331,7 @@ const personaImage = async (
       fix: "List your personas and use one of their ids",
     });
   }
-  const entry = pinnedEntry(await tenant.listPins(), persona.harness);
+  const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, persona.harness);
   if (entry === undefined) {
     return refuse(422, {
       code: "HarnessNotInCatalog",

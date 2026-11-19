@@ -13,6 +13,7 @@ import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { releaseUnreadable } from "./releases";
 import { placeableFix, why } from "./sessions";
+import { tenantApi } from "./tenant-api.ts";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
@@ -53,7 +54,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
   const tenant = env.TENANT.getByName(caller.tenantId);
   const harness = body.value.harness ?? "ClaudeCode";
   const { name, provider } = SETUP_CREDENTIALS[harness];
-  const entry = pinnedEntry(await tenant.listPins(), harness);
+  const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, harness);
   if (entry === undefined) {
     return problem(422, {
       code: "HarnessNotInCatalog",
