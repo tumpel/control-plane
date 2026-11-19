@@ -51,10 +51,10 @@ const boxTokenRefused = (detail: string): Response =>
 const start = async (request: Request, url: URL, env: Env, caller: Caller): Promise<Response> => {
   const body = await parseBody(request, ClaudeSetupStartSchema, "claudeSetups.start");
   if (!body.ok) return body.response;
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   const harness = body.value.harness ?? "ClaudeCode";
   const { name, provider } = SETUP_CREDENTIALS[harness];
-  const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, harness);
+  const entry = pinnedEntry((await tenant.call("listPins", {})).pins, harness);
   if (entry === undefined) {
     return problem(422, {
       code: "HarnessNotInCatalog",
@@ -65,9 +65,9 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
   }
   const now = Date.now();
   const hosts = await listHosts(env.DB, caller.tenantId);
-  const started = await tenant.startClaudeSetup(
-    caller.tenantId,
-    {
+  const { started } = await tenant.call("startClaudeSetup", {
+    tenantId: caller.tenantId,
+    input: {
       principalId: caller.principalId,
       secretSetId: body.value.secretSetId,
       harness,
@@ -76,7 +76,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       endpoint: url.origin,
     },
     now,
-  );
+  });
   if (started.kind === "Started") return json(started.setup);
   if (started.kind === "NoSecretSet") {
     return problem(404, {
@@ -116,8 +116,12 @@ const list = async (url: URL, env: Env, caller: Caller): Promise<Response> => {
       fix: "Name the secretSetId of one of your secret sets",
     });
   }
-  const tenant = env.TENANT.getByName(caller.tenantId);
-  return json(await tenant.listClaudeSetups(caller.tenantId, query.data.secretSetId, Date.now()));
+  const { setups } = await tenantApi(env.TENANT, caller.tenantId).call("listClaudeSetups", {
+    tenantId: caller.tenantId,
+    secretSetId: query.data.secretSetId,
+    now: Date.now(),
+  });
+  return json(setups);
 };
 
 const writeToken = async (request: Request, env: Env, claudeSetupId: string): Promise<Response> => {
@@ -129,14 +133,14 @@ const writeToken = async (request: Request, env: Env, claudeSetupId: string): Pr
   const { tenantId, value, expiresAt } = body.value;
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
   if (tenant === null) return boxTokenRefused(`no Claude setup ${claudeSetupId} takes this token`);
-  const stored = await env.TENANT.getByName(tenantId).writeClaudeSetupToken(
+  const { stored } = await tenantApi(env.TENANT, tenantId).call("writeClaudeSetupToken", {
     tenantId,
     claudeSetupId,
     credential,
-    value,
-    expiresAt,
-    Date.now(),
-  );
+    token: value,
+    ...(expiresAt === undefined ? {} : { tokenExpiresAt: expiresAt }),
+    now: Date.now(),
+  });
   if (stored.kind === "Stored") return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   if (stored.kind === "NotFound" || stored.kind === "Refused") {
     return boxTokenRefused(`no Claude setup ${claudeSetupId} takes this token`);
@@ -177,14 +181,23 @@ export const handleClaudeSetups = async (
   if (caller instanceof Response) return caller;
   if (!path.success) return setupNotFound(raw);
   const { claudeSetupId } = path.data;
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   if (tail === undefined) {
-    const setup = await tenant.getClaudeSetup(caller.tenantId, claudeSetupId, Date.now());
+    const { setup } = await tenant.call("getClaudeSetup", {
+      tenantId: caller.tenantId,
+      claudeSetupId,
+      now: Date.now(),
+    });
     return setup === null ? setupNotFound(claudeSetupId) : json(setup);
   }
   const body = await parseBody(request, ClaudeSetupCodeSubmitSchema, "claudeSetups.submitCode");
   if (!body.ok) return body.response;
-  const coded = await tenant.submitClaudeSetupCode(caller.tenantId, claudeSetupId, body.value.code, Date.now());
+  const { coded } = await tenant.call("submitClaudeSetupCode", {
+    tenantId: caller.tenantId,
+    claudeSetupId,
+    code: body.value.code,
+    now: Date.now(),
+  });
   if (coded.kind === "NotFound") return setupNotFound(claudeSetupId);
   if (coded.kind === "NotWaiting") return notWaiting(coded.detail);
   return json(coded.setup);

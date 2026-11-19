@@ -388,7 +388,13 @@ export class HostChannel extends DurableObject<Env> {
       },
       prepareClaudeSetup: async (stored) => {
         const tenantId = await this.tenantOf(host.host_id);
-        return this.env.TENANT.getByName(tenantId).prepareClaudeSetup(tenantId, stored, host.host_id, Date.now());
+        const { prepared } = await tenantApi(this.env.TENANT, tenantId).call("prepareClaudeSetup", {
+          tenantId,
+          stored,
+          hostId: host.host_id,
+          now: Date.now(),
+        });
+        return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
       now: () => new Date(),

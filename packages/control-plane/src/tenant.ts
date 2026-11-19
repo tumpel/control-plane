@@ -255,6 +255,67 @@ export class Tenant extends TenantConnectors {
       served: await this.serveConnectorToken(turnId, connectorId, now),
     }),
     unknownConnectors: ({ connectorIds }) => ({ unknownConnectorIds: this.unknownConnectors(connectorIds) }),
+    startOpenRouterAuthorization: async ({ tenantId, principalId, input, now }) => ({
+      started: await this.startOpenRouterAuthorization(tenantId, principalId, input, now),
+    }),
+    getOpenRouterAuthorization: ({ tenantId, principalId, openRouterAuthorizationId }) => ({
+      read: this.getOpenRouterAuthorization(tenantId, principalId, openRouterAuthorizationId),
+    }),
+    openRouterCallback: async ({ tenantId, openRouterAuthorizationId, callback, now }) => ({
+      settled: await this.openRouterCallback(tenantId, openRouterAuthorizationId, callback, now),
+    }),
+    openRouterAuthorizationDeadlineReached: ({ deadline }) => {
+      this.openRouterAuthorizationDeadlineReached(deadline);
+      return {};
+    },
+    openRouterSecretSets: () => ({ names: this.openRouterSecretSets() }),
+    startCircleCIAuthorization: async ({ tenantId, principalId, now }) => ({
+      started: await this.startCircleCIAuthorization(tenantId, principalId, now),
+    }),
+    completeCircleCIAuthorization: async ({ tenantId, principalId, circleCIAuthorizationId, redirectedUrl, now }) => ({
+      stepped: await this.completeCircleCIAuthorization(
+        tenantId,
+        principalId,
+        circleCIAuthorizationId,
+        redirectedUrl,
+        now,
+      ),
+    }),
+    chooseCircleCIOrganization: async ({ tenantId, principalId, circleCIAuthorizationId, organizationId, now }) => ({
+      stepped: await this.chooseCircleCIOrganization(
+        tenantId,
+        principalId,
+        circleCIAuthorizationId,
+        organizationId,
+        now,
+      ),
+    }),
+    circleCIAuthorizationDeadlineReached: async ({ tenantId, deadline }) => {
+      await this.circleCIAuthorizationDeadlineReached(tenantId, deadline);
+      return {};
+    },
+    startClaudeSetup: async ({ tenantId, input, now }) => ({
+      started: await this.startClaudeSetup(tenantId, input, now),
+    }),
+    getClaudeSetup: async ({ tenantId, claudeSetupId, now }) => ({
+      setup: await this.getClaudeSetup(tenantId, claudeSetupId, now),
+    }),
+    listClaudeSetups: async ({ tenantId, secretSetId, now }) => ({
+      setups: await this.listClaudeSetups(tenantId, secretSetId, now),
+    }),
+    submitClaudeSetupCode: async ({ tenantId, claudeSetupId, code, now }) => ({
+      coded: await this.submitClaudeSetupCode(tenantId, claudeSetupId, code, now),
+    }),
+    writeClaudeSetupToken: async ({ tenantId, claudeSetupId, credential, token, tokenExpiresAt, now }) => ({
+      stored: await this.writeClaudeSetupToken(tenantId, claudeSetupId, credential, token, tokenExpiresAt, now),
+    }),
+    claudeSetupDeadlineReached: async ({ tenantId, deadline }) => {
+      await this.claudeSetupDeadlineReached(tenantId, deadline);
+      return {};
+    },
+    prepareClaudeSetup: async ({ tenantId, stored, hostId, now }) => ({
+      prepared: await this.prepareClaudeSetup(tenantId, stored, hostId, now),
+    }),
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

@@ -9,7 +9,7 @@ export type ReportedHostUsage = z.infer<typeof ReportedHostUsageSchema>;
 export interface ImageAvailability {
   harness: string;
   harnessVersion: string;
-  architectures: readonly HostArchitecture[];
+  architectures: HostArchitecture[];
 }
 
 export type Unplaceable =
