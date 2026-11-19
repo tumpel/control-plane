@@ -263,7 +263,6 @@ const prepared = async (
   return { ok: true, value: writes };
 };
 const readLive = async (env: Env, tenantId: string, operation: string): Promise<Outcome<Live>> => {
-  const tenant = env.TENANT.getByName(tenantId);
   const api = tenantApi(env.TENANT, tenantId);
   const { read: secretSets } = await api.call("listSecretSets", { tenantId });
   if (secretSets.kind === "Unreadable") {
@@ -273,14 +272,16 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
     ok: true,
     value: {
       personas: (await api.call("listPersonas", { tenantId })).personas,
-      connectors: (await tenant.listConnectors(tenantId, Date.now())).map(({ connectorId, name }) => ({
-        connectorId,
-        name,
-      })),
+      connectors: (await api.call("listConnectors", { tenantId, now: Date.now() })).connectors.map(
+        ({ connectorId, name }) => ({
+          connectorId,
+          name,
+        }),
+      ),
       secretSets: secretSets.secretSets,
       pins: effectiveVersions((await api.call("listPins", {})).pins),
       hosts: await listHosts(env.DB, tenantId),
-      sessions: await tenant.listSessions(tenantId, {}),
+      sessions: await env.TENANT.getByName(tenantId).listSessions(tenantId, {}),
     },
   };
 };

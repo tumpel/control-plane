@@ -172,14 +172,14 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     });
   }
 
-  listConnectors(tenantId: string, now: number): Connector[] {
+  protected listConnectors(tenantId: string, now: number): Connector[] {
     return this.ctx.storage.sql
       .exec<NameRow>(`${NAME_SELECT} ORDER BY n.name`)
       .toArray()
       .map((row) => this.presentConnector(tenantId, row, now));
   }
 
-  getConnector(tenantId: string, connectorId: string, now: number): Connector | null {
+  protected getConnector(tenantId: string, connectorId: string, now: number): Connector | null {
     const row = this.connectorRow(connectorId);
     return row === null ? null : this.presentConnector(tenantId, row, now);
   }
@@ -191,7 +191,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return row !== undefined;
   }
 
-  createConnector(
+  protected createConnector(
     tenantId: string,
     auth: "Static" | "OAuth",
     name: string,
@@ -234,7 +234,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     );
   }
 
-  renameConnector(
+  protected renameConnector(
     tenantId: string,
     connectorId: string,
     updatedAt: number,
@@ -262,7 +262,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
       .map((row) => row.turn_id);
   }
 
-  deleteConnector(connectorId: string, updatedAt: number): ConnectorDeleted {
+  protected deleteConnector(connectorId: string, updatedAt: number): ConnectorDeleted {
     const sql = this.ctx.storage.sql;
     if (this.connectorRow(connectorId) === null) return { kind: "NotFound" };
     const personas = sql
@@ -283,7 +283,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return deleted === 0 ? { kind: "Changed" } : { kind: "Deleted" };
   }
 
-  async setStaticToken(
+  protected async setStaticToken(
     tenantId: string,
     connectorId: string,
     updatedAt: number,
@@ -309,7 +309,12 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return set ? this.written(tenantId, connectorId, now) : { kind: "Changed" };
   }
 
-  clearConnectorCredential(tenantId: string, connectorId: string, updatedAt: number, now: number): ConnectorWritten {
+  protected clearConnectorCredential(
+    tenantId: string,
+    connectorId: string,
+    updatedAt: number,
+    now: number,
+  ): ConnectorWritten {
     if (this.connectorRow(connectorId) === null) return { kind: "NotFound" };
     const sql = this.ctx.storage.sql;
     const cleared = this.ctx.storage.transactionSync(() => {
@@ -326,7 +331,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return cleared ? this.written(tenantId, connectorId, now) : { kind: "Changed" };
   }
 
-  async startConnectorAuthorization(
+  protected async startConnectorAuthorization(
     tenantId: string,
     principalId: string,
     connectorId: string,
@@ -408,7 +413,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return { kind: "NotConnected", detail };
   }
 
-  async connectorCallback(
+  protected async connectorCallback(
     claims: StateClaims,
     stateHash: string,
     callback: ConnectorCallback,
@@ -515,7 +520,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return { kind: "Connected", name: this.connectorRow(connectorId)?.name ?? connectorId };
   }
 
-  async serveConnectorToken(turnId: string, connectorId: string, now: number): Promise<ConnectorTokenServed> {
+  protected async serveConnectorToken(turnId: string, connectorId: string, now: number): Promise<ConnectorTokenServed> {
     const sql = this.ctx.storage.sql;
     const [turn] = sql
       .exec<{ state: string }>(
@@ -598,7 +603,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return { kind: "Served", token: { accessToken: bundle.accessToken, expiresAt: iso(bundle.expiresAt) } };
   }
 
-  unknownConnectors(connectorIds: readonly string[]): string[] {
+  protected unknownConnectors(connectorIds: readonly string[]): string[] {
     const known = new Set(
       this.ctx.storage.sql
         .exec<{ connector_id: string }>("SELECT connector_id FROM connector_names")

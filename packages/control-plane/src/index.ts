@@ -477,7 +477,7 @@ const personaWrite = async (
   operation: string,
   newSecretSet: boolean,
 ): Promise<PersonaWritten> => {
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   const repeated = body.connectorIds.filter((connectorId, at) => body.connectorIds.indexOf(connectorId) !== at);
   if (repeated.length > 0) {
     return {
@@ -490,7 +490,9 @@ const personaWrite = async (
       }),
     };
   }
-  const unknown = await tenant.unknownConnectors(body.connectorIds);
+  const { unknownConnectorIds: unknown } = await tenant.call("unknownConnectors", {
+    connectorIds: body.connectorIds,
+  });
   if (unknown.length > 0) {
     return {
       ok: false,

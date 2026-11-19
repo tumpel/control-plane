@@ -216,6 +216,45 @@ export class Tenant extends TenantConnectors {
     listPins: () => ({ pins: this.listPins() }),
     pin: ({ pin, now }) => ({ pin: this.pin(pin, now) }),
     unpin: ({ harness }) => ({ unpinned: this.unpin(harness) }),
+    listConnectors: ({ tenantId, now }) => ({ connectors: this.listConnectors(tenantId, now) }),
+    getConnector: ({ tenantId, connectorId, now }) => ({ connector: this.getConnector(tenantId, connectorId, now) }),
+    createConnector: ({ tenantId, auth, name, url, now }) => ({
+      written: this.createConnector(tenantId, auth, name, url, now),
+    }),
+    renameConnector: ({ tenantId, connectorId, updatedAt, name, now }) => ({
+      written: this.renameConnector(tenantId, connectorId, updatedAt, name, now),
+    }),
+    deleteConnector: ({ connectorId, updatedAt }) => ({ deleted: this.deleteConnector(connectorId, updatedAt) }),
+    setStaticToken: async ({ tenantId, connectorId, updatedAt, value, now }) => ({
+      written: await this.setStaticToken(tenantId, connectorId, updatedAt, value, now),
+    }),
+    clearConnectorCredential: ({ tenantId, connectorId, updatedAt, now }) => ({
+      written: this.clearConnectorCredential(tenantId, connectorId, updatedAt, now),
+    }),
+    startConnectorAuthorization: async ({
+      tenantId,
+      principalId,
+      connectorId,
+      updatedAt,
+      controlPlaneOrigin,
+      now,
+    }) => ({
+      started: await this.startConnectorAuthorization(
+        tenantId,
+        principalId,
+        connectorId,
+        updatedAt,
+        controlPlaneOrigin,
+        now,
+      ),
+    }),
+    connectorCallback: async ({ claims, stateHash, callback, initiatorIsOwner, now }) => ({
+      settled: await this.connectorCallback(claims, stateHash, callback, initiatorIsOwner, now),
+    }),
+    serveConnectorToken: async ({ turnId, connectorId, now }) => ({
+      served: await this.serveConnectorToken(turnId, connectorId, now),
+    }),
+    unknownConnectors: ({ connectorIds }) => ({ unknownConnectorIds: this.unknownConnectors(connectorIds) }),
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
