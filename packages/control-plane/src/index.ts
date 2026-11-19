@@ -1213,7 +1213,7 @@ const withHeaders = (answer: Response, extra: Record<string, string>): Response 
   if (Object.keys(extra).length === 0) return answer;
   const headers = new Headers(answer.headers);
   for (const [name, value] of Object.entries(extra)) headers.set(name, value);
-  return new Response(answer.body, { status: answer.status, headers });
+  return new Response(answer.body, { status: answer.status, headers, webSocket: answer.webSocket });
 };
 
 const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response> => {

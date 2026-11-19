@@ -2322,7 +2322,7 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("tenant events record a turn's start, completion and the idle session in order, wake an MCP wait and stream over a WebSocket", async () => {
+  test("tenant events record a turn's start, completion and the idle session in order, wake an MCP wait and stream over a WebSocket, also to a browser that sends its token as a subprotocol", async () => {
     const { bearer, host, tool, toolRefusal, sessionStart } = await tenant();
     const start = await tool("tumpel_events_wait", { waitSeconds: 0 }, EventPageSchema);
     assert.deepEqual(start.events, []);
@@ -2335,6 +2335,15 @@ suite("sessions", { concurrency: 8 }, () => {
       socket.addEventListener("message", (message) => resolve(JSON.parse(String(message.data))));
     });
     await new Promise((resolve) => socket.addEventListener("open", resolve));
+    const browser = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/events?waitSeconds=0&event=TurnCompleted`, {
+      protocols: ["tumpel.bearer", `tumpel.bearer.${bearer.authorization.slice("Bearer ".length)}`],
+      headers: { origin: "https://app.tumpel.test" },
+    } as unknown as string[]);
+    const browserStreamed = new Promise<unknown>((resolve) => {
+      browser.addEventListener("message", (message) => resolve(JSON.parse(String(message.data))));
+    });
+    await new Promise((resolve) => browser.addEventListener("open", resolve));
+    assert.equal(browser.protocol, "tumpel.bearer");
 
     const waiting = tool(
       "tumpel_events_wait",
@@ -2366,7 +2375,9 @@ suite("sessions", { concurrency: 8 }, () => {
     const pushed = TenantEventSchema.parse(await streamed);
     assert.equal(pushed.event, "TurnCompleted");
     assert.equal("turnId" in pushed && pushed.turnId, started.turn.turnId);
+    assert.deepEqual(TenantEventSchema.parse(await browserStreamed), pushed);
     socket.close();
+    browser.close();
 
     const { sessionId } = started.session;
     const all = await tool(

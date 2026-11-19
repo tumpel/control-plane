@@ -8,6 +8,7 @@ import type { Env } from "./index.ts";
 import { tenantApi } from "./tenant-api.ts";
 
 export const EVENTS_PATH = "/v1/events";
+const BEARER_SUBPROTOCOL = "tumpel.bearer";
 
 type EventQuery = z.infer<typeof EventQuerySchema>;
 type EventPage = z.infer<typeof EventPageSchema>;
@@ -81,6 +82,28 @@ const followEvents = async (env: Env, caller: Caller, query: EventQuery): Promis
   return openChannel(env, subscriptionOf(caller, query, query.afterEventId ?? start.page.lastEventId));
 };
 
+const subprotocolBearer = (request: Request): string | null => {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return null;
+  const offered = (request.headers.get("sec-websocket-protocol") ?? "").split(",").map((name) => name.trim());
+  const prefix = `${BEARER_SUBPROTOCOL}.`;
+  return offered.find((name) => name.startsWith(prefix))?.slice(prefix.length) ?? null;
+};
+
+const withBearer = (request: Request, token: string): Request => {
+  const headers = new Headers(request.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  return new Request(request, { headers });
+};
+
+const echoSubprotocol = (answer: Response): Response =>
+  answer.webSocket === null
+    ? answer
+    : new Response(null, {
+        status: answer.status,
+        headers: { "sec-websocket-protocol": BEARER_SUBPROTOCOL },
+        webSocket: answer.webSocket,
+      });
+
 export const handleEvents = async (
   request: Request,
   url: URL,
@@ -88,7 +111,8 @@ export const handleEvents = async (
   authenticate: Authenticate,
 ): Promise<Response | null> => {
   if (url.pathname !== EVENTS_PATH || request.method !== "GET") return null;
-  const caller = await authenticate(request, env);
+  const token = subprotocolBearer(request);
+  const caller = await authenticate(token === null ? request : withBearer(request, token), env);
   if (caller instanceof Response) return caller;
   const number = (name: string): number | string | undefined => {
     const value = url.searchParams.get(name);
@@ -109,6 +133,7 @@ export const handleEvents = async (
       fix: "Send query parameters that match the operation's schema in typespec",
     });
   }
+  if (token !== null) return echoSubprotocol(await followEvents(env, caller, query.data));
   if (request.headers.get("upgrade")?.toLowerCase() === "websocket") return followEvents(env, caller, query.data);
   return listEvents(env, caller, query.data);
 };
