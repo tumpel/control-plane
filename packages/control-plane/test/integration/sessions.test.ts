@@ -659,7 +659,7 @@ const tenant = async () => {
     const personas = await getJson("/v1/personas", PersonaSchema.array());
     return {
       repository: "https://github.com/acme/app.git",
-      model: "claude-sonnet-test",
+      model: "claude-sonnet-5-5",
       personaId: personas.find((persona) => persona.name === name)?.personaId,
     };
   };
@@ -893,6 +893,23 @@ test("a start against a current.json of the previous shape is refused ImageNotRe
   assert.equal(problem.code, "ImageNotReleased");
   assert.match(problem.detail, /the published release is unreadable: current\.json .* bases/);
   assert.equal(problem.fix, "Ask the operator to publish a release with the release workflow, then start again");
+});
+
+test("a start naming a model the harness does not run is refused ModelUnsupported and places no session", async () => {
+  const { bearer, getJson, sessionStart } = await tenant();
+  const refusal = await postJson(
+    "/v1/sessions",
+    { ...(await sessionStart()), model: "gpt-5-codex", prompt: "wrong model" },
+    bearer,
+  );
+  assert.equal(refusal.status, 422);
+  const problem = ProblemSchema.parse(await refusal.json());
+  assert.equal(problem.code, "ModelUnsupported");
+  assert.match(
+    problem.detail,
+    /^ClaudeCode does not run model gpt-5-codex with ApiKey ANTHROPIC of .*; it runs opus, .*claude-sonnet-5-5/,
+  );
+  assert.deepEqual(await getJson("/v1/sessions", SessionSchema.array()), []);
 });
 
 test("a deploy drain refuses new sessions and turns DeployInProgress and counts each host's running turns until they end", async () => {
@@ -1547,7 +1564,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const { personaId } = PersonaSchema.parse(await persona.json());
     await tool(
       "tumpel_session_start",
-      { repository: "https://github.com/acme/app.git", model: "gpt-test", personaId, prompt: "refresh" },
+      { repository: "https://github.com/acme/app.git", model: "gpt-5.6-sol", personaId, prompt: "refresh" },
       StartedSessionSchema,
     );
     const turn = await host.next("TurnOffer");
@@ -3455,7 +3472,7 @@ suite("sessions", { concurrency: 8 }, () => {
         "/v1/sessions",
         {
           repository: "https://github.com/acme/app.git",
-          model: "claude-sonnet-test",
+          model: "claude-sonnet-5-5",
           personaId: persona.personaId,
           prompt: "build every repo",
         },
