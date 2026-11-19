@@ -395,7 +395,7 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
           accountLabel: organization.name,
           organizationId: organization.organizationId,
           sealedToken,
-          credential: { kind: "Authorized", expiresAt },
+          credential: { kind: "Authorized", expiresAtMs: expiresAt },
         },
         now,
       );

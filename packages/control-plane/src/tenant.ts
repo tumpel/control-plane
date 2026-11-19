@@ -400,6 +400,28 @@ export class Tenant extends TenantConnectors {
     transcriptCursor: ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
       cursor: this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
+    connectedAccounts: () => ({ accounts: this.connectedAccounts() }),
+    deleteBuildConnection: ({ provider }) => ({ deleted: this.deleteBuildConnection(provider) }),
+    circleCIConnection: () => ({ connection: this.circleCIConnection() }),
+    circleCIToken: async () => ({ token: await this.circleCIToken() }),
+    connectCircleCI: async ({ start, now }) => ({ connection: await this.connectCircleCI(start, now) }),
+    listCircleCIProjects: ({ tenantId }) => ({ projects: this.listCircleCIProjects(tenantId) }),
+    circleCIProjectBoundTo: ({ tenantId, projectId }) => ({
+      project: this.circleCIProjectBoundTo(tenantId, projectId),
+    }),
+    circleCIProjectOf: ({ tenantId, repository }) => ({ project: this.circleCIProjectOf(tenantId, repository) }),
+    addCircleCIProject: async ({ tenantId, binding, now }) => ({
+      project: await this.addCircleCIProject(tenantId, binding, now),
+    }),
+    circleCIWebhooks: () => ({ webhooks: this.circleCIWebhooks() }),
+    circleCIWebhookSecret: async ({ projectId }) => ({ secret: await this.circleCIWebhookSecret(projectId) }),
+    deleteCircleCIProject: ({ circleCIProjectId }) => ({ deleted: this.deleteCircleCIProject(circleCIProjectId) }),
+    gitHubActionsConnection: ({ tenantId }) => ({ connection: this.gitHubActionsConnection(tenantId) }),
+    connectGitHubActions: ({ tenantId, start, now }) => ({
+      connection: this.connectGitHubActions(tenantId, start, now),
+    }),
+    namespaceConnection: () => ({ connection: this.namespaceConnection() }),
+    connectNamespace: ({ start, now }) => ({ connection: this.connectNamespace(start, now) }),
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

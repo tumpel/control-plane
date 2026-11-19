@@ -942,7 +942,7 @@ export class TenantPrebuilds extends TenantSessions {
     return row ?? null;
   }
 
-  connectedAccounts(): Record<BuildProvider, string | null> {
+  protected connectedAccounts(): Record<BuildProvider, string | null> {
     const account = (provider: BuildProvider): string | null =>
       this.connectionRow<{ account_label: string }>(provider)?.account_label ?? null;
     return {
@@ -956,7 +956,7 @@ export class TenantPrebuilds extends TenantSessions {
     return this.connectionRow(provider) !== null;
   }
 
-  deleteBuildConnection(provider: BuildProvider): boolean {
+  protected deleteBuildConnection(provider: BuildProvider): boolean {
     return this.ctx.storage.transactionSync(() => {
       if (provider === "CircleCI") {
         this.ctx.storage.sql.exec("DELETE FROM circleci_projects");
@@ -967,7 +967,7 @@ export class TenantPrebuilds extends TenantSessions {
     });
   }
 
-  circleCIConnection(): CircleCIRow | null {
+  protected circleCIConnection(): CircleCIRow | null {
     const row = this.connectionRow<{
       circleci_connection_id: string;
       account_label: string;
@@ -983,13 +983,13 @@ export class TenantPrebuilds extends TenantSessions {
       circleCIConnectionId: row.circleci_connection_id,
       accountLabel: row.account_label,
       organizationId: row.organization_id,
-      credential: expiry === undefined ? { kind: "Pasted" } : { kind: "Authorized", expiresAt: expiry.expires_at },
+      credential: expiry === undefined ? { kind: "Pasted" } : { kind: "Authorized", expiresAtMs: expiry.expires_at },
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
   }
 
-  async circleCIToken(): Promise<string | null> {
+  protected async circleCIToken(): Promise<string | null> {
     const row = this.connectionRow<{ api_token_sealed: string }>("CircleCI");
     if (row === null) return null;
     return unseal(
@@ -1030,12 +1030,12 @@ export class TenantPrebuilds extends TenantSessions {
     if (connection.credential.kind === "Authorized") {
       sql.exec(
         "INSERT INTO circleci_token_expiries (connection_slot, expires_at) VALUES (1, ?)",
-        connection.credential.expiresAt,
+        connection.credential.expiresAtMs,
       );
     }
   }
 
-  async connectCircleCI(start: CircleCIConnectionStart, now: number): Promise<CircleCIRow> {
+  protected async connectCircleCI(start: CircleCIConnectionStart, now: number): Promise<CircleCIRow> {
     await this.holdDataKey();
     const sealedToken = await this.sealCircleCIToken(start.apiToken);
     this.ctx.storage.transactionSync(() =>
@@ -1054,28 +1054,32 @@ export class TenantPrebuilds extends TenantSessions {
     return written;
   }
 
-  listCircleCIProjects(tenantId: string): CircleCIProject[] {
+  protected listCircleCIProjects(tenantId: string): CircleCIProject[] {
     return this.ctx.storage.sql
       .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects ORDER BY repository")
       .toArray()
       .map((row) => toCircleCIProject(tenantId, row));
   }
 
-  circleCIProjectBoundTo(tenantId: string, projectId: string): CircleCIProject | null {
+  protected circleCIProjectBoundTo(tenantId: string, projectId: string): CircleCIProject | null {
     const [row] = this.ctx.storage.sql
       .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects WHERE project_id = ?", projectId)
       .toArray();
     return row === undefined ? null : toCircleCIProject(tenantId, row);
   }
 
-  circleCIProjectOf(tenantId: string, repository: string): CircleCIProject | null {
+  protected circleCIProjectOf(tenantId: string, repository: string): CircleCIProject | null {
     const [row] = this.ctx.storage.sql
       .exec<CircleCIProjectRow>("SELECT * FROM circleci_projects WHERE repository = ?", repository)
       .toArray();
     return row === undefined ? null : toCircleCIProject(tenantId, row);
   }
 
-  async addCircleCIProject(tenantId: string, binding: CircleCIBinding, now: number): Promise<CircleCIProject> {
+  protected async addCircleCIProject(
+    tenantId: string,
+    binding: CircleCIBinding,
+    now: number,
+  ): Promise<CircleCIProject> {
     const circleCIProjectId = crypto.randomUUID();
     await this.holdDataKey();
     const sealed = await seal(await this.dataKey(), binding.signingSecret, webhookSecretContext(circleCIProjectId));
@@ -1098,7 +1102,7 @@ export class TenantPrebuilds extends TenantSessions {
     return project;
   }
 
-  circleCIWebhooks(): CircleCIWebhook[] {
+  protected circleCIWebhooks(): CircleCIWebhook[] {
     return this.ctx.storage.sql
       .exec<{ circleci_project_id: string; webhook_id: string }>(
         "SELECT circleci_project_id, webhook_id FROM circleci_projects ORDER BY repository",
@@ -1107,7 +1111,7 @@ export class TenantPrebuilds extends TenantSessions {
       .map((row) => ({ circleCIProjectId: row.circleci_project_id, webhookId: row.webhook_id }));
   }
 
-  async circleCIWebhookSecret(projectId: string): Promise<string | null> {
+  protected async circleCIWebhookSecret(projectId: string): Promise<string | null> {
     const [row] = this.ctx.storage.sql
       .exec<{ circleci_project_id: string; signing_secret_sealed: string }>(
         "SELECT circleci_project_id, signing_secret_sealed FROM circleci_projects WHERE project_id = ?",
@@ -1220,14 +1224,14 @@ export class TenantPrebuilds extends TenantSessions {
     );
   }
 
-  deleteCircleCIProject(circleCIProjectId: string): boolean {
+  protected deleteCircleCIProject(circleCIProjectId: string): boolean {
     return (
       this.ctx.storage.sql.exec("DELETE FROM circleci_projects WHERE circleci_project_id = ?", circleCIProjectId)
         .rowsWritten > 0
     );
   }
 
-  gitHubActionsConnection(tenantId: string): GitHubActionsConnection | null {
+  protected gitHubActionsConnection(tenantId: string): GitHubActionsConnection | null {
     const row = this.connectionRow<{
       github_actions_connection_id: string;
       account_label: string;
@@ -1246,7 +1250,11 @@ export class TenantPrebuilds extends TenantSessions {
     });
   }
 
-  connectGitHubActions(tenantId: string, start: GitHubActionsConnectionStart, now: number): GitHubActionsConnection {
+  protected connectGitHubActions(
+    tenantId: string,
+    start: GitHubActionsConnectionStart,
+    now: number,
+  ): GitHubActionsConnection {
     this.ctx.storage.sql.exec(
       `INSERT INTO github_actions_connections (connection_slot, github_actions_connection_id, account_label, caller_workflow, created_at, updated_at)
       VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,
@@ -1262,7 +1270,7 @@ export class TenantPrebuilds extends TenantSessions {
     return connection;
   }
 
-  namespaceConnection(): NamespaceRow | null {
+  protected namespaceConnection(): NamespaceRow | null {
     const row = this.connectionRow<{
       namespace_connection_id: string;
       account_label: string;
@@ -1280,7 +1288,7 @@ export class TenantPrebuilds extends TenantSessions {
     };
   }
 
-  connectNamespace(start: NamespaceConnectionStart, now: number): NamespaceRow {
+  protected connectNamespace(start: NamespaceConnectionStart, now: number): NamespaceRow {
     this.ctx.storage.sql.exec(
       `INSERT INTO namespace_connections (connection_slot, namespace_connection_id, account_label, workspace_id, created_at, updated_at)
       VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,

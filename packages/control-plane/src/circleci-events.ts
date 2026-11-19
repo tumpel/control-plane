@@ -38,8 +38,8 @@ export const handleCircleCIEvents = async (request: Request, url: URL, env: Env)
   }
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
   if (tenant === null) return forbidden();
-  const stub = env.TENANT.getByName(tenantId);
-  const secret = await stub.circleCIWebhookSecret(event.data.project.id);
+  const stub = tenantApi(env.TENANT, tenantId);
+  const secret = (await stub.call("circleCIWebhookSecret", { projectId: event.data.project.id })).secret;
   if (secret === null || !(await verifyCircleCISignature(secret, body, request.headers.get("circleci-signature")))) {
     return forbidden();
   }
