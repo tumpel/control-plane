@@ -416,7 +416,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona and its files; a file another persona holds stays. Refused while any session of the persona remains, whatever its state, naming those sessions; delete them first with tumpel_session_delete.",
+    "Delete a persona and its files; a file another persona holds stays. Refused while any session of the persona is neither Failed nor Archived, naming those sessions. Archived sessions stay readable.",
   ),
   {
     name: "tumpel_secret_set_create",
@@ -880,7 +880,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/sessions/{sessionId}",
     SessionPathSchema,
-    "Delete an Idle, Stopped, Failed or Archived session and everything stored for it: its turns, transcript and snapshots; a snapshot chunk another session holds stays. Refused as tumpel_session_archive is, and for a session that built a prebuild.",
+    "Delete an Idle, Stopped, Failed or Archived session and everything stored for it: its turns, transcript and snapshots; a snapshot chunk another session holds stays. A prebuild keeps the layer the session built. Refused as tumpel_session_archive is.",
   ),
   rest(
     "tumpel_session_stop_failures",

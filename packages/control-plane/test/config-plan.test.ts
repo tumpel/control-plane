@@ -257,7 +257,7 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
     ),
   },
   {
-    name: "a persona left out with any session, Failed and Archived included, stops the plan",
+    name: "a persona left out with a session that is neither Failed nor Archived stops the plan",
     desired: desired(config()),
     live: steady({
       personas: [livePersona("p1", "Default", "ClaudeCode", "s1"), livePersona("p2", "Old", "ClaudeCode", "s1")],
@@ -269,7 +269,7 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
       ],
     }),
     planned: problems(
-      "delete persona Old (p2) will be refused: it still has session a1, i1, f1; delete those sessions, or keep the persona in the config",
+      "delete persona Old (p2) will be refused: it is still used by session i1, which is neither Failed nor Archived; archive or delete those sessions, or keep the persona in the config",
     ),
   },
   {

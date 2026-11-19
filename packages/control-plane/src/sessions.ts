@@ -545,13 +545,7 @@ export const deleteSession = async (env: Env, caller: Caller, sessionId: string)
   const { deleted } = await tenant.call("deleteSession", { tenantId: caller.tenantId, sessionId });
   if (deleted.kind === "Deleted") return ok(null);
   if (deleted.kind === "NotFound") return sessionNotFound(sessionId);
-  if (deleted.kind === "NotStopped") return sessionNotStopped(sessionId, deleted.state, "delete");
-  return refuse(409, {
-    code: "Conflict",
-    title: "Session built a prebuild",
-    detail: `session ${sessionId} built prebuild ${deleted.prebuildId}, and the prebuild's layer is the session's snapshot`,
-    fix: "Delete only sessions you started; the prebuild keeps the session that built it",
-  });
+  return sessionNotStopped(sessionId, deleted.state, "delete");
 };
 
 export const listTurns = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Turn[]>> => {

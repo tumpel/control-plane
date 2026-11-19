@@ -612,8 +612,8 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     return problem(409, {
       code: "Conflict",
       title: "Persona in use",
-      detail: `persona ${personaId} still has session ${deleted.sessions.join(", ")}`,
-      fix: "Delete those sessions, then delete the persona again",
+      detail: `persona ${personaId} is still used by session ${deleted.sessions.join(", ")}, which is neither Failed nor Archived`,
+      fix: "Archive or delete those sessions, then delete the persona again",
     });
   }
   if (request.method === "POST") {

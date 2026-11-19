@@ -2855,7 +2855,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(offer.repository, "https://github.com/acme/app");
   });
 
-  test("a clone failure fails the session, which takes no more turns, archives, and holds its persona until it is deleted", async () => {
+  test("a clone failure fails the session, which takes no more turns, frees its persona for a delete and archives", async () => {
     const { github, bearer, host, refused, getJson, tool, sessionStart, createPersona, deletePersona } = await tenant();
     await createPersona("Unclonable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
@@ -2896,18 +2896,10 @@ suite("sessions", { concurrency: 8 }, () => {
       assert.equal(send.code, "SessionFailed");
       failed.push(sessionId);
     }
-    assert.equal((await tool("tumpel_session_archive", { sessionId: failed[0] }, SessionSchema)).state, "Archived");
-    const inUse = await deletePersona(start.personaId ?? "");
-    assert.equal(inUse.status, 409);
-    assert.equal(
-      ProblemSchema.parse(await inUse.json()).detail,
-      `persona ${start.personaId} still has session ${failed.join(", ")}`,
-    );
-    for (const sessionId of failed) {
-      const deleted = await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer });
-      assert.equal(deleted.status, 204, await deleted.text());
-    }
     assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+    for (const sessionId of failed) {
+      assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
+    }
   });
 
   test("a session delete removes its rows, transcript chunks, snapshot and timers, and a persona delete keeps a file another persona holds", async () => {
@@ -2956,7 +2948,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(inUse.status, 409);
     assert.equal(
       ProblemSchema.parse(await inUse.json()).detail,
-      `persona ${start.personaId} still has session ${sessionId}`,
+      `persona ${start.personaId} is still used by session ${sessionId}, which is neither Failed nor Archived`,
     );
 
     const deleted = await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer });
@@ -4291,7 +4283,7 @@ test("a newer prebuild archives the older one only once no session still restore
   assert.notEqual(await store.text(newer.request.storageKey), null);
 });
 
-test("archiving the current prebuild by hand keeps its root until the session restoring from it stores its own snapshot", async () => {
+test("deleting the session that built the current prebuild keeps its layer, and the next session restores it", async () => {
   const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
   await installPrebuiltApp(tenantId);
   const { personaId } = await sessionStart();
@@ -4306,7 +4298,7 @@ test("archiving the current prebuild by hand keeps its root until the session re
   host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
-  await storeRoot(request.storageKey);
+  const root = await storeRoot(request.storageKey);
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   const teardown = await host.next("BoxTeardown");
   host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
@@ -4316,6 +4308,15 @@ test("archiving the current prebuild by hand keeps its root until the session re
     (read) => read.status.state === "Done",
   );
 
+  const deleted = await call(`/v1/sessions/${offer.sessionId}`, { method: "DELETE", headers: bearer });
+  assert.equal(deleted.status, 204, await deleted.text());
+  assert.equal((await call(`/v1/sessions/${offer.sessionId}`, { headers: bearer })).status, 404);
+  assert.deepEqual(
+    await tenantSql(tenantId, "SELECT 1 FROM prebuild_sessions WHERE session_id = ?", offer.sessionId),
+    [],
+  );
+  assert.notEqual(await store.text(request.storageKey), null);
+
   const next = await postJson("/v1/sessions", { ...(await sessionStart()), repository, prompt: "restore it" }, bearer);
   assert.equal(next.status, 200, await next.clone().text());
   const consumer = await host.next("TurnOffer");
@@ -4323,23 +4324,11 @@ test("archiving the current prebuild by hand keeps its root until the session re
     consumer.snapshots.map((snapshot) => snapshot.snapshotId),
     [request.snapshotId],
   );
-  const archived = await postJson(`/v1/sessions/${offer.sessionId}/archive`, {}, bearer);
-  assert.equal(archived.status, 200, await archived.clone().text());
-  assert.equal(SessionSchema.parse(await archived.json()).state, "Archived");
-  assert.notEqual(await store.text(request.storageKey), null);
-
-  host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
-  await host.next("TurnClaimed");
-  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
-  host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-  const own = await host.next("SnapshotRequest");
-  await storeRoot(own.storageKey);
-  host.send({ type: "SnapshotDone", snapshotId: own.snapshotId, uploadedBytes: 14 });
-  await until(
-    "the archived prebuild's root deleted",
-    () => store.text(request.storageKey),
-    (text) => text === null,
-  );
+  assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, {
+    layer: "Prebuild",
+    prebuildId: started.prebuildId,
+    layerDigest: createHash("sha256").update(root).digest("hex"),
+  });
 });
 
 test("a prebuild whose snapshot fails reads Failed and its box is discarded over the channel the failure came in on", async () => {
