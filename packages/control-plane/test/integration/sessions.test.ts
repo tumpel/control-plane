@@ -3873,6 +3873,57 @@ test("a newer prebuild archives the older one only once no session still restore
   assert.notEqual(await store.text(newer.request.storageKey), null);
 });
 
+test("archiving the current prebuild by hand keeps its root until the session restoring from it stores its own snapshot", async () => {
+  const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
+  await installPrebuiltApp(tenantId);
+  const { personaId } = await sessionStart();
+  const repository = "https://github.com/prebuilt/app";
+  const response = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI" }, bearer);
+  assert.equal(response.status, 200, await response.clone().text());
+  const started = PrebuildSchema.parse(await response.json());
+  const offer = await host.next("TurnOffer");
+  host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+  await host.next("TurnClaimed");
+  host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
+  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+  host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const request = await host.next("SnapshotRequest");
+  await storeRoot(request.storageKey);
+  host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+  const teardown = await host.next("BoxTeardown");
+  host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
+  await until(
+    "the prebuild reading Done",
+    () => getJson(`/v1/prebuilds/${started.prebuildId}`, PrebuildSchema),
+    (read) => read.status.state === "Done",
+  );
+
+  const next = await postJson("/v1/sessions", { ...(await sessionStart()), repository, prompt: "restore it" }, bearer);
+  assert.equal(next.status, 200, await next.clone().text());
+  const consumer = await host.next("TurnOffer");
+  assert.deepEqual(
+    consumer.snapshots.map((snapshot) => snapshot.snapshotId),
+    [request.snapshotId],
+  );
+  const archived = await postJson(`/v1/sessions/${offer.sessionId}/archive`, {}, bearer);
+  assert.equal(archived.status, 200, await archived.clone().text());
+  assert.equal(SessionSchema.parse(await archived.json()).state, "Archived");
+  assert.notEqual(await store.text(request.storageKey), null);
+
+  host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
+  await host.next("TurnClaimed");
+  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
+  host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const own = await host.next("SnapshotRequest");
+  await storeRoot(own.storageKey);
+  host.send({ type: "SnapshotDone", snapshotId: own.snapshotId, uploadedBytes: 14 });
+  await until(
+    "the archived prebuild's root deleted",
+    () => store.text(request.storageKey),
+    (text) => text === null,
+  );
+});
+
 test("a prebuild whose snapshot fails reads Failed and its box is discarded over the channel the failure came in on", async () => {
   const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
   await installPrebuiltApp(tenantId);

@@ -648,13 +648,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `SELECT prebuild_sessions.session_id FROM prebuilds AS older
         JOIN prebuild_sessions ON prebuild_sessions.prebuild_id = older.prebuild_id
         JOIN sessions ON sessions.session_id = prebuild_sessions.session_id
-        WHERE older.state = 'Done' AND sessions.state != 'Archived'
-          AND EXISTS (SELECT 1 FROM prebuilds AS newer WHERE newer.repository = older.repository
-            AND newer.guest_image_digest = older.guest_image_digest AND newer.state = 'Done' AND newer.created_at > older.created_at)
-          AND NOT EXISTS (SELECT 1 FROM session_prebuild_layers AS consumer JOIN turns ON turns.session_id = consumer.session_id
-            WHERE consumer.prebuild_id = older.prebuild_id AND turns.state IN (SELECT value FROM json_each(?))
-              AND NOT EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = consumer.session_id))`,
-        JSON.stringify(IN_FLIGHT),
+        WHERE older.state = 'Done' AND (sessions.state = 'Archived'
+          AND EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = sessions.session_id)
+          OR sessions.state != 'Archived' AND EXISTS (SELECT 1 FROM prebuilds AS newer WHERE newer.repository = older.repository
+            AND newer.guest_image_digest = older.guest_image_digest AND newer.state = 'Done' AND newer.created_at > older.created_at))`,
       )
       .toArray();
     for (const { session_id } of superseded) await this.archiveSession(tenantId, session_id, now);
@@ -686,7 +683,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .exec<StoredSnapshotRow & { session_id: string; prebuild_id: string }>(
         `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, snapshots.session_id, prebuilds.prebuild_id FROM prebuilds
         JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
-        WHERE prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
+        JOIN sessions ON sessions.session_id = prebuild_sessions.session_id
+        WHERE sessions.state != 'Archived' AND prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
         ORDER BY prebuilds.created_at DESC, snapshots.snapshot_seq DESC LIMIT 1`,
         session.repository,
         base.imageDigest,
@@ -2003,6 +2001,29 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     if (session.state !== "Archived") this.setSessionState(sessionId, "Archived", now);
+    await this.timers(tenantId, sessionId, {
+      FirstLine: null,
+      Total: null,
+      Snapshot: null,
+      SnapshotAnswer: null,
+      Teardown: null,
+      TeardownAnswer: null,
+      HostOffline: null,
+    });
+    if (session.state === "Idle") {
+      await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
+    }
+    const [restoring] = sql
+      .exec(
+        `SELECT 1 FROM prebuild_sessions JOIN session_prebuild_layers AS consumer USING (prebuild_id)
+        JOIN turns ON turns.session_id = consumer.session_id
+        WHERE prebuild_sessions.session_id = ? AND turns.state IN (SELECT value FROM json_each(?))
+          AND NOT EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = consumer.session_id) LIMIT 1`,
+        sessionId,
+        JSON.stringify(IN_FLIGHT),
+      )
+      .toArray();
+    if (restoring !== undefined) return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
     const keys = sql
       .exec<{ storage_key: string }>(
         "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
@@ -2029,18 +2050,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
     }
     await this.releaseChunks(tenantId, sessionId);
-    await this.timers(tenantId, sessionId, {
-      FirstLine: null,
-      Total: null,
-      Snapshot: null,
-      SnapshotAnswer: null,
-      Teardown: null,
-      TeardownAnswer: null,
-      HostOffline: null,
-    });
-    if (session.state === "Idle") {
-      await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
-    }
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
