@@ -109,7 +109,7 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
-  withSupervisorUpdates,
+  withReports,
 } from "./hosts";
 import {
   issues,
@@ -1006,7 +1006,7 @@ const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Respo
 const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await withSupervisorUpdates(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
+  return json(await withReports(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
 };
 
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -1130,7 +1130,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
     if (!body.ok) return body.response;
     const labelled = await setHostLabels(env.DB, caller.tenantId, hostId, body.value.labels, Date.now());
     if (!labelled.ok) return refusal(labelled);
-    const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+    const [host] = await withReports(env, caller.tenantId, [labelled.value]);
     return json(host);
   }
   if (revoking) {
@@ -1139,7 +1139,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
   if (host === null) return refusal(hostNotFound(hostId));
-  const [withUpdates] = await withSupervisorUpdates(env, caller.tenantId, [host]);
+  const [withUpdates] = await withReports(env, caller.tenantId, [host]);
   return json(withUpdates);
 };
 
@@ -1154,7 +1154,7 @@ const handleHostLabelsPatch = async (request: Request, url: URL, env: Env): Prom
   if (!body.ok) return body.response;
   const labelled = await patchHostLabels(env.DB, caller.tenantId, decodeURIComponent(matched), body.value, Date.now());
   if (!labelled.ok) return refusal(labelled);
-  const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+  const [host] = await withReports(env, caller.tenantId, [labelled.value]);
   return json(host);
 };
 
