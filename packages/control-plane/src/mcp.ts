@@ -276,7 +276,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts/usage",
     NO_ARGUMENTS,
-    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib and updatedAt, when the last Hello or Heartbeat arrived.",
+    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them when the host reports them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
   ),
   rest(
     "tumpel_host_get",
@@ -776,7 +776,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema.extend({ repository: SessionStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; refused PoolExhausted when every host runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
+    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; refused PoolExhausted when no host has memory for the persona's box, or, on a host that reports no memory budget, when it runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
   ),
   rest(
     "tumpel_session_start_from_issue",

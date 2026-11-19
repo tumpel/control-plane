@@ -307,6 +307,9 @@ type HostUsageRow = {
   channel_protocol: number;
   disk_budget_mib: number | null;
   disk_held_mib: number | null;
+  memory_budget_mib: number | null;
+  memory_held_mib: number | null;
+  unreported_mib: number;
   created_at: number;
   updated_at: number;
 };
@@ -1024,6 +1027,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private offerMessage(session: SessionRow, turn: TurnRow): StoredTurnOffer {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO unreported_box_offers (box_id, host_id, box_memory_mib)
+      SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM turns WHERE session_id = ?4 AND box_id = ?1 AND turn_id != ?5)
+      ON CONFLICT (box_id) DO NOTHING`,
+      session.box_id,
+      session.host_id,
+      session.box_memory_mib,
+      session.session_id,
+      turn.turn_id,
+    );
     const prebuild = this.hostPrebuild(session.session_id);
     return {
       type: "TurnOffer",
@@ -1103,8 +1116,31 @@ export abstract class TenantSessions extends DurableObject<Env> {
       now,
       channelProtocol,
     );
-    this.hostDiskUsage(hostId, usage, now);
+    this.hostReported(hostId, usage, now);
     clearSupersededFailure(this.ctx.storage.sql, hostId);
+  }
+
+  private hostReported(hostId: string, usage: HostUsage, now: number): void {
+    this.hostDiskUsage(hostId, usage, now);
+    this.hostMemoryUsage(hostId, usage, now);
+    this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE host_id = ?", hostId);
+  }
+
+  private hostMemoryUsage(hostId: string, usage: HostUsage, now: number): void {
+    const sql = this.ctx.storage.sql;
+    if (usage.memoryBudgetMib === undefined || usage.memoryHeldMib === undefined) {
+      sql.exec("DELETE FROM host_memory_usage WHERE host_id = ?", hostId);
+      return;
+    }
+    sql.exec(
+      `INSERT INTO host_memory_usage (host_id, memory_budget_mib, memory_held_mib, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT (host_id) DO UPDATE SET memory_budget_mib = excluded.memory_budget_mib,
+        memory_held_mib = excluded.memory_held_mib, updated_at = excluded.updated_at`,
+      hostId,
+      usage.memoryBudgetMib,
+      usage.memoryHeldMib,
+      now,
+    );
   }
 
   private hostDiskUsage(hostId: string, usage: HostUsage, now: number): void {
@@ -1136,7 +1172,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (updated.rowsWritten === 0) {
       throw new Error(`host ${hostId} sent a Heartbeat, but its tenant holds no usage from its Hello`);
     }
-    this.hostDiskUsage(hostId, usage, now);
+    this.hostReported(hostId, usage, now);
   }
 
   async failLostTurns(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
@@ -1163,6 +1199,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   forgetHostUsage(hostId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
     this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE host_id = ?", hostId);
+    this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
@@ -1182,8 +1219,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return sql
       .exec<HostUsageRow>(
         `SELECT u.host_id, u.box_capacity, u.boxes_warm, u.load_average, u.memory_available_mib, u.channel_protocol,
-          d.disk_budget_mib, d.disk_held_mib, u.created_at, u.updated_at
-        FROM host_usage u LEFT JOIN host_disk_usage d ON d.host_id = u.host_id ORDER BY u.created_at, u.host_id`,
+          d.disk_budget_mib, d.disk_held_mib, m.memory_budget_mib, m.memory_held_mib,
+          (SELECT COALESCE(SUM(o.box_memory_mib), 0) FROM unreported_box_offers o WHERE o.host_id = u.host_id) AS unreported_mib,
+          u.created_at, u.updated_at
+        FROM host_usage u LEFT JOIN host_disk_usage d ON d.host_id = u.host_id
+          LEFT JOIN host_memory_usage m ON m.host_id = u.host_id
+        ORDER BY u.created_at, u.host_id`,
       )
       .toArray()
       .map((row) => ({
@@ -1197,6 +1238,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         ...(row.disk_budget_mib === null || row.disk_held_mib === null
           ? {}
           : { diskBudgetMib: row.disk_budget_mib, diskHeldMib: row.disk_held_mib }),
+        ...(row.memory_budget_mib === null || row.memory_held_mib === null
+          ? {}
+          : { memoryBudgetMib: row.memory_budget_mib, memoryHeldMib: row.memory_held_mib + row.unreported_mib }),
         channelProtocol: row.channel_protocol,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -2560,6 +2604,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const { turn, session } = offered;
     const now = Date.now();
     if (message.reason === "PoolExhausted" && turn.state === "Offered") {
+      this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE box_id = ?", turn.box_id);
       this.ctx.storage.sql.exec(
         `INSERT INTO turn_refusals (turn_id, host_id, detail, refused_at) VALUES (?, ?, ?, ?)
         ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id, detail = excluded.detail, refused_at = excluded.refused_at`,
