@@ -211,11 +211,11 @@ export class HostChannel extends DurableObject<Env> {
     context: control.ControlContext,
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    const tenant = this.env.TENANT.getByName(tenantId);
-    for (const handoff of await tenant.deferredOffers(tenantId, hostId)) {
+    const tenant = tenantApi(this.env.TENANT, tenantId);
+    for (const handoff of (await tenant.call("deferredOffers", { tenantId, hostId })).handoffs) {
       if (handoff.hostId === hostId) await control.send(attachment.connection, handoff.offer, context);
       else await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
-      await tenant.offerSent(handoff.offer.turnId);
+      await tenant.call("offerSent", { turnId: handoff.offer.turnId });
     }
   }
 
@@ -257,23 +257,23 @@ export class HostChannel extends DurableObject<Env> {
       .bind(welcomed.supervisorVersion, now, hostId)
       .run();
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).hostHello(
+    await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
       hostId,
-      welcomed.boxCapacity,
-      welcomed.usage,
+      boxCapacity: welcomed.boxCapacity,
+      usage: welcomed.usage,
       now,
-      welcomed.protocolVersion,
-    );
+      channelProtocol: welcomed.protocolVersion,
+    });
   }
 
   private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).hostUsage(hostId, usage, now);
+    await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
   }
 
   private async reconcileHeldBoxes(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, heldSessionIds, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {
@@ -292,15 +292,15 @@ export class HostChannel extends DurableObject<Env> {
       await this.telemetry(tenantId, hostId, message);
       return null;
     }
-    const tenant = this.env.TENANT.getByName(tenantId);
+    const tenant = tenantApi(this.env.TENANT, tenantId);
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
-      await tenantApi(this.env.TENANT, tenantId).call("supervisorUpdate", { hostId, message });
+      await tenant.call("supervisorUpdate", { hostId, message });
       if (message.type === "SupervisorUpdateStep" && message.phase === "Restarting") await this.presence("Offline");
       else await this.refreshPresence();
       return null;
     }
-    return tenant.hostMessage(tenantId, hostId, message);
+    return (await tenant.call("hostMessage", { tenantId, hostId, message })).reply;
   }
 
   private async telemetry(
@@ -313,7 +313,10 @@ export class HostChannel extends DurableObject<Env> {
       dimensions: { ...point.dimensions, hostId },
     });
     const turnIds = [...new Set(turns.map((point) => point.turnId))];
-    const offered = turnIds.length === 0 ? {} : await this.env.TENANT.getByName(tenantId).turnMetricDimensions(turnIds);
+    const offered =
+      turnIds.length === 0
+        ? {}
+        : (await tenantApi(this.env.TENANT, tenantId).call("turnMetricDimensions", { turnIds })).dimensions;
     await this.env.TENANT_METRICS.getByName(tenantId)
       .record({ instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) })
       .catch((error: unknown) => {
@@ -384,7 +387,13 @@ export class HostChannel extends DurableObject<Env> {
       ledger: this.ledger(),
       prepareOffer: async (offer) => {
         const tenantId = await this.tenantOf(host.host_id);
-        return this.env.TENANT.getByName(tenantId).prepareOffer(tenantId, offer.turnId, host.host_id, Date.now());
+        const { prepared } = await tenantApi(this.env.TENANT, tenantId).call("prepareOffer", {
+          tenantId,
+          turnId: offer.turnId,
+          hostId: host.host_id,
+          now: Date.now(),
+        });
+        return prepared;
       },
       prepareClaudeSetup: async (stored) => {
         const tenantId = await this.tenantOf(host.host_id);
@@ -424,6 +433,11 @@ export class HostChannel extends DurableObject<Env> {
       .run();
     if (changed.meta.changes === 0) return;
     const tenantId = await this.tenantOf(host.host_id);
-    await this.env.TENANT.getByName(tenantId).hostPresence(tenantId, host.host_id, state, now);
+    await tenantApi(this.env.TENANT, tenantId).call("hostPresence", {
+      tenantId,
+      hostId: host.host_id,
+      presence: state,
+      now,
+    });
   }
 }

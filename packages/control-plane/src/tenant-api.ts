@@ -51,6 +51,10 @@ import {
   CreatePersonaResultSchema,
   CreateSecretSetInputSchema,
   CreateSecretSetResultSchema,
+  DeadlineReachedInputSchema,
+  DeadlineReachedResultSchema,
+  DeferredOffersInputSchema,
+  DeferredOffersResultSchema,
   DeleteBuildConnectionInputSchema,
   DeleteBuildConnectionResultSchema,
   DeleteCircleCIProjectInputSchema,
@@ -63,6 +67,8 @@ import {
   DeleteSecretSetResultSchema,
   DispatchCircleCIPrebuildInputSchema,
   DispatchCircleCIPrebuildResultSchema,
+  ForgetHostUsageInputSchema,
+  ForgetHostUsageResultSchema,
   GetClaudeSetupInputSchema,
   GetClaudeSetupResultSchema,
   GetConnectorInputSchema,
@@ -89,6 +95,14 @@ import {
   GitHubActionsConnectionResultSchema,
   HeldPrebuildInputSchema,
   HeldPrebuildResultSchema,
+  HostHelloInputSchema,
+  HostHelloResultSchema,
+  HostMessageInputSchema,
+  HostMessageResultSchema,
+  HostPresenceInputSchema,
+  HostPresenceResultSchema,
+  HostUsageInputSchema,
+  HostUsageResultSchema,
   JobInputsTargetInputSchema,
   JobInputsTargetResultSchema,
   ListCircleCIProjectsInputSchema,
@@ -99,6 +113,8 @@ import {
   ListConnectorsResultSchema,
   ListCredentialHandoversInputSchema,
   ListCredentialHandoversResultSchema,
+  ListHostUsageInputSchema,
+  ListHostUsageResultSchema,
   ListLatestPrebuildsInputSchema,
   ListLatestPrebuildsResultSchema,
   ListPersonasInputSchema,
@@ -119,6 +135,8 @@ import {
   ListTurnsResultSchema,
   NamespaceConnectionInputSchema,
   NamespaceConnectionResultSchema,
+  OfferSentInputSchema,
+  OfferSentResultSchema,
   OpenInputSchema,
   OpenResultSchema,
   OpenRouterAuthorizationDeadlineReachedInputSchema,
@@ -133,6 +151,10 @@ import {
   PrebuildDeadlineReachedResultSchema,
   PrepareClaudeSetupInputSchema,
   PrepareClaudeSetupResultSchema,
+  PrepareOfferInputSchema,
+  PrepareOfferResultSchema,
+  ReconcileHeldBoxesInputSchema,
+  ReconcileHeldBoxesResultSchema,
   RecordPrebuildBuildingInputSchema,
   RecordPrebuildBuildingResultSchema,
   RemoveSecretMemberInputSchema,
@@ -141,6 +163,8 @@ import {
   RenameConnectorResultSchema,
   RepositoryReadTokenInputSchema,
   RepositoryReadTokenResultSchema,
+  RunningTurnsByHostInputSchema,
+  RunningTurnsByHostResultSchema,
   SendTurnInputSchema,
   SendTurnResultSchema,
   ServeConnectorTokenInputSchema,
@@ -179,6 +203,8 @@ import {
   TenantRefusalSchema,
   TranscriptCursorInputSchema,
   TranscriptCursorResultSchema,
+  TurnMetricDimensionsInputSchema,
+  TurnMetricDimensionsResultSchema,
   UnknownConnectorsInputSchema,
   UnknownConnectorsResultSchema,
   UnpinInputSchema,
@@ -197,7 +223,7 @@ import {
   WriteClaudeSetupTokenResultSchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
-import { TenantSkew } from "./tenant-version.ts";
+import { problem } from "./http.ts";
 
 export const TENANT_OPERATIONS = {
   listPersonas: { input: ListPersonasInputSchema, result: ListPersonasResultSchema },
@@ -336,6 +362,19 @@ export const TENANT_OPERATIONS = {
   connectGitHubActions: { input: ConnectGitHubActionsInputSchema, result: ConnectGitHubActionsResultSchema },
   namespaceConnection: { input: NamespaceConnectionInputSchema, result: NamespaceConnectionResultSchema },
   connectNamespace: { input: ConnectNamespaceInputSchema, result: ConnectNamespaceResultSchema },
+  offerSent: { input: OfferSentInputSchema, result: OfferSentResultSchema },
+  hostHello: { input: HostHelloInputSchema, result: HostHelloResultSchema },
+  hostUsage: { input: HostUsageInputSchema, result: HostUsageResultSchema },
+  reconcileHeldBoxes: { input: ReconcileHeldBoxesInputSchema, result: ReconcileHeldBoxesResultSchema },
+  forgetHostUsage: { input: ForgetHostUsageInputSchema, result: ForgetHostUsageResultSchema },
+  runningTurnsByHost: { input: RunningTurnsByHostInputSchema, result: RunningTurnsByHostResultSchema },
+  listHostUsage: { input: ListHostUsageInputSchema, result: ListHostUsageResultSchema },
+  deferredOffers: { input: DeferredOffersInputSchema, result: DeferredOffersResultSchema },
+  turnMetricDimensions: { input: TurnMetricDimensionsInputSchema, result: TurnMetricDimensionsResultSchema },
+  prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
+  hostPresence: { input: HostPresenceInputSchema, result: HostPresenceResultSchema },
+  hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
+  deadlineReached: { input: DeadlineReachedInputSchema, result: DeadlineReachedResultSchema },
 } as const;
 
 type Operations = typeof TENANT_OPERATIONS;
@@ -408,3 +447,19 @@ export const tenantApi = (namespace: { getByName(name: string): TenantStub }, te
     return TENANT_OPERATIONS[operation].result.parse(response.result) as TenantResult<O>;
   },
 });
+
+export class TenantSkew extends Error {}
+
+export const tenantSkewed = (error: unknown): Response => {
+  if (!(error instanceof TenantSkew)) throw error;
+  return problem(
+    503,
+    {
+      code: "DeployInProgress",
+      title: "Deploy in progress",
+      detail: `a deploy of the control plane is rolling out: ${error.message}`,
+      fix: "Retry in a minute, once the deploy has rolled out",
+    },
+    { "retry-after": "30" },
+  );
+};

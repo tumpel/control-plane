@@ -386,7 +386,11 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return null;
   }
 
-  override async hostMessage(tenantId: string, hostId: string, message: TenantHostMessage): Promise<HostReply | null> {
+  protected override async hostMessage(
+    tenantId: string,
+    hostId: string,
+    message: TenantHostMessage,
+  ): Promise<HostReply | null> {
     if (!isClaudeSetupMessage(message)) return super.hostMessage(tenantId, hostId, message);
     const row = this.claudeSetupRow(message.claudeSetupId);
     if (row === null || row.host_id !== hostId) {

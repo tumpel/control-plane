@@ -254,7 +254,7 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
   await env.DB.prepare("UPDATE hosts SET state = 'Revoked', updated_at = ? WHERE host_id = ? AND tenant_id = ?")
     .bind(now, hostId, tenantId)
     .run();
-  await env.TENANT.getByName(tenantId).forgetHostUsage(hostId);
+  await tenantApi(env.TENANT, tenantId).call("forgetHostUsage", { hostId });
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, state: "Revoked", updatedAt: now } };
 };

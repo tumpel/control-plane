@@ -952,7 +952,7 @@ export class TenantPrebuilds extends TenantSessions {
     };
   }
 
-  buildProviderConnected(provider: BuildProvider): boolean {
+  protected buildProviderConnected(provider: BuildProvider): boolean {
     return this.connectionRow(provider) !== null;
   }
 

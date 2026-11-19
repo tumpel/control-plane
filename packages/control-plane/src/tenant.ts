@@ -26,7 +26,6 @@ import { serveTenantRequest, type TenantHandlers, type TenantRequest, type Tenan
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
-import { TENANT_RPC_VERSION } from "./tenant-version.ts";
 
 export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
   boxMemoryMib: number;
@@ -168,10 +167,6 @@ export class Tenant extends TenantConnectors {
       await this.holdDataKey();
       await this.sealPlaintext();
     });
-  }
-
-  rpcVersion(): number {
-    return TENANT_RPC_VERSION;
   }
 
   handle(request: TenantRequest): Promise<TenantResponse> {
@@ -422,6 +417,44 @@ export class Tenant extends TenantConnectors {
     }),
     namespaceConnection: () => ({ connection: this.namespaceConnection() }),
     connectNamespace: ({ start, now }) => ({ connection: this.connectNamespace(start, now) }),
+    offerSent: ({ turnId }) => {
+      this.offerSent(turnId);
+      return {};
+    },
+    hostHello: ({ hostId, boxCapacity, usage, now, channelProtocol }) => {
+      this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
+      return {};
+    },
+    hostUsage: ({ hostId, usage, now }) => {
+      this.hostUsage(hostId, usage, now);
+      return {};
+    },
+    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, now }) => {
+      await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+      return {};
+    },
+    forgetHostUsage: ({ hostId }) => {
+      this.forgetHostUsage(hostId);
+      return {};
+    },
+    runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
+    listHostUsage: ({ tenantId }) => ({ usage: this.listHostUsage(tenantId) }),
+    deferredOffers: async ({ tenantId, hostId }) => ({ handoffs: await this.deferredOffers(tenantId, hostId) }),
+    turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
+    prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
+      prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
+    }),
+    hostPresence: async ({ tenantId, hostId, presence, now }) => {
+      await this.hostPresence(tenantId, hostId, presence, now);
+      return {};
+    },
+    hostMessage: async ({ tenantId, hostId, message }) => ({
+      reply: await this.hostMessage(tenantId, hostId, message),
+    }),
+    deadlineReached: async ({ tenantId, due }) => {
+      await this.deadlineReached(tenantId, due);
+      return {};
+    },
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
@@ -883,7 +916,7 @@ export class Tenant extends TenantConnectors {
     return deleted ? { kind: "Deleted" } : { kind: "NotFound" };
   }
 
-  hasSecretSet(secretSetId: string): boolean {
+  protected hasSecretSet(secretSetId: string): boolean {
     return (
       this.ctx.storage.sql
         .exec<{ secret_set_id: string }>("SELECT secret_set_id FROM secret_sets WHERE secret_set_id = ?", secretSetId)

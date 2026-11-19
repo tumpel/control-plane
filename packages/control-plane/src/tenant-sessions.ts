@@ -1171,7 +1171,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
   }
 
-  offerSent(turnId: string): void {
+  protected offerSent(turnId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
   }
 
@@ -1259,7 +1259,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return turn;
   }
 
-  hostHello(hostId: string, boxCapacity: number, usage: HostUsage, now: number, channelProtocol: number): void {
+  protected hostHello(
+    hostId: string,
+    boxCapacity: number,
+    usage: HostUsage,
+    now: number,
+    channelProtocol: number,
+  ): void {
     this.ctx.storage.sql.exec(
       `INSERT INTO host_usage (host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at, channel_protocol)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1319,7 +1325,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  hostUsage(hostId: string, usage: HostUsage, now: number): void {
+  protected hostUsage(hostId: string, usage: HostUsage, now: number): void {
     const updated = this.ctx.storage.sql.exec(
       "UPDATE host_usage SET boxes_warm = ?, load_average = ?, memory_available_mib = ?, updated_at = ? WHERE host_id = ?",
       usage.boxesWarm,
@@ -1334,7 +1340,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.hostReported(hostId, usage, now);
   }
 
-  async reconcileHeldBoxes(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+  protected async reconcileHeldBoxes(
+    tenantId: string,
+    hostId: string,
+    heldSessionIds: string[],
+    now: number,
+  ): Promise<void> {
     await this.releaseUnneededBoxes(tenantId, hostId, heldSessionIds, now);
     const gone = this.ctx.storage.sql
       .exec<{ session_id: string }>(
@@ -1408,14 +1419,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  forgetHostUsage(hostId: string): void {
+  protected forgetHostUsage(hostId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
     this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE host_id = ?", hostId);
     this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
-  runningTurnsByHost(): RunningTurns[] {
+  protected runningTurnsByHost(): RunningTurns[] {
     return this.ctx.storage.sql
       .exec<{ host_id: string; running: number }>(
         `SELECT host_id, COUNT(*) AS running FROM turns WHERE state IN (${IN_FLIGHT.map(() => "?").join(", ")}) GROUP BY host_id`,
@@ -1425,7 +1436,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
   }
 
-  heldBoxes(): HeldBox[] {
+  protected heldBoxes(): HeldBox[] {
     return this.ctx.storage.sql
       .exec<{
         session_id: string;
@@ -1468,7 +1479,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       }));
   }
 
-  listHostUsage(tenantId: string): ReportedHostUsage[] {
+  protected listHostUsage(tenantId: string): ReportedHostUsage[] {
     const sql = this.ctx.storage.sql;
     const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
     return sql
@@ -1842,7 +1853,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return null;
   }
 
-  async deferredOffers(tenantId: string, hostId: string): Promise<TurnHandoff[]> {
+  protected async deferredOffers(tenantId: string, hostId: string): Promise<TurnHandoff[]> {
     const sql = this.ctx.storage.sql;
     const turnIds = sql
       .exec<{ turn_id: string }>("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId)
@@ -2359,7 +2370,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { ...known, kind: "Lines", lines: linesWithin(lines, maxBytes) };
   }
 
-  turnMetricDimensions(turnIds: readonly string[]): Record<string, Dimensions> {
+  protected turnMetricDimensions(turnIds: readonly string[]): Record<string, Dimensions> {
     return Object.fromEntries(
       this.ctx.storage.sql
         .exec<{ turn_id: string; dimensions: string }>(
@@ -2371,7 +2382,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
+  protected async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null) {
@@ -2622,7 +2633,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return snapshots;
   }
 
-  async hostPresence(tenantId: string, hostId: string, presence: "Online" | "Offline", now: number): Promise<void> {
+  protected async hostPresence(
+    tenantId: string,
+    hostId: string,
+    presence: "Online" | "Offline",
+    now: number,
+  ): Promise<void> {
     const inFlight = this.ctx.storage.sql
       .exec<{ session_id: string; turn_id: string }>(
         "SELECT session_id, turn_id FROM turns WHERE host_id = ? AND state = 'Running'",
@@ -2650,7 +2666,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row?.state === "Offline";
   }
 
-  async hostMessage(tenantId: string, hostId: string, message: SessionHostMessage): Promise<HostReply | null> {
+  protected async hostMessage(
+    tenantId: string,
+    hostId: string,
+    message: SessionHostMessage,
+  ): Promise<HostReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
@@ -3056,7 +3076,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
+  protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
     const { turnId } = due.deadline;
     const { name } = due;
     const turn = this.turnRow(turnId);
