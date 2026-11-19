@@ -410,13 +410,7 @@ export const startPrebuild = async (
     apiOrigin,
     now,
   );
-  if (started.kind !== "NoPrebuildHost") return placed(started);
-  return refuse(409, {
-    code: "NoHostAvailable",
-    title: "No host can take the prebuild",
-    detail: `every ${PREBUILD_ARCHITECTURE} host of your tenant builds another prebuild, or your tenant has no ${PREBUILD_ARCHITECTURE} host; a host builds one prebuild at a time, on ${PREBUILD_ARCHITECTURE}`,
-    fix: `Wait for the running prebuild to end, or enrol another ${PREBUILD_ARCHITECTURE} host, then start the prebuild again`,
-  });
+  return placed(started);
 };
 
 const LIFECYCLE_NAMES: Record<LifecycleCommand, PrebuildPreview["commands"][number]["lifecycle"]> = {

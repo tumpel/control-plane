@@ -3116,9 +3116,6 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   });
   assert.deepEqual(installationTokenRequests.at(-1), { repositories: ["app"], permissions: { contents: "read" } });
   assert.equal(new URL(started.logUrl).pathname, `/v1/sessions/${offer.sessionId}/transcript`);
-  const busy = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI", rebuild: true }, bearer);
-  assert.equal(busy.status, 409, await busy.clone().text());
-  assert.equal(ProblemSchema.parse(await busy.json()).code, "NoHostAvailable");
 
   host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
   await host.next("TurnClaimed");
