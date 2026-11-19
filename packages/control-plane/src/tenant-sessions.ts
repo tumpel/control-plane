@@ -7,6 +7,7 @@ import {
   type SecretMember,
 } from "@tumpel/api/credentials";
 import {
+  type ChunkPlacementSchema,
   CredentialHandoverSchema,
   HarnessSchema,
   type PrebuildFailurePhaseSchema,
@@ -14,6 +15,8 @@ import {
   SessionPrebuildLayerSchema,
   SessionSchema,
   type SessionStartSchema,
+  SnapshotManifestSchema,
+  SnapshotRootSchema,
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
@@ -61,6 +64,7 @@ import {
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry, GOAL_FOLDS } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
+import { issues } from "./http.ts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
@@ -87,6 +91,10 @@ export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
 type TurnImage = z.infer<typeof TurnImageSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
+type ChunkPlacement = z.infer<typeof ChunkPlacementSchema>;
+type Unreferenced = { roots: string[]; packs: string[] };
+type StoredRoot = { root: Uint8Array<ArrayBuffer>; placements: ChunkPlacement[] };
+type PlacementParse<T> = { ok: true; value: T } | { ok: false; detail: string };
 export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
 export type SessionStart = z.infer<typeof SessionStartSchema>;
 export type StartedSession = z.infer<typeof StartedSessionSchema>;
@@ -379,10 +387,31 @@ const refused = (reason: string): Refused => ({ type: "Refused", reason });
 
 const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
 
-const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.pack_digest = packs.pack_digest)";
+const PLACEMENTS_OF = "SELECT json_extract(value, '$.digest'), json_extract(value, '$.packDigest') FROM json_each(?1)";
 
-const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
-  AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
+const UNREFERENCED_CHUNKS = `DELETE FROM chunks WHERE (digest, pack_digest) IN (${PLACEMENTS_OF})
+  AND NOT EXISTS (SELECT 1 FROM session_placements WHERE session_placements.digest = chunks.digest AND session_placements.pack_digest = chunks.pack_digest)
+  RETURNING pack_digest`;
+
+const UNSTORED_SNAPSHOTS =
+  "SELECT snapshot_id FROM snapshot_requests WHERE session_id = ?1 UNION SELECT snapshot_id FROM snapshot_failures WHERE session_id = ?1";
+
+const DEAD_PACKS = `DELETE FROM packs WHERE pack_digest IN (SELECT value FROM json_each(?1))
+  AND NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.pack_digest = packs.pack_digest)
+  AND NOT EXISTS (SELECT 1 FROM snapshot_packs WHERE snapshot_packs.pack_digest = packs.pack_digest)
+  RETURNING pack_digest`;
+
+const parseStored = <T>(text: string, schema: z.ZodType<T>, what: string): PlacementParse<T> => {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, detail: `${what} is not JSON (${String(error)})` };
+  }
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) return { ok: false, detail: `${what} does not match its schema: ${issues(parsed.error)}` };
+  return { ok: true, value: parsed.data };
+};
 
 const toSession = (
   tenantId: string,
@@ -558,20 +587,24 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.host(session.host_id).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id });
   }
 
-  private async prebuildStored(request: SnapshotRequestRow, sizeBytes: number, now: number): Promise<void> {
+  private async prebuildStored(
+    tenantId: string,
+    request: SnapshotRequestRow,
+    root: Uint8Array<ArrayBuffer>,
+    sizeBytes: number,
+    now: number,
+  ): Promise<void> {
     const prebuild = this.hostPrebuild(request.session_id);
     if (prebuild === null) return;
-    const root = await this.env.STORE.get(request.storage_key);
-    if (root === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
-    const digest = await sha256Hex(new Uint8Array(await root.arrayBuffer()));
+    const digest = await sha256Hex(root);
     const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
+    const done = this.ctx.storage.transactionSync(() => {
       const moved = sql.exec(
         "UPDATE prebuilds SET state = 'Done', updated_at = ? WHERE prebuild_id = ? AND state = 'Building'",
         now,
         prebuild.prebuild_id,
       ).rowsWritten;
-      if (moved === 0) return;
+      if (moved === 0) return false;
       sql.exec(
         "INSERT INTO prebuild_layers (prebuild_id, layer_digest, layer_size_bytes, finished_at, created_at) VALUES (?, ?, ?, ?, ?)",
         prebuild.prebuild_id,
@@ -580,7 +613,26 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
         now,
       );
+      return true;
     });
+    if (done) await this.releaseSupersededLayers(tenantId, prebuild.prebuild_id, now);
+  }
+
+  private async releaseSupersededLayers(tenantId: string, prebuildId: string, now: number): Promise<void> {
+    const superseded = this.ctx.storage.sql
+      .exec<{ session_id: string }>(
+        `SELECT prebuild_sessions.session_id FROM prebuilds JOIN prebuild_sessions USING (prebuild_id)
+        JOIN sessions ON sessions.session_id = prebuild_sessions.session_id
+        WHERE prebuilds.repository = (SELECT repository FROM prebuilds WHERE prebuild_id = ?1) AND prebuilds.state = 'Done'
+          AND sessions.state IN ('Idle', 'Stopped', 'Failed')
+          AND prebuilds.prebuild_id != (SELECT newest.prebuild_id FROM prebuilds AS newest
+            WHERE newest.repository = prebuilds.repository AND newest.state = 'Done' ORDER BY newest.created_at DESC LIMIT 1)
+          AND NOT EXISTS (SELECT 1 FROM session_prebuild_layers JOIN sessions AS booted USING (session_id)
+            WHERE session_prebuild_layers.prebuild_id = prebuilds.prebuild_id AND booted.state != 'Archived')`,
+        prebuildId,
+      )
+      .toArray();
+    for (const layer of superseded) await this.archiveSession(tenantId, layer.session_id, now);
   }
 
   private prebuildLayer(session: SessionRow, host: HostRecord, release: ReleaseRead): PrebuildLayer {
@@ -630,7 +682,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     sql.exec(
-      "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?, digest FROM session_chunks WHERE session_id = ?",
+      "INSERT OR IGNORE INTO session_placements (session_id, digest, pack_digest) SELECT ?, digest, pack_digest FROM session_placements WHERE session_id = ?",
       session.session_id,
       layer.session_id,
     );
@@ -1522,28 +1574,31 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     if (session.state !== "Archived") this.setSessionState(sessionId, "Archived", now);
-    const keys = sql
-      .exec<{ storage_key: string }>(
-        "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
-        sessionId,
-      )
-      .toArray()
-      .map((row) => row.storage_key);
-    this.ctx.storage.transactionSync(() => {
-      for (const pending of ["snapshot_packs", "snapshot_chunks"]) {
-        sql.exec(
-          `DELETE FROM ${pending} WHERE snapshot_id IN (SELECT snapshot_id FROM snapshot_requests WHERE session_id = ?1 UNION SELECT snapshot_id FROM snapshot_failures WHERE session_id = ?1)`,
+    const unreferenced = this.replaceReferences(sessionId, [], () => {
+      const roots = sql
+        .exec<{ storage_key: string }>(
+          "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
           sessionId,
-        );
+        )
+        .toArray()
+        .map((row) => row.storage_key);
+      const packs = sql
+        .exec<{ pack_digest: string }>(
+          `SELECT DISTINCT pack_digest FROM snapshot_packs AS own WHERE snapshot_id IN (${UNSTORED_SNAPSHOTS})
+            AND NOT EXISTS (SELECT 1 FROM packs WHERE packs.pack_digest = own.pack_digest)
+            AND NOT EXISTS (SELECT 1 FROM snapshot_packs AS other WHERE other.pack_digest = own.pack_digest AND other.snapshot_id NOT IN (${UNSTORED_SNAPSHOTS}))`,
+          sessionId,
+        )
+        .toArray()
+        .map((row) => row.pack_digest);
+      for (const pending of ["snapshot_packs", "snapshot_chunks"]) {
+        sql.exec(`DELETE FROM ${pending} WHERE snapshot_id IN (${UNSTORED_SNAPSHOTS})`, sessionId);
       }
       sql.exec("DELETE FROM snapshots WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
+      return { roots, packs };
     });
-    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
-      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
-    }
-    await this.releaseChunks(tenantId, sessionId);
     await this.timers(tenantId, sessionId, {
       FirstLine: null,
       Total: null,
@@ -1556,28 +1611,97 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state === "Idle") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
+    const [booted] = sql
+      .exec<{ prebuild_id: string }>("SELECT prebuild_id FROM session_prebuild_layers WHERE session_id = ?", sessionId)
+      .toArray();
+    if (booted !== undefined) await this.releaseSupersededLayers(tenantId, booted.prebuild_id, now);
+    await this.deleteUnreferenced(tenantId, unreferenced);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
-  private releaseChunks(tenantId: string, sessionId: string): Promise<void> {
+  private replaceReferences(sessionId: string, kept: ChunkPlacement[], release: () => Unreferenced): Unreferenced {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const released = release();
+      const dropped = sql
+        .exec<{ digest: string; pack_digest: string }>(
+          "SELECT digest, pack_digest FROM session_placements WHERE session_id = ?",
+          sessionId,
+        )
+        .toArray()
+        .map((row) => ({ digest: row.digest, packDigest: row.pack_digest }));
+      sql.exec("DELETE FROM session_placements WHERE session_id = ?", sessionId);
+      sql.exec(
+        `INSERT OR IGNORE INTO session_placements (session_id, digest, pack_digest) SELECT ?2, * FROM (${PLACEMENTS_OF})`,
+        JSON.stringify(kept),
+        sessionId,
+      );
+      const emptied = sql
+        .exec<{ pack_digest: string }>(UNREFERENCED_CHUNKS, JSON.stringify(dropped))
+        .toArray()
+        .map((row) => row.pack_digest);
+      const dead = sql
+        .exec<{ pack_digest: string }>(DEAD_PACKS, JSON.stringify([...new Set(emptied)]))
+        .toArray()
+        .map((row) => row.pack_digest);
+      return { roots: released.roots, packs: [...released.packs, ...dead] };
+    });
+  }
+
+  private deleteUnreferenced(tenantId: string, unreferenced: Unreferenced): Promise<void> {
     const sql = this.ctx.storage.sql;
     return this.ctx.blockConcurrencyWhile(async () => {
-      const dead = this.ctx.storage.transactionSync(() => {
-        sql.exec(`DELETE FROM chunks WHERE digest IN (${ORPHAN_CHUNKS})`, sessionId);
-        sql.exec("DELETE FROM session_chunks WHERE session_id = ?", sessionId);
-        const packs = sql
-          .exec<{ pack_digest: string }>(`SELECT pack_digest ${DEAD_PACKS}`)
+      const reused = new Set(
+        sql
+          .exec<{ pack_digest: string }>(
+            "SELECT pack_digest FROM packs WHERE pack_digest IN (SELECT value FROM json_each(?1)) UNION SELECT pack_digest FROM snapshot_packs WHERE pack_digest IN (SELECT value FROM json_each(?1))",
+            JSON.stringify(unreferenced.packs),
+          )
           .toArray()
-          .map((row) => row.pack_digest);
-        sql.exec(`DELETE ${DEAD_PACKS}`);
-        return packs;
-      });
-      for (let start = 0; start < dead.length; start += STORE_DELETE_BATCH) {
-        await this.env.STORE.delete(
-          dead.slice(start, start + STORE_DELETE_BATCH).map((packDigest) => packKey(tenantId, packDigest)),
-        );
+          .map((row) => row.pack_digest),
+      );
+      const keys = [
+        ...unreferenced.roots,
+        ...unreferenced.packs.filter((pack) => !reused.has(pack)).map((pack) => packKey(tenantId, pack)),
+      ];
+      for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+        const batch = keys.slice(start, start + STORE_DELETE_BATCH);
+        await this.env.STORE.delete(batch).catch((error: unknown) => {
+          throw new Error(
+            `StoreDeleteFailed: object storage refused to delete ${batch.length} snapshot objects no snapshot references (${String(error)}); ${keys.slice(start).join(", ")} stay in object storage with no record`,
+          );
+        });
       }
     });
+  }
+
+  private async snapshotPlacements(tenantId: string, storageKey: string): Promise<PlacementParse<StoredRoot>> {
+    const object = await this.env.STORE.get(storageKey);
+    if (object === null) return { ok: false, detail: `object storage holds no root under ${storageKey}` };
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    const root = parseStored(new TextDecoder().decode(bytes), SnapshotRootSchema, `the root under ${storageKey}`);
+    if (!root.ok) return root;
+    const parts: ArrayBuffer[] = [];
+    for (const placement of root.value.manifest) {
+      const part = await this.env.STORE.get(packKey(tenantId, placement.packDigest), {
+        range: { offset: placement.offset, length: placement.length },
+      });
+      if (part === null) {
+        return {
+          ok: false,
+          detail: `object storage holds no pack ${placement.packDigest}, which the root under ${storageKey} names for manifest chunk ${placement.digest}`,
+        };
+      }
+      parts.push(await part.arrayBuffer());
+    }
+    const manifest = parseStored(
+      await new Blob(parts).text(),
+      SnapshotManifestSchema,
+      `the manifest of the root under ${storageKey}`,
+    );
+    if (!manifest.ok) return manifest;
+    const files = manifest.value.entries.flatMap((entry) => (entry.kind === "File" ? entry.chunks : []));
+    return { ok: true, value: { root: bytes, placements: [...root.value.manifest, ...files] } };
   }
 
   private async snapshotOrTeardown(tenantId: string, session: SessionRow, latest: TurnRow): Promise<void> {
@@ -2280,17 +2404,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const digests = JSON.stringify(message.digests);
     const held = this.ctx.storage.transactionSync(() => {
-      sql.exec(
-        "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?1, value FROM json_each(?2)",
-        window.request.session_id,
-        digests,
-      );
-      return sql
+      const rows = sql
         .exec<{ digest: string; pack_digest: string; byte_offset: number; byte_length: number }>(
           "SELECT digest, MIN(pack_digest) AS pack_digest, byte_offset, byte_length FROM chunks WHERE digest IN (SELECT value FROM json_each(?1)) GROUP BY digest ORDER BY digest",
           digests,
         )
         .toArray();
+      sql.exec(
+        `INSERT OR IGNORE INTO session_placements (session_id, digest, pack_digest) SELECT ?2, * FROM (${PLACEMENTS_OF})`,
+        JSON.stringify(rows.map((row) => ({ digest: row.digest, packDigest: row.pack_digest }))),
+        window.request.session_id,
+      );
+      return rows;
     });
     return {
       type: "SnapshotChunksHeld",
@@ -2340,9 +2465,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
           chunk.length,
         );
         sql.exec(
-          "INSERT OR IGNORE INTO session_chunks (session_id, digest) VALUES (?, ?)",
+          "INSERT OR IGNORE INTO session_placements (session_id, digest, pack_digest) VALUES (?, ?, ?)",
           request.session_id,
           chunk.digest,
+          chunk.packDigest,
         );
       }
       const stored = new Set(
@@ -2420,7 +2546,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         SELECT asked.pack_digest, packs.size_bytes, MIN(
           EXISTS (SELECT 1 FROM chunks WHERE chunks.digest = asked.digest AND chunks.pack_digest = asked.pack_digest
             AND chunks.byte_offset = asked.byte_offset AND chunks.byte_length = asked.byte_length)
-          AND EXISTS (SELECT 1 FROM session_chunks WHERE session_chunks.session_id = ?2 AND session_chunks.digest = asked.digest)
+          AND EXISTS (SELECT 1 FROM session_placements WHERE session_placements.session_id = ?2
+            AND session_placements.digest = asked.digest AND session_placements.pack_digest = asked.pack_digest)
         ) AS held
         FROM asked JOIN packs ON packs.pack_digest = asked.pack_digest
         GROUP BY asked.pack_digest ORDER BY asked.pack_digest`,
@@ -2895,7 +3022,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     if (failure === undefined || this.sessionRow(failure.session_id)?.host_id !== hostId) return;
     if ((await this.env.STORE.head(failure.storage_key)) === null) return;
-    this.ctx.storage.transactionSync(() => this.promotePlacements(snapshotId, Date.now()));
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "INSERT OR IGNORE INTO session_placements (session_id, digest, pack_digest) SELECT ?, digest, pack_digest FROM snapshot_chunks WHERE snapshot_id = ?",
+        failure.session_id,
+        snapshotId,
+      );
+      this.promotePlacements(snapshotId, Date.now());
+    });
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -2955,8 +3089,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (session.state === "Stopping" && message.reason !== "BoxNotFound") this.returnToIdle(session.session_id);
       return null;
     }
-    if ((await this.env.STORE.head(request.storage_key)) === null) {
-      const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
+    const placements = await this.snapshotPlacements(tenantId, request.storage_key);
+    if (!placements.ok) {
+      const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but ${placements.detail}; check the host's uploads to object storage`;
       this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
       await this.prebuildUnstored(tenantId, session, detail);
       if (session.state === "Stopping") this.returnToIdle(session.session_id);
@@ -2979,11 +3114,30 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
     });
-    await this.prebuildStored(request, message.uploadedBytes, now);
-    if (session.state !== "Stopping") return null;
-    const latest = this.latestTurn(session.session_id, null);
-    if (latest === null) throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
-    await this.snapshotOrTeardown(tenantId, session, latest);
+    const unreferenced = this.replaceReferences(request.session_id, placements.value.placements, () => {
+      const superseded = sql
+        .exec<{ storage_key: string }>(
+          "SELECT storage_key FROM snapshots WHERE session_id = ?1 AND snapshot_seq < ?2 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND snapshot_seq < ?2 AND storage_key != ''",
+          request.session_id,
+          request.snapshot_seq,
+        )
+        .toArray()
+        .map((row) => row.storage_key);
+      sql.exec(
+        "DELETE FROM snapshots WHERE session_id = ? AND snapshot_seq < ?",
+        request.session_id,
+        request.snapshot_seq,
+      );
+      return { roots: superseded, packs: [] };
+    });
+    await this.prebuildStored(tenantId, request, placements.value.root, message.uploadedBytes, now);
+    if (session.state === "Stopping") {
+      const latest = this.latestTurn(session.session_id, null);
+      if (latest === null)
+        throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
+      await this.snapshotOrTeardown(tenantId, session, latest);
+    }
+    await this.deleteUnreferenced(tenantId, unreferenced);
     return null;
   }
 }
