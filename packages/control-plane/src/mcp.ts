@@ -337,7 +337,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/harnesses",
     NO_ARGUMENTS,
-    "List the harness catalog: every harness and version a tenant can pin, and for each credential it accepts, the models it runs with that credential; a credential without models takes any model its provider serves.",
+    "List the harness catalog: every harness and version a tenant can pin, and for each credential it accepts, its modelSupport: Listed with the models it runs with that credential, or ProviderChecked when it takes any model its provider serves.",
   ),
   rest(
     "tumpel_harness_list_pins",
