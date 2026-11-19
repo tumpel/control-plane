@@ -24,6 +24,7 @@ import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { htmlPage } from "./pages";
+import { tenantApi } from "./tenant-api.ts";
 import type { ConnectorCallback, ConnectorWritten } from "./tenant-connectors.ts";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -109,8 +110,13 @@ const create = async (request: Request, env: Env, caller: Caller, auth: "Static"
       fix: "Give the public https address of a remote MCP server",
     });
   }
-  const tenant = env.TENANT.getByName(caller.tenantId);
-  const created = await tenant.createConnector(caller.tenantId, auth, name, url, Date.now());
+  const { written: created } = await tenantApi(env.TENANT, caller.tenantId).call("createConnector", {
+    tenantId: caller.tenantId,
+    auth,
+    name,
+    url,
+    now: Date.now(),
+  });
   return answered(created, "", name);
 };
 
@@ -127,10 +133,10 @@ const connector = async (
   connectorId: string,
   credential: boolean,
 ): Promise<Response> => {
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   const now = Date.now();
   if (request.method === "GET" && !credential) {
-    const found = await tenant.getConnector(caller.tenantId, connectorId, now);
+    const { connector: found } = await tenant.call("getConnector", { tenantId: caller.tenantId, connectorId, now });
     return found === null ? notFound(connectorId) : json(found);
   }
   if (request.method === "DELETE" && credential) {
@@ -138,7 +144,12 @@ const connector = async (
     if (refused) return refused;
     const updatedAt = updatedAtOf(url, "connectors.clearCredential");
     if (updatedAt instanceof Response) return updatedAt;
-    const cleared = await tenant.clearConnectorCredential(caller.tenantId, connectorId, updatedAt, now);
+    const { written: cleared } = await tenant.call("clearConnectorCredential", {
+      tenantId: caller.tenantId,
+      connectorId,
+      updatedAt,
+      now,
+    });
     return answered(cleared, connectorId, "");
   }
   if (request.method === "PUT" && !credential) {
@@ -148,14 +159,20 @@ const connector = async (
     if (updatedAt instanceof Response) return updatedAt;
     const body = await parseBody(request, ConnectorUpdateSchema, "connectors.update");
     if (!body.ok) return body.response;
-    const renamed = await tenant.renameConnector(caller.tenantId, connectorId, updatedAt, body.value.name, now);
+    const { written: renamed } = await tenant.call("renameConnector", {
+      tenantId: caller.tenantId,
+      connectorId,
+      updatedAt,
+      name: body.value.name,
+      now,
+    });
     return answered(renamed, connectorId, body.value.name);
   }
   const refused = ownerRequired(caller, "connectors.delete");
   if (refused) return refused;
   const updatedAt = updatedAtOf(url, "connectors.delete");
   if (updatedAt instanceof Response) return updatedAt;
-  const deleted = await tenant.deleteConnector(connectorId, updatedAt);
+  const { deleted } = await tenant.call("deleteConnector", { connectorId, updatedAt });
   if (deleted.kind === "NotFound") return notFound(connectorId);
   if (deleted.kind === "Changed") return changed(connectorId);
   if (deleted.kind === "InUse") {
@@ -174,14 +191,14 @@ const authorize = async (url: URL, env: Env, caller: Caller, connectorId: string
   if (refused) return refused;
   const updatedAt = updatedAtOf(url, "oauthConnectors.authorize");
   if (updatedAt instanceof Response) return updatedAt;
-  const started = await env.TENANT.getByName(caller.tenantId).startConnectorAuthorization(
-    caller.tenantId,
-    caller.principalId,
+  const { started } = await tenantApi(env.TENANT, caller.tenantId).call("startConnectorAuthorization", {
+    tenantId: caller.tenantId,
+    principalId: caller.principalId,
     connectorId,
     updatedAt,
-    url.origin,
-    Date.now(),
-  );
+    controlPlaneOrigin: url.origin,
+    now: Date.now(),
+  });
   if (started.kind === "Started") return json(started.authorization);
   if (started.kind === "NotFound") return notFound(connectorId);
   if (started.kind === "Changed") return changed(connectorId);
@@ -215,12 +232,14 @@ const setToken = async (
   if (updatedAt instanceof Response) return updatedAt;
   const body = await parseBody(request, StaticConnectorTokenWriteSchema, "staticConnectors.setToken");
   if (!body.ok) return body.response;
-  const tenant = env.TENANT.getByName(caller.tenantId);
-  return answered(
-    await tenant.setStaticToken(caller.tenantId, connectorId, updatedAt, body.value.value, Date.now()),
+  const { written } = await tenantApi(env.TENANT, caller.tenantId).call("setStaticToken", {
+    tenantId: caller.tenantId,
     connectorId,
-    "",
-  );
+    updatedAt,
+    value: body.value.value,
+    now: Date.now(),
+  });
+  return answered(written, connectorId, "");
 };
 
 const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnector: string): Promise<Response> => {
@@ -237,7 +256,11 @@ const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnec
   if (!(await turnTokenMatches(key, token, turnId, connectorId))) {
     return turnTokenRefused(`the token is not the one turn ${turnId} holds for connector ${connectorId}`);
   }
-  const served = await env.TENANT.getByName(tenantId).serveConnectorToken(turnId, connectorId, Date.now());
+  const { served } = await tenantApi(env.TENANT, tenantId).call("serveConnectorToken", {
+    turnId,
+    connectorId,
+    now: Date.now(),
+  });
   if (served.kind === "Served") return json(served.token);
   if (served.kind === "Refused") return turnTokenRefused(`turn ${turnId} does not use connector ${connectorId}`);
   if (served.kind === "NotRunning") {
@@ -299,13 +322,13 @@ const handleCallback = async (url: URL, env: Env): Promise<Response> => {
   const membership = await env.DB.prepare("SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?")
     .bind(claims.tenantId, claims.principalId)
     .first<{ role: string }>();
-  const settled = await env.TENANT.getByName(claims.tenantId).connectorCallback(
+  const { settled } = await tenantApi(env.TENANT, claims.tenantId).call("connectorCallback", {
     claims,
-    await sha256Hex(state),
+    stateHash: await sha256Hex(state),
     callback,
-    membership?.role === "Owner",
-    Date.now(),
-  );
+    initiatorIsOwner: membership?.role === "Owner",
+    now: Date.now(),
+  });
   if (settled.kind === "NotConnected") return notConnected(settled.detail);
   return htmlPage(env, new URL(url.origin), 200, () =>
     resultPage(
@@ -339,7 +362,15 @@ export const handleConnectors = async (
   if (!listing && !creating && !oneMethod && authorizing === undefined && tokenFor === undefined) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
-  if (listing) return json(await env.TENANT.getByName(caller.tenantId).listConnectors(caller.tenantId, Date.now()));
+  if (listing)
+    return json(
+      (
+        await tenantApi(env.TENANT, caller.tenantId).call("listConnectors", {
+          tenantId: caller.tenantId,
+          now: Date.now(),
+        })
+      ).connectors,
+    );
   if (creating) return create(request, env, caller, pathname === "/v1/static-connectors" ? "Static" : "OAuth");
   const raw = one?.[1] ?? authorizing ?? tokenFor ?? "";
   const connectorId = pathId(raw);
