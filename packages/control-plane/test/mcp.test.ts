@@ -308,6 +308,8 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     { name: "Reviewer", secretSetId: defaultSet.secretSetId, connectorIds: [], files: [] },
     bearer,
   );
+  assert.equal(keyless.status, 422);
+  assert.equal(ProblemSchema.parse(await keyless.json()).code, "NoCredential");
   const unlisted = await send(
     "PUT",
     `/v1/personas/${persona.personaId}`,
@@ -404,8 +406,6 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     /Connector changed/,
   );
   await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId, updatedAt: disconnected.updatedAt });
-  assert.equal(keyless.status, 422);
-  assert.equal(ProblemSchema.parse(await keyless.json()).code, "NoCredential");
   assert.deepEqual(
     await toolJson(PersonaSchema.array(), "tumpel_persona_list"),
     await rest(PersonaSchema.array(), "GET", "/v1/personas"),

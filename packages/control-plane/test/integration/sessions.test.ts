@@ -2547,6 +2547,45 @@ suite("sessions", { concurrency: 8 }, () => {
     back.close();
   });
 
+  test("a session the first heartbeat after a reconnect stops before a snapshot held its last turn takes its next turn in a fresh box", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const lost = await enrol("lost");
+    const first = await connect(lost.id, lost.key);
+    await hostState(lost.id, "Online");
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "unsnapshotted" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const { session } = StartedSessionSchema.parse(await response.json());
+    const offer = await first.next("TurnOffer");
+    first.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    first.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    first.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    assert.equal((await first.next("SnapshotRequest")).sessionId, session.sessionId);
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Completed");
+
+    first.close();
+    await hostState(lost.id, "Offline");
+    const back = await connect(lost.id, lost.key, 8, { ...first.carried(), held: [] });
+    await until(
+      "the session whose box is gone reading Stopped",
+      () => getJson(`/v1/sessions/${session.sessionId}`, SessionSchema),
+      (read) => read.state === "Stopped",
+    );
+    const sent = await postJson(`/v1/sessions/${session.sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const next = TurnSchema.parse(await sent.json());
+    const again = await back.next("TurnOffer");
+    assert.equal(again.turnId, next.turnId);
+    assert.notEqual(again.boxId, offer.boxId);
+    back.close();
+  });
+
   test("a session moves off its offline host once a snapshot holds its last completed turn, and the old host's late frames leave its channel working", async () => {
     const { bearer, refused, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("move-from");
