@@ -22,6 +22,7 @@ import {
   type SupervisorUpdates,
   supervisorUpdatesByHost,
 } from "./supervisor-updates";
+import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
@@ -173,6 +174,22 @@ export class Tenant extends TenantConnectors {
     return TENANT_RPC_VERSION;
   }
 
+  handle(request: TenantRequest): Promise<TenantResponse> {
+    return serveTenantRequest(request, this.operations, () =>
+      this.ctx.abort("Tenant API reset onto the deployed code"),
+    );
+  }
+
+  private readonly operations: TenantHandlers = {
+    listPersonas: ({ tenantId }) => ({ personas: this.listPersonas(tenantId) }),
+    getPersona: ({ tenantId, personaId }) => ({ persona: this.getPersona(tenantId, personaId) }),
+    createPersona: ({ tenantId, persona, now }) => ({ written: this.createPersona(tenantId, persona, now) }),
+    updatePersona: ({ tenantId, personaId, persona, now }) => ({
+      written: this.updatePersona(tenantId, personaId, persona, now),
+    }),
+    deletePersona: ({ tenantId, personaId }) => ({ deleted: this.deletePersona(tenantId, personaId) }),
+  };
+
   supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
     recordSupervisorUpdate(this.ctx.storage.sql, hostId, message);
   }
@@ -269,14 +286,14 @@ export class Tenant extends TenantConnectors {
     return toPersona(row, personaFileRows(sql, row.persona_id), connectorIds);
   }
 
-  listPersonas(tenantId: string): StoredPersona[] {
+  protected listPersonas(tenantId: string): StoredPersona[] {
     return this.ctx.storage.sql
       .exec<PersonaRow>(`${PERSONA_SELECT} WHERE tenant_id = ? ORDER BY created_at, persona_id`, tenantId)
       .toArray()
       .map((row) => this.persona(row));
   }
 
-  getPersona(tenantId: string, personaId: string): StoredPersona | null {
+  protected getPersona(tenantId: string, personaId: string): StoredPersona | null {
     const [row] = this.ctx.storage.sql
       .exec<PersonaRow>(`${PERSONA_SELECT} WHERE tenant_id = ? AND persona_id = ?`, tenantId, personaId)
       .toArray();
@@ -312,7 +329,7 @@ export class Tenant extends TenantConnectors {
     }
   }
 
-  createPersona(tenantId: string, persona: PersonaWrite, now: number): Written<StoredPersona> {
+  protected createPersona(tenantId: string, persona: PersonaWrite, now: number): Written<StoredPersona> {
     const personaId = crypto.randomUUID();
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
@@ -339,7 +356,7 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: created };
   }
 
-  updatePersona(
+  protected updatePersona(
     tenantId: string,
     personaId: string,
     persona: PersonaChange,
@@ -368,7 +385,7 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
-  deletePersona(tenantId: string, personaId: string): PersonaDeleted {
+  protected deletePersona(tenantId: string, personaId: string): PersonaDeleted {
     const sql = this.ctx.storage.sql;
     const sessions = sql
       .exec<{ session_id: string }>(

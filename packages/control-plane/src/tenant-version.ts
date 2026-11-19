@@ -1,6 +1,6 @@
 import { problem } from "./http.ts";
 
-export const TENANT_RPC_VERSION = 1;
+export const TENANT_RPC_VERSION = 2;
 
 export class TenantSkew extends Error {}
 

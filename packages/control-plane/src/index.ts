@@ -198,6 +198,7 @@ import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import type { PersonaWrite, Tenant } from "./tenant";
+import { tenantApi } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
 import { checkedTenants, tenantSkewed } from "./tenant-version.ts";
 import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
@@ -388,7 +389,7 @@ const handleDevicesList = async (request: Request, env: Env): Promise<Response> 
 const handlePersonasList = async (request: Request, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const personas = await env.TENANT.getByName(caller.tenantId).listPersonas(caller.tenantId);
+  const { personas } = await tenantApi(env.TENANT, caller.tenantId).call("listPersonas", { tenantId: caller.tenantId });
   const now = Date.now();
   return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
 };
@@ -538,10 +539,13 @@ const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promi
   if (!body.ok) return body.response;
   const write = await personaWrite(env, caller, body.value, "personas.create", true);
   if (!write.ok) return write.response;
-  const tenant = env.TENANT.getByName(caller.tenantId);
-  const created = await tenant.createPersona(caller.tenantId, write.value, Date.now());
-  if (!created.ok) return conflict("personas.create", body.value.name, created.constraint);
-  return json(await readPersona(env, created.value, Date.now()));
+  const { written } = await tenantApi(env.TENANT, caller.tenantId).call("createPersona", {
+    tenantId: caller.tenantId,
+    persona: write.value,
+    now: Date.now(),
+  });
+  if (!written.ok) return conflict("personas.create", body.value.name, written.constraint);
+  return json(await readPersona(env, written.value, Date.now()));
 };
 
 const PERSONA_PATH = /^\/v1\/personas\/([^/]+)$/;
@@ -555,9 +559,10 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
   const path = PersonaPathSchema.safeParse({ personaId: raw });
   if (!path.success) return personaNotFound(raw);
   const { personaId } = path.data;
-  const tenant = env.TENANT.getByName(caller.tenantId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
+  const read = async () => (await tenant.call("getPersona", { tenantId: caller.tenantId, personaId })).persona;
   if (request.method === "DELETE") {
-    const deleted = await tenant.deletePersona(caller.tenantId, personaId);
+    const { deleted } = await tenant.call("deletePersona", { tenantId: caller.tenantId, personaId });
     if (deleted.kind === "Deleted") return noContent();
     if (deleted.kind === "NotFound") return personaNotFound(personaId);
     return problem(409, {
@@ -570,7 +575,7 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
   if (request.method === "PUT") {
     const body = await personaBody(request, PersonaUpdateSchema, "personas.update");
     if (!body.ok) return body.response;
-    const current = await tenant.getPersona(caller.tenantId, personaId);
+    const current = await read();
     if (current === null) return personaNotFound(personaId);
     const write = await personaWrite(
       env,
@@ -581,13 +586,18 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     );
     if (!write.ok) return write.response;
     const { harness: _fixed, ...change } = write.value;
-    const updated = await tenant.updatePersona(caller.tenantId, personaId, change, Date.now());
-    if (!updated.ok) return conflict("personas.update", body.value.name, updated.constraint);
-    return updated.value === null
+    const { written } = await tenant.call("updatePersona", {
+      tenantId: caller.tenantId,
+      personaId,
+      persona: change,
+      now: Date.now(),
+    });
+    if (!written.ok) return conflict("personas.update", body.value.name, written.constraint);
+    return written.value === null
       ? personaNotFound(personaId)
-      : json(await readPersona(env, updated.value, Date.now()));
+      : json(await readPersona(env, written.value, Date.now()));
   }
-  const persona = await tenant.getPersona(caller.tenantId, personaId);
+  const persona = await read();
   return persona === null ? personaNotFound(personaId) : json(await readPersona(env, persona, Date.now()));
 };
 

@@ -31,6 +31,7 @@ import { imagesFor, type ReleaseImage, readRelease, releaseUnreadable, rootfsKey
 import { placed } from "./sessions";
 import { settingsOf } from "./settings";
 import { TEMPLATE_PATH } from "./template-pull-request.ts";
+import { tenantApi } from "./tenant-api.ts";
 import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
 import { PREBUILD_ARCHITECTURE } from "./tenant-sessions";
 import { toolchainFindings } from "./toolchain-files.ts";
@@ -319,7 +320,10 @@ const personaImage = async (
   now: number,
 ): Promise<Outcome<PersonaImage>> => {
   const tenant = tenantOf(env, caller);
-  const persona = await tenant.getPersona(caller.tenantId, personaId);
+  const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
+    tenantId: caller.tenantId,
+    personaId,
+  });
   if (persona === null) {
     return refuse(404, {
       code: "NotFound",
