@@ -235,24 +235,17 @@ const announced = (envelope: Hello): Parsed<Announced> => {
     channelProtocolOldest,
     channelProtocolVersion: envelope.protocolVersion,
   };
-  const { guestProtocolOldest, guestProtocolVersion } = envelope;
-  if (guestProtocolOldest === undefined && guestProtocolVersion === undefined) {
+  const { guestProtocol } = envelope;
+  if (guestProtocol === undefined) {
     return { ok: true, value: { channelProtocol, guestProtocol: { state: "NotReported" } } };
   }
-  if (
-    guestProtocolOldest === undefined ||
-    guestProtocolVersion === undefined ||
-    guestProtocolOldest > guestProtocolVersion
-  ) {
+  if (guestProtocol.guestProtocolOldest > guestProtocol.guestProtocolVersion) {
     return {
       ok: false,
-      reason: `Hello names guest protocols ${guestProtocolOldest ?? "none"} to ${guestProtocolVersion ?? "none"}, not a range; update the supervisor`,
+      reason: `Hello names guest protocols ${guestProtocol.guestProtocolOldest} to ${guestProtocol.guestProtocolVersion}, oldest above newest; update the supervisor`,
     };
   }
-  return {
-    ok: true,
-    value: { channelProtocol, guestProtocol: { state: "Reported", guestProtocolOldest, guestProtocolVersion } },
-  };
+  return { ok: true, value: { channelProtocol, guestProtocol: { state: "Reported", ...guestProtocol } } };
 };
 
 const hello = async (

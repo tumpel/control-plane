@@ -142,7 +142,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
       hello: async (
         privateKey: KeyObject = keys.privateKey,
         protocolVersion: number = ChannelProtocol.Version,
-        ranges: Pick<Hello, "channelProtocolOldest" | "guestProtocolOldest" | "guestProtocolVersion"> = {},
+        ranges: Pick<Hello, "channelProtocolOldest" | "guestProtocol"> = {},
       ) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
@@ -245,8 +245,7 @@ test("a Hello that announces its channel and guest protocol ranges is welcomed w
   const link = setup().connect();
   await link.hello(undefined, ChannelProtocol.Version, {
     channelProtocolOldest: ChannelProtocol.Oldest,
-    guestProtocolOldest: 9,
-    guestProtocolVersion: 14,
+    guestProtocol: { guestProtocolOldest: 9, guestProtocolVersion: 14 },
   });
   assert.equal(link.connection.phase, "Open");
   assert.deepEqual(link.events.at(-1), {
@@ -264,12 +263,10 @@ test("a Hello that announces its channel and guest protocol ranges is welcomed w
   });
 });
 
-test("a Hello whose announced ranges run backwards or name half a guest range is closed as a protocol error", async () => {
+test("a Hello whose announced ranges run backwards is closed as a protocol error", async () => {
   for (const ranges of [
     { channelProtocolOldest: ChannelProtocol.Version + 1 },
-    { guestProtocolOldest: 9 },
-    { guestProtocolVersion: 14 },
-    { guestProtocolOldest: 14, guestProtocolVersion: 9 },
+    { guestProtocol: { guestProtocolOldest: 14, guestProtocolVersion: 9 } },
   ]) {
     const link = setup().connect();
     await link.hello(undefined, ChannelProtocol.Version, ranges);
