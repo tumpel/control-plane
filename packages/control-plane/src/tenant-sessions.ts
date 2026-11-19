@@ -101,7 +101,13 @@ import {
 } from "./supervisor-updates";
 import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
-import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-metrics.ts";
+import {
+  type Dimensions,
+  DimensionsSchema,
+  offeredDimensions,
+  type TimingMetric,
+  timingBatch,
+} from "./turn-metrics.ts";
 
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
@@ -2831,8 +2837,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.storeCredentialFile(offered.session, message.credentialFile);
     }
     if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
-    if (message.type === "TurnFailed") return this.turnFailed(tenantId, hostId, message);
-    if (message.type === "TurnClaim") return this.turnClaim(tenantId, hostId, message);
+    if (message.type === "TurnFailed")
+      return this.endingImageFetch(tenantId, hostId, message, () => this.turnFailed(tenantId, hostId, message));
+    if (message.type === "TurnClaim")
+      return this.endingImageFetch(tenantId, hostId, message, () => this.turnClaim(tenantId, hostId, message));
     if (message.type === "SnapshotDone" || message.type === "SnapshotFailed") {
       return this.snapshotAnswer(tenantId, hostId, message);
     }
@@ -2841,7 +2849,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
-    await this.turnEvent(tenantId, offered, message);
+    await this.endingImageFetch(tenantId, hostId, message, () => this.turnEvent(tenantId, offered, message));
     return null;
   }
 
@@ -3141,6 +3149,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
+      sql.exec(
+        "INSERT INTO turn_claims (turn_id, claimed_at) VALUES (?, ?) ON CONFLICT (turn_id) DO UPDATE SET claimed_at = excluded.claimed_at",
+        turn.turn_id,
+        now,
+      );
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
       this.appendEvent({ event: "TurnStarted", turnId: turn.turn_id, sessionId: session.session_id }, now);
       sql.exec(
@@ -3156,10 +3169,59 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { type: "TurnClaimed", turnId: turn.turn_id };
   }
 
+  private async endingImageFetch<Reply>(
+    tenantId: string,
+    hostId: string,
+    message: TurnEvent | TurnFailed | TurnClaim,
+    handle: () => Promise<Reply>,
+  ): Promise<Reply> {
+    const now = Date.now();
+    const offered = this.offeredTurn(hostId, message);
+    if (offered.type === "Refused" || message.type === "TurnImageFetching") return handle();
+    const [fetch] = this.ctx.storage.sql
+      .exec<{ started_at: number }>(
+        "DELETE FROM turn_image_fetches WHERE turn_id = ? RETURNING started_at",
+        offered.turn.turn_id,
+      )
+      .toArray();
+    const reply = await handle();
+    if (fetch === undefined) return reply;
+    const { turn, session } = offered;
+    await this.recordTiming(tenantId, "turn.image_fetch.duration", turn, session, fetch.started_at, now);
+    return reply;
+  }
+
+  private async recordTiming(
+    tenantId: string,
+    metric: TimingMetric,
+    turn: TurnRow,
+    session: SessionRow,
+    startedAt: number,
+    endedAt: number,
+  ): Promise<void> {
+    const dimensions = { hostId: turn.host_id, harness: session.harness };
+    await this.env.TENANT_METRICS.getByName(tenantId)
+      .record(
+        timingBatch(metric, { turnId: turn.turn_id, sessionId: session.session_id, dimensions }, startedAt, endedAt),
+      )
+      .catch((error: unknown) => {
+        console.error(
+          `TurnTimingRejected: the metrics store refused ${metric} for turn ${turn.turn_id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  }
+
   private async turnEvent(tenantId: string, { turn, session }: OfferedTurn, message: TurnEvent): Promise<void> {
     const now = Date.now();
     const sql = this.ctx.storage.sql;
-    if (message.type === "TurnImageFetching") return;
+    if (message.type === "TurnImageFetching") {
+      sql.exec(
+        "INSERT INTO turn_image_fetches (turn_id, started_at) VALUES (?, ?) ON CONFLICT (turn_id) DO UPDATE SET started_at = excluded.started_at",
+        turn.turn_id,
+        now,
+      );
+      return;
+    }
     if (message.type === "TurnRepositoryReady") {
       if (turn.state !== "Running" || turn.line_count > 0) return;
       const settings = settingsOf(this.env);
@@ -3168,8 +3230,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
       });
     }
     if (turn.state !== "Running") return;
-    if (message.type === "TurnLine")
-      return this.appendLine(tenantId, session, turn, message.lineSeq, message.text, now);
+    if (message.type === "TurnLine") {
+      const [claim] =
+        turn.line_count === 0
+          ? sql
+              .exec<{ claimed_at: number }>(
+                "DELETE FROM turn_claims WHERE turn_id = ? RETURNING claimed_at",
+                turn.turn_id,
+              )
+              .toArray()
+          : [];
+      await this.appendLine(tenantId, session, turn, message.lineSeq, message.text, now);
+      if (claim === undefined) return;
+      return this.recordTiming(tenantId, "turn.first_output.duration", turn, session, claim.claimed_at, now);
+    }
     const held = this.sessionRow(session.session_id)?.last_line_seq ?? 0;
     if (message.lastLineSeq !== held) {
       return this.failTurn(
@@ -3225,6 +3299,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.chunks.write(tenantId, turn.session_id, turn.turn_id, 1);
     this.ctx.storage.transactionSync(() => {
       record();
+      this.ctx.storage.sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", turn.turn_id);
+      this.ctx.storage.sql.exec("DELETE FROM turn_claims WHERE turn_id = ?", turn.turn_id);
       releaseConnectorCredentials(this.ctx.storage.sql);
     });
     const session = this.sessionRow(turn.session_id);

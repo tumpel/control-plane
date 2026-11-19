@@ -1,5 +1,5 @@
 import type { CredentialCheck, SecretMember } from "@tumpel/api/credentials";
-import type { TurnPointSchema } from "@tumpel/schemas";
+import type { MetricBatchSchema, TurnPointSchema } from "@tumpel/schemas";
 import { z } from "zod";
 
 type TurnPoint = z.infer<typeof TurnPointSchema>;
@@ -32,3 +32,21 @@ export const stampTurnPoints = (
     if (point.metric === "turn.cost" && dimensions.costBasis === "NotReported") return [];
     return [{ ...point, dimensions }];
   });
+
+const TIMING_DESCRIPTIONS = {
+  "turn.image_fetch.duration": "Seconds from the host reporting an image fetch to its next message for the turn",
+  "turn.first_output.duration": "Seconds from the claim to the turn's first transcript line",
+} as const;
+
+export type TimingMetric = keyof typeof TIMING_DESCRIPTIONS;
+
+export const timingBatch = (
+  metric: TimingMetric,
+  point: { turnId: string; sessionId: string; dimensions: Dimensions },
+  startedAt: number,
+  endedAt: number,
+): z.infer<typeof MetricBatchSchema> => ({
+  instruments: [{ metric, unit: "s", kind: "Turn", description: TIMING_DESCRIPTIONS[metric] }],
+  samples: [],
+  turns: [{ metric, at: new Date(endedAt).toISOString(), value: (endedAt - startedAt) / 1000, ...point }],
+});
