@@ -339,7 +339,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/personas",
     PersonaCreateSchema,
-    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, connectorIds, the connectors its sessions get ([] for none), the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to 65536 bytes) or Stored (digest and sizeBytes of an uploaded file), optionally boxMemoryMib, the memory of each box its sessions boot, from 512 up to 65536, 2048 by default, and optionally boxDiskMib, the disk of each box, from 32768 (the default) up to 262144.",
+    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, connectorIds, the connectors its sessions get ([] for none), the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to 65536 bytes) or Stored (digest and sizeBytes of an uploaded file), optionally boxMemoryMib, the memory of each box its sessions boot, from 512 up to 65536, 2048 by default, optionally boxDiskMib, the disk of each box, from 32768 (the default) up to 262144, and optionally boxRetention, what happens to a session's box after each turn: Off tears it down once its snapshot is stored, Warm keeps it until the session is stopped or archived, and Auto, the default, keeps it until placement evicts it to make room.",
   ),
   rest(
     "tumpel_persona_upload_file",
@@ -355,7 +355,7 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, secret set, connectorIds (the whole list; [] for none), box memory, box disk and whole file set; sessions already started keep their connectors; its harness is fixed at create, a file left out is deleted, and a boxMemoryMib or boxDiskMib left out goes back to its default of 2048 or 32768 MiB. Name an unchanged file as Stored by its digest and sizeBytes.",
+    "Replace a persona's name, secret set, connectorIds (the whole list; [] for none), box memory, box disk and whole file set; sessions already started keep their connectors; its harness is fixed at create, a file left out is deleted, and a boxMemoryMib or boxDiskMib left out goes back to its default of 2048 or 32768 MiB, and a boxRetention left out goes back to Auto. Name an unchanged file as Stored by its digest and sizeBytes.",
   ),
   rest(
     "tumpel_persona_delete",
@@ -776,7 +776,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema.extend({ repository: SessionStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; refused PoolExhausted when no host has memory for the persona's box, or, on a host that reports no memory budget, when it runs a turn in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
+    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
   ),
   rest(
     "tumpel_session_start_from_issue",

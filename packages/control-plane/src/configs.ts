@@ -34,7 +34,7 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds"> & {
+type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];
@@ -328,6 +328,7 @@ const planPersonas = (
       persona.connectorNames.map((name) => connectorIds.get(name)).join() === current.connectorIds.join() &&
       (persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib) === current.boxMemoryMib &&
       (persona.boxDiskMib ?? BoxDiskLimit.DefaultMib) === current.boxDiskMib &&
+      (persona.boxRetention ?? "Auto") === current.boxRetention &&
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {

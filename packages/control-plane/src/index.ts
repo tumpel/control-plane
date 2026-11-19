@@ -524,6 +524,7 @@ const personaWrite = async (
       connectorIds: body.connectorIds,
       boxMemoryMib: body.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
       boxDiskMib: body.boxDiskMib ?? BoxDiskLimit.DefaultMib,
+      boxRetention: body.boxRetention ?? "Auto",
       files: stored.value,
     },
   };

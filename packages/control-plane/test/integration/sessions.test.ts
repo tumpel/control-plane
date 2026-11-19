@@ -371,6 +371,10 @@ class HostSide {
     );
   }
 
+  holds(type: ControlMessage["type"]): boolean {
+    return this.inbox.some((message) => message.type === type);
+  }
+
   snapshotRequestsFor(sessionId: string): number {
     return this.inbox.filter((message) => message.type === "SnapshotRequest" && message.sessionId === sessionId).length;
   }
@@ -3064,6 +3068,114 @@ suite("sessions", { concurrency: 8 }, () => {
     );
     assert.equal(await start("third"), budgeted.id);
     side.close();
+  });
+
+  const idleTurn = async (side: HostSide, args: Record<string, unknown>, bearer: Record<string, string>) => {
+    const response = await postJson("/v1/sessions", args, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const started = StartedSessionSchema.parse(await response.json());
+    const offer = await side.next("TurnOffer");
+    assert.equal(offer.sessionId, started.session.sessionId);
+    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    side.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    side.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    return { session: started.session, offer };
+  };
+
+  const releasedBox = async (side: HostSide, sessionId: string, boxId: string) => {
+    const request = await side.next("SnapshotRequest");
+    assert.equal(request.sessionId, sessionId);
+    await store.put(request.storageKey, "snapshot bytes");
+    side.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+    const teardown = await side.next("BoxTeardown");
+    assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId });
+  };
+
+  test("a start with no free slot evicts the least recently used idle Auto box and holds its offer until that box is gone", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const tight = await enrol("tight");
+    const side = await connect(tight.id, tight.key, 1);
+    await hostState(tight.id, "Online");
+    const kept = await idleTurn(side, { ...(await sessionStart()), prompt: "keep me" }, bearer);
+    assert.equal(kept.session.boxRetention, "Auto");
+    await until(
+      "the first session reading Idle",
+      () => getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema),
+      (session) => session.state === "Idle",
+    );
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "make room" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const next = StartedSessionSchema.parse(await response.json());
+    assert.equal(next.session.hostId, tight.id);
+    await releasedBox(side, kept.session.sessionId, kept.offer.boxId);
+    assert.equal(side.holds("TurnOffer"), false, "the new turn's offer waits for the evicted box's BoxGone");
+    assert.equal((await getJson(`/v1/turns/${next.turn.turnId}`, TurnSchema)).state, "Offered");
+    side.send({ type: "BoxGone", sessionId: kept.session.sessionId, boxId: kept.offer.boxId });
+    assert.equal((await side.next("TurnOffer")).turnId, next.turn.turnId);
+    assert.equal((await getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema)).state, "Stopped");
+    side.close();
+  });
+
+  test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
+    const { sessionId } = off.session;
+    assert.equal(off.session.boxRetention, "Off");
+    await releasedBox(host, sessionId, off.offer.boxId);
+    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Stopping");
+    host.send({ type: "BoxGone", sessionId, boxId: off.offer.boxId });
+    await until(
+      "the Off session reading Stopped",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const offer = await host.next("TurnOffer");
+    assert.equal(offer.sessionId, sessionId);
+    assert.notEqual(offer.boxId, off.offer.boxId);
+  });
+
+  test("a send during an Off release waits for the box to go and runs on a fresh box, while a person's stop refuses sends", async () => {
+    const { bearer, host, getJson, refused, tool, sessionStart } = await tenant();
+    const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
+    const { sessionId } = off.session;
+    const request = await host.next("SnapshotRequest");
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "while releasing" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const queued = TurnSchema.parse(await sent.json());
+    assert.equal(queued.state, "Offered");
+    await store.put(request.storageKey, "snapshot bytes");
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+    const teardown = await host.next("BoxTeardown");
+    assert.equal(host.holds("TurnOffer"), false, "the queued turn waits for the released box's BoxGone");
+    host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+    const offer = await host.next("TurnOffer");
+    assert.deepEqual([offer.turnId, offer.sessionId], [queued.turnId, sessionId]);
+    assert.notEqual(offer.boxId, off.offer.boxId);
+
+    const kept = await idleTurn(host, { ...(await sessionStart()), prompt: "keep" }, bearer);
+    await until(
+      "the kept session reading Idle",
+      () => getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema),
+      (session) => session.state === "Idle",
+    );
+    assert.equal(
+      (await tool("tumpel_session_stop", { sessionId: kept.session.sessionId }, SessionSchema)).state,
+      "Stopping",
+    );
+    const stopping = await refused(`/v1/sessions/${kept.session.sessionId}/turns`, {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "too late" }),
+    });
+    assert.equal(stopping.code, "SessionStopping");
   });
 
   const sealedValues = async (tenantId: string) =>

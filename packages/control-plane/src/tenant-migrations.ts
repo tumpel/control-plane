@@ -65,6 +65,7 @@ import tenant0064 from "../migrations/tenant/0064_connectors.sql";
 import tenant0065 from "../migrations/tenant/0065_box_memory_min_512.sql";
 import tenant0066 from "../migrations/tenant/0066_host_memory_usage.sql";
 import tenant0067 from "../migrations/tenant/0067_box_retention.sql";
+import tenant0068 from "../migrations/tenant/0068_turn_release_waits.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -135,4 +136,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0065_box_memory_min_512", sql: tenant0065 },
   { name: "0066_host_memory_usage", sql: tenant0066 },
   { name: "0067_box_retention", sql: tenant0067 },
+  { name: "0068_turn_release_waits", sql: tenant0068 },
 ];
