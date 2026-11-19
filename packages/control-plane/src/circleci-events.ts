@@ -1,6 +1,7 @@
 import { verifyCircleCISignature, WorkflowCompletedSchema } from "./circleci.ts";
 import { issues, problem } from "./http";
 import type { Env } from "./index";
+import { tenantApi } from "./tenant-api.ts";
 
 const EVENTS_PATH = /^\/v1\/circleci-events\/([^/]+)$/;
 
@@ -42,6 +43,11 @@ export const handleCircleCIEvents = async (request: Request, url: URL, env: Env)
   if (secret === null || !(await verifyCircleCISignature(secret, body, request.headers.get("circleci-signature")))) {
     return forbidden();
   }
-  await stub.circleCIWorkflowCompleted(tenantId, event.data, Date.now());
+  const { pipeline, project, ...workflow } = event.data;
+  await tenantApi(env.TENANT, tenantId).call("circleCIWorkflowCompleted", {
+    tenantId,
+    event: { ...workflow, pipelineId: pipeline.id, projectId: project.id },
+    now: Date.now(),
+  });
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };

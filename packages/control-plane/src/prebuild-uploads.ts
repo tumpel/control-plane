@@ -14,6 +14,7 @@ import { type JwtCheck, jwtVerifier, unverifiedIssuer, type VerifiedJwt, type Ve
 import { presignRootfs } from "./prebuilds";
 import { signerOf } from "./presign";
 import { settingsOf } from "./settings";
+import { tenantApi } from "./tenant-api.ts";
 import type {
   CallerWorkflow,
   CircleCIUploadTarget,
@@ -277,7 +278,7 @@ const bindCircleCIClaims = (target: CircleCIUploadTarget, claims: Record<string,
 const targetOf = async (env: Env, prebuildId: string, tenantId: string): Promise<UploadTarget | null> => {
   const tenant = await env.DB.prepare("SELECT 1 FROM tenants WHERE tenant_id = ?").bind(tenantId).first();
   if (tenant === null) return null;
-  return env.TENANT.getByName(tenantId).uploadTarget(tenantId, prebuildId);
+  return (await tenantApi(env.TENANT, tenantId).call("uploadTarget", { tenantId, prebuildId })).target;
 };
 
 const boundCircleCI = async (
@@ -327,7 +328,7 @@ const boundGitHub = async (
   const mismatch = bindClaims(target, claims, repository);
   if (mismatch !== null) return { ok: false, response: mismatch };
   if (target.prebuild.status.state === "Dispatched") {
-    await env.TENANT.getByName(tenantId).recordPrebuildBuilding(tenantId, prebuildId, Date.now());
+    await tenantApi(env.TENANT, tenantId).call("recordPrebuildBuilding", { tenantId, prebuildId, now: Date.now() });
   }
   return { ok: true, tenantId, target, unbound: { kind: "None" } };
 };
@@ -342,12 +343,12 @@ const bindCircleCIJob = async (env: Env, unbound: UnboundJob, tenantId: string):
   const { target, jobId } = unbound;
   const { prebuildId } = target.prebuild;
   const { pipelineId, headSha } = target.pipeline;
-  const recorded = await env.TENANT.getByName(tenantId).bindCircleCIUploadJob(
+  const { bound: recorded } = await tenantApi(env.TENANT, tenantId).call("bindCircleCIUploadJob", {
     tenantId,
     prebuildId,
-    { pipelineId, headSha, jobId },
-    Date.now(),
-  );
+    upload: { pipelineId, headSha, jobId },
+    now: Date.now(),
+  });
   if (recorded.kind === "Bound") return null;
   if (recorded.kind === "OtherJob") return otherJob(prebuildId, jobId, recorded.jobId);
   if (recorded.kind === "RevisionMoved") return notUploading(recorded.prebuild);
@@ -356,7 +357,12 @@ const bindCircleCIJob = async (env: Env, unbound: UnboundJob, tenantId: string):
 
 const start = async (env: Env, binding: UploadTarget, tenantId: string, upload: PrebuildLayerUpload) => {
   const { prebuildId } = binding.prebuild;
-  const recorded = await env.TENANT.getByName(tenantId).startPrebuildUpload(tenantId, prebuildId, upload, Date.now());
+  const { recorded } = await tenantApi(env.TENANT, tenantId).call("startPrebuildUpload", {
+    tenantId,
+    prebuildId,
+    upload,
+    now: Date.now(),
+  });
   if (recorded.kind === "NotUploading") return notUploading(recorded.prebuild);
   if (recorded.kind === "OtherLayer") {
     return problem(409, {
@@ -401,12 +407,12 @@ const complete = async (env: Env, binding: UploadTarget, tenantId: string): Prom
       fix: "Start the upload, PUT the layer to the URL it answered, then call complete",
     });
   }
-  const recorded = await env.TENANT.getByName(tenantId).completePrebuildUpload(
+  const { recorded } = await tenantApi(env.TENANT, tenantId).call("completePrebuildUpload", {
     tenantId,
-    prebuild.prebuildId,
+    prebuildId: prebuild.prebuildId,
     upload,
-    Date.now(),
-  );
+    now: Date.now(),
+  });
   if (recorded.kind !== "Recorded") return notUploading(recorded.prebuild);
   return json(recorded.prebuild);
 };
@@ -489,8 +495,8 @@ export const handlePrebuildInputs = async (request: Request, url: URL, env: Env)
   const repositoryUrl = `https://github.com/${repository.toLowerCase()}`;
   const tenantId = await tenantOfAccount(env.DB, repository.slice(0, repository.indexOf("/")));
   if (tenantId === null) return noRunPrebuild(repositoryUrl, sha);
-  const tenant = env.TENANT.getByName(tenantId);
-  const target = await tenant.jobInputsTarget(tenantId, repositoryUrl, sha, runId);
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const { target } = await tenant.call("jobInputsTarget", { tenantId, repository: repositoryUrl, headSha: sha, runId });
   if (target === null) return noRunPrebuild(repositoryUrl, sha);
   const { prebuild } = target;
   const mismatch = checkRunClaims(
@@ -506,7 +512,7 @@ export const handlePrebuildInputs = async (request: Request, url: URL, env: Env)
   if (mismatch !== null) return mismatch;
   if (prebuild.status.state !== "Dispatched" && prebuild.status.state !== "Building") return notRunning(prebuild);
   const now = Date.now();
-  const bound = await tenant.bindJobRun(tenantId, prebuild.prebuildId, runId, now);
+  const { bound } = await tenant.call("bindJobRun", { tenantId, prebuildId: prebuild.prebuildId, runId, now });
   if (bound.kind === "OtherRun") {
     return tokenMismatch(
       "run_id",
