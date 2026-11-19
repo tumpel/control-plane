@@ -1844,11 +1844,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
   test("a steer reaches the running Claude Code turn through its hook on the box's steer connector and reads back Delivered", async () => {
     const { bearer, host, getJson, tool, sessionStart } = await tenant();
-    await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "fix the build" },
-      StartedSessionSchema,
-    );
+    await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "fix the build" }, StartedSessionSchema);
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     const settings = offer.personaFiles.find((file) => file.path === ".claude/settings.json");
