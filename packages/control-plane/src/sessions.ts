@@ -1,6 +1,5 @@
 import { type CredentialRefusal, checkModelCredential, credentialProblem } from "@tumpel/api/credentials";
 import {
-  type CompactTranscriptTurnSchema,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
@@ -14,17 +13,17 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
-import { deployInProgress } from "./deploy-drain";
+import { deployInProgress } from "./deploy-drain.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
-import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog";
-import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts";
-import { issues, json, parseBody, problem } from "./http";
-import { type Caller, whoamiOf } from "./identity";
-import type { Env } from "./index";
-import type { Unplaceable } from "./placement";
-import { releaseUnreadable } from "./releases";
+import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
+import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
+import { issues, json, parseBody, problem } from "./http.ts";
+import { type Caller, whoamiOf } from "./identity.ts";
+import type { Env } from "./index.ts";
+import type { Unplaceable } from "./placement.ts";
+import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
-import { settingsOf } from "./settings";
+import { settingsOf } from "./settings.ts";
 import type {
   CredentialHandover,
   NewSession,
@@ -40,16 +39,29 @@ import type {
   Turn,
   TurnFailure,
   TurnSend,
-} from "./tenant-sessions";
+} from "./tenant-sessions.ts";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
-import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type TranscriptLine } from "./transcript";
+import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type TranscriptLine } from "./transcript.ts";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
-type CompactTranscriptTurn = z.infer<typeof CompactTranscriptTurnSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
 export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
 type SessionStopQuery = z.infer<typeof SessionStopQuerySchema>;
 export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
+
+export interface CompactTranscriptLine {
+  lineSeq: number;
+  text: string;
+  createdAt: number;
+  durationMs: number;
+}
+
+export interface CompactTranscriptTurn {
+  turnId: string;
+  lines: CompactTranscriptLine[];
+  startedAt: number;
+  endedAt: number;
+}
 
 const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused => ({
   ok: false,
@@ -517,12 +529,20 @@ const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLi
   return decodeLines(await object.text());
 };
 
-const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
+export const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
   const turns: CompactTranscriptTurn[] = [];
-  for (const { turnId, lineSeq, text } of lines) {
+  let previousAt: number | null = null;
+  for (const { turnId, lineSeq, text, createdAt } of lines) {
     const last = turns.at(-1);
-    if (last?.turnId === turnId) last.lines.push({ lineSeq, text });
-    else turns.push({ turnId, lines: [{ lineSeq, text }] });
+    const durationMs = previousAt === null ? 0 : createdAt - previousAt;
+    const line: CompactTranscriptLine = { lineSeq, text, createdAt, durationMs };
+    if (last !== undefined && last.turnId === turnId) {
+      last.lines.push(line);
+      last.endedAt = createdAt;
+    } else {
+      turns.push({ turnId, lines: [line], startedAt: createdAt, endedAt: createdAt });
+    }
+    previousAt = createdAt;
   }
   return turns;
 };
@@ -585,16 +605,14 @@ export const readTranscript = async (
           TranscriptPageSchema.parse({ form: "Raw", sessionState, lines: page.lines, cursor: page.cursor, finished }),
         );
       }
-      return ok(
-        TranscriptPageSchema.parse({
-          form: "Compact",
-          sessionId,
-          sessionState,
-          turns: byTurn(page.lines),
-          cursor: page.cursor,
-          finished,
-        }),
-      );
+      return ok({
+        form: "Compact" as const,
+        sessionId,
+        sessionState,
+        turns: byTurn(page.lines),
+        cursor: page.cursor,
+        finished,
+      });
     }
     const next = await readAfter(page);
     if (next === null) return sessionNotFound(sessionId);
