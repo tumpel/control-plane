@@ -337,7 +337,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/harnesses",
     NO_ARGUMENTS,
-    "List the harness catalog: every harness and version a tenant can pin.",
+    "List the harness catalog: every harness and version a tenant can pin, and for each credential it accepts, the models it runs with that credential; a credential without models takes any model its provider serves.",
   ),
   rest(
     "tumpel_harness_list_pins",
@@ -836,7 +836,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema.extend({ repository: SessionStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
+    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. A model that tumpel_harness_list does not list for the credential the turn uses is refused ModelUnsupported, before any box boots. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
   ),
   rest(
     "tumpel_session_start_from_issue",
