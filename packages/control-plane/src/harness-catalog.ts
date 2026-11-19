@@ -52,6 +52,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "Anthropic",
@@ -60,6 +61,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "NotBilled",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "OpenRouter",
@@ -68,6 +70,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [{ name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" }],
         arguments: [],
         costBasis: "NotReported",
+        modelSupport: { kind: "ProviderChecked" },
       },
     ],
     personaFilePaths: [".claude/settings.json", ".claude/CLAUDE.md", ".claude.json"],
@@ -88,6 +91,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: ["-c", `cli_auth_credentials_store="file"`, "-c", `forced_login_method="chatgpt"`],
         costBasis: "NotReported",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "OpenAi",
@@ -100,6 +104,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
           env_key: "OPENAI_API_KEY",
         }),
         costBasis: "NotReported",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "OpenRouter",
@@ -112,6 +117,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
           env_key: "OPENROUTER_API_KEY",
         }),
         costBasis: "NotReported",
+        modelSupport: { kind: "ProviderChecked" },
       },
     ],
     personaFilePaths: [".codex/config.toml", ".codex/AGENTS.md"],
@@ -150,6 +156,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "Anthropic",
@@ -158,8 +165,17 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        modelSupport: { kind: "ProviderChecked" },
       },
-      { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [], arguments: [], costBasis: "Billed" },
+      {
+        provider: "OpenAi",
+        kind: "ApiKey",
+        variable: "OPENAI_API_KEY",
+        fixed: [],
+        arguments: [],
+        costBasis: "Billed",
+        modelSupport: { kind: "ProviderChecked" },
+      },
     ],
     personaFilePaths: [".config/opencode/opencode.json", ".config/opencode/AGENTS.md"],
     installRecipe: {
@@ -197,6 +213,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "Anthropic",
@@ -205,6 +222,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "NotBilled",
+        modelSupport: { kind: "ProviderChecked" },
       },
       {
         provider: "OpenRouter",
@@ -213,6 +231,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        modelSupport: { kind: "ProviderChecked" },
       },
     ],
     personaFilePaths: [".pi/agent/settings.json", ".pi/agent/models.json", ".pi/agent/AGENTS.md"],
