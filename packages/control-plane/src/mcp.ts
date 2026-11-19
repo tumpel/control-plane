@@ -803,7 +803,7 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: "tumpel_session_stop",
     description:
-      "Stop a session: its host snapshots it and frees its box, and the next tumpel_turn_send boots a fresh box from the snapshots. Returns the session, Stopping until the box is gone and then Stopped. Refused TurnInFlight while a turn runs, unless cancelTurn is true: the running turn then ends at once and fails Cancelled, and the box is snapshotted and freed. Refused while the host is offline.",
+      "Stop a session: its host snapshots it and frees its box, and the next tumpel_turn_send boots a fresh box from the snapshots. Returns the session, Stopping until the box is gone and then Stopped. Refused TurnInFlight while a turn runs or waits, unless cancelTurn is true: the running turn then ends at once, it and every waiting turn fail Cancelled, and the box is snapshotted and freed. Refused while the host is offline.",
     input: SessionPathSchema.extend(SessionStopQuerySchema.shape),
     request: { method: "POST", path: "/v1/sessions/{sessionId}/stop", query: ["cancelTurn"] },
     answer: "rest",
@@ -827,7 +827,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions/{sessionId}/turns",
     SessionPathSchema.extend(TurnSendSchema.shape),
-    "Send a session its next prompt. Pass goal to name when the work is done: the harness keeps working toward it until it holds. Only a harness that tumpel_harness_list shows with goals true takes a goal. Returns the turn, with its goal; the turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused while another turn of the session runs.",
+    "Send a session its next prompt. Pass goal to name when the work is done: the harness keeps working toward it until it holds. Only a harness that tumpel_harness_list shows with goals true takes a goal. Returns the turn, with its goal; the turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. A turn sent while another turn of the session is in flight waits Offered, and the waiting turns start in send order, each when the turn before it ends; its time budget starts when it starts.",
   ),
   rest(
     "tumpel_turn_list",

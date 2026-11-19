@@ -69,6 +69,7 @@ import tenant0068 from "../migrations/tenant/0068_turn_release_waits.sql";
 import tenant0069 from "../migrations/tenant/0069_events.sql";
 import tenant0070 from "../migrations/tenant/0070_snapshot_manifest_chunks.sql";
 import tenant0071 from "../migrations/tenant/0071_turn_timing_starts.sql";
+import tenant0072 from "../migrations/tenant/0072_turn_session_waits.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -143,4 +144,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0069_events", sql: tenant0069 },
   { name: "0070_snapshot_manifest_chunks", sql: tenant0070 },
   { name: "0071_turn_timing_starts", sql: tenant0071 },
+  { name: "0072_turn_session_waits", sql: tenant0072 },
 ];

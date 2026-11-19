@@ -1949,6 +1949,122 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema)).reason, "Cancelled");
   });
 
+  test("turns sent while a turn runs wait Offered and start in send order, each when the turn before it ends", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "one" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const first = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+
+    const second = await tool("tumpel_turn_send", { sessionId, prompt: "two" }, TurnSchema);
+    const third = await tool("tumpel_turn_send", { sessionId, prompt: "three" }, TurnSchema);
+    assert.deepEqual([second.state, third.state], ["Offered", "Offered"]);
+    assert.equal(host.holds("TurnOffer"), false);
+
+    host.send({
+      type: "TurnFailed",
+      turnId: first.turnId,
+      reason: "HarnessExited",
+      detail: "the harness exited",
+      failedAt: new Date().toISOString(),
+    });
+    const secondOffer = await host.next("TurnOffer");
+    assert.deepEqual([secondOffer.turnId, secondOffer.boxId], [second.turnId, first.boxId]);
+    assert.equal(host.holds("TurnOffer"), false);
+    host.send({ type: "TurnClaim", turnId: second.turnId, boxId: secondOffer.boxId });
+    host.send({
+      type: "TurnLine",
+      turnId: second.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({ type: "TurnComplete", turnId: second.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+
+    assert.equal((await host.next("TurnOffer")).turnId, third.turnId);
+    assert.equal((await tool("tumpel_turn_get", { turnId: second.turnId }, TurnSchema)).state, "Completed");
+  });
+
+  test("a waiting turn's whole-turn budget starts when it starts, not when it was sent", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "long" },
+      StartedSessionSchema,
+    );
+    const { sessionId, tenantId } = started.session;
+    const first = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const waiting = await tool("tumpel_turn_send", { sessionId, prompt: "behind it" }, TurnSchema);
+    await tenantSql(
+      tenantId,
+      "UPDATE turns SET created_at = ? WHERE turn_id = ?",
+      Date.now() - (SETTINGS.turnTotalBudgetSeconds + 10) * 1000,
+      waiting.turnId,
+    );
+
+    const ended = Date.now();
+    host.send({
+      type: "TurnFailed",
+      turnId: first.turnId,
+      reason: "HarnessExited",
+      detail: "the harness exited",
+      failedAt: new Date().toISOString(),
+    });
+    assert.equal((await host.next("TurnOffer")).turnId, waiting.turnId);
+    const total = z
+      .object({ turnId: z.string(), at: z.number() })
+      .parse((await storedTimers(sessionId))?.deadlines.Total);
+    assert.equal(total.turnId, waiting.turnId);
+    assert.ok(total.at >= ended + SETTINGS.turnTotalBudgetSeconds * 1000, `${total.at} is before ${ended}`);
+    assert.equal((await tool("tumpel_turn_get", { turnId: waiting.turnId }, TurnSchema)).state, "Offered");
+  });
+
+  test("a stop with cancelTurn fails every waiting turn Cancelled before it starts, and a stop without it is refused while one waits", async () => {
+    const { email, host, refused, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "busy" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const first = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const waiting = await tool("tumpel_turn_send", { sessionId, prompt: "never mind" }, TurnSchema);
+    assert.equal((await refused(`/v1/sessions/${sessionId}/stop`)).code, "TurnInFlight");
+
+    const stopping = await tool("tumpel_session_stop", { sessionId, cancelTurn: true }, SessionSchema);
+    assert.equal(stopping.state, "Stopping");
+    assert.deepEqual(await host.next("TurnCancel"), { type: "TurnCancel", turnId: first.turnId });
+    const failure = await tool("tumpel_turn_failure", { turnId: waiting.turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "Cancelled");
+    assert.equal(
+      failure.detail,
+      `${email} stopped the session and cancelled the turn while it waited for turn ${first.turnId}`,
+    );
+    assert.equal((await tool("tumpel_turn_failure", { turnId: first.turnId }, TurnFailureSchema)).reason, "Cancelled");
+    await host.next("SnapshotRequest");
+    assert.equal(host.holds("TurnOffer"), false);
+  });
+
   test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
     const { host, getJson, tool, sessionStart } = await tenant();
     const started = await tool(
