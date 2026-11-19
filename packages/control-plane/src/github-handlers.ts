@@ -282,6 +282,7 @@ const repositoriesOf = async (
     app,
     installation.installationId,
     Date.now(),
+    { kind: "Exact", permissions: { metadata: "read" } },
   );
   if (!token.ok) return { ...token, detail: `${token.detail}, for the installation on ${installation.accountLogin}` };
   return listInstallationRepositories(fetcher, env.GITHUB_API_ORIGIN, token.value);
@@ -319,7 +320,10 @@ const handleIssues = async (caller: Caller, url: URL, env: Env, owner: string, n
           (await installationsOf(env.DB, caller.tenantId)).map(({ accountLogin }) => accountLogin),
           target,
         )
-      : await mintInstallationToken(fetcher, env.GITHUB_API_ORIGIN, app, installation, target, Date.now());
+      : await mintInstallationToken(fetcher, env.GITHUB_API_ORIGIN, app, installation, target, Date.now(), {
+          kind: "Exact",
+          permissions: { issues: "read" },
+        });
   if (minted.kind === "NoToken") return notConnected();
   if (minted.kind !== "Minted") return unreadable(minted.detail);
   return listed(await listOpenIssues(fetcher, env.GITHUB_API_ORIGIN, minted.token, target), GitHubIssueSchema);

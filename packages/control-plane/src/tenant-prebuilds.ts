@@ -23,12 +23,14 @@ import { seal, unseal } from "./envelope.ts";
 import {
   type GitHubRepository,
   type Minted,
+  type Permissions,
   REPOSITORY_TOKEN,
   readAppPermissions,
   repositoryCredential,
 } from "./github.ts";
 import {
   appLacking,
+  CALLER_WORKFLOW_SCOPE,
   commitCallerWorkflow,
   type Dispatched,
   dispatchCallerWorkflow,
@@ -676,7 +678,7 @@ export class TenantPrebuilds extends TenantSessions {
     now: number,
   ): Promise<StartedGitHubActions> {
     const { target, callerWorkflow } = start;
-    const minted: Minted = await this.repositoryToken(tenantId, target, now);
+    const minted: Minted = await this.repositoryToken(tenantId, target, now, CALLER_WORKFLOW_SCOPE);
     if (minted.kind === "NoToken") return { kind: "NoInstallation" };
     if (minted.kind !== "Minted") return { kind: "TokenRefused", detail: minted.detail };
     const fetcher = (url: string, init: RequestInit) => fetch(url, init);
@@ -1289,13 +1291,17 @@ export class TenantPrebuilds extends TenantSessions {
     personaId: string,
     repository: GitHubRepository,
     now: number,
+    permissions: Permissions,
   ): Promise<ReadToken> {
     const persona = this.personaRow(personaId);
     if (persona === null) throw new Error(`persona ${personaId} is gone; the start checked it a moment ago`);
     const variables = (await this.members(persona.secretSetId)).flatMap((member) =>
       member.kind === "Variable" ? [{ name: member.name, value: member.value }] : [],
     );
-    const credential = repositoryCredential(variables, await this.repositoryToken(tenantId, repository, now));
+    const credential = repositoryCredential(
+      variables,
+      await this.repositoryToken(tenantId, repository, now, { kind: "Exact", permissions }),
+    );
     if (credential.kind === "Refused") return credential;
     const token = credential.variables.find((variable) => variable.name === REPOSITORY_TOKEN)?.value;
     if (token === undefined) {

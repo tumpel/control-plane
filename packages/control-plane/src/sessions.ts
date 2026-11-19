@@ -279,7 +279,7 @@ export const startSessionFromIssue = async (
   const issueUrl = `${repositoryUrl(target)}/issues/${start.issueNumber}`;
   const tenant = tenantOf(env, caller);
   if ((await tenant.getPersona(caller.tenantId, start.personaId)) === null) return personaNotFound(start.personaId);
-  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
+  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now, { issues: "read" });
   if (token.kind === "Refused") {
     return refuse(409, {
       code: "RepositoryUnreadable",
