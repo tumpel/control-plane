@@ -34,11 +34,20 @@ export type ConnectorAccessToken = z.infer<typeof ConnectorAccessTokenSchema>;
 type ConnectorStatus = z.infer<typeof ConnectorStatusSchema>;
 type FailureReason = Extract<ConnectorStatus, { state: "AuthorizationFailed" }>["reason"];
 
-export type ConnectorWritten = { kind: "Written"; connector: Connector } | { kind: "NotFound" } | { kind: "NameTaken" };
-export type ConnectorDeleted = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "InUse"; detail: string };
+export type ConnectorWritten =
+  | { kind: "Written"; connector: Connector }
+  | { kind: "NotFound" }
+  | { kind: "NameTaken" }
+  | { kind: "Changed" };
+export type ConnectorDeleted =
+  | { kind: "Deleted" }
+  | { kind: "NotFound" }
+  | { kind: "Changed" }
+  | { kind: "InUse"; detail: string };
 export type ConnectorAuthorizeStarted =
   | { kind: "Started"; authorization: ConnectorAuthorization }
   | { kind: "NotFound" }
+  | { kind: "Changed" }
   | { kind: "DiscoveryFailed" | "RegistrationUnsupported"; detail: string };
 export type ConnectorCallbackSettled = { kind: "Connected"; name: string } | { kind: "NotConnected"; detail: string };
 export type ConnectorCallback =
@@ -214,15 +223,32 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     return connector === null ? { kind: "NotFound" } : { kind: "Written", connector };
   }
 
-  renameConnector(tenantId: string, connectorId: string, name: string, now: number): ConnectorWritten {
+  private advance(connectorId: string, updatedAt: number, now: number): boolean {
+    return (
+      this.ctx.storage.sql.exec(
+        "UPDATE connector_names SET updated_at = MAX(?, updated_at + 1) WHERE connector_id = ? AND updated_at = ?",
+        now,
+        connectorId,
+        updatedAt,
+      ).rowsWritten === 1
+    );
+  }
+
+  renameConnector(
+    tenantId: string,
+    connectorId: string,
+    updatedAt: number,
+    name: string,
+    now: number,
+  ): ConnectorWritten {
+    if (this.connectorRow(connectorId) === null) return { kind: "NotFound" };
     if (this.nameTaken(name, connectorId)) return { kind: "NameTaken" };
-    const renamed = this.ctx.storage.sql.exec(
-      "UPDATE connector_names SET name = ?, updated_at = ? WHERE connector_id = ?",
-      name,
-      now,
-      connectorId,
-    ).rowsWritten;
-    return renamed === 0 ? { kind: "NotFound" } : this.written(tenantId, connectorId, now);
+    const renamed = this.ctx.storage.transactionSync(() => {
+      if (!this.advance(connectorId, updatedAt, now)) return false;
+      this.ctx.storage.sql.exec("UPDATE connector_names SET name = ? WHERE connector_id = ?", name, connectorId);
+      return true;
+    });
+    return renamed ? this.written(tenantId, connectorId, now) : { kind: "Changed" };
   }
 
   private runningTurnsUsing(connectorId: string): string[] {
@@ -236,7 +262,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
       .map((row) => row.turn_id);
   }
 
-  deleteConnector(connectorId: string): ConnectorDeleted {
+  deleteConnector(connectorId: string, updatedAt: number): ConnectorDeleted {
     const sql = this.ctx.storage.sql;
     if (this.connectorRow(connectorId) === null) return { kind: "NotFound" };
     const personas = sql
@@ -249,16 +275,27 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     if (personas.length > 0) return { kind: "InUse", detail: `the persona ${personas.join(", ")} lists it` };
     const turns = this.runningTurnsUsing(connectorId);
     if (turns.length > 0) return { kind: "InUse", detail: `the running turn ${turns.join(", ")} uses it` };
-    sql.exec("DELETE FROM connector_names WHERE connector_id = ?", connectorId);
-    return { kind: "Deleted" };
+    const deleted = sql.exec(
+      "DELETE FROM connector_names WHERE connector_id = ? AND updated_at = ?",
+      connectorId,
+      updatedAt,
+    ).rowsWritten;
+    return deleted === 0 ? { kind: "Changed" } : { kind: "Deleted" };
   }
 
-  async setStaticToken(tenantId: string, connectorId: string, value: string, now: number): Promise<ConnectorWritten> {
+  async setStaticToken(
+    tenantId: string,
+    connectorId: string,
+    updatedAt: number,
+    value: string,
+    now: number,
+  ): Promise<ConnectorWritten> {
     const row = this.connectorRow(connectorId);
     if (row === null || row.auth !== "Static") return { kind: "NotFound" };
     const sealed = await seal(await this.dataKey(), value, credentialContext(connectorId));
     const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
+    const set = this.ctx.storage.transactionSync(() => {
+      if (!this.advance(connectorId, updatedAt, now)) return false;
       sql.exec(
         `INSERT INTO static_connector_tokens (connector_id, token_sealed, connected_at) VALUES (?, ?, ?)
         ON CONFLICT (connector_id) DO UPDATE SET token_sealed = excluded.token_sealed, connected_at = excluded.connected_at`,
@@ -267,36 +304,39 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
         now,
       );
       sql.exec("DELETE FROM connector_disconnections WHERE connector_id = ?", connectorId);
-      sql.exec("UPDATE connector_names SET updated_at = ? WHERE connector_id = ?", now, connectorId);
+      return true;
     });
-    return this.written(tenantId, connectorId, now);
+    return set ? this.written(tenantId, connectorId, now) : { kind: "Changed" };
   }
 
-  clearConnectorCredential(tenantId: string, connectorId: string, now: number): ConnectorWritten {
+  clearConnectorCredential(tenantId: string, connectorId: string, updatedAt: number, now: number): ConnectorWritten {
     if (this.connectorRow(connectorId) === null) return { kind: "NotFound" };
     const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
+    const cleared = this.ctx.storage.transactionSync(() => {
+      if (!this.advance(connectorId, updatedAt, now)) return false;
       sql.exec("DELETE FROM connector_authorizations WHERE connector_id = ?", connectorId);
       sql.exec(
         "INSERT INTO connector_disconnections (connector_id, disconnected_at) VALUES (?, ?) ON CONFLICT (connector_id) DO NOTHING",
         connectorId,
         now,
       );
-      sql.exec("UPDATE connector_names SET updated_at = ? WHERE connector_id = ?", now, connectorId);
       releaseConnectorCredentials(sql);
+      return true;
     });
-    return this.written(tenantId, connectorId, now);
+    return cleared ? this.written(tenantId, connectorId, now) : { kind: "Changed" };
   }
 
   async startConnectorAuthorization(
     tenantId: string,
     principalId: string,
     connectorId: string,
+    updatedAt: number,
     controlPlaneOrigin: string,
     now: number,
   ): Promise<ConnectorAuthorizeStarted> {
     const row = this.connectorRow(connectorId);
     if (row === null || row.auth !== "OAuth") return { kind: "NotFound" };
+    if (row.updated_at !== updatedAt) return { kind: "Changed" };
     const found = await discover(fetcher, row.url);
     if (found.kind !== "Discovered") return found;
     const { discovered } = found;
@@ -317,7 +357,8 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
     const dueAt = now + CALLBACK_BUDGET_MS;
     const stateHash = await sha256Hex(state);
     const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
+    const started = this.ctx.storage.transactionSync(() => {
+      if (!this.advance(connectorId, updatedAt, now)) return false;
       sql.exec("DELETE FROM connector_authorizations WHERE connector_id = ?", connectorId);
       sql.exec(
         `INSERT INTO connector_authorizations (connector_authorization_id, connector_id, principal_id, state_hash, issuer,
@@ -336,7 +377,9 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
         dueAt,
         now,
       );
+      return true;
     });
+    if (!started) return { kind: "Changed" };
     return {
       kind: "Started",
       authorization: {

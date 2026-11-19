@@ -14,6 +14,7 @@ import {
   ConfigSubscriptionTokenSchema,
   ConnectorPathSchema,
   ConnectorUpdateSchema,
+  ConnectorWritePathSchema,
   DevicePathSchema,
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
@@ -631,34 +632,38 @@ export const TOOLS: ToolDefinition[] = [
     request: { method: "GET", path: "/v1/connectors/{connectorId}" },
     answer: "connectorTokenCommand",
   },
-  rest(
-    "tumpel_connector_authorize",
-    "POST",
-    "/v1/oauth-connectors/{connectorId}/authorize",
-    ConnectorPathSchema,
-    "Start connecting an OAuth connector. Owner only. Returns authorizeUrl and callbackDueAt, 10 minutes out: give the person authorizeUrl to open in a browser and approve; the provider sends the browser back to the control plane, which stores the grant. Read the outcome with tumpel_connector_get. Refused ConnectorDiscoveryFailed or ConnectorRegistrationUnsupported, each with the fix.",
-  ),
-  rest(
-    "tumpel_connector_update",
-    "PUT",
-    "/v1/connectors/{connectorId}",
-    ConnectorPathSchema.extend(ConnectorUpdateSchema.shape),
-    "Rename a connector. Owner only. Its url and credential kind are fixed; a new address needs a new connector.",
-  ),
-  rest(
-    "tumpel_connector_clear_credential",
-    "DELETE",
-    "/v1/connectors/{connectorId}/credential",
-    ConnectorPathSchema,
-    "Disconnect a connector. Owner only. New turns that need it are refused; running turns keep it until they end, and stopping them cuts it off sooner. The control plane deletes its credential once no running turn uses it; revoke the grant on the provider's site too.",
-  ),
-  rest(
-    "tumpel_connector_delete",
-    "DELETE",
-    "/v1/connectors/{connectorId}",
-    ConnectorPathSchema,
-    "Delete a connector and its credential. Owner only. Refused ConnectorInUse while a persona lists it or a running turn uses it.",
-  ),
+  {
+    name: "tumpel_connector_authorize",
+    description:
+      "Start connecting an OAuth connector. Owner only. Returns authorizeUrl and callbackDueAt, 10 minutes out: give the person authorizeUrl to open in a browser and approve; the provider sends the browser back to the control plane, which stores the grant. Read the outcome with tumpel_connector_get. Refused ConnectorDiscoveryFailed or ConnectorRegistrationUnsupported, each with the fix. Pass the updatedAt of your last read of the connector; refused ConnectorChanged when it changed since, so read it again.",
+    input: ConnectorWritePathSchema,
+    request: { method: "POST", path: "/v1/oauth-connectors/{connectorId}/authorize", query: ["updatedAt"] },
+    answer: "rest",
+  },
+  {
+    name: "tumpel_connector_update",
+    description:
+      "Rename a connector. Owner only. Its url and credential kind are fixed; a new address needs a new connector. Pass the updatedAt of your last read of the connector; refused ConnectorChanged when it changed since, so read it again.",
+    input: ConnectorWritePathSchema.extend(ConnectorUpdateSchema.shape),
+    request: { method: "PUT", path: "/v1/connectors/{connectorId}", query: ["updatedAt"] },
+    answer: "rest",
+  },
+  {
+    name: "tumpel_connector_clear_credential",
+    description:
+      "Disconnect a connector. Owner only. New turns that need it are refused; running turns keep it until they end, and stopping them cuts it off sooner. The control plane deletes its credential once no running turn uses it; revoke the grant on the provider's site too. Pass the updatedAt of your last read of the connector; refused ConnectorChanged when it changed since, so read it again.",
+    input: ConnectorWritePathSchema,
+    request: { method: "DELETE", path: "/v1/connectors/{connectorId}/credential", query: ["updatedAt"] },
+    answer: "rest",
+  },
+  {
+    name: "tumpel_connector_delete",
+    description:
+      "Delete a connector and its credential. Owner only. Refused ConnectorInUse while a persona lists it or a running turn uses it. Pass the updatedAt of your last read of the connector; refused ConnectorChanged when it changed since, so read it again.",
+    input: ConnectorWritePathSchema,
+    request: { method: "DELETE", path: "/v1/connectors/{connectorId}", query: ["updatedAt"] },
+    answer: "rest",
+  },
   rest(
     "tumpel_openrouter_get_authorization",
     "GET",

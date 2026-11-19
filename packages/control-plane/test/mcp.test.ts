@@ -325,10 +325,31 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     (await tool("tumpel_connector_set_token", { connectorId: recall.connectorId })).content[0]?.text ?? "",
     /tumpel connector set-token .* --stdin/,
   );
-  const connected = await rest(ConnectorSchema, "PUT", `/v1/static-connectors/${recall.connectorId}/token`, {
-    value: SECRET,
-  });
+  const unconditional = await send(
+    "PUT",
+    `/v1/static-connectors/${recall.connectorId}/token`,
+    { value: SECRET },
+    bearer,
+  );
+  assert.equal(unconditional.status, 400);
+  assert.equal(ProblemSchema.parse(await unconditional.json()).code, "InvalidRequest");
+  const connected = await rest(
+    ConnectorSchema,
+    "PUT",
+    `/v1/static-connectors/${recall.connectorId}/token?updatedAt=${recall.updatedAt}`,
+    { value: SECRET },
+  );
   assert.equal(connected.status.state, "Connected");
+  assert.ok(connected.updatedAt > recall.updatedAt);
+  const stale = await send(
+    "PUT",
+    `/v1/connectors/${recall.connectorId}?updatedAt=${recall.updatedAt}`,
+    { name: "Stale" },
+    bearer,
+  );
+  assert.equal(stale.status, 409);
+  assert.equal(ProblemSchema.parse(await stale.json()).code, "ConnectorChanged");
+  assert.deepEqual(await rest(ConnectorSchema, "GET", `/v1/connectors/${recall.connectorId}`), connected);
   const repeated = await send(
     "PUT",
     `/v1/personas/${persona.personaId}`,
@@ -349,11 +370,20 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     files: [],
   });
   assert.deepEqual(listing.connectorIds, [recall.connectorId]);
-  const inUse = await send("DELETE", `/v1/connectors/${recall.connectorId}`, undefined, bearer);
+  const malformed = await send("DELETE", `/v1/connectors/${recall.connectorId}?updatedAt=soon`, undefined, bearer);
+  assert.equal(malformed.status, 400);
+  assert.equal(ProblemSchema.parse(await malformed.json()).code, "InvalidRequest");
+  const inUse = await send(
+    "DELETE",
+    `/v1/connectors/${recall.connectorId}?updatedAt=${connected.updatedAt}`,
+    undefined,
+    bearer,
+  );
   assert.equal(inUse.status, 409);
   assert.equal(ProblemSchema.parse(await inUse.json()).code, "ConnectorInUse");
   const disconnected = await toolJson(ConnectorSchema, "tumpel_connector_clear_credential", {
     connectorId: recall.connectorId,
+    updatedAt: connected.updatedAt,
   });
   assert.equal(disconnected.status.state, "Disconnected");
   assert.deepEqual(
@@ -368,7 +398,12 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     connectorIds: [],
     files: [],
   });
-  await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId });
+  assert.match(
+    (await tool("tumpel_connector_delete", { connectorId: recall.connectorId, updatedAt: connected.updatedAt }))
+      .content[0]?.text ?? "",
+    /Connector changed/,
+  );
+  await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId, updatedAt: disconnected.updatedAt });
   assert.equal(keyless.status, 422);
   assert.equal(ProblemSchema.parse(await keyless.json()).code, "NoCredential");
   assert.deepEqual(

@@ -49,9 +49,31 @@ const nameTaken = (name: string): Response =>
     fix: "Pick another name, or rename the existing connector",
   });
 
+const changed = (connectorId: string): Response =>
+  problem(409, {
+    code: "ConnectorChanged",
+    title: "Connector changed",
+    detail: `connector ${connectorId} changed after you read it, so this write changed nothing`,
+    fix: "Read the connector again with tumpel connector get and send the write with its updatedAt",
+  });
+
+const UPDATED_AT = /^\d{1,15}$/;
+
+const updatedAtOf = (url: URL, operation: string): number | Response => {
+  const raw = url.searchParams.get("updatedAt") ?? "";
+  if (UPDATED_AT.test(raw)) return Number(raw);
+  return problem(400, {
+    code: "InvalidRequest",
+    title: "Invalid query",
+    detail: `${operation} needs the updatedAt query parameter as epoch milliseconds, and got ${raw === "" ? "none" : raw}`,
+    fix: "Read the connector and send its updatedAt, such as ?updatedAt=1763481600000",
+  });
+};
+
 const answered = (written: ConnectorWritten, connectorId: string, name: string): Response => {
   if (written.kind === "Written") return json(written.connector);
   if (written.kind === "NameTaken") return nameTaken(name);
+  if (written.kind === "Changed") return changed(connectorId);
   return notFound(connectorId);
 };
 
@@ -99,6 +121,7 @@ const pathId = (raw: string): string | null => {
 
 const connector = async (
   request: Request,
+  url: URL,
   env: Env,
   caller: Caller,
   connectorId: string,
@@ -113,20 +136,28 @@ const connector = async (
   if (request.method === "DELETE" && credential) {
     const refused = ownerRequired(caller, "connectors.clearCredential");
     if (refused) return refused;
-    return answered(await tenant.clearConnectorCredential(caller.tenantId, connectorId, now), connectorId, "");
+    const updatedAt = updatedAtOf(url, "connectors.clearCredential");
+    if (updatedAt instanceof Response) return updatedAt;
+    const cleared = await tenant.clearConnectorCredential(caller.tenantId, connectorId, updatedAt, now);
+    return answered(cleared, connectorId, "");
   }
   if (request.method === "PUT" && !credential) {
     const refused = ownerRequired(caller, "connectors.update");
     if (refused) return refused;
+    const updatedAt = updatedAtOf(url, "connectors.update");
+    if (updatedAt instanceof Response) return updatedAt;
     const body = await parseBody(request, ConnectorUpdateSchema, "connectors.update");
     if (!body.ok) return body.response;
-    const renamed = await tenant.renameConnector(caller.tenantId, connectorId, body.value.name, now);
+    const renamed = await tenant.renameConnector(caller.tenantId, connectorId, updatedAt, body.value.name, now);
     return answered(renamed, connectorId, body.value.name);
   }
   const refused = ownerRequired(caller, "connectors.delete");
   if (refused) return refused;
-  const deleted = await tenant.deleteConnector(connectorId);
+  const updatedAt = updatedAtOf(url, "connectors.delete");
+  if (updatedAt instanceof Response) return updatedAt;
+  const deleted = await tenant.deleteConnector(connectorId, updatedAt);
   if (deleted.kind === "NotFound") return notFound(connectorId);
+  if (deleted.kind === "Changed") return changed(connectorId);
   if (deleted.kind === "InUse") {
     return problem(409, {
       code: "ConnectorInUse",
@@ -141,15 +172,19 @@ const connector = async (
 const authorize = async (url: URL, env: Env, caller: Caller, connectorId: string): Promise<Response> => {
   const refused = ownerRequired(caller, "oauthConnectors.authorize");
   if (refused) return refused;
+  const updatedAt = updatedAtOf(url, "oauthConnectors.authorize");
+  if (updatedAt instanceof Response) return updatedAt;
   const started = await env.TENANT.getByName(caller.tenantId).startConnectorAuthorization(
     caller.tenantId,
     caller.principalId,
     connectorId,
+    updatedAt,
     url.origin,
     Date.now(),
   );
   if (started.kind === "Started") return json(started.authorization);
   if (started.kind === "NotFound") return notFound(connectorId);
+  if (started.kind === "Changed") return changed(connectorId);
   const failure: Problem =
     started.kind === "DiscoveryFailed"
       ? {
@@ -167,14 +202,22 @@ const authorize = async (url: URL, env: Env, caller: Caller, connectorId: string
   return problem(422, failure);
 };
 
-const setToken = async (request: Request, env: Env, caller: Caller, connectorId: string): Promise<Response> => {
+const setToken = async (
+  request: Request,
+  url: URL,
+  env: Env,
+  caller: Caller,
+  connectorId: string,
+): Promise<Response> => {
   const refused = ownerRequired(caller, "staticConnectors.setToken");
   if (refused) return refused;
+  const updatedAt = updatedAtOf(url, "staticConnectors.setToken");
+  if (updatedAt instanceof Response) return updatedAt;
   const body = await parseBody(request, StaticConnectorTokenWriteSchema, "staticConnectors.setToken");
   if (!body.ok) return body.response;
   const tenant = env.TENANT.getByName(caller.tenantId);
   return answered(
-    await tenant.setStaticToken(caller.tenantId, connectorId, body.value.value, Date.now()),
+    await tenant.setStaticToken(caller.tenantId, connectorId, updatedAt, body.value.value, Date.now()),
     connectorId,
     "",
   );
@@ -302,6 +345,6 @@ export const handleConnectors = async (
   const connectorId = pathId(raw);
   if (connectorId === null) return notFound(decodeURIComponent(raw));
   if (authorizing !== undefined) return authorize(url, env, caller, connectorId);
-  if (tokenFor !== undefined) return setToken(request, env, caller, connectorId);
-  return connector(request, env, caller, connectorId, one?.[2] !== undefined);
+  if (tokenFor !== undefined) return setToken(request, url, env, caller, connectorId);
+  return connector(request, url, env, caller, connectorId, one?.[2] !== undefined);
 };
