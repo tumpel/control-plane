@@ -163,7 +163,7 @@ export class HostChannel extends DurableObject<Env> {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.failLostTurns(host.host_id, event.heldSessionIds, now);
+    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
       await this.report(host.host_id, event.usage, now);
       await this.sendDeferredOffers(host.host_id, attachment, context);
@@ -270,9 +270,9 @@ export class HostChannel extends DurableObject<Env> {
     await this.env.TENANT.getByName(tenantId).hostUsage(hostId, usage, now);
   }
 
-  private async failLostTurns(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+  private async reconcileHeldBoxes(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await this.env.TENANT.getByName(tenantId).failLostTurns(tenantId, hostId, heldSessionIds, now);
+    await this.env.TENANT.getByName(tenantId).reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
   }
 
   private async tenantOf(hostId: string): Promise<string> {

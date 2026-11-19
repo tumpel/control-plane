@@ -3178,6 +3178,104 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(stopping.code, "SessionStopping");
   });
 
+  test("the first heartbeat after a reconnect releases the boxes a host still holds for Stopped, archived and idle Off sessions, and keeps Warm, Auto and running boxes", async () => {
+    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const drift = await enrol("drift");
+    const first = await connect(drift.id, drift.key);
+    await hostState(drift.id, "Online");
+    first.report({ ...USAGE, loadAverage: 0.5 });
+    await until(
+      "the first heartbeat of the first connection",
+      () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
+      (usages) => usages.find((usage) => usage.hostId === drift.id)?.loadAverage === 0.5,
+    );
+    const snapshotted = async (sessionId: string) => {
+      const request = await first.next("SnapshotRequest");
+      assert.equal(request.sessionId, sessionId);
+      await store.put(request.storageKey, "snapshot bytes");
+      first.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+      await until(
+        `session ${sessionId} reading Idle with snapshot ${request.snapshotId}`,
+        async () => ({
+          session: await getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+          snapshots: await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+        }),
+        ({ session, snapshots }) =>
+          session.state === "Idle" && snapshots.some((snapshot) => snapshot.snapshotId === request.snapshotId),
+      );
+    };
+
+    const stopped = await idleTurn(
+      first,
+      { ...(await sessionStart()), prompt: "stopped", boxRetention: "Off" },
+      bearer,
+    );
+    await releasedBox(first, stopped.session.sessionId, stopped.offer.boxId);
+    first.send({ type: "BoxGone", sessionId: stopped.session.sessionId, boxId: stopped.offer.boxId });
+    await until(
+      "the stopped session reading Stopped",
+      () => getJson(`/v1/sessions/${stopped.session.sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+
+    const off = await idleTurn(first, { ...(await sessionStart()), prompt: "off", boxRetention: "Off" }, bearer);
+    await releasedBox(first, off.session.sessionId, off.offer.boxId);
+    first.send({
+      type: "BoxTeardownFailed",
+      sessionId: off.session.sessionId,
+      boxId: off.offer.boxId,
+      reason: "BoxDirty",
+      detail: "the box is busy",
+      failedAt: new Date().toISOString(),
+    });
+    await snapshotted(off.session.sessionId);
+
+    const archived = await idleTurn(first, { ...(await sessionStart()), prompt: "archived" }, bearer);
+    await snapshotted(archived.session.sessionId);
+    assert.equal(
+      (await tool("tumpel_session_archive", { sessionId: archived.session.sessionId }, SessionSchema)).state,
+      "Archived",
+    );
+    assert.equal((await first.next("BoxDiscard")).sessionId, archived.session.sessionId);
+
+    const warm = await idleTurn(first, { ...(await sessionStart()), prompt: "warm", boxRetention: "Warm" }, bearer);
+    await snapshotted(warm.session.sessionId);
+    const auto = await idleTurn(first, { ...(await sessionStart()), prompt: "auto" }, bearer);
+    await snapshotted(auto.session.sessionId);
+    const running = await postJson(
+      "/v1/sessions",
+      { ...(await sessionStart()), prompt: "running", boxRetention: "Off" },
+      bearer,
+    );
+    assert.equal(running.status, 200, await running.clone().text());
+    const runningOffer = await first.next("TurnOffer");
+    first.send({ type: "TurnClaim", turnId: runningOffer.turnId, boxId: runningOffer.boxId });
+    await first.next("TurnClaimed");
+
+    first.close();
+    await hostState(drift.id, "Offline");
+    const back = await connect(drift.id, drift.key, 8, first.carried());
+    const released = [await back.next("BoxDiscard"), await back.next("BoxDiscard"), await back.next("BoxTeardown")];
+    assert.deepEqual(
+      released.map((message) => [message.type, message.sessionId, message.boxId]).sort(),
+      [
+        ["BoxDiscard", stopped.session.sessionId, stopped.offer.boxId],
+        ["BoxDiscard", archived.session.sessionId, archived.offer.boxId],
+        ["BoxTeardown", off.session.sessionId, off.offer.boxId],
+      ].sort(),
+    );
+
+    const sent = await postJson(`/v1/sessions/${warm.session.sessionId}/turns`, { prompt: "still warm" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    assert.equal((await back.next("TurnOffer")).boxId, warm.offer.boxId);
+    assert.equal(back.holds("BoxDiscard") || back.holds("BoxTeardown"), false);
+    assert.equal((await getJson(`/v1/sessions/${auto.session.sessionId}`, SessionSchema)).state, "Idle");
+    assert.equal((await getJson(`/v1/turns/${runningOffer.turnId}`, TurnSchema)).state, "Running");
+    back.close();
+  });
+
   const sealedValues = async (tenantId: string) =>
     z
       .object({ secret_set_id: z.string(), name: z.string(), sealed: z.string() })
