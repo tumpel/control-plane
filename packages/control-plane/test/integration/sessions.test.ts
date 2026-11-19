@@ -1563,7 +1563,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const { personaId } = PersonaSchema.parse(await persona.json());
     await tool(
       "tumpel_session_start",
-      { repository: "https://github.com/acme/app.git", model: "gpt-5.5", personaId, prompt: "refresh" },
+      { repository: "https://github.com/acme/app.git", model: "gpt-5.6-sol", personaId, prompt: "refresh" },
       StartedSessionSchema,
     );
     const turn = await host.next("TurnOffer");

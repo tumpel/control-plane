@@ -44,7 +44,6 @@ const CODEX_CHATGPT_MODELS = [
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
-  "gpt-5.5",
 ];
 
 export type GoalFold = { fold: (prompt: string, goal: string) => string; limit: number };

@@ -49,7 +49,7 @@ test("a subscription turn's cost is not billed, an API key's is billed, and a li
   });
   assert.equal(offered("ClaudeCode", apiKey, "claude-opus-5-5").costBasis, "Billed");
   assert.equal(offered("ClaudeCode", openRouter, "anthropic/claude-opus-5-5").costBasis, "NotReported");
-  assert.equal(offered("Codex", chatGpt, "gpt-5.5").costBasis, "NotReported");
+  assert.equal(offered("Codex", chatGpt, "gpt-5.6-sol").costBasis, "NotReported");
   assert.deepEqual(offeredDimensions("persona-1", "set-1", null), { personaId: "persona-1", secretSetId: "set-1" });
 });
 
