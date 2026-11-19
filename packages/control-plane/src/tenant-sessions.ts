@@ -1726,7 +1726,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
       return { kind: "Sent", turn: toTurn(tenantId, turn) };
     }
-    const missingTurnIds = this.unsnapshottedTurns(sessionId);
+    const missingTurnIds = session.state === "Stopped" ? [] : this.unsnapshottedTurns(sessionId);
     if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return image;
