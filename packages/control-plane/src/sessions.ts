@@ -26,6 +26,7 @@ import type { Unplaceable } from "./placement.ts";
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
+import { tenantApi } from "./tenant-api.ts";
 import type {
   CredentialHandover,
   NewSession,
@@ -231,7 +232,10 @@ const prepareStart = async (
   const target = githubRepository(start.repository);
   if (target === null) return refuse(422, notARepository(start.repository));
   const tenant = tenantOf(env, caller);
-  const persona = await tenant.getPersona(caller.tenantId, start.personaId);
+  const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
+    tenantId: caller.tenantId,
+    personaId: start.personaId,
+  });
   if (persona === null) return personaNotFound(start.personaId);
   const entry = pinnedEntry(await tenant.listPins(), persona.harness);
   if (entry === undefined) {
@@ -306,7 +310,11 @@ export const startSessionFromIssue = async (
   if (target === null) return refuse(422, notARepository(`${start.owner}/${start.name}`));
   const issueUrl = `${repositoryUrl(target)}/issues/${start.issueNumber}`;
   const tenant = tenantOf(env, caller);
-  if ((await tenant.getPersona(caller.tenantId, start.personaId)) === null) return personaNotFound(start.personaId);
+  const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
+    tenantId: caller.tenantId,
+    personaId: start.personaId,
+  });
+  if (persona === null) return personaNotFound(start.personaId);
   const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now, { issues: "read" });
   if (token.kind === "Refused") {
     return refuse(409, {

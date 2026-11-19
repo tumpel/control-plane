@@ -35,6 +35,7 @@ import type { Env } from "./index.ts";
 import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-files.ts";
 import { keyPrefixMismatch, unreadableSecretSet } from "./secret-members.ts";
 import type { ConfigApplied } from "./tenant.ts";
+import { tenantApi } from "./tenant-api.ts";
 import { personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 type ApplyRequest = z.infer<typeof TenantConfigApplySchema>;
@@ -270,7 +271,7 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
   return {
     ok: true,
     value: {
-      personas: await tenant.listPersonas(tenantId),
+      personas: (await tenantApi(env.TENANT, tenantId).call("listPersonas", { tenantId })).personas,
       connectors: (await tenant.listConnectors(tenantId, Date.now())).map(({ connectorId, name }) => ({
         connectorId,
         name,
