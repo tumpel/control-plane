@@ -274,3 +274,44 @@ test("a held turn goes to a host with disk room, the fullest disk loses ties, an
   );
   assert.equal(placed(placeSession([full], [usage("full", 10_000, 0)], AMD64_IMAGES, BOX)), "full");
 });
+
+test("a placement refusal captures each host's name and reason: Full, NoDisk, NoImage, NotOnline", () => {
+  const usage = (
+    hostId: string,
+    boxCapacity: number,
+    boxesRunning: number,
+    memoryAvailableMib: number,
+    diskBudgetMib: number,
+    diskHeldMib: number,
+  ) => ({
+    hostId,
+    tenantId: "tenant-placement",
+    boxCapacity,
+    boxesRunning,
+    boxesWarm: 0,
+    loadAverage: 0,
+    memoryAvailableMib,
+    diskBudgetMib,
+    diskHeldMib,
+    channelProtocol: 24,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+  const hosts: Host[] = [
+    { ...HOST, hostId: "big", name: "example-host" },
+    { ...HOST, hostId: "small", name: "tumpel" },
+    { ...HOST, hostId: "arm", name: "arm-box", architecture: "Arm64" },
+    { ...HOST, hostId: "gone", name: "offline-box", state: "Offline" },
+  ];
+  const usages = [usage("big", 7, 7, 43000, 330000, 65536), usage("small", 1, 0, 4000, 21000, 19000)];
+  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX);
+  assert.equal(placement.kind, "Refused");
+  if (placement.kind !== "Refused") return;
+  const reasons = placement.hosts.map(({ host, reason }) => [host.name, reason]);
+  assert.deepEqual(reasons, [
+    ["example-host", "Full"],
+    ["tumpel", "NoDisk"],
+    ["arm-box", "NoImage"],
+    ["offline-box", "NotOnline"],
+  ]);
+});

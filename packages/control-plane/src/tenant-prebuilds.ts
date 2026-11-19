@@ -739,18 +739,8 @@ export class TenantPrebuilds extends TenantSessions {
     input: NewSession,
     apiOrigin: string,
     now: number,
-  ): Promise<Started<Prebuild> | { kind: "NoPrebuildHost" }> {
-    const busy = new Set(
-      this.ctx.storage.sql
-        .exec<{ host_id: string }>(
-          `SELECT sessions.host_id FROM prebuilds JOIN prebuild_sessions USING (prebuild_id) JOIN sessions USING (session_id)
-          WHERE prebuilds.state IN ('Dispatched', 'Building')`,
-        )
-        .toArray()
-        .map((row) => row.host_id),
-    );
-    const hosts = input.hosts.filter((host) => host.architecture === PREBUILD_ARCHITECTURE && !busy.has(host.hostId));
-    if (hosts.length === 0 && input.hosts.length > 0) return { kind: "NoPrebuildHost" };
+  ): Promise<Started<Prebuild>> {
+    const hosts = input.hosts.filter((host) => host.architecture === PREBUILD_ARCHITECTURE);
     const begun = await this.begin(tenantId, { ...input, hosts }, now, (sessionId) => {
       this.writePrebuildCommit(
         { ...commit, logUrl: `${apiOrigin}/v1/sessions/${sessionId}/transcript` },
