@@ -19,11 +19,13 @@ import {
   appManifest,
   botLogin,
   botUserId,
+  CONTENTS_READ,
   commitIdentity,
   convertManifest,
   dashboardReturn,
   type Fetch,
   githubRepository,
+  grantedNeeds,
   importAppKey,
   installedBy,
   listInstallationRepositories,
@@ -206,6 +208,7 @@ test("an installation token is minted for the session's repository, by the insta
     installation,
     { owner: "octo", name: "widgets" },
     now,
+    { kind: "Exact", permissions: { contents: "read" } },
   );
   assert.deepEqual(minted, {
     kind: "Minted",
@@ -214,7 +217,10 @@ test("an installation token is minted for the session's repository, by the insta
     permissions: { contents: "write" },
   });
   assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
-  assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { repositories: ["widgets"] });
+  assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), {
+    repositories: ["widgets"],
+    permissions: { contents: "read" },
+  });
 
   const jwt = (header(calls[0]?.init ?? {}, "authorization") ?? "").replace(/^Bearer /, "");
   const [head, payload, signature] = jwt.split(".");
@@ -246,6 +252,7 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     installation,
     { owner: "octo", name: "private" },
     now,
+    CONTENTS_READ,
   );
   assert.equal(notCovered.kind, "Outside");
   assert.match(notCovered.kind === "Outside" ? notCovered.detail : "", /422: There is at least one repository/);
@@ -258,6 +265,7 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     installation,
     { owner: "octo", name: "private" },
     now,
+    CONTENTS_READ,
   );
   assert.equal(down.kind, "Refused");
   assert.doesNotMatch(down.kind === "Refused" ? down.detail : "", /add octo\/private/);
@@ -274,17 +282,21 @@ test("a repository outside the installation names the fix, and only a 404 or 422
     { ...installation, status: "Suspended" },
     { owner: "octo", name: "x" },
     now,
+    CONTENTS_READ,
   );
   assert.match(suspended.kind === "Outside" ? suspended.detail : "", /suspended/);
   assert.equal(elsewhere.calls.length, 0);
 });
 
-test("a turn gets an unscoped token for every active installation, routed by owner", async () => {
+test("a turn gets a token for every active installation, scoped to what the installation grants, routed by owner", async () => {
   const now = Date.parse("2026-11-15T10:00:00Z");
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
   const calls: Call[] = [];
   const fetcher: Fetch = async (url, init) => {
     calls.push({ url, init });
+    if (init.method === "GET") {
+      return Response.json({ permissions: { contents: "write", issues: "read", metadata: "read" } }, { status: 200 });
+    }
     const token = url.endsWith("/installations/7/access_tokens") ? "ghs_mine" : "ghs_org";
     return Response.json({ token, expires_at: "2026-11-15T11:00:00Z", permissions: {} }, { status: 201 });
   };
@@ -301,9 +313,12 @@ test("a turn gets an unscoped token for every active installation, routed by own
     { owner: "Tumpel", name: "protocol" },
     now,
   );
+  const granted = JSON.stringify({ permissions: { contents: "write", issues: "read", metadata: "read" } });
   assert.deepEqual(calls.map(({ url, init }) => [url, init.body ?? null]).sort(), [
-    ["https://api.github.com/app/installations/7/access_tokens", null],
-    ["https://api.github.com/app/installations/8/access_tokens", null],
+    ["https://api.github.com/app/installations/7", null],
+    ["https://api.github.com/app/installations/7/access_tokens", granted],
+    ["https://api.github.com/app/installations/8", null],
+    ["https://api.github.com/app/installations/8/access_tokens", granted],
   ]);
   assert.ok(minted.ok);
   assert.deepEqual(
@@ -481,6 +496,18 @@ const gitHubIssue = (number: number, pullRequest: boolean) => ({
   ...(pullRequest ? { pull_request: { url: `https://api.github.com/repos/octo/widgets/pulls/${number}` } } : {}),
 });
 
+test("a granted scope asks for each need at the level the installation holds, and drops what it lacks", () => {
+  assert.deepEqual(
+    grantedNeeds(
+      { actions: "write", contents: "write", workflows: "write", metadata: "read" },
+      { actions: "write", contents: "read", metadata: "read", issues: "write" },
+    ),
+    { actions: "write", contents: "read", metadata: "read" },
+  );
+  assert.deepEqual(grantedNeeds({ contents: "read" }, { contents: "write" }), { contents: "read" });
+  assert.deepEqual(grantedNeeds({ administration: "write" }, { administration: "admin" }), { administration: "write" });
+});
+
 test("an installation-wide token is minted without naming repositories", async () => {
   const app = { clientId: "Iv23client", privateKey: await importAppKey(pkcs8FromPem(pkcs8Pem)) };
   const { fetcher, calls } = spiedFetch(201, {
@@ -489,7 +516,10 @@ test("an installation-wide token is minted without naming repositories", async (
     permissions: {},
   });
   assert.deepEqual(
-    await mintInstallationWideToken(fetcher, "https://api.github.com", app, 7, Date.parse("2026-11-15T10:00:00Z")),
+    await mintInstallationWideToken(fetcher, "https://api.github.com", app, 7, Date.parse("2026-11-15T10:00:00Z"), {
+      kind: "Exact",
+      permissions: { metadata: "read" },
+    }),
     {
       ok: true,
       value: "ghs_wide",
@@ -497,7 +527,7 @@ test("an installation-wide token is minted without naming repositories", async (
   );
   assert.equal(calls[0]?.url, "https://api.github.com/app/installations/7/access_tokens");
   assert.equal(calls[0]?.init.method, "POST");
-  assert.equal(calls[0]?.init.body, null);
+  assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { permissions: { metadata: "read" } });
 });
 
 test("the installation's repositories are read page by page until total_count, as owner, name, default branch, visibility and URL", async () => {

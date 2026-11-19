@@ -364,7 +364,7 @@ export const startPrebuild = async (
   const harness = await personaImage(env, caller, start.personaId, now);
   if (!harness.ok) return harness;
   const entry = harness.value;
-  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now);
+  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now, { contents: "read" });
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
   const described = await readDefaultBranch(fetcher, env.GITHUB_API_ORIGIN, target, token.token);
@@ -430,7 +430,9 @@ export const previewPrebuild = async (
   if (target === null) return notGitHub(request.repository);
   const harness = await personaImage(env, caller, request.personaId, now);
   if (!harness.ok) return harness;
-  const token = await tenantOf(env, caller).repositoryReadToken(caller.tenantId, request.personaId, target, now);
+  const token = await tenantOf(env, caller).repositoryReadToken(caller.tenantId, request.personaId, target, now, {
+    contents: "read",
+  });
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
   const api = env.GITHUB_API_ORIGIN;

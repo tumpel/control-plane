@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { callGitHub, type Fetch, GITHUB_WEB, type GitHubAnswer, type GitHubRepository } from "./github.ts";
+import {
+  callGitHub,
+  type Fetch,
+  GITHUB_WEB,
+  type GitHubAnswer,
+  type GitHubRepository,
+  type TokenScope,
+} from "./github.ts";
 import { GitHubFileCommitSchema, GitHubFileSchema } from "./github-schemas.ts";
 
 export const REUSABLE_WORKFLOW_PATH = "tumpel/workflows/.github/workflows/prebuild.yml";
@@ -43,6 +50,11 @@ const API_MEDIA_TYPE = "application/vnd.github+json";
 const PERMISSION_LABELS: Record<string, string> = { actions: "Actions", contents: "Contents", workflows: "Workflows" };
 const DISPATCH_PERMISSIONS = ["actions"];
 const COMMIT_PERMISSIONS = ["contents", "workflows"];
+
+export const CALLER_WORKFLOW_SCOPE: TokenScope = {
+  kind: "Granted",
+  needs: Object.fromEntries([...DISPATCH_PERMISSIONS, ...COMMIT_PERMISSIONS].map((name) => [name, "write"])),
+};
 const ACTIONS_DISABLED = /disabled/i;
 
 export type CallerWorkflowRead =

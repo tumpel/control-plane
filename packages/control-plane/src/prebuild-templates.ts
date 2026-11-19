@@ -10,7 +10,13 @@ import pythonManifest1 from "../templates/python/1/template.json";
 import rustDevcontainer1 from "../templates/rust/1/devcontainer.jsonc";
 import rustManifest1 from "../templates/rust/1/template.json";
 import recordedVersions from "../templates/versions.json";
-import { type GitHubRepository, githubRepository, mintInstallationWideToken, notARepository } from "./github.ts";
+import {
+  type GitHubRepository,
+  githubRepository,
+  mintInstallationWideToken,
+  notARepository,
+  type Permissions,
+} from "./github.ts";
 import { appMissing } from "./github-handlers.ts";
 import { appKey, installationOn } from "./github-store.ts";
 import { issues, json, parseBody, problem } from "./http";
@@ -75,7 +81,13 @@ const gitHubRefused = (detail: string): Response =>
 
 type Token = { ok: true; target: GitHubRepository; token: string } | { ok: false; response: Response };
 
-const installationToken = async (env: Env, caller: Caller, url: URL, repository: string): Promise<Token> => {
+const installationToken = async (
+  env: Env,
+  caller: Caller,
+  url: URL,
+  repository: string,
+  permissions: Permissions,
+): Promise<Token> => {
   const target = githubRepository(repository);
   if (target === null) return { ok: false, response: problem(422, notARepository(repository)) };
   const app = await appKey(env.DB, keyStoreOf(env));
@@ -98,6 +110,7 @@ const installationToken = async (env: Env, caller: Caller, url: URL, repository:
     app,
     installation.installationId,
     Date.now(),
+    { kind: "Exact", permissions },
   );
   if (!token.ok)
     return { ok: false, response: gitHubRefused(`${token.detail}, for the installation on ${target.owner}`) };
@@ -109,7 +122,10 @@ const handleOpen = async (request: Request, url: URL, env: Env, caller: Caller):
   if (!body.ok) return body.response;
   const found = lookUpTemplate(body.value.prebuildTemplateId, body.value.prebuildTemplateVersion);
   if (found.kind === "NotFound") return templateNotFound(found.detail);
-  const token = await installationToken(env, caller, url, body.value.repository);
+  const token = await installationToken(env, caller, url, body.value.repository, {
+    contents: "write",
+    pull_requests: "write",
+  });
   if (!token.ok) return token.response;
   const opened = await openTemplatePullRequest(
     (input, init) => fetch(input, init),
@@ -140,7 +156,7 @@ const handleRead = async (url: URL, env: Env, caller: Caller): Promise<Response>
       fix: "Name the repository, such as ?repository=https://github.com/acme/app",
     });
   }
-  const token = await installationToken(env, caller, url, query.data.repository);
+  const token = await installationToken(env, caller, url, query.data.repository, { pull_requests: "read" });
   if (!token.ok) return token.response;
   const read = await readTemplatePullRequest(
     (input, init) => fetch(input, init),

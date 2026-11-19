@@ -40,8 +40,10 @@ import { accessTokenExpiry } from "./credential-file.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
+  AGENT_SCOPE,
   botLogin,
   botUserId,
+  CONTENTS_READ,
   type CommitIdentity,
   commitIdentity,
   type GitHubAnswer,
@@ -55,6 +57,7 @@ import {
   REPOSITORY_TOKEN,
   type RepositoryCredentialSource,
   repositoryCredential,
+  type TokenScope,
   uncovered,
   withOwnerTokens,
 } from "./github.ts";
@@ -351,7 +354,6 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
-const CONTENTS_READ = { contents: "read" } as const;
 const STORE_DELETE_BATCH = 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
@@ -877,7 +879,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     repository: GitHubRepository,
     now: number,
-    permissions: Readonly<Record<string, "read">> | null = null,
+    scope: TokenScope,
   ): Promise<Minted> {
     const installation = await installationOn(this.env.DB, tenantId, repository.owner);
     if (installation === null) {
@@ -897,7 +899,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       installation,
       repository,
       now,
-      permissions,
+      scope,
     );
   }
 
@@ -2062,7 +2064,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const minted: Minted =
       target === null
         ? { kind: "NoToken" }
-        : await this.repositoryToken(tenantId, target, now, prebuild === null ? null : CONTENTS_READ);
+        : await this.repositoryToken(tenantId, target, now, prebuild === null ? AGENT_SCOPE : CONTENTS_READ);
     if (prebuild !== null && minted.kind !== "Minted") {
       const reason = minted.kind === "NoToken" ? "no installation covers it" : minted.detail;
       await this.failTurn(

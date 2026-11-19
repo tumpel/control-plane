@@ -8,6 +8,7 @@ import {
   GitHubBotUserSchema,
   GitHubErrorSchema,
   type GitHubInstallationChoiceStateSchema,
+  GitHubInstallationPermissionsSchema,
   GitHubInstallationRecordSchema,
   GitHubInstallationRepositoriesSchema,
   GitHubInstallationTokenSchema,
@@ -75,6 +76,38 @@ export const APP_EVENTS = [
   "workflow_run",
 ];
 
+export const AGENT_PERMISSIONS = {
+  actions: "write",
+  administration: "write",
+  artifact_metadata: "write",
+  attestations: "write",
+  checks: "write",
+  code_quality: "read",
+  security_events: "write",
+  statuses: "write",
+  contents: "write",
+  repository_custom_properties: "write",
+  vulnerability_alerts: "write",
+  dependabot_secrets: "write",
+  deployments: "write",
+  discussions: "write",
+  environments: "write",
+  issues: "write",
+  merge_queues: "write",
+  metadata: "read",
+  packages: "write",
+  pages: "write",
+  repository_projects: "write",
+  pull_requests: "write",
+  secret_scanning_alerts: "write",
+  secrets: "write",
+  actions_variables: "write",
+  repository_hooks: "write",
+  workflows: "write",
+  members: "read",
+  organization_projects: "write",
+} as const;
+
 export const appManifest = (origin: string): GitHubAppManifest => ({
   name: `tumpel ${new URL(origin).hostname.replaceAll(".", "-")}`.slice(0, APP_NAME_LIMIT).trim(),
   url: origin,
@@ -86,37 +119,7 @@ export const appManifest = (origin: string): GitHubAppManifest => ({
   setup_on_update: true,
   public: true,
   request_oauth_on_install: true,
-  default_permissions: {
-    actions: "write",
-    administration: "write",
-    artifact_metadata: "write",
-    attestations: "write",
-    checks: "write",
-    code_quality: "read",
-    security_events: "write",
-    statuses: "write",
-    contents: "write",
-    repository_custom_properties: "write",
-    vulnerability_alerts: "write",
-    dependabot_secrets: "write",
-    deployments: "write",
-    discussions: "write",
-    environments: "write",
-    issues: "write",
-    merge_queues: "write",
-    metadata: "read",
-    packages: "write",
-    pages: "write",
-    repository_projects: "write",
-    pull_requests: "write",
-    secret_scanning_alerts: "write",
-    secrets: "write",
-    actions_variables: "write",
-    repository_hooks: "write",
-    workflows: "write",
-    members: "read",
-    organization_projects: "write",
-  },
+  default_permissions: AGENT_PERMISSIONS,
   default_events: APP_EVENTS,
 });
 
@@ -333,6 +336,73 @@ export const uncovered = (accounts: string[], target: GitHubRepository): Minted 
   };
 };
 
+export type Permissions = Readonly<Record<string, "read" | "write">>;
+
+export type TokenScope = { kind: "Exact"; permissions: Permissions } | { kind: "Granted"; needs: Permissions };
+
+export const CONTENTS_READ: TokenScope = { kind: "Exact", permissions: { contents: "read" } };
+
+export const AGENT_SCOPE: TokenScope = { kind: "Granted", needs: AGENT_PERMISSIONS };
+
+export const grantedNeeds = (needs: Permissions, granted: Record<string, string>): Permissions =>
+  Object.fromEntries(
+    Object.entries(needs).flatMap(([name, level]) => {
+      const held = granted[name];
+      if (held === undefined) return [];
+      return [[name, level === "write" && held !== "read" ? "write" : "read"]];
+    }),
+  );
+
+const scopedPermissions = async (
+  fetcher: Fetch,
+  api: string,
+  app: AppKey,
+  installationId: number,
+  now: number,
+  scope: TokenScope,
+): Promise<GitHubAnswer<Permissions>> => {
+  if (scope.kind === "Exact") return { ok: true, value: scope.permissions };
+  const read = await callGitHub(
+    fetcher,
+    {
+      method: "GET",
+      url: `${api}/app/installations/${installationId}`,
+      accept: API_MEDIA_TYPE,
+      bearer: await appJwt(app.clientId, app.privateKey, now),
+      body: null,
+    },
+    GitHubInstallationPermissionsSchema,
+    "GitHubInstallationPermissions",
+  );
+  return read.ok ? { ok: true, value: grantedNeeds(scope.needs, read.value.permissions) } : read;
+};
+
+const accessToken = async (
+  fetcher: Fetch,
+  api: string,
+  app: AppKey,
+  installationId: number,
+  now: number,
+  scope: TokenScope,
+  repositories: string[] | null,
+): Promise<GitHubAnswer<z.infer<typeof GitHubInstallationTokenSchema>>> => {
+  const permissions = await scopedPermissions(fetcher, api, app, installationId, now, scope);
+  if (!permissions.ok) return permissions;
+  return callGitHub(
+    fetcher,
+    {
+      method: "POST",
+      url: `${api}/app/installations/${installationId}/access_tokens`,
+      accept: API_MEDIA_TYPE,
+      bearer: await appJwt(app.clientId, app.privateKey, now),
+      body:
+        repositories === null ? { permissions: permissions.value } : { repositories, permissions: permissions.value },
+    },
+    GitHubInstallationTokenSchema,
+    "GitHubInstallationToken",
+  );
+};
+
 export const mintInstallationToken = async (
   fetcher: Fetch,
   api: string,
@@ -340,7 +410,7 @@ export const mintInstallationToken = async (
   installation: Installation,
   target: GitHubRepository,
   now: number,
-  permissions: Readonly<Record<string, "read">> | null = null,
+  scope: TokenScope,
 ): Promise<Minted> => {
   if (installation.status === "Suspended") {
     return {
@@ -349,18 +419,7 @@ export const mintInstallationToken = async (
     };
   }
   const { installationId } = installation;
-  const answer = await callGitHub(
-    fetcher,
-    {
-      method: "POST",
-      url: `${api}/app/installations/${installationId}/access_tokens`,
-      accept: API_MEDIA_TYPE,
-      bearer: await appJwt(app.clientId, app.privateKey, now),
-      body: permissions === null ? { repositories: [target.name] } : { repositories: [target.name], permissions },
-    },
-    GitHubInstallationTokenSchema,
-    "GitHubInstallationToken",
-  );
+  const answer = await accessToken(fetcher, api, app, installationId, now, scope, [target.name]);
   if (answer.ok) {
     return {
       kind: "Minted",
@@ -428,19 +487,9 @@ export const mintInstallationWideToken = async (
   app: AppKey,
   installationId: number,
   now: number,
+  scope: TokenScope,
 ): Promise<GitHubAnswer<string>> => {
-  const answer = await callGitHub(
-    fetcher,
-    {
-      method: "POST",
-      url: `${api}/app/installations/${installationId}/access_tokens`,
-      accept: API_MEDIA_TYPE,
-      bearer: await appJwt(app.clientId, app.privateKey, now),
-      body: null,
-    },
-    GitHubInstallationTokenSchema,
-    "GitHubInstallationToken",
-  );
+  const answer = await accessToken(fetcher, api, app, installationId, now, scope, null);
   return answer.ok ? { ok: true, value: answer.value.token } : answer;
 };
 
@@ -821,7 +870,7 @@ export const mintOwnerTokens = async (
   const answers = await Promise.all(
     active.map(async (installation) => ({
       owner: installation.accountLogin.toLowerCase(),
-      answer: await mintInstallationWideToken(fetcher, api, app, installation.installationId, now),
+      answer: await mintInstallationWideToken(fetcher, api, app, installation.installationId, now, AGENT_SCOPE),
     })),
   );
   const tokens: OwnerToken[] = [];

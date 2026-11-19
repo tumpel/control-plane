@@ -145,6 +145,10 @@ export const GitHubAppSchema = z.object({
   permissions: z.record(z.string(), z.string()),
 });
 
+export const GitHubInstallationPermissionsSchema = z.object({
+  permissions: z.record(z.string(), z.string()),
+});
+
 export const GitHubInstallationTokenSchema = z.object({
   token: z.string(),
   expires_at: OffsetDateTimeSchema,

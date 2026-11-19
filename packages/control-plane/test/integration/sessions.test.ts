@@ -422,6 +422,9 @@ const BARE_TREE = "a".repeat(40);
 const installationTokenRequests: unknown[] = [];
 
 const prebuiltRepository = (method: string, path: string): { status: number; body: unknown } | null => {
+  if (method === "GET" && path === "/app/installations/77") {
+    return { status: 200, body: { permissions: { contents: "write", metadata: "read" } } };
+  }
   if (method === "POST" && path === "/app/installations/77/access_tokens") {
     const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
     return {
