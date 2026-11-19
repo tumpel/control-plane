@@ -6,6 +6,8 @@ import {
   SessionStartFromIssueSchema,
   SessionStartSchema,
   SessionStopQuerySchema,
+  SteerCreateSchema,
+  type SteerSchema,
   TranscriptPageSchema,
   TranscriptQuerySchema,
   TurnPathSchema,
@@ -51,6 +53,8 @@ export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
 export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
 type SessionStopQuery = z.infer<typeof SessionStopQuerySchema>;
+type SteerCreate = z.infer<typeof SteerCreateSchema>;
+type Steer = z.infer<typeof SteerSchema>;
 export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
 
 export interface CompactTranscriptLine {
@@ -576,6 +580,37 @@ export const cancelTurn = async (env: Env, caller: Caller, turnId: string, now: 
   });
 };
 
+export const steerTurn = async (
+  env: Env,
+  caller: Caller,
+  turnId: string,
+  steer: SteerCreate,
+  now: number,
+): Promise<Outcome<Steer>> => {
+  const { sent } = await tenantOf(env, caller).call("steerTurn", { tenantId: caller.tenantId, turnId, steer, now });
+  if (sent.kind === "Sent") return ok(sent.steer);
+  if (sent.kind === "NotFound") return turnNotFound(turnId);
+  if (sent.kind === "NotRunning") {
+    return refuse(409, {
+      code: "TurnNotRunning",
+      title: "Turn not running",
+      detail: `turn ${turnId} is ${sent.state}, so its harness reads no more prompts`,
+      fix: "Send the prompt as the session's next turn",
+    });
+  }
+  return refuse(409, {
+    code: "SteerUnsupported",
+    title: "Turn takes no steer",
+    detail: `turn ${turnId} runs on a box that reads no prompt mid-turn: only Claude Code takes one, on a host that supports connectors, with a persona whose .claude/settings.json is a JSON object`,
+    fix: "Send the prompt as the session's next turn",
+  });
+};
+
+export const listSteers = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<Steer[]>> => {
+  const { steers } = await tenantOf(env, caller).call("listSteers", { tenantId: caller.tenantId, turnId });
+  return steers === null ? turnNotFound(turnId) : ok(steers);
+};
+
 export const waitTurns = async (
   env: Env,
   caller: Caller,
@@ -789,7 +824,7 @@ const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-ha
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const SESSION_DELETES = [""];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
-const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel)?$/;
+const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel|\/steers)?$/;
 const TURN_WAIT_PATH = "/v1/turns/wait";
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
@@ -856,7 +891,8 @@ export const handleSessions = async (
             ? SESSION_DELETES
             : []
       ).includes(session[2] ?? "")) ||
-    (turn !== null && (posting ? turn[2] === "/cancel" : request.method === "GET" && turn[2] !== "/cancel")) ||
+    (turn !== null &&
+      (posting ? turn[2] === "/cancel" || turn[2] === "/steers" : request.method === "GET" && turn[2] !== "/cancel")) ||
     (snapshot !== null && request.method === "GET");
   if (!routed) return null;
   const caller = await authenticate(request, env);
@@ -893,6 +929,12 @@ export const handleSessions = async (
     if (!path.success) return answer(turnNotFound(raw));
     if (turn[2] === "/cancel") return answer(await cancelTurn(env, caller, path.data.turnId, Date.now()));
     if (turn[2] === "/failure") return answer(await getTurnFailure(env, caller, path.data.turnId));
+    if (turn[2] === "/steers" && posting) {
+      const body = await parseBody(request, SteerCreateSchema, "turns.steer");
+      if (!body.ok) return body.response;
+      return answer(await steerTurn(env, caller, path.data.turnId, body.value, Date.now()));
+    }
+    if (turn[2] === "/steers") return answer(await listSteers(env, caller, path.data.turnId));
     return answer(await getTurn(env, caller, path.data.turnId));
   }
   return answer(await getSnapshot(env, caller, decodeURIComponent(snapshot?.[1] ?? "")));

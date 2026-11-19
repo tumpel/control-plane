@@ -35,6 +35,7 @@ import {
   SnapshotSchema,
   StartedSessionFromIssueSchema,
   StartedSessionSchema,
+  SteerSchema,
   StopFailureSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
@@ -49,6 +50,7 @@ import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
 import { workersSecretKeyStore } from "../../src/key-store.ts";
 import type { ReleaseManifest } from "../../src/releases.ts";
+import { STEER_CONNECTOR_ID, withSteerHooks } from "../../src/steer.ts";
 import {
   type ChunkLedger,
   type ChunkStore,
@@ -1014,10 +1016,11 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(Date.parse(offer.credential.expiresAt) > Date.now());
     assert.equal(offer.lastLineSeq, 0);
     assert.deepEqual(offer.snapshots, []);
-    const digest = createHash("sha256").update(SETTINGS_FILE).digest("hex");
+    const steered = withSteerHooks(SETTINGS_FILE) ?? "";
+    const digest = createHash("sha256").update(steered).digest("hex");
     assert.deepEqual(
       offer.personaFiles.map((file) => [file.path, file.digest, file.sizeBytes]),
-      [[".claude/settings.json", digest, SETTINGS_FILE.length]],
+      [[".claude/settings.json", digest, steered.length]],
     );
     assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
     assert.match(
@@ -1845,6 +1848,104 @@ suite("sessions", { concurrency: 8 }, () => {
       ProblemSchema.parse(await codex.json()).detail,
       /runs Codex, which takes no goal; ClaudeCode takes one$/,
     );
+  });
+
+  test("a steer reaches the running Claude Code turn through its hook on the box's steer connector and reads back Delivered", async () => {
+    const { bearer, host, getJson, tool, sessionStart } = await tenant();
+    await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "fix the build" }, StartedSessionSchema);
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    const settings = offer.personaFiles.find((file) => file.path === ".claude/settings.json");
+    assert.equal(
+      settings?.digest,
+      createHash("sha256")
+        .update(withSteerHooks(SETTINGS_FILE) ?? "")
+        .digest("hex"),
+    );
+    const steerConnector = offer.credential.connectors.find(
+      (connector) => connector.connectorId === STEER_CONNECTOR_ID,
+    );
+    assert.ok(steerConnector !== undefined, "a Claude Code turn carries the steer connector");
+
+    const early = await tool("tumpel_turn_steer", { turnId, prompt: "too soon?" }, SteerSchema);
+    assert.equal(early.state, "Pending");
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    await until(
+      "the turn reading Running",
+      () => getJson(`/v1/turns/${turnId}`, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const steer = await tool("tumpel_turn_steer", { turnId, prompt: "also update the changelog" }, SteerSchema);
+    assert.deepEqual([steer.turnId, steer.state], [turnId, "Pending"]);
+
+    const token = await postJson(
+      new URL(steerConnector.tokenUrl).pathname,
+      {},
+      { authorization: `Bearer ${steerConnector.tokenCredential}` },
+    );
+    assert.equal(token.status, 200, await token.clone().text());
+    const { accessToken } = z.object({ accessToken: z.string() }).parse(await token.json());
+    const inboxPath = new URL(steerConnector.url).pathname;
+    const inbox = (body: unknown) => postJson(inboxPath, body, { authorization: `Bearer ${accessToken}` });
+
+    const initialize = await inbox({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    assert.equal(initialize.status, 200);
+    assert.deepEqual(await initialize.json(), {
+      jsonrpc: "2.0",
+      id: 1,
+      result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "tumpel-steer", version: "1" } },
+    });
+    const forged = await postJson(
+      inboxPath,
+      { hook_event_name: "PostToolUse" },
+      {
+        authorization: `Bearer ${steerConnector.tokenCredential.replace(/.$/, "x")}`,
+      },
+    );
+    assert.equal(forged.status, 401);
+
+    const afterTool = await inbox({ hook_event_name: "PostToolUse", tool_name: "Bash" });
+    assert.equal(afterTool.status, 200, await afterTool.clone().text());
+    assert.deepEqual(await afterTool.json(), {
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext:
+          "The user sent this while you worked. Act on it now, inside this turn:\n\ntoo soon?\n\nalso update the changelog",
+      },
+    });
+    assert.deepEqual(await (await inbox({ hook_event_name: "Stop" })).json(), {});
+    const late = await tool("tumpel_turn_steer", { turnId, prompt: "and tag the release" }, SteerSchema);
+    assert.deepEqual(await (await inbox({ hook_event_name: "Stop", stop_hook_active: false })).json(), {
+      decision: "block",
+      reason: "The user sent this while you worked. Act on it now, inside this turn:\n\nand tag the release",
+    });
+    const unread = await tool("tumpel_turn_steer", { turnId, prompt: "one more thing" }, SteerSchema);
+
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    await until(
+      "the turn reading Completed",
+      () => getJson(`/v1/turns/${turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    assert.deepEqual(
+      (await getJson(`/v1/turns/${turnId}/steers`, SteerSchema.array())).map((read) => [read.steerId, read.state]),
+      [
+        [early.steerId, "Delivered"],
+        [steer.steerId, "Delivered"],
+        [late.steerId, "Delivered"],
+        [unread.steerId, "TurnEnded"],
+      ],
+    );
+    const ended = await postJson(`/v1/turns/${turnId}/steers`, { prompt: "too late" }, bearer);
+    assert.equal(ended.status, 409);
+    assert.equal(ProblemSchema.parse(await ended.json()).code, "TurnNotRunning");
+    assert.equal((await inbox({ hook_event_name: "Stop" })).status, 409);
   });
 
   test("a stop with cancelTurn fails the running turn Cancelled, snapshots and frees its box, and the next send boots a fresh box", async () => {

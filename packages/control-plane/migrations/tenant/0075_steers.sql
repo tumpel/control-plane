@@ -1,0 +1,17 @@
+CREATE TABLE steer_inboxes (
+  turn_id TEXT PRIMARY KEY REFERENCES turns (turn_id) ON DELETE CASCADE
+);
+
+CREATE TABLE steers (
+  steer_id TEXT PRIMARY KEY,
+  turn_id TEXT NOT NULL REFERENCES steer_inboxes (turn_id) ON DELETE CASCADE,
+  prompt TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX steers_turn ON steers (turn_id, created_at);
+
+CREATE TABLE steer_deliveries (
+  steer_id TEXT PRIMARY KEY REFERENCES steers (steer_id) ON DELETE CASCADE,
+  delivered_at INTEGER NOT NULL
+);

@@ -72,6 +72,7 @@ import tenant0071 from "../migrations/tenant/0071_turn_timing_starts.sql";
 import tenant0072 from "../migrations/tenant/0072_turn_session_waits.sql";
 import tenant0073 from "../migrations/tenant/0073_session_delete_handovers.sql";
 import tenant0074 from "../migrations/tenant/0074_prebuild_layer_roots.sql";
+import tenant0075 from "../migrations/tenant/0075_steers.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -149,4 +150,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0072_turn_session_waits", sql: tenant0072 },
   { name: "0073_session_delete_handovers", sql: tenant0073 },
   { name: "0074_prebuild_layer_roots", sql: tenant0074 },
+  { name: "0075_steers", sql: tenant0075 },
 ];
