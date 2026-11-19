@@ -199,6 +199,7 @@ import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import type { PersonaWrite, Tenant } from "./tenant";
 import type { TenantMetrics } from "./tenant-metrics";
+import { checkedTenants, tenantSkewed } from "./tenant-version.ts";
 import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 export { HostChannel } from "./host-channel";
@@ -214,7 +215,7 @@ export interface Env extends SignerEnv {
   RELEASES_ACCESS_KEY_ID?: string;
   RELEASES_SECRET_ACCESS_KEY?: string;
   DB: D1Database;
-  TENANT: DurableObjectNamespace<Tenant>;
+  TENANT: Pick<DurableObjectNamespace<Tenant>, "getByName">;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
@@ -1559,7 +1560,8 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: { ...cors, "cache-control": "no-store" } });
     }
-    return withHeaders(await dispatch(request, url, env), cors);
+    const response = await dispatch(request, url, { ...env, TENANT: checkedTenants(env.TENANT) }).catch(tenantSkewed);
+    return withHeaders(response, cors);
   },
   async queue(batch, env): Promise<void> {
     await noticeRelease(
