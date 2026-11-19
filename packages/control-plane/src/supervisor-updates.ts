@@ -125,6 +125,15 @@ export const restartDeadline = (sql: SqlStorage, hostId: string, deadlineMs: num
   return step === undefined ? null : Date.parse(step.at) + deadlineMs;
 };
 
+export const clearSupersededFailure = (sql: SqlStorage, hostId: string): void => {
+  sql.exec(
+    `DELETE FROM supervisor_update_latest_failures WHERE host_id = ?1 AND EXISTS (
+      SELECT 1 FROM supervisor_update_latest_steps
+      WHERE host_id = ?1 AND phase = 'Restarting' AND julianday(supervisor_update_latest_failures.failed_at) < julianday(at))`,
+    hostId,
+  );
+};
+
 export const forgetSupervisorUpdates = (sql: SqlStorage, hostId: string): void => {
   sql.exec("DELETE FROM supervisor_update_latest_steps WHERE host_id = ?", hostId);
   sql.exec("DELETE FROM supervisor_update_latest_failures WHERE host_id = ?", hostId);
