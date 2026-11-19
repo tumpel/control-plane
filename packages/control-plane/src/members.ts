@@ -18,7 +18,7 @@ import {
 import type { z } from "zod";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
 import type { PersonCheck } from "./github-handlers.ts";
-import { json, parseBody, problem } from "./http";
+import { json, noContent, parseBody, problem } from "./http";
 import { type Caller, type Role, type Whoami, whoamiOf } from "./identity";
 import type { Env } from "./index";
 import { htmlPage, INVITATION_ACCEPT_PATH } from "./pages";
@@ -36,8 +36,6 @@ const MEMBERS_PATH = "/v1/members";
 const INVITATIONS_PATH = "/v1/invitations";
 const MEMBER_PATH = /^\/v1\/members\/([^/]+)$/;
 const INVITATION_PATH = /^\/v1\/invitations\/([^/]+)$/;
-
-const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 
 export const ownerRequired = (caller: Caller, operation: string): Response | null =>
   caller.role === "Owner"

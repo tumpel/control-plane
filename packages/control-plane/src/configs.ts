@@ -341,11 +341,11 @@ const planPersonaDeletes = (desired: ConfigPersona[], live: Live, steps: Step[],
   const wanted = new Set(desired.map((persona) => persona.name));
   for (const persona of live.personas.filter((each) => !wanted.has(each.name))) {
     const held = live.sessions
-      .filter((session) => session.personaId === persona.personaId && !["Failed", "Archived"].includes(session.state))
+      .filter((session) => session.personaId === persona.personaId)
       .map((session) => session.sessionId);
     if (held.length > 0) {
       problems.push(
-        `delete persona ${persona.name} (${persona.personaId}) will be refused: it is still used by session ${held.join(", ")}, which is neither Failed nor Archived; archive those sessions, or keep the persona in the config`,
+        `delete persona ${persona.name} (${persona.personaId}) will be refused: it still has session ${held.join(", ")}; delete those sessions, or keep the persona in the config`,
       );
       continue;
     }

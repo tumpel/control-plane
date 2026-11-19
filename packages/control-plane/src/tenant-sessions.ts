@@ -194,6 +194,12 @@ export type Archive =
   | { kind: "NotFound" }
   | { kind: "NotStopped"; state: SessionState };
 
+export type SessionDelete =
+  | { kind: "Deleted" }
+  | { kind: "NotFound" }
+  | { kind: "NotStopped"; state: SessionState }
+  | { kind: "BuiltPrebuild"; prebuildId: string };
+
 export type TranscriptCursor = {
   sessionState: SessionState;
   harness: Session["harness"];
@@ -389,6 +395,37 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
+
+const TURN_ROWS = [
+  "turn_failures",
+  "credential_handovers",
+  "turn_metric_dimensions",
+  "deferred_offers",
+  "turn_results",
+  "turn_full_images",
+  "turn_layered_images",
+  "turn_goals",
+  "turn_refusals",
+  "turn_warnings",
+  "turn_eviction_waits",
+  "turn_release_waits",
+];
+
+const SESSION_ROWS = [
+  "transcript_pending",
+  "transcript_chunks",
+  "stop_failures",
+  "session_issues",
+  "session_connectors",
+  "session_box_memory",
+  "session_box_retention",
+  "session_prebuild_layers",
+  "session_layer_absences",
+  "after_turn_releases",
+  "box_evictions",
+  "turns",
+  "sessions",
+];
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
@@ -2181,6 +2218,35 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     await this.releaseChunks(tenantId, sessionId);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
+  }
+
+  protected async deleteSession(tenantId: string, sessionId: string): Promise<SessionDelete> {
+    const sql = this.ctx.storage.sql;
+    const [prebuild] = sql
+      .exec<{ prebuild_id: string }>("SELECT prebuild_id FROM prebuild_sessions WHERE session_id = ?", sessionId)
+      .toArray();
+    if (prebuild !== undefined) return { kind: "BuiltPrebuild", prebuildId: prebuild.prebuild_id };
+    const archived = await this.archiveSession(tenantId, sessionId, Date.now());
+    if (archived.kind !== "Archived") return archived;
+    const keys = sql
+      .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
+      .toArray()
+      .map((row) => row.storage_key);
+    this.ctx.storage.transactionSync(() => {
+      for (const table of TURN_ROWS) {
+        sql.exec(`DELETE FROM ${table} WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?)`, sessionId);
+      }
+      sql.exec(
+        "DELETE FROM events WHERE event_id IN (SELECT event_id FROM event_sessions WHERE session_id = ?)",
+        sessionId,
+      );
+      for (const table of SESSION_ROWS) sql.exec(`DELETE FROM ${table} WHERE session_id = ?`, sessionId);
+    });
+    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+    }
+    await this.env.SESSION_TIMER.getByName(sessionId).clear();
+    return { kind: "Deleted" };
   }
 
   private releaseChunks(tenantId: string, sessionId: string): Promise<void> {

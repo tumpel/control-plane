@@ -470,6 +470,7 @@ const connectorToken = async (tenantId: string, email: string): Promise<string> 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
+const SHARED = '{"model":"shared"}';
 const GITHUB_USER = { id: 4242, login: "ticket-worker" };
 const PREBUILT_HEAD = "5".repeat(40);
 const PREBUILT_TREE = "6".repeat(40);
@@ -1650,8 +1651,8 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(ProblemSchema.parse(await late.json()).code, "ClaudeSetupNotWaiting");
   });
 
-  test("a stop frees an idle session's box once a snapshot holds its last turn, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and frees its persona for delete", async () => {
-    const { github, host, refused, tool, readAll, sessionStart, createPersona, deletePersona } = await tenant();
+  test("a stop frees an idle session's box once a snapshot holds its last turn, and an archive deletes its snapshots, keeps its transcript and refuses later sends", async () => {
+    const { github, host, refused, tool, readAll, sessionStart, createPersona } = await tenant();
     await createPersona("Archivable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
       { kind: "Variable", name: "GITHUB_TOKEN", value: github },
@@ -1713,19 +1714,8 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Stopped",
     );
 
-    const inUse = await deletePersona(start.personaId ?? "");
-    assert.equal(inUse.status, 409);
-    assert.match(
-      ProblemSchema.parse(await inUse.json()).detail,
-      new RegExp(
-        `persona ${start.personaId} is still used by session ${sessionId}, which is neither Failed nor Archived$`,
-      ),
-    );
-
     const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
     assert.equal(archived.state, "Archived");
-    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
-    assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).personaId, start.personaId);
     assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
     assert.equal(await store.text(request.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
@@ -2865,7 +2855,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(offer.repository, "https://github.com/acme/app");
   });
 
-  test("a clone failure fails the session, which takes no more turns, frees its persona for a delete and archives", async () => {
+  test("a clone failure fails the session, which takes no more turns, archives, and holds its persona until it is deleted", async () => {
     const { github, bearer, host, refused, getJson, tool, sessionStart, createPersona, deletePersona } = await tenant();
     await createPersona("Unclonable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
@@ -2906,10 +2896,103 @@ suite("sessions", { concurrency: 8 }, () => {
       assert.equal(send.code, "SessionFailed");
       failed.push(sessionId);
     }
-    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+    assert.equal((await tool("tumpel_session_archive", { sessionId: failed[0] }, SessionSchema)).state, "Archived");
+    const inUse = await deletePersona(start.personaId ?? "");
+    assert.equal(inUse.status, 409);
+    assert.equal(
+      ProblemSchema.parse(await inUse.json()).detail,
+      `persona ${start.personaId} still has session ${failed.join(", ")}`,
+    );
     for (const sessionId of failed) {
-      assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
+      const deleted = await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer });
+      assert.equal(deleted.status, 204, await deleted.text());
     }
+    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+  });
+
+  test("a session delete removes its rows, transcript chunks, snapshot and timers, and a persona delete keeps a file another persona holds", async () => {
+    const { github, bearer, host, refused, getJson, tool, sessionStart, createPersona, deletePersona } = await tenant();
+    const secrets = [
+      { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+      { kind: "Variable", name: "GITHUB_TOKEN", value: github },
+    ];
+    const notes = { source: "Inline", path: ".claude/settings.json", content: Buffer.from(SHARED).toString("base64") };
+    await createPersona("Deletable", secrets, [notes]);
+    await createPersona("Sharer", secrets, [notes]);
+    const start = await sessionStart("Deletable");
+    const started = await tool("tumpel_session_start", { ...start, prompt: "delete me" }, StartedSessionSchema);
+    const { sessionId, tenantId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const running = await refused(`/v1/sessions/${sessionId}`, { method: "DELETE" });
+    assert.equal(running.code, "SessionNotStopped");
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "a stored snapshot",
+      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+      (snapshots) => snapshots.length === 1,
+    );
+    const transcripts = await until(
+      "a stored transcript chunk",
+      async () =>
+        z
+          .object({ storage_key: z.string() })
+          .array()
+          .parse(await tenantSql(tenantId, "SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId))
+          .map((row) => row.storage_key),
+      (keys) => keys.length > 0,
+    );
+    const inUse = await deletePersona(start.personaId ?? "");
+    assert.equal(inUse.status, 409);
+    assert.equal(
+      ProblemSchema.parse(await inUse.json()).detail,
+      `persona ${start.personaId} still has session ${sessionId}`,
+    );
+
+    const deleted = await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer });
+    assert.equal(deleted.status, 204, await deleted.text());
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
+    assert.equal((await call(`/v1/sessions/${sessionId}`, { headers: bearer })).status, 404);
+    assert.equal((await call(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: bearer })).status, 404);
+    for (const key of [snapshot.storageKey, ...transcripts]) assert.equal(await store.text(key), null, key);
+    assert.equal(await storedTimers(sessionId), null);
+    const columns = z
+      .object({ tbl: z.string(), col: z.enum(["session_id", "turn_id"]) })
+      .array()
+      .parse(
+        await tenantSql(
+          tenantId,
+          "SELECT m.name AS tbl, p.name AS col FROM sqlite_master AS m JOIN pragma_table_info(m.name) AS p WHERE m.type = 'table' AND p.name IN ('session_id', 'turn_id')",
+        ),
+      );
+    assert.ok(columns.length > 20);
+    for (const { tbl, col } of columns) {
+      const rows = await tenantSql(
+        tenantId,
+        `SELECT 1 FROM ${tbl} WHERE ${col} = ?`,
+        col === "session_id" ? sessionId : turnId,
+      );
+      assert.deepEqual(rows, [], `${tbl}.${col}`);
+    }
+    assert.deepEqual(await tenantSql(tenantId, "SELECT 1 FROM events WHERE instr(payload, ?) > 0", sessionId), []);
+
+    const digest = createHash("sha256").update(SHARED).digest("hex");
+    const fileKey = `${tenantId}/persona-files/${digest}`;
+    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+    assert.equal(await store.text(fileKey), SHARED);
+    const sharer = (await getJson("/v1/personas", PersonaSchema.array())).find((persona) => persona.name === "Sharer");
+    assert.equal((await deletePersona(sharer?.personaId ?? "")).status, 204);
+    assert.equal(await store.text(fileKey), null);
   });
 
   test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {

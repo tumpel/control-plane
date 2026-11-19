@@ -114,6 +114,7 @@ import {
 import {
   issues,
   json,
+  noContent,
   oauthError,
   type Parsed,
   parseBody,
@@ -404,8 +405,6 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
 };
 
-const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
-
 const personaNotFound = (personaId: string): Response =>
   problem(404, {
     code: "NotFound",
@@ -613,8 +612,8 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     return problem(409, {
       code: "Conflict",
       title: "Persona in use",
-      detail: `persona ${personaId} is still used by session ${deleted.sessions.join(", ")}, which is neither Failed nor Archived`,
-      fix: "Archive those sessions, then delete the persona again",
+      detail: `persona ${personaId} still has session ${deleted.sessions.join(", ")}`,
+      fix: "Delete those sessions, then delete the persona again",
     });
   }
   if (request.method === "POST") {

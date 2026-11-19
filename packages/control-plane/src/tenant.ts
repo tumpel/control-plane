@@ -16,7 +16,7 @@ import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import { personaFileKey, type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
   type MemberUpdate,
   memberWith,
@@ -204,7 +204,7 @@ export class Tenant extends TenantConnectors {
     patchPersona: ({ tenantId, personaId, patch, now }) => ({
       written: this.patchPersona(tenantId, personaId, patch, now),
     }),
-    deletePersona: ({ tenantId, personaId }) => ({ deleted: this.deletePersona(tenantId, personaId) }),
+    deletePersona: async ({ tenantId, personaId }) => ({ deleted: await this.deletePersona(tenantId, personaId) }),
     open: ({ tenantId, now }) => {
       this.open(tenantId, now);
       return {};
@@ -406,6 +406,7 @@ export class Tenant extends TenantConnectors {
     archiveSession: async ({ tenantId, sessionId, now }) => ({
       archived: await this.archiveSession(tenantId, sessionId, now),
     }),
+    deleteSession: async ({ tenantId, sessionId }) => ({ deleted: await this.deleteSession(tenantId, sessionId) }),
     getSession: ({ tenantId, sessionId }) => ({ session: this.getSession(tenantId, sessionId) }),
     listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
     listTurns: ({ tenantId, sessionId }) => ({ turns: this.listTurns(tenantId, sessionId) }),
@@ -709,19 +710,47 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
-  protected deletePersona(tenantId: string, personaId: string): PersonaDeleted {
+  protected async deletePersona(tenantId: string, personaId: string): Promise<PersonaDeleted> {
     const sql = this.ctx.storage.sql;
     const sessions = sql
       .exec<{ session_id: string }>(
-        "SELECT session_id FROM sessions WHERE persona_id = ? AND state NOT IN ('Failed', 'Archived') ORDER BY created_at, session_id",
+        "SELECT session_id FROM sessions WHERE persona_id = ? ORDER BY created_at, session_id",
         personaId,
       )
       .toArray()
       .map((row) => row.session_id);
     if (sessions.length > 0) return { kind: "InUse", sessions };
+    const digests = this.personaDigests([personaId]);
     const deleted =
       sql.exec("DELETE FROM personas WHERE tenant_id = ? AND persona_id = ?", tenantId, personaId).rowsWritten > 0;
-    return deleted ? { kind: "Deleted" } : { kind: "NotFound" };
+    if (!deleted) return { kind: "NotFound" };
+    await this.releasePersonaFiles(tenantId, digests);
+    return { kind: "Deleted" };
+  }
+
+  private personaDigests(personaIds: string[]): string[] {
+    return this.ctx.storage.sql
+      .exec<{ digest: string }>(
+        "SELECT DISTINCT digest FROM persona_files WHERE persona_id IN (SELECT value FROM json_each(?))",
+        JSON.stringify(personaIds),
+      )
+      .toArray()
+      .map((row) => row.digest);
+  }
+
+  private async releasePersonaFiles(tenantId: string, digests: string[]): Promise<void> {
+    const held = new Set(
+      this.ctx.storage.sql
+        .exec<{ digest: string }>(
+          "SELECT DISTINCT digest FROM persona_files WHERE digest IN (SELECT value FROM json_each(?))",
+          JSON.stringify(digests),
+        )
+        .toArray()
+        .map((row) => row.digest),
+    );
+    const released = digests.filter((digest) => !held.has(digest));
+    if (released.length === 0) return;
+    await this.env.STORE.delete(released.map((digest) => personaFileKey(tenantId, digest)));
   }
 
   private secretSetsWhere(tenantId: string, where: string, ...bindings: string[]): SecretSetsRead {
@@ -1125,12 +1154,17 @@ export class Tenant extends TenantConnectors {
     }
     const deleted = this.deletedDuringApply(tenantId, writes);
     if (deleted !== null) return { kind: "Deleted", resource: deleted };
+    const digests = this.personaDigests(
+      writes.flatMap((write) => (write.kind === "DeletePersona" ? [write.personaId] : [])),
+    );
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         for (const write of writes) this.writeConfig(tenantId, write, sealed, now);
       }),
     );
-    return written.ok ? { kind: "Applied" } : { kind: "Conflict", constraint: written.constraint };
+    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
+    await this.releasePersonaFiles(tenantId, digests);
+    return { kind: "Applied" };
   }
 
   protected listPins(): HarnessPin[] {
