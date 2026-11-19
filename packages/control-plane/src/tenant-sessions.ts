@@ -1334,7 +1334,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.hostReported(hostId, usage, now);
   }
 
-  async failLostTurns(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+  async reconcileHeldBoxes(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+    await this.releaseUnneededBoxes(tenantId, hostId, heldSessionIds, now);
     const gone = this.ctx.storage.sql
       .exec<{ session_id: string }>(
         "UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state = 'Idle' AND session_id NOT IN (SELECT value FROM json_each(?)) RETURNING session_id",
@@ -1365,6 +1366,46 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
       );
     }
+  }
+
+  private async releaseUnneededBoxes(
+    tenantId: string,
+    hostId: string,
+    heldSessionIds: string[],
+    now: number,
+  ): Promise<void> {
+    const unneeded = this.ctx.storage.sql
+      .exec<SessionRow>(
+        `${SESSION_SELECT} WHERE host_id = ? AND session_id IN (SELECT value FROM json_each(?))
+          AND (state IN ('Stopped', 'Archived') OR (state = 'Idle' AND box_retention = 'Off'))`,
+        hostId,
+        JSON.stringify(heldSessionIds),
+      )
+      .toArray();
+    for (const session of unneeded) {
+      if (session.state !== "Idle") {
+        await this.host(hostId).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id });
+        continue;
+      }
+      const latest = this.latestTurn(session.session_id, null);
+      if (latest === null)
+        throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
+      this.startAfterTurnRelease(session, now);
+      await this.timers(tenantId, session.session_id, { Snapshot: null });
+      await this.snapshotOrTeardown(tenantId, { ...session, state: "Stopping" }, latest);
+    }
+  }
+
+  private startAfterTurnRelease(session: SessionRow, now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      this.setSessionState(session.session_id, "Stopping", now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO after_turn_releases (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
+        session.session_id,
+        session.box_id,
+        now,
+      );
+    });
   }
 
   forgetHostUsage(hostId: string): void {
@@ -2992,17 +3033,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.turnEnded();
     const session = this.sessionRow(turn.session_id);
     const release = session?.state === "Idle" && session.box_retention === "Off";
-    if (release) {
-      this.ctx.storage.transactionSync(() => {
-        this.setSessionState(turn.session_id, "Stopping", now);
-        this.ctx.storage.sql.exec(
-          "INSERT INTO after_turn_releases (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
-          turn.session_id,
-          session.box_id,
-          now,
-        );
-      });
-    }
+    if (release) this.startAfterTurnRelease(session, now);
     const delay =
       this.hostPrebuild(turn.session_id) === null && !release ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
     await this.timers(tenantId, turn.session_id, {
