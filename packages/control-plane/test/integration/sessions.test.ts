@@ -1454,6 +1454,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(started.status, 200, await started.clone().text());
     assert.equal(ClaudeSetupSchema.parse(await started.json()).harness, "Codex");
     const offer = await host.next("ClaudeSetupBoxOffer");
+    assert.equal(offer.harness, "Codex");
     assert.equal(offer.harnessVersion, CODEX_VERSION);
     const { claudeSetupId } = offer;
     const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
