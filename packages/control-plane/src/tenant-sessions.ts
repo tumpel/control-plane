@@ -15,6 +15,8 @@ import {
   SessionPrebuildLayerSchema,
   SessionSchema,
   type SessionStartSchema,
+  SnapshotManifestSchema,
+  SnapshotRootSchema,
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
@@ -413,6 +415,11 @@ const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chun
 const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
   AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
 
+const CHUNK_GRACE_MS = 24 * 60 * 60 * 1000;
+
+const LIVE_CHUNKS =
+  "SELECT digest FROM snapshot_manifest_chunks UNION SELECT digest FROM snapshot_chunks UNION SELECT digest FROM session_chunks";
+
 const toSession = (
   tenantId: string,
   row: SessionViewRow,
@@ -595,20 +602,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.host(session.host_id).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id });
   }
 
-  private async prebuildStored(request: SnapshotRequestRow, sizeBytes: number, now: number): Promise<void> {
+  private async prebuildStored(
+    tenantId: string,
+    request: SnapshotRequestRow,
+    sizeBytes: number,
+    now: number,
+  ): Promise<void> {
     const prebuild = this.hostPrebuild(request.session_id);
     if (prebuild === null) return;
     const root = await this.env.STORE.get(request.storage_key);
     if (root === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
     const digest = await sha256Hex(new Uint8Array(await root.arrayBuffer()));
     const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
+    const done = this.ctx.storage.transactionSync(() => {
       const moved = sql.exec(
         "UPDATE prebuilds SET state = 'Done', updated_at = ? WHERE prebuild_id = ? AND state = 'Building'",
         now,
         prebuild.prebuild_id,
       ).rowsWritten;
-      if (moved === 0) return;
+      if (moved === 0) return false;
       this.appendEvent(
         {
           event: "PrebuildDone",
@@ -625,7 +637,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
         now,
       );
+      return true;
     });
+    if (done) await this.archiveSupersededPrebuilds(tenantId, now);
+  }
+
+  private async archiveSupersededPrebuilds(tenantId: string, now: number): Promise<void> {
+    const superseded = this.ctx.storage.sql
+      .exec<{ session_id: string }>(
+        `SELECT prebuild_sessions.session_id FROM prebuilds AS older
+        JOIN prebuild_sessions ON prebuild_sessions.prebuild_id = older.prebuild_id
+        JOIN sessions ON sessions.session_id = prebuild_sessions.session_id
+        WHERE older.state = 'Done' AND sessions.state != 'Archived'
+          AND EXISTS (SELECT 1 FROM prebuilds AS newer WHERE newer.repository = older.repository
+            AND newer.guest_image_digest = older.guest_image_digest AND newer.state = 'Done' AND newer.created_at > older.created_at)
+          AND NOT EXISTS (SELECT 1 FROM session_prebuild_layers AS consumer JOIN turns ON turns.session_id = consumer.session_id
+            WHERE consumer.prebuild_id = older.prebuild_id AND turns.state IN (SELECT value FROM json_each(?))
+              AND NOT EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = consumer.session_id))`,
+        JSON.stringify(IN_FLIGHT),
+      )
+      .toArray();
+    for (const { session_id } of superseded) await this.archiveSession(tenantId, session_id, now);
   }
 
   private prebuildLayer(session: SessionRow, host: HostRecord, release: ReleaseRead): PrebuildLayer {
@@ -1985,6 +2017,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
           sessionId,
         );
       }
+      sql.exec(
+        "DELETE FROM snapshot_manifest_chunks WHERE snapshot_id IN (SELECT snapshot_id FROM snapshots WHERE session_id = ?)",
+        sessionId,
+      );
       sql.exec("DELETE FROM snapshots WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
@@ -2010,10 +2046,99 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private releaseChunks(tenantId: string, sessionId: string): Promise<void> {
     const sql = this.ctx.storage.sql;
+    return this.dropChunks(tenantId, () => {
+      sql.exec(`DELETE FROM chunks WHERE digest IN (${ORPHAN_CHUNKS})`, sessionId);
+      sql.exec("DELETE FROM session_chunks WHERE session_id = ?", sessionId);
+    });
+  }
+
+  private async manifestDigests(tenantId: string, storageKey: string): Promise<string[] | null> {
+    const root = await this.env.STORE.get(storageKey);
+    if (root === null) return null;
+    const places = SnapshotRootSchema.parse(await root.json()).manifest;
+    const parts = await Promise.all(
+      places.map(async (place) => {
+        const pack = await this.env.STORE.get(packKey(tenantId, place.packDigest), {
+          range: { offset: place.offset, length: place.length },
+        });
+        if (pack === null) {
+          throw new Error(
+            `pack ${place.packDigest} of snapshot root ${storageKey} is gone from object storage; archive its session`,
+          );
+        }
+        return pack.arrayBuffer();
+      }),
+    );
+    const manifest = SnapshotManifestSchema.parse(JSON.parse(await new Blob(parts).text()));
+    return [
+      ...places.map((place) => place.digest),
+      ...manifest.entries.flatMap((entry) => (entry.kind === "File" ? entry.chunks.map((chunk) => chunk.digest) : [])),
+    ];
+  }
+
+  private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const older = sql
+      .exec<{ snapshot_id: string; storage_key: string }>(
+        `SELECT snapshot_id, storage_key FROM snapshots WHERE session_id = ?1 AND snapshot_seq < ?2
+        UNION ALL SELECT snapshot_id, storage_key FROM snapshot_failures WHERE session_id = ?1 AND snapshot_seq < ?2 AND storage_key != ''`,
+        stored.session_id,
+        stored.snapshot_seq,
+      )
+      .toArray();
+    this.ctx.storage.transactionSync(() => {
+      for (const { snapshot_id } of older) {
+        this.dropPlacements(snapshot_id);
+        sql.exec("DELETE FROM snapshot_manifest_chunks WHERE snapshot_id = ?", snapshot_id);
+        sql.exec("DELETE FROM snapshots WHERE snapshot_id = ?", snapshot_id);
+      }
+    });
+    const keys = older.map((row) => row.storage_key);
+    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+    }
+    const unread = sql
+      .exec<{ snapshot_id: string; storage_key: string }>(
+        "SELECT snapshot_id, storage_key FROM snapshots WHERE NOT EXISTS (SELECT 1 FROM snapshot_manifest_chunks WHERE snapshot_manifest_chunks.snapshot_id = snapshots.snapshot_id)",
+      )
+      .toArray();
+    for (const snapshot of unread) {
+      const read = await this.manifestDigests(tenantId, snapshot.storage_key);
+      if (read === null) {
+        console.error(
+          `snapshot ${snapshot.snapshot_id} of tenant ${tenantId} has no root under ${snapshot.storage_key}, so its session_chunks keep its chunks; archive its session to free them`,
+        );
+        continue;
+      }
+      const digests = JSON.stringify(read);
+      sql.exec(
+        "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?1, value FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM snapshots WHERE snapshot_id = ?1)",
+        snapshot.snapshot_id,
+        digests,
+      );
+    }
+    await this.archiveSupersededPrebuilds(tenantId, now);
+    await this.dropChunks(tenantId, () => {
+      sql.exec(
+        `DELETE FROM chunk_releases WHERE digest IN (${LIVE_CHUNKS}) OR digest NOT IN (SELECT digest FROM chunks)`,
+      );
+      sql.exec(
+        `INSERT OR IGNORE INTO chunk_releases (digest, released_at) SELECT DISTINCT digest, ?1 FROM chunks WHERE digest NOT IN (${LIVE_CHUNKS})`,
+        now,
+      );
+      sql.exec(
+        "DELETE FROM chunks WHERE digest IN (SELECT digest FROM chunk_releases WHERE released_at < ?1)",
+        now - CHUNK_GRACE_MS,
+      );
+      sql.exec("DELETE FROM chunk_releases WHERE released_at < ?1", now - CHUNK_GRACE_MS);
+    });
+  }
+
+  private dropChunks(tenantId: string, drop: () => void): Promise<void> {
+    const sql = this.ctx.storage.sql;
     return this.ctx.blockConcurrencyWhile(async () => {
       const dead = this.ctx.storage.transactionSync(() => {
-        sql.exec(`DELETE FROM chunks WHERE digest IN (${ORPHAN_CHUNKS})`, sessionId);
-        sql.exec("DELETE FROM session_chunks WHERE session_id = ?", sessionId);
+        drop();
         const packs = sql
           .exec<{ pack_digest: string }>(`SELECT pack_digest ${DEAD_PACKS}`)
           .toArray()
@@ -2750,12 +2875,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
         window.request.session_id,
         digests,
       );
-      return sql
+      const held = sql
         .exec<{ digest: string; pack_digest: string; byte_offset: number; byte_length: number }>(
           "SELECT digest, MIN(pack_digest) AS pack_digest, byte_offset, byte_length FROM chunks WHERE digest IN (SELECT value FROM json_each(?1)) GROUP BY digest ORDER BY digest",
           digests,
         )
         .toArray();
+      for (const row of held) {
+        sql.exec(
+          "INSERT OR IGNORE INTO snapshot_chunks (snapshot_id, digest, pack_digest, byte_offset, byte_length) VALUES (?, ?, ?, ?, ?)",
+          window.request.snapshot_id,
+          row.digest,
+          row.pack_digest,
+          row.byte_offset,
+          row.byte_length,
+        );
+      }
+      return held;
     });
     return {
       type: "SnapshotChunksHeld",
@@ -3442,6 +3578,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
+    const digests = await this.manifestDigests(tenantId, request.storage_key);
+    if (digests === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
+    const manifest = JSON.stringify(digests);
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
@@ -3458,12 +3597,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         now,
       );
+      sql.exec(
+        "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?, value FROM json_each(?)",
+        request.snapshot_id,
+        manifest,
+      );
+      sql.exec(
+        "DELETE FROM session_chunks WHERE session_id = ? AND digest NOT IN (SELECT value FROM json_each(?))",
+        request.session_id,
+        manifest,
+      );
     });
-    await this.prebuildStored(request, message.uploadedBytes, now);
-    if (session.state !== "Stopping") return null;
-    const latest = this.latestTurn(session.session_id, null);
-    if (latest === null) throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
-    await this.snapshotOrTeardown(tenantId, session, latest);
+    await this.prebuildStored(tenantId, request, message.uploadedBytes, now);
+    if (session.state === "Stopping") {
+      const latest = this.latestTurn(session.session_id, null);
+      if (latest === null)
+        throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
+      await this.snapshotOrTeardown(tenantId, session, latest);
+    }
+    await this.collectSnapshots(tenantId, request, now);
     return null;
   }
 }

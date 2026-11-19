@@ -186,6 +186,30 @@ const objects = (bucket: "STORE" | "RELEASES"): Objects => {
 };
 
 const store = objects("STORE");
+
+const storeRoot = async (storageKey: string, digests: string[] = []): Promise<string> => {
+  const chunks = digests.map((digest) => ({ digest, packDigest: digest, offset: 0, length: 1 }));
+  const manifest = JSON.stringify({
+    entries: [
+      {
+        kind: "File",
+        path: "f",
+        mode: 420,
+        uid: 0,
+        gid: 0,
+        mtimeSeconds: 0,
+        mtimeNanos: 0,
+        sizeBytes: chunks.length,
+        chunks,
+      },
+    ],
+  });
+  const digest = createHash("sha256").update(manifest).digest("hex");
+  await store.put(`${storageKey.split("/")[0]}/packs/${digest}`, manifest);
+  const root = JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] });
+  await store.put(storageKey, root);
+  return root;
+};
 const releases = objects("RELEASES");
 
 const storeTimers = async (sessionId: string, timers: unknown, at: number): Promise<void> => {
@@ -724,7 +748,7 @@ const tenant = async () => {
       assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(upload.packDigest, "hex").toString("base64"));
       await store.put(url.pathname.replace("/tumpel-sessions/", ""), "pack bytes");
     }
-    await store.put(request.storageKey, '{"manifest":[]}');
+    await storeRoot(request.storageKey, digests);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
     await until(
       "a stored snapshot",
@@ -1117,7 +1141,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(upload.pathname, `/tumpel-sessions/${request.storageKey}`);
     assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
     assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
     const [snapshot] = await until(
       "a stored snapshot",
@@ -1205,7 +1229,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
 
     await tenantSql(
@@ -1333,7 +1357,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 19, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   });
 
@@ -1665,7 +1689,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
     assert.equal(request.turnId, turnId);
-    await store.put(request.storageKey, "snapshot bytes");
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await host.next("BoxTeardown");
     assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId: offer.boxId });
@@ -1718,7 +1742,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const warm = await host.next("SnapshotRequest");
-    await store.put(warm.storageKey, '{"entries":[]}');
+    await storeRoot(warm.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
     await until(
       "a stored snapshot",
@@ -1839,7 +1863,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
     const request = await host.next("SnapshotRequest");
     assert.equal(request.turnId, turnId);
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await host.next("BoxTeardown");
     assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId: offer.boxId });
@@ -1878,7 +1902,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema)).reason, "Cancelled");
 
     const request = await host.next("SnapshotRequest");
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await host.next("BoxTeardown");
     host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
@@ -1911,7 +1935,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     assert.deepEqual(await host.next("TurnCancel"), { type: "TurnCancel", turnId });
     const request = await host.next("SnapshotRequest");
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await host.next("BoxTeardown");
     host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
@@ -1939,7 +1963,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const warm = await host.next("SnapshotRequest");
-    await store.put(warm.storageKey, '{"entries":[]}');
+    await storeRoot(warm.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
     await until(
       "a stored snapshot",
@@ -1967,12 +1991,12 @@ suite("sessions", { concurrency: 8 }, () => {
     const again = await host.next("SnapshotRequest");
     assert.equal(again.sessionId, sessionId);
     assert.equal(again.turnId, turnId);
-    await store.put(again.storageKey, '{"entries":[]}');
+    await storeRoot(again.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: again.snapshotId, uploadedBytes: 14 });
     await until(
-      "a second stored snapshot",
+      "the second snapshot stored in place of the first",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
-      (snapshots) => snapshots.length === 2,
+      (snapshots) => snapshots.length === 1 && snapshots[0]?.snapshotId === again.snapshotId,
     );
   });
 
@@ -2139,6 +2163,49 @@ suite("sessions", { concurrency: 8 }, () => {
       [two],
     );
     assert.deepEqual(again.uploaded, [packOne]);
+  });
+
+  test("a stored snapshot records its manifest's chunks with it, deletes the session's older root, and its sweep deletes a chunk a day after its last reference goes", async () => {
+    const { host, tool, completedTurn, storedChunks } = await tenant();
+    const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
+    const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
+    const first = await completedTurn("snapshot the first");
+    const { sessionId } = first.session;
+    const older = await storedChunks(sessionId, [one], { [packOne]: [one] });
+    const tenantId = older.request.storageKey.split("/")[0] ?? "";
+    const recorded = await tenantSql(
+      tenantId,
+      "SELECT digest FROM snapshot_manifest_chunks WHERE snapshot_id = ? AND digest = ?",
+      older.request.snapshotId,
+      one,
+    );
+    assert.deepEqual(recorded, [{ digest: one }]);
+
+    const snapshotAgain = async (prompt: string, digest: string, pack: string) => {
+      await tool("tumpel_turn_send", { sessionId, prompt }, TurnSchema);
+      const offer = await host.next("TurnOffer");
+      host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+      host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+      return storedChunks(sessionId, [digest], { [pack]: [digest] });
+    };
+    const newer = await snapshotAgain("snapshot the second", two, packTwo);
+    await until(
+      "the older snapshot gone",
+      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+      (snapshots) => snapshots.length === 1 && snapshots[0]?.snapshotId === newer.request.snapshotId,
+    );
+    assert.equal(await store.text(older.request.storageKey), null);
+    assert.notEqual(await store.text(`${tenantId}/packs/${packOne}`), null);
+
+    await tenantSql(tenantId, "UPDATE chunk_releases SET released_at = 0 WHERE digest = ?", one);
+    await snapshotAgain("snapshot the third", three, packThree);
+    await until(
+      "the released pack deleted",
+      () => store.text(`${tenantId}/packs/${packOne}`),
+      (text) => text === null,
+    );
+    assert.notEqual(await store.text(`${tenantId}/packs/${packTwo}`), null);
+    assert.deepEqual(await tenantSql(tenantId, "SELECT digest FROM chunks WHERE digest = ?", one), []);
   });
 
   test("a turn whose host goes offline before claiming it stays Offered, is offered again at the next Welcome and runs", async () => {
@@ -2699,7 +2766,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
     from = await connect(first.id, first.key, 16, from.carried());
     await hostState(first.id, "Online");
-    await store.put(request.storageKey, '{"entries":[]}');
+    await storeRoot(request.storageKey);
     from.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     await until(
       "a stored snapshot",
@@ -3210,7 +3277,7 @@ suite("sessions", { concurrency: 8 }, () => {
   const releasedBox = async (side: HostSide, sessionId: string, boxId: string) => {
     const request = await side.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
-    await store.put(request.storageKey, "snapshot bytes");
+    await storeRoot(request.storageKey);
     side.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await side.next("BoxTeardown");
     assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId });
@@ -3272,7 +3339,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(sent.status, 200, await sent.clone().text());
     const queued = TurnSchema.parse(await sent.json());
     assert.equal(queued.state, "Offered");
-    await store.put(request.storageKey, "snapshot bytes");
+    await storeRoot(request.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await host.next("BoxTeardown");
     assert.equal(host.holds("TurnOffer"), false, "the queued turn waits for the released box's BoxGone");
@@ -3314,7 +3381,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const snapshotted = async (sessionId: string) => {
       const request = await first.next("SnapshotRequest");
       assert.equal(request.sessionId, sessionId);
-      await store.put(request.storageKey, "snapshot bytes");
+      await storeRoot(request.storageKey);
       first.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
       await until(
         `session ${sessionId} reading Idle with snapshot ${request.snapshotId}`,
@@ -3688,7 +3755,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
   assert.equal(request.sessionId, offer.sessionId);
-  await store.put(request.storageKey, "prebuilt root");
+  const prebuiltRoot = await storeRoot(request.storageKey);
   host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
   const teardown = await host.next("BoxTeardown");
   host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
@@ -3696,7 +3763,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   if (done.status.state !== "Done") throw new Error(`prebuild ${started.prebuildId} is ${done.status.state}`);
   assert.deepEqual(
     { layerDigest: done.status.layerDigest, layerSizeBytes: done.status.layerSizeBytes },
-    { layerDigest: createHash("sha256").update("prebuilt root").digest("hex"), layerSizeBytes: 4096 },
+    { layerDigest: createHash("sha256").update(prebuiltRoot).digest("hex"), layerSizeBytes: 4096 },
   );
   const listed = await getJson("/v1/sessions", SessionSchema.array());
   assert.ok(listed.every((session) => session.sessionId !== offer.sessionId));
@@ -3729,7 +3796,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const own = await host.next("SnapshotRequest");
   assert.equal(own.sessionId, consumer.sessionId);
-  await store.put(own.storageKey, '{"entries":[]}');
+  await storeRoot(own.storageKey);
   host.send({ type: "SnapshotDone", snapshotId: own.snapshotId, uploadedBytes: 14 });
   await until(
     "the consumer's own snapshot stored",
@@ -3744,6 +3811,66 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     [own.snapshotId],
   );
   assert.deepEqual((await getJson(`/v1/sessions/${consumer.sessionId}`, SessionSchema)).prebuildLayer, prebuilt);
+});
+
+test("a newer prebuild archives the older one only once no session still restores from it", async () => {
+  const { tenantId, bearer, host, getJson, sessionStart } = await tenant();
+  await installPrebuiltApp(tenantId);
+  const { personaId } = await sessionStart();
+  const repository = "https://github.com/prebuilt/app";
+  const prebuild = async () => {
+    const response = await postJson("/v1/prebuilds", { repository, personaId, provider: "CircleCI" }, bearer);
+    assert.equal(response.status, 200, await response.clone().text());
+    const started = PrebuildSchema.parse(await response.json());
+    const offer = await host.next("TurnOffer");
+    assert.equal(offer.prebuildCommitSha, PREBUILT_HEAD);
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    await host.next("TurnClaimed");
+    host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
+    host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+    host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const request = await host.next("SnapshotRequest");
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
+    const teardown = await host.next("BoxTeardown");
+    host.send({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
+    await until(
+      "the prebuild reading Done",
+      () => getJson(`/v1/prebuilds/${started.prebuildId}`, PrebuildSchema),
+      (read) => read.status.state === "Done",
+    );
+    return { prebuildId: started.prebuildId, request };
+  };
+  const older = await prebuild();
+  await tenantSql(tenantId, "UPDATE prebuilds SET input_digest = ? WHERE prebuild_id = ?", "older", older.prebuildId);
+
+  const next = await postJson(
+    "/v1/sessions",
+    { ...(await sessionStart()), repository, prompt: "restore the older" },
+    bearer,
+  );
+  assert.equal(next.status, 200, await next.clone().text());
+  const consumer = await host.next("TurnOffer");
+  assert.deepEqual(
+    consumer.snapshots.map((snapshot) => snapshot.snapshotId),
+    [older.request.snapshotId],
+  );
+  const newer = await prebuild();
+  assert.notEqual(await store.text(older.request.storageKey), null);
+
+  host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
+  await host.next("TurnClaimed");
+  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
+  host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+  const own = await host.next("SnapshotRequest");
+  await storeRoot(own.storageKey);
+  host.send({ type: "SnapshotDone", snapshotId: own.snapshotId, uploadedBytes: 14 });
+  await until(
+    "the older prebuild's root deleted",
+    () => store.text(older.request.storageKey),
+    (text) => text === null,
+  );
+  assert.notEqual(await store.text(newer.request.storageKey), null);
 });
 
 test("a prebuild whose snapshot fails reads Failed and its box is discarded over the channel the failure came in on", async () => {
