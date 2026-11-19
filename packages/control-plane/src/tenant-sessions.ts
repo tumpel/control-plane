@@ -76,7 +76,12 @@ import { bootArchitectures, bootFor, bootImage, imagesFor, type ReleaseRead, rea
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { settingsOf, turnCredentialSeconds } from "./settings";
-import { forgetSupervisorUpdates, restartDeadline, type SupervisorUpdateMessage } from "./supervisor-updates";
+import {
+  clearSupersededFailure,
+  forgetSupervisorUpdates,
+  restartDeadline,
+  type SupervisorUpdateMessage,
+} from "./supervisor-updates";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-metrics.ts";
 
@@ -1085,6 +1090,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       channelProtocol,
     );
     this.hostDiskUsage(hostId, usage, now);
+    clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 
   private hostDiskUsage(hostId: string, usage: HostUsage, now: number): void {

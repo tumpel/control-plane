@@ -405,6 +405,63 @@ suite("hosts", { concurrency: true }, () => {
     assert.match(stderr, /Update to v0\.4\.2 staged, waiting for 2 boxes/);
   });
 
+  test("a supervisor update failure reported before a restart is gone from host reads once the host says Hello again", async () => {
+    const keys = generateKeyPairSync("ed25519");
+    const publicKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x ?? "", "base64url").toString("base64");
+    const enrolled = await postJson("/v1/hosts/enrol", {
+      name: "stale-failure",
+      architecture: "Amd64",
+      cpuCount: 1,
+      memoryBytes: 1024,
+      publicKey,
+      supervisorVersion: "0.1.0",
+      enrolmentToken: await mint(),
+    });
+    assert.equal(enrolled.status, 200);
+    const { hostId } = HostSchema.parse(await enrolled.json());
+    const message = (seq: number, body: Record<string, unknown>) =>
+      JSON.stringify({ type: "Frame", seq, ack: 0, message: body });
+    const first = rawHost(hostId, keys.privateKey, 2, (welcomed) => {
+      welcomed.send(
+        message(1, {
+          type: "SupervisorUpdateFailed",
+          fromSha256: "a".repeat(64),
+          toSha256: "b".repeat(64),
+          reason: "SupervisorUpdateDryRunFailed",
+          detail: "the candidate died with SIGFPE",
+          outputTail: [],
+          failedAt: "2026-11-17T14:18:00+01:00",
+        }),
+      );
+      welcomed.send(
+        message(2, {
+          type: "SupervisorUpdateStep",
+          fromSha256: "a".repeat(64),
+          toSha256: "c".repeat(64),
+          releaseVersion: "v0.4.3",
+          boxesRunning: 0,
+          phase: "Restarting",
+          at: "2026-11-18T08:12:00+01:00",
+        }),
+      );
+    });
+    await until(
+      "the failure reported",
+      () => readHost(hostId),
+      (read) => read.supervisorUpdateFailure.state === "Reported",
+    );
+    first.socket.close();
+
+    const second = rawHost(hostId, keys.privateKey, 2, () => undefined);
+    const cleared = await until(
+      "the failure cleared by the next Hello",
+      () => readHost(hostId),
+      (read) => read.supervisorUpdateFailure.state === "NotReported" && read.state === "Online",
+    );
+    assert.deepEqual(cleared.supervisorUpdateFailure, { state: "NotReported" });
+    second.socket.close();
+  });
+
   test("an unknown enrolment token is refused", async () => {
     const response = await postJson("/v1/hosts/enrol", {
       name: "stranger",
