@@ -14,6 +14,8 @@ export const storedJson = (text: string): Response =>
 export const json = (body: unknown, status = 200, headers: Record<string, string> = {}): Response =>
   Response.json(body, { status, headers: { ...NO_STORE, ...headers } });
 
+export const noContent = (): Response => new Response(null, { status: 204, headers: NO_STORE });
+
 export const problem = (status: ProblemStatus, body: Problem, headers: Record<string, string> = {}): Response =>
   json(ProblemSchema.parse(body), status, headers);
 

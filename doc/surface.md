@@ -111,6 +111,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `SecretSets_setMember`                   | `tumpel_secret_set_set_member`               | `tumpel secret-set set-member`               |
 | `SecretSets_update`                      | `tumpel_secret_set_update`                   | `tumpel secret-set update`                   |
 | `Sessions_archive`                       | `tumpel_session_archive`                     | `tumpel session archive`                     |
+| `Sessions_delete`                        | `tumpel_session_delete`                      | `tumpel session delete`                      |
 | `Sessions_get`                           | `tumpel_session_get`                         | `tumpel session get`                         |
 | `Sessions_list`                          | `tumpel_session_list`                        | `tumpel session list`                        |
 | `Sessions_listCredentialHandovers`       | `tumpel_session_handovers`                   | `tumpel session handovers`                   |

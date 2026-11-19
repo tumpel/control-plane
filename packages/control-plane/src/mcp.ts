@@ -119,6 +119,7 @@ const DONE: Record<string, string> = {
   tumpel_host_revoke_token: "Enrolment token revoked",
   tumpel_harness_unpin: "Pin removed",
   tumpel_persona_delete: "Persona deleted",
+  tumpel_session_delete: "Session deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
   tumpel_github_actions_delete: "GitHub Actions disconnected",
@@ -363,7 +364,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona; refused while any session of the persona is neither Failed nor Archived. Archived sessions stay readable.",
+    "Delete a persona and its files; a file another persona holds stays. Refused while any session of the persona remains, whatever its state, naming those sessions; delete them first with tumpel_session_delete.",
   ),
   {
     name: "tumpel_secret_set_create",
@@ -814,6 +815,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/sessions/{sessionId}/archive",
     SessionPathSchema,
     "Archive an Idle, Stopped or Failed session: discard an Idle session's box without a snapshot, delete its snapshots, keep its transcript readable and refuse every later send. Final; archiving an Archived session returns it as it is. Refused while a turn runs or the session stops, and while an Idle session's host is offline. Returns the archived session.",
+  ),
+  rest(
+    "tumpel_session_delete",
+    "DELETE",
+    "/v1/sessions/{sessionId}",
+    SessionPathSchema,
+    "Delete an Idle, Stopped, Failed or Archived session and everything stored for it: its turns, transcript and snapshots; a snapshot chunk another session holds stays. Refused as tumpel_session_archive is, and for a session that built a prebuild.",
   ),
   rest(
     "tumpel_session_stop_failures",

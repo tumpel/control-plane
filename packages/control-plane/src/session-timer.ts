@@ -85,6 +85,11 @@ export class SessionTimer extends DurableObject<Env> {
     await this.save(timers);
   }
 
+  async clear(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+  }
+
   override async alarm(): Promise<void> {
     const timers = await this.ctx.storage.get<Timers>(TIMERS_KEY);
     if (timers === undefined) return;
