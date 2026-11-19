@@ -34,7 +34,7 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId"> & {
+type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds"> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];
@@ -52,6 +52,7 @@ export type ConfigWrite =
 
 export interface Live {
   personas: StoredPersona[];
+  connectors: { connectorId: string; name: string }[];
   secretSets: SecretSet[];
   pins: Pin[];
   hosts: HostRecord[];
@@ -297,7 +298,15 @@ const planPersonas = (
 ): void => {
   const byName = new Map(live.personas.map((persona) => [persona.name, persona]));
   const setIds = new Map(live.secretSets.map((set) => [set.name, set.secretSetId]));
+  const connectorIds = new Map(live.connectors.map((connector) => [connector.name, connector.connectorId]));
   for (const persona of desired) {
+    const unknown = persona.connectorNames.filter((name) => !connectorIds.has(name));
+    if (unknown.length > 0) {
+      problems.push(
+        `persona ${JSON.stringify(persona.name)} names the connector ${unknown.map((name) => JSON.stringify(name)).join(", ")}, which your tenant does not have; create and connect it first, or drop it from connectorNames`,
+      );
+      continue;
+    }
     const local = bundles.get(persona.name) ?? [];
     const current = byName.get(persona.name);
     if (current === undefined) {
@@ -316,6 +325,7 @@ const planPersonas = (
     const removed = [...held.keys()].filter((path) => !wanted.has(path)).sort();
     const unchanged =
       setIds.get(persona.secretSetName) === current.secretSetId &&
+      persona.connectorNames.map((name) => connectorIds.get(name)).join() === current.connectorIds.join() &&
       (persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib) === current.boxMemoryMib &&
       (persona.boxDiskMib ?? BoxDiskLimit.DefaultMib) === current.boxDiskMib &&
       removed.length === 0 &&

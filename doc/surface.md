@@ -7,9 +7,10 @@ names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, StaticConnectors `connector`, OAuthConnectors `connector`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
-`Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,
+`Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`
+the verbs `create-static` and `create-oauth`,
 `Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb
 `stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in
 principal reads it too. The CLI's `transcript read` takes a turnId and reads that turn's lines of its
@@ -37,6 +38,11 @@ nothing: the server cannot read your environment, so they return the config entr
 | `ClaudeSetups_start`                     | `tumpel_claude_setup_start`                  | `tumpel claude-setup start`                  |
 | `ClaudeSetups_submitCode`                | `(none)`                                     | `tumpel claude-setup submit-code`            |
 | `Connections_list`                       | `tumpel_connection_list`                     | `tumpel connection list`                     |
+| `Connectors_clearCredential`             | `tumpel_connector_clear_credential`          | `tumpel connector clear-credential`          |
+| `Connectors_delete`                      | `tumpel_connector_delete`                    | `tumpel connector delete`                    |
+| `Connectors_get`                         | `tumpel_connector_get`                       | `tumpel connector get`                       |
+| `Connectors_list`                        | `tumpel_connector_list`                      | `tumpel connector list`                      |
+| `Connectors_update`                      | `tumpel_connector_update`                    | `tumpel connector update`                    |
 | `Devices_list`                           | `tumpel_devices_list`                        | `tumpel devices list`                        |
 | `Devices_revoke`                         | `tumpel_devices_revoke`                      | `tumpel devices revoke`                      |
 | `EnrolmentTokens_list`                   | `tumpel_host_list_tokens`                    | `tumpel host list-tokens`                    |
@@ -73,6 +79,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `NamespaceConnections_delete`            | `tumpel_namespace_delete`                    | `tumpel namespace delete`                    |
 | `NamespaceConnections_get`               | `tumpel_namespace_get`                       | `tumpel namespace get`                       |
 | `NamespaceConnections_start`             | `tumpel_namespace_start`                     | `tumpel namespace start`                     |
+| `OAuthConnectors_authorize`              | `tumpel_connector_authorize`                 | `tumpel connector authorize`                 |
+| `OAuthConnectors_create`                 | `tumpel_connector_create_oauth`              | `tumpel connector create-oauth`              |
 | `OAuthGrants_list`                       | `tumpel_oauth_grant_list`                    | `tumpel oauth-grant list`                    |
 | `OAuthGrants_revoke`                     | `tumpel_oauth_grant_revoke`                  | `tumpel oauth-grant revoke`                  |
 | `OpenRouterConnections_authorize`        | `tumpel_openrouter_authorize`                | `tumpel openrouter authorize`                |
@@ -111,6 +119,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Sessions_stop`                          | `tumpel_session_stop`                        | `tumpel session stop`                        |
 | `Snapshots_get`                          | `tumpel_snapshot_get`                        | `tumpel snapshot get`                        |
 | `Snapshots_list`                         | `tumpel_snapshot_list`                       | `tumpel snapshot list`                       |
+| `StaticConnectors_create`                | `tumpel_connector_create_static`             | `tumpel connector create-static`             |
+| `StaticConnectors_setToken`              | `tumpel_connector_set_token`                 | `tumpel connector set-token`                 |
 | `TenantConfigs_apply`                    | `tumpel_config_apply`                        | `tumpel config apply`                        |
 | `TenantConfigs_plan`                     | `tumpel_config_plan`                         | `tumpel config plan`                         |
 | `Transcripts_read`                       | `tumpel_transcript_read`                     | `tumpel transcript read`                     |
@@ -154,3 +164,4 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `PrebuildInputs_read`: build job wire, signed by the provider's OIDC job token, never by a principal.
 - `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
+- `ConnectorTokens_fetch`: box wire of the guest forwarder, signed by the turn's connector token, never by a principal.

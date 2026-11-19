@@ -611,7 +611,7 @@ const tenant = async () => {
     const created = await postJson("/v1/secret-sets", { name: `${name} secrets`, secrets }, bearer);
     assert.equal(created.status, 200);
     const { secretSetId } = SecretSetSchema.parse(await created.json());
-    const persona = { name, harness: "ClaudeCode", secretSetId, files };
+    const persona = { name, harness: "ClaudeCode", secretSetId, connectorIds: [], files };
     const personas = await getJson("/v1/personas", PersonaSchema.array());
     const existing = personas.find((candidate) => candidate.name === name);
     const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
@@ -1468,7 +1468,11 @@ suite("sessions", { concurrency: 8 }, () => {
       { kind: "Variable", name: "GITHUB_TOKEN", expiresAt: null },
     ]);
 
-    const persona = await postJson("/v1/personas", { name: "Codex", harness: "Codex", secretSetId, files: [] }, bearer);
+    const persona = await postJson(
+      "/v1/personas",
+      { name: "Codex", harness: "Codex", secretSetId, connectorIds: [], files: [] },
+      bearer,
+    );
     assert.equal(persona.status, 200, await persona.clone().text());
     const { personaId } = PersonaSchema.parse(await persona.json());
     await tool(
@@ -2843,7 +2847,13 @@ suite("sessions", { concurrency: 8 }, () => {
       const written = await server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
         method: "PUT",
         headers: { "content-type": "application/json", ...bearer },
-        body: JSON.stringify({ name: persona.name, secretSetId: persona.secretSetId, boxDiskMib, files: [] }),
+        body: JSON.stringify({
+          name: persona.name,
+          secretSetId: persona.secretSetId,
+          connectorIds: [],
+          boxDiskMib,
+          files: [],
+        }),
       });
       assert.equal(written.status, 200, await written.clone().text());
       assert.equal((await getJson(`/v1/personas/${persona.personaId}`, PersonaSchema)).boxDiskMib, boxDiskMib);

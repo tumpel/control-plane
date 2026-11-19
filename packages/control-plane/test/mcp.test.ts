@@ -6,6 +6,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ConfigSecretSetSchema,
+  ConnectorSchema,
   DeviceAuthorizationSchema,
   DeviceSchema,
   DeviceTokenSchema,
@@ -285,6 +286,7 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     name: "Reviewer",
     harness: "ClaudeCode",
     secretSetId: secretSet.secretSetId,
+    connectorIds: [],
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review").toString("base64") }],
   });
   assert.deepEqual(persona, await rest(PersonaSchema, "GET", `/v1/personas/${persona.personaId}`));
@@ -296,15 +298,77 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     personaId: persona.personaId,
     name: "Reviewer",
     secretSetId: secretSet.secretSetId,
+    connectorIds: [],
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review closely").toString("base64") }],
   });
   assert.notEqual(updated.files[0]?.digest, persona.files[0]?.digest);
   const keyless = await send(
     "PUT",
     `/v1/personas/${persona.personaId}`,
-    { name: "Reviewer", secretSetId: defaultSet.secretSetId, files: [] },
+    { name: "Reviewer", secretSetId: defaultSet.secretSetId, connectorIds: [], files: [] },
     bearer,
   );
+  const unlisted = await send(
+    "PUT",
+    `/v1/personas/${persona.personaId}`,
+    { name: "Reviewer", secretSetId: secretSet.secretSetId, files: [] },
+    bearer,
+  );
+  assert.equal(unlisted.status, 400);
+  assert.equal(ProblemSchema.parse(await unlisted.json()).title, "Connectors missing");
+  const recall = await toolJson(ConnectorSchema, "tumpel_connector_create_static", {
+    name: "Recall",
+    url: "https://recall.example.com/mcp",
+  });
+  assert.equal(recall.status.state, "NotConnected");
+  assert.match(
+    (await tool("tumpel_connector_set_token", { connectorId: recall.connectorId })).content[0]?.text ?? "",
+    /tumpel connector set-token .* --stdin/,
+  );
+  const connected = await rest(ConnectorSchema, "PUT", `/v1/static-connectors/${recall.connectorId}/token`, {
+    value: SECRET,
+  });
+  assert.equal(connected.status.state, "Connected");
+  const repeated = await send(
+    "PUT",
+    `/v1/personas/${persona.personaId}`,
+    {
+      name: "Reviewer",
+      secretSetId: secretSet.secretSetId,
+      connectorIds: [recall.connectorId, recall.connectorId],
+      files: [],
+    },
+    bearer,
+  );
+  assert.equal(repeated.status, 422);
+  const listing = await toolJson(PersonaSchema, "tumpel_persona_update", {
+    personaId: persona.personaId,
+    name: "Reviewer",
+    secretSetId: secretSet.secretSetId,
+    connectorIds: [recall.connectorId],
+    files: [],
+  });
+  assert.deepEqual(listing.connectorIds, [recall.connectorId]);
+  const inUse = await send("DELETE", `/v1/connectors/${recall.connectorId}`, undefined, bearer);
+  assert.equal(inUse.status, 409);
+  assert.equal(ProblemSchema.parse(await inUse.json()).code, "ConnectorInUse");
+  const disconnected = await toolJson(ConnectorSchema, "tumpel_connector_clear_credential", {
+    connectorId: recall.connectorId,
+  });
+  assert.equal(disconnected.status.state, "Disconnected");
+  assert.deepEqual(
+    await toolJson(ConnectorSchema.array(), "tumpel_connector_list"),
+    await rest(ConnectorSchema.array(), "GET", "/v1/connectors"),
+  );
+  assert.equal(JSON.stringify(await rest(ConnectorSchema.array(), "GET", "/v1/connectors")).includes(SECRET), false);
+  await toolJson(PersonaSchema, "tumpel_persona_update", {
+    personaId: persona.personaId,
+    name: "Reviewer",
+    secretSetId: secretSet.secretSetId,
+    connectorIds: [],
+    files: [],
+  });
+  await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId });
   assert.equal(keyless.status, 422);
   assert.equal(ProblemSchema.parse(await keyless.json()).code, "NoCredential");
   assert.deepEqual(

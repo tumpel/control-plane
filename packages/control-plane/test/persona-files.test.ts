@@ -138,6 +138,7 @@ test("a read returns a file at the inline cap as an Inline write with its bytes,
     { STORE: store, R2_BUCKET_NAME: "tumpel-sessions", R2_STUB_ORIGIN: "https://r2.example.test" },
     {
       personaId: "persona-1",
+      connectorIds: [],
       tenantId: "tenant-1",
       name: "Reviewer",
       harness: "ClaudeCode",

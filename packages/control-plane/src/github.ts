@@ -54,7 +54,7 @@ const APP_NAME_LIMIT = 34;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const base64Url = (bytes: Uint8Array): string => {
+export const base64Url = (bytes: Uint8Array): string => {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -155,7 +155,7 @@ export const authorizeUrl = (web: string, clientId: string, redirectUri: string,
 
 const fromBase64 = (text: string): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
 
-const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> | null =>
+export const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> | null =>
   /^[A-Za-z0-9_-]+$/.test(text) ? fromBase64(text.replaceAll("-", "+").replaceAll("_", "/")) : null;
 
 const derLength = (length: number): number[] => {

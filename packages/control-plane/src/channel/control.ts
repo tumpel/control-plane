@@ -81,7 +81,7 @@ export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
   TelemetryBatch: TELEMETRY_BATCH_VERSION,
 };
 
-export const GRANT_ARGUMENTS_VERSION = 18;
+export const CONNECTORS_VERSION = 26;
 
 export interface ControlHost {
   hostId: string;
@@ -136,11 +136,8 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-const spokenGrant = (credential: DispatchGrant, protocolVersion: number): DispatchGrant => {
-  if (protocolVersion >= GRANT_ARGUMENTS_VERSION) return credential;
-  const { credentialHandoverId, expiresAt, variables } = credential;
-  return { credentialHandoverId, expiresAt, variables };
-};
+const spokenGrant = (credential: DispatchGrant, protocolVersion: number): DispatchGrant =>
+  protocolVersion >= CONNECTORS_VERSION ? credential : { ...credential, connectors: [] };
 
 const outbound = async (
   stored: StoredControlMessage,

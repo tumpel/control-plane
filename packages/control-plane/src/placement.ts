@@ -1,5 +1,6 @@
 import { BoxMemoryLimit, type ReportedHostUsageSchema } from "@tumpel/schemas";
 import type { z } from "zod";
+import { CONNECTORS_VERSION } from "./channel/control.ts";
 import type { HostRecord as Host } from "./host-record.ts";
 import type { HostArchitecture } from "./releases.ts";
 
@@ -16,7 +17,8 @@ export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
   | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
   | { kind: "Unplaceable"; host: Host; reason: "NoMemory"; usage: ReportedHostUsage; boxMemoryMib: number }
-  | { kind: "Unplaceable"; host: Host; reason: "NoDisk"; usage: ReportedHostUsage; boxDiskMib: number };
+  | { kind: "Unplaceable"; host: Host; reason: "NoDisk"; usage: ReportedHostUsage; boxDiskMib: number }
+  | { kind: "Unplaceable"; host: Host; reason: "NoConnectors"; usage: ReportedHostUsage };
 
 export interface BoxSize {
   boxMemoryMib: number;
@@ -53,6 +55,7 @@ const assess = (
   usages: ReadonlyMap<string, ReportedHostUsage>,
   image: ImageAvailability,
   { boxMemoryMib, boxDiskMib }: BoxSize,
+  connectors: boolean,
 ): Candidate | Unplaceable => {
   if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
@@ -61,6 +64,9 @@ const assess = (
     throw new Error(
       `host ${host.name} (${host.hostId}) is Online but its tenant holds no usage from its Hello; restart tumpel-supervisor run on that host so its Hello carries its usage`,
     );
+  }
+  if (connectors && usage.channelProtocol < CONNECTORS_VERSION) {
+    return { kind: "Unplaceable", host, reason: "NoConnectors", usage };
   }
   if (usage.boxesRunning >= usage.boxCapacity) return { kind: "Unplaceable", host, reason: "Full", usage };
   if (boxMemoryMib > BoxMemoryLimit.DefaultMib && usage.memoryAvailableMib < boxMemoryMib)
@@ -74,9 +80,10 @@ export const placeSession = (
   usages: readonly ReportedHostUsage[],
   image: ImageAvailability,
   box: BoxSize,
+  connectors: boolean,
 ): Placement => {
   const byHost = new Map(usages.map((usage) => [usage.hostId, usage]));
-  const assessed = hosts.map((host) => assess(host, byHost, image, box));
+  const assessed = hosts.map((host) => assess(host, byHost, image, box, connectors));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
     .sort((a, b) => busyness(a) - busyness(b) || freeSlots(b.usage) - freeSlots(a.usage));

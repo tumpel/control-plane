@@ -276,7 +276,7 @@ test("an apply refused at a later change writes none of the earlier ones", async
     {
       config: {
         ...fixture,
-        personas: [{ name: "Atomic", harness: "ClaudeCode", secretSetName: "atomic", files: [] }],
+        personas: [{ name: "Atomic", harness: "ClaudeCode", secretSetName: "atomic", connectorNames: [], files: [] }],
         secretSets: [{ ...fixture.secretSets[0], name: "atomic" }],
         harnessPins: [{ harness: "ClaudeCode", harnessVersion: "0.0.1" }],
         hosts: [],
@@ -315,6 +315,7 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
     name: "Rollback",
     harness: "ClaudeCode",
     secretSetId,
+    connectorIds: [],
     boxMemoryMib: 4096,
     boxDiskMib: 32768,
     files: [],
@@ -386,13 +387,18 @@ test("a taken name, a repeated member, two credentials for one provider and dele
     name: "Twin",
     harness: "ClaudeCode",
     secretSetId,
+    connectorIds: [],
     files: [],
   };
   assert.equal((await postJson("/v1/personas", persona, bearer)).status, 200);
   const twin = await postJson("/v1/personas", persona, bearer);
   assert.equal(twin.status, 409);
   assert.equal(ProblemSchema.parse(await twin.json()).code, "Conflict");
-  const unknown = await postJson("/v1/personas", { ...persona, name: "Lost", secretSetId: "no-such-set" }, bearer);
+  const unknown = await postJson(
+    "/v1/personas",
+    { ...persona, name: "Lost", secretSetId: "no-such-set", connectorIds: [] },
+    bearer,
+  );
   assert.equal(unknown.status, 422);
   const keyless = await postJson("/v1/personas", { ...persona, name: "Keyless", harness: "Codex" }, bearer);
   assert.equal(keyless.status, 422);
@@ -417,6 +423,7 @@ test("a persona file at a path its harness does not read is refused, a stored fi
     name: "Files",
     harness: "ClaudeCode",
     secretSetId: set.secretSetId,
+    connectorIds: [],
   };
   const misplaced = await postJson(
     "/v1/personas",
@@ -492,6 +499,7 @@ test("tumpel persona get output without its server fields creates a copy with th
       name: "Original",
       harness: "ClaudeCode",
       secretSetId: set.secretSetId,
+      connectorIds: [],
       files: [
         { source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from(REVIEWER_MEMORY).toString("base64") },
         { source: "Stored", path: ".claude/settings.json", digest: largeDigest, sizeBytes: large.byteLength },
@@ -576,6 +584,7 @@ test("secret-set set-member writes one member from stdin and keeps the rest, and
     secretSetId,
     "--persona-file",
     `.claude/CLAUDE.md=${join(scratch, "piped", "CLAUDE.md")}`,
+    "--no-connectors",
   ]);
   assert.equal(persona.code, 0, persona.stderr);
   const { personaId } = PersonaSchema.parse(JSON.parse(persona.stdout));

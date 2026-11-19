@@ -13,6 +13,7 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
+import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
@@ -126,6 +127,9 @@ export const why = (refused: Unplaceable): string => {
   if (refused.reason === "NoMemory") {
     return `${named} has ${refused.usage.memoryAvailableMib} MiB of memory available, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
   }
+  if (refused.reason === "NoConnectors") {
+    return `${named} runs a supervisor too old to serve connectors`;
+  }
   if (refused.reason === "NoDisk") {
     return `${named} gives box disks ${refused.usage.diskBudgetMib} MiB and its boxes hold ${refused.usage.diskHeldMib} MiB of it, and the persona's boxes need ${refused.boxDiskMib} MiB`;
   }
@@ -136,6 +140,9 @@ export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoMemory")) {
     return `Lower the persona's boxMemoryMib toward the 4096 MiB default, free memory on a host, or enrol a host with more memory, then ${retry}`;
+  }
+  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoConnectors")) {
+    return `Let a host update its supervisor to the current release, or use a persona without connectors, then ${retry}`;
   }
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoDisk")) {
     return `Lower the persona's boxDiskMib toward the 32768 MiB default, free disk on a host, or enrol a host with more disk, then ${retry}`;
@@ -248,8 +255,17 @@ const prepareStart = async (
   });
 };
 
+const connectorDisconnected = (names: string[]): Refused =>
+  refuse(409, {
+    code: "ConnectorDisconnected",
+    title: "Connector not connected",
+    detail: disconnectedDetail(names),
+    fix: DISCONNECTED_FIX,
+  });
+
 export const placed = <T>(started: Started<T>): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
+  if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
   if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
   if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
   return ok(started.started);
@@ -425,6 +441,7 @@ export const sendTurn = async (
       fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
     });
   }
+  if (sent.kind === "ConnectorDisconnected") return connectorDisconnected(sent.names);
   return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
 };
 
