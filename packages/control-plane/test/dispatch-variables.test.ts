@@ -12,6 +12,7 @@ const claudeCode = {
       fixed: [],
       arguments: [],
       costBasis: "Billed" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
     {
       provider: "Anthropic" as const,
@@ -20,6 +21,7 @@ const claudeCode = {
       fixed: [],
       arguments: [],
       costBasis: "NotBilled" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
     {
       provider: "OpenRouter" as const,
@@ -28,6 +30,7 @@ const claudeCode = {
       fixed: [{ name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api" }],
       arguments: [],
       costBasis: "Billed" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
   ],
 };
@@ -41,6 +44,7 @@ const codex = {
       fixed: [],
       arguments: [],
       costBasis: "Billed" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
   ],
 };
@@ -54,6 +58,7 @@ const openCode = {
       fixed: [],
       arguments: [],
       costBasis: "Billed" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
     {
       provider: "Anthropic" as const,
@@ -62,6 +67,7 @@ const openCode = {
       fixed: [],
       arguments: [],
       costBasis: "Billed" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
     {
       provider: "OpenAi" as const,
@@ -70,6 +76,7 @@ const openCode = {
       fixed: [],
       arguments: [],
       costBasis: "Billed" as const,
+      modelSupport: { kind: "ProviderChecked" as const },
     },
   ],
 };
@@ -126,6 +133,7 @@ test("a login file reaches the box as a file at its catalog path, never as a var
         fixed: [],
         arguments: ["-c", 'cli_auth_credentials_store="file"'],
         costBasis: "NotBilled" as const,
+        modelSupport: { kind: "ProviderChecked" as const },
       },
       ...codex.credentials,
     ],

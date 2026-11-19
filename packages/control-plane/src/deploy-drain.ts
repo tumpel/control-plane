@@ -79,6 +79,11 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
       ),
     )
   ).flat();
-  const rollout: ReleaseRollout = { deployedCommit: env.DEPLOYED_COMMIT, drained: hosts.length === 0, hosts };
+  const rollout: ReleaseRollout = {
+    deployedCommit: env.DEPLOYED_COMMIT,
+    drained: hosts.length === 0,
+    hosts,
+    channelProtocols: [],
+  };
   return json(rollout);
 };
