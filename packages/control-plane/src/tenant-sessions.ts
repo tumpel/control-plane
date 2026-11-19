@@ -86,7 +86,7 @@ import {
   type Unplaceable,
 } from "./placement";
 import { signerOf } from "./presign";
-import { bootArchitectures, bootFor, bootImage, imagesFor, type ReleaseRead, readRelease } from "./releases";
+import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
@@ -639,13 +639,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${host.name} is ${host.architecture}, and prebuilds build on ${PREBUILD_ARCHITECTURE} alone; run the session on an ${PREBUILD_ARCHITECTURE} host to start from a prebuild`,
       );
     }
-    const image = imagesFor(release, session.harness, session.harness_version).find(
-      (each) => each.architecture === PREBUILD_ARCHITECTURE,
-    );
-    if (image === undefined) {
+    const base =
+      release.kind === "Published"
+        ? release.manifest.bases.find((each) => each.architecture === PREBUILD_ARCHITECTURE)
+        : undefined;
+    if (base === undefined) {
       return none(
         "NoAmd64Image",
-        `the current release carries no ${session.harness} ${session.harness_version} guest image for ${PREBUILD_ARCHITECTURE}, the image prebuilds build on; pin a harness version the release carries for ${PREBUILD_ARCHITECTURE} to start from a prebuild`,
+        `the current release carries no base image for ${PREBUILD_ARCHITECTURE}, the image prebuilds build on; ask the operator to publish a release with one to start from a prebuild`,
       );
     }
     const sql = this.ctx.storage.sql;
@@ -656,7 +657,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         WHERE prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
         ORDER BY prebuilds.created_at DESC, snapshots.snapshot_seq DESC LIMIT 1`,
         session.repository,
-        image.imageDigest,
+        base.imageDigest,
       )
       .toArray();
     if (layer === undefined) {
@@ -671,7 +672,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       }
       return none(
         "OtherGuestImage",
-        `every stored prebuild of ${session.repository} is built on another guest image than ${image.imageDigest}, the image of ${session.harness} ${session.harness_version}; start a prebuild of it again so later sessions start from its layer`,
+        `every stored prebuild of ${session.repository} is built on another base image than ${base.imageDigest}, the base of the current release; start a prebuild of it again so later sessions start from its layer`,
       );
     }
     sql.exec(

@@ -33,12 +33,12 @@ export const imageKey = (image: ReleaseImage): string => `${imagePrefix(image)}/
 
 export const manifestKey = (image: ReleaseImage): string => `${imagePrefix(image)}/${image.manifestDigest}`;
 
-export const rootfsKey = (image: ReleaseImage): string => `${imagePrefix(image)}/rootfs/${image.rootfsDigest}`;
-
 export const kernelKey = (image: ReleaseImage | ReleaseBaseImage): string =>
   `kernels/${arch(image.architecture)}/${image.kernelDigest}`;
 
 const basePrefix = (base: ReleaseBaseImage): string => `images/base/${arch(base.architecture)}`;
+
+export const rootfsKey = (base: ReleaseBaseImage): string => `${basePrefix(base)}/rootfs/${base.rootfsDigest}`;
 
 const layerPrefix = (layer: ReleaseHarnessLayer): string =>
   `layers/${layer.harness}/${layer.harnessVersion}/${arch(layer.architecture)}`;
