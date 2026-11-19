@@ -99,6 +99,7 @@ import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { htmlPage } from "./pages";
+import { tenantApi } from "./tenant-api.ts";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
 export type SignedInPerson = (request: Request, env: Env) => Promise<PersonCheck>;
@@ -843,9 +844,9 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
   const { action, installation, repository, workflow_run: run } = delivery.data;
   const tenantId = await tenantOfInstallation(env.DB, installation.id);
   if (tenantId === null) return noContent;
-  await env.TENANT.getByName(tenantId).workflowRunReported(
+  await tenantApi(env.TENANT, tenantId).call("workflowRunReported", {
     tenantId,
-    {
+    event: {
       action,
       runId: run.id,
       repository: repository.full_name,
@@ -854,8 +855,8 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
       htmlUrl: run.html_url,
       conclusion: run.conclusion,
     },
-    Date.now(),
-  );
+    now: Date.now(),
+  });
   return noContent;
 };
 

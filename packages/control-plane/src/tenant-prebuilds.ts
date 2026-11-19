@@ -339,7 +339,7 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
   });
 
 export class TenantPrebuilds extends TenantSessions {
-  listPrebuilds(tenantId: string, repository: string | null): Prebuild[] {
+  protected listPrebuilds(tenantId: string, repository: string | null): Prebuild[] {
     return this.ctx.storage.sql
       .exec<PrebuildRow>(
         `${PREBUILD_SELECT} WHERE ?1 IS NULL OR repository = ?1 ORDER BY prebuilds.created_at DESC, prebuilds.rowid DESC`,
@@ -349,7 +349,7 @@ export class TenantPrebuilds extends TenantSessions {
       .map((row) => toPrebuild(tenantId, row));
   }
 
-  listLatestPrebuilds(tenantId: string): Prebuild[] {
+  protected listLatestPrebuilds(tenantId: string): Prebuild[] {
     return this.ctx.storage.sql
       .exec<PrebuildRow>(
         `${PREBUILD_SELECT} WHERE prebuilds.rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER
@@ -360,14 +360,14 @@ export class TenantPrebuilds extends TenantSessions {
       .map((row) => toPrebuild(tenantId, row));
   }
 
-  getPrebuild(tenantId: string, prebuildId: string): Prebuild | null {
+  protected getPrebuild(tenantId: string, prebuildId: string): Prebuild | null {
     const [row] = this.ctx.storage.sql
       .exec<PrebuildRow>(`${PREBUILD_SELECT} WHERE prebuilds.prebuild_id = ?`, prebuildId)
       .toArray();
     return row === undefined ? null : toPrebuild(tenantId, row);
   }
 
-  heldPrebuild(tenantId: string, key: PrebuildKey): Prebuild | null {
+  protected heldPrebuild(tenantId: string, key: PrebuildKey): Prebuild | null {
     const [row] = this.ctx.storage.sql
       .exec<PrebuildRow>(
         `${PREBUILD_SELECT} WHERE repository = ? AND input_digest = ? AND guest_image_digest = ? AND state != 'Failed'
@@ -479,7 +479,7 @@ export class TenantPrebuilds extends TenantSessions {
     return failed;
   }
 
-  async recordPrebuildBuilding(tenantId: string, prebuildId: string, now: number): Promise<void> {
+  protected async recordPrebuildBuilding(tenantId: string, prebuildId: string, now: number): Promise<void> {
     if (this.recordedRun(prebuildId).kind === "NoRun") return;
     const moved = this.ctx.storage.sql.exec(
       "UPDATE prebuilds SET state = 'Building', updated_at = ? WHERE prebuild_id = ? AND state = 'Dispatched'",
@@ -554,7 +554,12 @@ export class TenantPrebuilds extends TenantSessions {
     return prebuildId;
   }
 
-  jobInputsTarget(tenantId: string, repository: string, headSha: string, runId: number): JobInputsTarget | null {
+  protected jobInputsTarget(
+    tenantId: string,
+    repository: string,
+    headSha: string,
+    runId: number,
+  ): JobInputsTarget | null {
     const prebuildId = this.prebuildOfRun(runId) ?? this.waitingPrebuild(repository, headSha);
     if (prebuildId === null) return null;
     const [row] = this.ctx.storage.sql
@@ -574,7 +579,7 @@ export class TenantPrebuilds extends TenantSessions {
     };
   }
 
-  async bindJobRun(tenantId: string, prebuildId: string, runId: number, now: number): Promise<JobRunBound> {
+  protected async bindJobRun(tenantId: string, prebuildId: string, runId: number, now: number): Promise<JobRunBound> {
     const prebuild = this.prebuildOf(tenantId, prebuildId);
     const other = this.bindRun(prebuildId, runId, runPage(prebuild.repository, runId), now);
     if (other !== null) return other;
@@ -582,7 +587,7 @@ export class TenantPrebuilds extends TenantSessions {
     return { kind: "Bound", prebuild: this.prebuildOf(tenantId, prebuildId) };
   }
 
-  async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
+  protected async workflowRunReported(tenantId: string, event: RunEvent, now: number): Promise<void> {
     const prebuildId = this.prebuildOfRun(event.runId) ?? this.pickUpRun(event, now);
     if (prebuildId === null) return;
     switch (event.action) {
@@ -611,7 +616,7 @@ export class TenantPrebuilds extends TenantSessions {
     }
   }
 
-  async prebuildDeadlineReached(tenantId: string, due: PrebuildDueDeadline): Promise<void> {
+  protected async prebuildDeadlineReached(tenantId: string, due: PrebuildDueDeadline): Promise<void> {
     const { prebuildId } = due.deadline;
     const prebuild = this.getPrebuild(tenantId, prebuildId);
     if (prebuild === null) return;
@@ -672,7 +677,7 @@ export class TenantPrebuilds extends TenantSessions {
     return { kind: "AppPermissionMissing", permissions: lacking, appSlug: stored.slug, appOwner: stored.ownerLogin };
   }
 
-  async startGitHubActionsPrebuild(
+  protected async startGitHubActionsPrebuild(
     tenantId: string,
     start: GitHubActionsStart,
     now: number,
@@ -734,7 +739,7 @@ export class TenantPrebuilds extends TenantSessions {
     return { kind: "Started", prebuild: await this.armDispatch(tenantId, start.prebuildId, now) };
   }
 
-  async startHostPrebuild(
+  protected async startHostPrebuild(
     tenantId: string,
     commit: Omit<PrebuildCommit, "logUrl">,
     provider: BuildProvider,
@@ -761,7 +766,7 @@ export class TenantPrebuilds extends TenantSessions {
     return { kind: "Started", started: this.prebuildOf(tenantId, commit.prebuildId) };
   }
 
-  uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {
+  protected uploadTarget(tenantId: string, prebuildId: string): UploadTarget | null {
     const [row] = this.ctx.storage.sql
       .exec<PrebuildRow>(`${PREBUILD_SELECT} WHERE prebuilds.prebuild_id = ?`, prebuildId)
       .toArray();
@@ -793,7 +798,7 @@ export class TenantPrebuilds extends TenantSessions {
     );
   }
 
-  async bindCircleCIUploadJob(
+  protected async bindCircleCIUploadJob(
     tenantId: string,
     prebuildId: string,
     upload: CircleCIUploadJob,
@@ -849,7 +854,12 @@ export class TenantPrebuilds extends TenantSessions {
     return { kind: "RevisionMoved", prebuild: this.prebuildOf(tenantId, prebuildId) };
   }
 
-  startPrebuildUpload(tenantId: string, prebuildId: string, upload: PrebuildLayerUpload, now: number): UploadRecorded {
+  protected startPrebuildUpload(
+    tenantId: string,
+    prebuildId: string,
+    upload: PrebuildLayerUpload,
+    now: number,
+  ): UploadRecorded {
     const recorded = this.ctx.storage.transactionSync((): PrebuildLayerUpload | "Recorded" | "NotUploading" => {
       const [building] = this.ctx.storage.sql
         .exec("SELECT 1 FROM prebuilds WHERE prebuild_id = ? AND state = 'Building'", prebuildId)
@@ -882,7 +892,7 @@ export class TenantPrebuilds extends TenantSessions {
     return this.uploadRecorded(tenantId, prebuildId, recorded === "Recorded");
   }
 
-  async completePrebuildUpload(
+  protected async completePrebuildUpload(
     tenantId: string,
     prebuildId: string,
     upload: PrebuildLayerUpload,
@@ -907,7 +917,7 @@ export class TenantPrebuilds extends TenantSessions {
     return recorded ? { kind: "Recorded", prebuild } : { kind: "NotUploading", prebuild };
   }
 
-  getPrebuildFailure(tenantId: string, prebuildId: string): PrebuildFailure | null {
+  protected getPrebuildFailure(tenantId: string, prebuildId: string): PrebuildFailure | null {
     const [row] = this.ctx.storage.sql
       .exec<FailureRow>(
         "SELECT prebuild_id, phase, detail, fix, created_at FROM prebuild_failures WHERE prebuild_id = ?",
@@ -1113,7 +1123,7 @@ export class TenantPrebuilds extends TenantSessions {
     );
   }
 
-  async dispatchCircleCIPrebuild(
+  protected async dispatchCircleCIPrebuild(
     tenantId: string,
     start: PrebuildStartRecord,
     project: CircleCIProject,
@@ -1180,7 +1190,7 @@ export class TenantPrebuilds extends TenantSessions {
     return { kind: "Dispatched", prebuild };
   }
 
-  async circleCIWorkflowCompleted(tenantId: string, event: WorkflowCompleted, now: number): Promise<void> {
+  protected async circleCIWorkflowCompleted(tenantId: string, event: WorkflowCompleted, now: number): Promise<void> {
     if (event.type !== "workflow-completed" || event.workflow.name !== CIRCLECI_WORKFLOW) return;
     const [row] = this.ctx.storage.sql
       .exec<{ prebuild_id: string }>(
@@ -1286,7 +1296,7 @@ export class TenantPrebuilds extends TenantSessions {
     return connection;
   }
 
-  async repositoryReadToken(
+  protected async repositoryReadToken(
     tenantId: string,
     personaId: string,
     repository: GitHubRepository,

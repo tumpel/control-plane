@@ -56,8 +56,6 @@ const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused
   problem: refused,
 });
 
-const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
-
 const prebuildNotFound = (prebuildId: string): Refused =>
   refuse(404, {
     code: "NotFound",
@@ -194,9 +192,9 @@ const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: 
   const tenant = env.TENANT.getByName(tenantId);
   const connection = await tenant.gitHubActionsConnection(tenantId);
   if (connection === null) return noBuildProvider("GitHubActions", repository);
-  const started = await tenant.startGitHubActionsPrebuild(
+  const { started } = await tenantApi(env.TENANT, tenantId).call("startGitHubActionsPrebuild", {
     tenantId,
-    {
+    start: {
       prebuildId: crypto.randomUUID(),
       personaId: request.personaId,
       target,
@@ -208,7 +206,7 @@ const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: 
       rebuild: request.rebuild,
     },
     now,
-  );
+  });
   switch (started.kind) {
     case "Started":
       return ok(started.prebuild);
@@ -258,9 +256,9 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
       fix: "Ask the operator to serve the releases bucket under a shorter presigned URL, then start the prebuild again",
     });
   }
-  const dispatched = await tenant.dispatchCircleCIPrebuild(
+  const { dispatched } = await tenantApi(env.TENANT, tenantId).call("dispatchCircleCIPrebuild", {
     tenantId,
-    {
+    start: {
       prebuildId,
       personaId: dispatch.personaId,
       key,
@@ -273,7 +271,7 @@ const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Prom
     project,
     parameters,
     now,
-  );
+  });
   if (dispatched.kind === "NotConnected") return noBuildProvider("CircleCI", key.repository);
   if (dispatched.kind === "Refused") return pipelineRefused(dispatched.detail);
   return ok(dispatched.prebuild);
@@ -363,11 +361,17 @@ export const startPrebuild = async (
   const target = githubRepository(start.repository);
   if (target === null) return notGitHub(start.repository);
   const repository = repositoryUrl(target);
-  const tenant = tenantOf(env, caller);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
   const harness = await personaImage(env, caller, start.personaId, now);
   if (!harness.ok) return harness;
   const entry = harness.value;
-  const token = await tenant.repositoryReadToken(caller.tenantId, start.personaId, target, now, { contents: "read" });
+  const { read: token } = await tenant.call("repositoryReadToken", {
+    tenantId: caller.tenantId,
+    personaId: start.personaId,
+    repository: target,
+    now,
+    permissions: { contents: "read" },
+  });
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
   const described = await readDefaultBranch(fetcher, env.GITHUB_API_ORIGIN, target, token.token);
@@ -380,14 +384,14 @@ export const startPrebuild = async (
     guestImageDigest: entry.image.imageDigest,
   };
   if (!start.rebuild) {
-    const held = await tenant.heldPrebuild(caller.tenantId, key);
+    const { prebuild: held } = await tenant.call("heldPrebuild", { tenantId: caller.tenantId, key });
     if (held !== null) return ok(held);
   }
   if (inputs.configSource === "Default") return devcontainerMissing(target);
   const prebuildId = crypto.randomUUID();
-  const started = await tenant.startHostPrebuild(
-    caller.tenantId,
-    {
+  const { started } = await tenant.call("startHostPrebuild", {
+    tenantId: caller.tenantId,
+    commit: {
       prebuildId,
       personaId: start.personaId,
       key,
@@ -396,8 +400,8 @@ export const startPrebuild = async (
       headSha: inputs.headSha,
       rootfsKey: rootfsKey(entry.image),
     },
-    start.provider,
-    {
+    provider: start.provider,
+    input: {
       principalId: caller.principalId,
       hosts: await listHosts(env.DB, caller.tenantId),
       harness: entry.harness,
@@ -412,7 +416,7 @@ export const startPrebuild = async (
     },
     apiOrigin,
     now,
-  );
+  });
   return placed(started);
 };
 
@@ -433,8 +437,12 @@ export const previewPrebuild = async (
   if (target === null) return notGitHub(request.repository);
   const harness = await personaImage(env, caller, request.personaId, now);
   if (!harness.ok) return harness;
-  const token = await tenantOf(env, caller).repositoryReadToken(caller.tenantId, request.personaId, target, now, {
-    contents: "read",
+  const { read: token } = await tenantApi(env.TENANT, caller.tenantId).call("repositoryReadToken", {
+    tenantId: caller.tenantId,
+    personaId: request.personaId,
+    repository: target,
+    now,
+    permissions: { contents: "read" },
   });
   if (token.kind === "Refused") return repositoryUnreadable(token.detail);
   const fetcher = (url: string, init: RequestInit) => fetch(url, init);
@@ -509,17 +517,23 @@ export const listPrebuilds = async (
   caller: Caller,
   repository: string | undefined,
 ): Promise<Outcome<Prebuild[]>> => {
-  if (repository === undefined) return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, null));
+  const list = async (url: string | null) =>
+    (await tenantApi(env.TENANT, caller.tenantId).call("listPrebuilds", { tenantId: caller.tenantId, repository: url }))
+      .prebuilds;
+  if (repository === undefined) return ok(await list(null));
   const target = githubRepository(repository);
   if (target === null) return notGitHub(repository);
-  return ok(await tenantOf(env, caller).listPrebuilds(caller.tenantId, repositoryUrl(target)));
+  return ok(await list(repositoryUrl(target)));
 };
 
 export const listLatestPrebuilds = async (env: Env, caller: Caller): Promise<Prebuild[]> =>
-  tenantOf(env, caller).listLatestPrebuilds(caller.tenantId);
+  (await tenantApi(env.TENANT, caller.tenantId).call("listLatestPrebuilds", { tenantId: caller.tenantId })).prebuilds;
 
 export const getPrebuild = async (env: Env, caller: Caller, prebuildId: string): Promise<Outcome<Prebuild>> => {
-  const prebuild = await tenantOf(env, caller).getPrebuild(caller.tenantId, prebuildId);
+  const { prebuild } = await tenantApi(env.TENANT, caller.tenantId).call("getPrebuild", {
+    tenantId: caller.tenantId,
+    prebuildId,
+  });
   return prebuild === null ? prebuildNotFound(prebuildId) : ok(prebuild);
 };
 
@@ -528,10 +542,10 @@ export const getPrebuildFailure = async (
   caller: Caller,
   prebuildId: string,
 ): Promise<Outcome<PrebuildFailure>> => {
-  const tenant = tenantOf(env, caller);
-  const failure = await tenant.getPrebuildFailure(caller.tenantId, prebuildId);
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
+  const { failure } = await tenant.call("getPrebuildFailure", { tenantId: caller.tenantId, prebuildId });
   if (failure !== null) return ok(failure);
-  const prebuild = await tenant.getPrebuild(caller.tenantId, prebuildId);
+  const { prebuild } = await tenant.call("getPrebuild", { tenantId: caller.tenantId, prebuildId });
   if (prebuild === null) return prebuildNotFound(prebuildId);
   return refuse(404, {
     code: "NotFound",

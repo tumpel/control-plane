@@ -316,6 +316,60 @@ export class Tenant extends TenantConnectors {
     prepareClaudeSetup: async ({ tenantId, stored, hostId, now }) => ({
       prepared: await this.prepareClaudeSetup(tenantId, stored, hostId, now),
     }),
+    listPrebuilds: ({ tenantId, repository }) => ({ prebuilds: this.listPrebuilds(tenantId, repository) }),
+    listLatestPrebuilds: ({ tenantId }) => ({ prebuilds: this.listLatestPrebuilds(tenantId) }),
+    getPrebuild: ({ tenantId, prebuildId }) => ({ prebuild: this.getPrebuild(tenantId, prebuildId) }),
+    heldPrebuild: ({ tenantId, key }) => ({ prebuild: this.heldPrebuild(tenantId, key) }),
+    recordPrebuildBuilding: async ({ tenantId, prebuildId, now }) => {
+      await this.recordPrebuildBuilding(tenantId, prebuildId, now);
+      return {};
+    },
+    jobInputsTarget: ({ tenantId, repository, headSha, runId }) => ({
+      target: this.jobInputsTarget(tenantId, repository, headSha, runId),
+    }),
+    bindJobRun: async ({ tenantId, prebuildId, runId, now }) => ({
+      bound: await this.bindJobRun(tenantId, prebuildId, runId, now),
+    }),
+    workflowRunReported: async ({ tenantId, event, now }) => {
+      await this.workflowRunReported(tenantId, event, now);
+      return {};
+    },
+    prebuildDeadlineReached: async ({ tenantId, due }) => {
+      await this.prebuildDeadlineReached(tenantId, due);
+      return {};
+    },
+    startGitHubActionsPrebuild: async ({ tenantId, start, now }) => ({
+      started: await this.startGitHubActionsPrebuild(tenantId, start, now),
+    }),
+    startHostPrebuild: async ({ tenantId, commit, provider, input, apiOrigin, now }) => ({
+      started: await this.startHostPrebuild(tenantId, commit, provider, input, apiOrigin, now),
+    }),
+    uploadTarget: ({ tenantId, prebuildId }) => ({ target: this.uploadTarget(tenantId, prebuildId) }),
+    bindCircleCIUploadJob: async ({ tenantId, prebuildId, upload, now }) => ({
+      bound: await this.bindCircleCIUploadJob(tenantId, prebuildId, upload, now),
+    }),
+    startPrebuildUpload: ({ tenantId, prebuildId, upload, now }) => ({
+      recorded: this.startPrebuildUpload(tenantId, prebuildId, upload, now),
+    }),
+    completePrebuildUpload: async ({ tenantId, prebuildId, upload, now }) => ({
+      recorded: await this.completePrebuildUpload(tenantId, prebuildId, upload, now),
+    }),
+    getPrebuildFailure: ({ tenantId, prebuildId }) => ({ failure: this.getPrebuildFailure(tenantId, prebuildId) }),
+    dispatchCircleCIPrebuild: async ({ tenantId, start, project, parameters, now }) => ({
+      dispatched: await this.dispatchCircleCIPrebuild(tenantId, start, project, parameters, now),
+    }),
+    circleCIWorkflowCompleted: async ({ tenantId, event, now }) => {
+      const { pipelineId, projectId, ...rest } = event;
+      await this.circleCIWorkflowCompleted(
+        tenantId,
+        { ...rest, pipeline: { id: pipelineId }, project: { id: projectId } },
+        now,
+      );
+      return {};
+    },
+    repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
+      read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
+    }),
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

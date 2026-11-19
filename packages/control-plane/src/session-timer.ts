@@ -104,7 +104,7 @@ export class SessionTimer extends DurableObject<Env> {
         await api.call("circleCIAuthorizationDeadlineReached", { tenantId, deadline: reached.deadline });
       else if (reached.name === "OpenRouterAuthorization")
         await api.call("openRouterAuthorizationDeadlineReached", { deadline: reached.deadline });
-      else if (isPrebuildDeadline(reached)) await tenant.prebuildDeadlineReached(timers.tenantId, reached);
+      else if (isPrebuildDeadline(reached)) await api.call("prebuildDeadlineReached", { tenantId, due: reached });
       else await tenant.deadlineReached(timers.tenantId, reached);
     }
   }
