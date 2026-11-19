@@ -13,6 +13,40 @@ const PI_VERSION = "1.5.2";
 
 const GOAL_TURN_CAP = 20;
 
+const ANTHROPIC_MODELS = [
+  "claude-fable-5-2",
+  "claude-fable-5-1",
+  "claude-fable-5",
+  "claude-mythos-5-2",
+  "claude-mythos-5-1",
+  "claude-mythos-5",
+  "claude-opus-5-5",
+  "claude-opus-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-5-5",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-5-5",
+  "claude-haiku-4-5",
+];
+const CLAUDE_CODE_MODELS = ["opus", "sonnet", "haiku", ...ANTHROPIC_MODELS];
+const ANTHROPIC_PROVIDER_MODELS = ANTHROPIC_MODELS.map((model) => `anthropic/${model}`);
+const CODEX_CHATGPT_MODELS = [
+  "gpt-6.1-sol",
+  "gpt-6.1-terra",
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+];
+
 export type GoalFold = { fold: (prompt: string, goal: string) => string; limit: number };
 
 export const GOAL_FOLDS: ReadonlyMap<string, GoalFold> = new Map([
@@ -52,6 +86,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        models: CLAUDE_CODE_MODELS,
       },
       {
         provider: "Anthropic",
@@ -60,6 +95,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "NotBilled",
+        models: CLAUDE_CODE_MODELS,
       },
       {
         provider: "OpenRouter",
@@ -88,6 +124,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: ["-c", `cli_auth_credentials_store="file"`, "-c", `forced_login_method="chatgpt"`],
         costBasis: "NotReported",
+        models: CODEX_CHATGPT_MODELS,
       },
       {
         provider: "OpenAi",
@@ -158,6 +195,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        models: ANTHROPIC_PROVIDER_MODELS,
       },
       { provider: "OpenAi", kind: "ApiKey", variable: "OPENAI_API_KEY", fixed: [], arguments: [], costBasis: "Billed" },
     ],
@@ -197,6 +235,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "Billed",
+        models: ANTHROPIC_PROVIDER_MODELS,
       },
       {
         provider: "Anthropic",
@@ -205,6 +244,7 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         fixed: [],
         arguments: [],
         costBasis: "NotBilled",
+        models: ANTHROPIC_PROVIDER_MODELS,
       },
       {
         provider: "OpenRouter",
