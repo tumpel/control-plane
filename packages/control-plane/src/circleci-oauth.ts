@@ -10,7 +10,7 @@ export type CircleCIAuthorization = z.infer<typeof CircleCIAuthorizationSchema>;
 export type CircleCIAuthorizationFailureReason = z.infer<typeof CircleCIAuthorizationFailureReasonSchema>;
 export type CircleCIOrganization = z.infer<typeof CircleCIOrganizationSchema>;
 
-export type CircleCICredentialRow = { kind: "Authorized"; expiresAt: number } | { kind: "Pasted" };
+export type CircleCICredentialRow = { kind: "Authorized"; expiresAtMs: number } | { kind: "Pasted" };
 
 export const CIRCLECI_REDIRECT_URI = "http://127.0.0.1:47151/circleci/callback";
 export const CIRCLECI_CLIENT_NAME = "Tumpel";
@@ -90,7 +90,7 @@ export type CredentialStanding =
 
 export const credentialStanding = (credential: CircleCICredentialRow, now: number): CredentialStanding => {
   if (credential.kind === "Pasted") return { state: "Connected" };
-  const { expiresAt } = credential;
+  const { expiresAtMs: expiresAt } = credential;
   const at = new Date(expiresAt).toISOString();
   if (expiresAt <= now) return { state: "Expired", expiredAt: at };
   if (expiresAt - now <= RENEWAL_WINDOW_MS) return { state: "Expiring", expiresAt: at };

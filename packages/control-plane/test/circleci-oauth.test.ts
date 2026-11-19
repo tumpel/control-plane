@@ -43,14 +43,14 @@ test("the parser refuses what is not this redirect address with one state and a 
 test("an authorized token reads Expiring inside the renewal window and Expired from its expiry", () => {
   const now = Date.parse("2026-11-15T12:00:00Z");
   assert.deepEqual(credentialStanding({ kind: "Pasted" }, now), { state: "Connected" });
-  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAt: now + RENEWAL_WINDOW_MS + 1 }, now), {
+  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAtMs: now + RENEWAL_WINDOW_MS + 1 }, now), {
     state: "Connected",
   });
-  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAt: now + RENEWAL_WINDOW_MS }, now), {
+  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAtMs: now + RENEWAL_WINDOW_MS }, now), {
     state: "Expiring",
     expiresAt: new Date(now + RENEWAL_WINDOW_MS).toISOString(),
   });
-  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAt: now }, now), {
+  assert.deepEqual(credentialStanding({ kind: "Authorized", expiresAtMs: now }, now), {
     state: "Expired",
     expiredAt: new Date(now).toISOString(),
   });

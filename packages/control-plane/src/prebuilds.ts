@@ -189,8 +189,8 @@ interface GitHubActionsRequest {
 
 const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: number): Promise<Outcome<Prebuild>> => {
   const { tenantId, target, repository, image } = request;
-  const tenant = env.TENANT.getByName(tenantId);
-  const connection = await tenant.gitHubActionsConnection(tenantId);
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const connection = (await tenant.call("gitHubActionsConnection", { tenantId })).connection;
   if (connection === null) return noBuildProvider("GitHubActions", repository);
   const { started } = await tenantApi(env.TENANT, tenantId).call("startGitHubActionsPrebuild", {
     tenantId,
@@ -236,8 +236,8 @@ const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: 
 
 const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Promise<Outcome<Prebuild>> => {
   const { prebuildId, tenantId, key, image } = dispatch;
-  const tenant = env.TENANT.getByName(tenantId);
-  const project = await tenant.circleCIProjectOf(tenantId, key.repository);
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const project = (await tenant.call("circleCIProjectOf", { tenantId, repository: key.repository })).project;
   if (project === null) return circleCIProjectMissing(key.repository);
   const rootfsUrl = await presignRootfs(env, rootfsKey(image), now);
   const parameters = circleCIParameters({

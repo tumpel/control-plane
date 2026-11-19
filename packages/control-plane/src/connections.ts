@@ -54,7 +54,7 @@ const subjectPattern = (tenantId: string): string => {
   return pattern.subject;
 };
 
-const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
+const tenantOf = (env: Env, caller: Caller) => tenantApi(env.TENANT, caller.tenantId);
 
 const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 
@@ -82,12 +82,12 @@ export const listConnections = async (env: Env, caller: Caller): Promise<Connect
   const installations = app === null ? [] : await installationsOf(env.DB, caller.tenantId);
   const logins = installations.map((installation) => installation.accountLogin).join(", ");
   const tenant = tenantOf(env, caller);
-  const accounts = await tenant.connectedAccounts();
+  const accounts = (await tenant.call("connectedAccounts", {})).accounts;
   const openRouter = (await tenantApi(env.TENANT, caller.tenantId).call("openRouterSecretSets", {})).names.join(", ");
   return [
     summary("GitHub", logins === "" ? null : logins, app !== null),
     summary("GitHubActions", accounts.GitHubActions, true),
-    circleCISummary(await tenant.circleCIConnection(), Date.now()),
+    circleCISummary((await tenant.call("circleCIConnection", {})).connection, Date.now()),
     summary("Namespace", accounts.Namespace, stageIssuer(env.ISSUER_HOSTNAME) !== null),
     summary("OpenRouter", openRouter === "" ? null : openRouter, true),
   ];
@@ -127,7 +127,7 @@ const circleCIConnectionOf = (env: Env, tenantId: string, row: CircleCIRow): unk
   issuer: circleCIIssuer(env.CIRCLECI_OIDC_ORIGIN, row.organizationId),
   credential:
     row.credential.kind === "Authorized"
-      ? { kind: "Authorized", expiresAt: new Date(row.credential.expiresAt).toISOString() }
+      ? { kind: "Authorized", expiresAt: new Date(row.credential.expiresAtMs).toISOString() }
       : { kind: "Pasted" },
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
@@ -155,7 +155,7 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Prom
   const tenant = tenantOf(env, caller);
   const { tenantId } = caller;
   if (provider === "GitHubActions") {
-    const connection = await tenant.gitHubActionsConnection(tenantId);
+    const connection = (await tenant.call("gitHubActionsConnection", { tenantId })).connection;
     return GitHubActionsConnectionLinkSchema.parse({
       tenantId,
       link: connection === null ? { state: "NotConnected" } : { state: "Connected", connection },
@@ -167,10 +167,15 @@ const readLink = async (env: Env, caller: Caller, provider: BuildProvider): Prom
       }),
     });
   }
-  if (provider === "CircleCI") return circleCILink(env, tenantId, await tenant.circleCIConnection());
+  if (provider === "CircleCI")
+    return circleCILink(env, tenantId, (await tenant.call("circleCIConnection", {})).connection);
   return NamespaceConnectionLinkSchema.parse({
     tenantId,
-    link: namespaceLink(tenantId, stageIssuer(env.ISSUER_HOSTNAME), await tenant.namespaceConnection()),
+    link: namespaceLink(
+      tenantId,
+      stageIssuer(env.ISSUER_HOSTNAME),
+      (await tenant.call("namespaceConnection", {})).connection,
+    ),
   });
 };
 
@@ -180,7 +185,7 @@ const connect = async (request: Request, env: Env, caller: Caller, provider: Bui
   if (provider === "GitHubActions") {
     const body = await parseBody(request, GitHubActionsConnectionStartSchema, "gitHubActionsConnections.start");
     if (!body.ok) return body.response;
-    await tenant.connectGitHubActions(caller.tenantId, body.value, now);
+    await tenant.call("connectGitHubActions", { tenantId: caller.tenantId, start: body.value, now });
     return json(await readLink(env, caller, provider));
   }
   if (provider === "CircleCI") {
@@ -195,7 +200,7 @@ const connect = async (request: Request, env: Env, caller: Caller, provider: Bui
         fix: "Create a personal API token at https://app.circleci.com/settings/user/tokens as a member of the organization, then connect again with tumpel circleci start --token-stdin; CircleCI's API v2 refuses project tokens",
       });
     }
-    await tenant.connectCircleCI(body.value, now);
+    await tenant.call("connectCircleCI", { start: body.value, now });
     return json(await readLink(env, caller, provider));
   }
   const body = await parseBody(request, NamespaceConnectionStartSchema, "namespaceConnections.start");
@@ -203,7 +208,7 @@ const connect = async (request: Request, env: Env, caller: Caller, provider: Bui
   if (stageIssuer(env.ISSUER_HOSTNAME) === null) {
     return problem(409, { code: "IssuerMissing", title: "No issuer", ...issuerMissing() });
   }
-  await tenant.connectNamespace(body.value, now);
+  await tenant.call("connectNamespace", { start: body.value, now });
   return json(await readLink(env, caller, provider));
 };
 
@@ -236,16 +241,16 @@ export const handleConnections = async (
   if (route.action === "START") return connect(request, env, caller, route.provider);
   if (route.action === "DELETE") {
     const tenant = tenantOf(env, caller);
-    const token = route.provider === "CircleCI" ? await tenant.circleCIToken() : null;
+    const token = route.provider === "CircleCI" ? (await tenant.call("circleCIToken", {})).token : null;
     if (token !== null) {
       const refused = await deleteCircleCIWebhooks(
         env,
         token,
-        (await tenant.circleCIWebhooks()).map((webhook) => webhook.webhookId),
+        (await tenant.call("circleCIWebhooks", {})).webhooks.map((webhook) => webhook.webhookId),
       );
       if (refused !== null) return refused;
     }
-    await tenant.deleteBuildConnection(route.provider);
+    (await tenant.call("deleteBuildConnection", { provider: route.provider })).deleted;
     return noContent();
   }
   return json(await readLink(env, caller, route.provider));

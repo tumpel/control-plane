@@ -5,6 +5,7 @@ import { json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { ownerRequired } from "./members";
+import { tenantApi } from "./tenant-api.ts";
 import type { CircleCIProjectAdd } from "./tenant-prebuilds";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -12,7 +13,7 @@ type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 const PROJECTS_PATH = "/v1/circleci-projects";
 const PROJECT_PATH = /^\/v1\/circleci-projects\/([^/]+)$/;
 
-const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
+const tenantOf = (env: Env, caller: Caller) => tenantApi(env.TENANT, caller.tenantId);
 
 const notConnected = (repository: string): Response =>
   problem(409, {
@@ -78,8 +79,8 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
   }
   const repository = repositoryUrl(target);
   const tenant = tenantOf(env, caller);
-  const connection = await tenant.circleCIConnection();
-  const token = await tenant.circleCIToken();
+  const connection = (await tenant.call("circleCIConnection", {})).connection;
+  const token = (await tenant.call("circleCIToken", {})).token;
   if (connection === null || token === null) return notConnected(repository);
   const fetcher: Fetch = (url, init) => fetch(url, init);
   const project = await readProject(fetcher, env.CIRCLECI_API_ORIGIN, token, add.projectSlug);
@@ -97,7 +98,9 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
       `project ${add.projectSlug} belongs to CircleCI organization ${project.value.organization_id}, and the connection names ${connection.organizationId}`,
     );
   }
-  const bound = await tenant.circleCIProjectBoundTo(caller.tenantId, project.value.id);
+  const bound = (
+    await tenant.call("circleCIProjectBoundTo", { tenantId: caller.tenantId, projectId: project.value.id })
+  ).project;
   if (bound !== null) return projectAlreadyBound(add.projectSlug, bound.repository, bound.circleCIProjectId);
   const definition = await readPipelineDefinition(
     fetcher,
@@ -115,7 +118,7 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
       `pipeline definition ${add.pipelineDefinitionId} checks out ${checkout}, and the binding names ${repository}`,
     );
   }
-  const held = await tenant.circleCIProjectOf(caller.tenantId, repository);
+  const held = (await tenant.call("circleCIProjectOf", { tenantId: caller.tenantId, repository })).project;
   if (held !== null) return alreadyBound(repository, held.projectSlug, held.circleCIProjectId);
   const secret = signingSecret();
   const hook = await createWebhook(fetcher, env.CIRCLECI_API_ORIGIN, token, {
@@ -125,9 +128,9 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
   });
   if (!hook.ok)
     return circleCIRefused(hook, `registering the workflow-completed webhook on project ${add.projectSlug}`);
-  const added = await tenant.addCircleCIProject(
-    caller.tenantId,
-    {
+  const { project: added } = await tenant.call("addCircleCIProject", {
+    tenantId: caller.tenantId,
+    binding: {
       repository,
       projectSlug: add.projectSlug,
       projectId: project.value.id,
@@ -135,8 +138,8 @@ const addProject = async (env: Env, caller: Caller, add: CircleCIProjectAdd, api
       webhookId: hook.value.id,
       signingSecret: secret,
     },
-    Date.now(),
-  );
+    now: Date.now(),
+  });
   return json(added);
 };
 
@@ -160,9 +163,11 @@ const deleteProject = async (env: Env, caller: Caller, raw: string): Promise<Res
   const tenant = tenantOf(env, caller);
   const path = CircleCIProjectPathSchema.safeParse({ circleCIProjectId: raw });
   const webhook = path.success
-    ? (await tenant.circleCIWebhooks()).find((each) => each.circleCIProjectId === path.data.circleCIProjectId)
+    ? (await tenant.call("circleCIWebhooks", {})).webhooks.find(
+        (each) => each.circleCIProjectId === path.data.circleCIProjectId,
+      )
     : undefined;
-  const token = await tenant.circleCIToken();
+  const token = (await tenant.call("circleCIToken", {})).token;
   if (webhook === undefined || token === null) {
     return problem(404, {
       code: "NotFound",
@@ -173,7 +178,7 @@ const deleteProject = async (env: Env, caller: Caller, raw: string): Promise<Res
   }
   const refused = await deleteCircleCIWebhooks(env, token, [webhook.webhookId]);
   if (refused !== null) return refused;
-  await tenant.deleteCircleCIProject(webhook.circleCIProjectId);
+  await tenant.call("deleteCircleCIProject", { circleCIProjectId: webhook.circleCIProjectId });
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 };
 
@@ -189,7 +194,7 @@ export const handleCircleCIProjects = async (
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (collection && request.method === "GET")
-    return json(await tenantOf(env, caller).listCircleCIProjects(caller.tenantId));
+    return json((await tenantOf(env, caller).call("listCircleCIProjects", { tenantId: caller.tenantId })).projects);
   const refused = ownerRequired(caller, collection ? "circleCIProjects.add" : "circleCIProjects.delete");
   if (refused) return refused;
   if (collection) {
