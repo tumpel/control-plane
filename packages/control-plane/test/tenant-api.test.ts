@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TenantApiProtocol } from "@tumpel/schemas";
-import { serveTenantRequest, type TenantHandlers, tenantApi } from "../src/tenant-api.ts";
-import { TenantSkew } from "../src/tenant-version.ts";
+import { serveTenantRequest, type TenantHandlers, TenantSkew, tenantApi, tenantSkewed } from "../src/tenant-api.ts";
 
 const persona = {
   personaId: "p1",
@@ -80,4 +79,10 @@ test("the client turns a refusal from a stale instance into a retryable skew", a
     "t1",
   );
   await assert.rejects(stale.call("getPersona", { tenantId: "t1", personaId: "p1" }), TenantSkew);
+  const answered = await stale
+    .call("getPersona", { tenantId: "t1", personaId: "p1" })
+    .then(() => assert.fail("a stale instance served the call"), tenantSkewed);
+  assert.equal(answered.status, 503);
+  assert.equal(answered.headers.get("retry-after"), "30");
+  assert.equal((await answered.json()).code, "DeployInProgress");
 });

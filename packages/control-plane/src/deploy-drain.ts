@@ -4,6 +4,7 @@ import { sameSecret } from "./crypto";
 import { issues, json, type Problem, problem } from "./http";
 import { bearerOf } from "./identity";
 import type { Env } from "./index";
+import { tenantApi } from "./tenant-api.ts";
 
 export type ReleaseRollout = z.infer<typeof ReleaseRolloutSchema>;
 export type RunningTurns = { hostId: string; runningTurns: number };
@@ -70,8 +71,8 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
     await Promise.all(
       results.map(async ({ tenant_id }) =>
         (
-          await env.TENANT.getByName(tenant_id).runningTurnsByHost()
-        ).map((each) => ({
+          await tenantApi(env.TENANT, tenant_id).call("runningTurnsByHost", {})
+        ).running.map((each) => ({
           ...each,
           tenantId: tenant_id,
         })),

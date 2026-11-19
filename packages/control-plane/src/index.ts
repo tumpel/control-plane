@@ -198,9 +198,8 @@ import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import type { PersonaWrite, Tenant } from "./tenant";
-import { tenantApi } from "./tenant-api.ts";
+import { tenantApi, tenantSkewed } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
-import { checkedTenants, tenantSkewed } from "./tenant-version.ts";
 import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 export { HostChannel } from "./host-channel";
@@ -216,7 +215,7 @@ export interface Env extends SignerEnv {
   RELEASES_ACCESS_KEY_ID?: string;
   RELEASES_SECRET_ACCESS_KEY?: string;
   DB: D1Database;
-  TENANT: Pick<DurableObjectNamespace<Tenant>, "getByName">;
+  TENANT: DurableObjectNamespace<Tenant>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
@@ -881,7 +880,9 @@ const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<R
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await env.TENANT.getByName(caller.tenantId).listHostUsage(caller.tenantId));
+  return json(
+    (await tenantApi(env.TENANT, caller.tenantId).call("listHostUsage", { tenantId: caller.tenantId })).usage,
+  );
 };
 
 const RELEASE_DOWNLOAD_PATH = /^\/v1\/releases\/(supervisor|cli)\/([^/]+)$/;
@@ -1601,7 +1602,7 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: { ...cors, "cache-control": "no-store" } });
     }
-    const response = await dispatch(request, url, { ...env, TENANT: checkedTenants(env.TENANT) }).catch(tenantSkewed);
+    const response = await dispatch(request, url, env).catch(tenantSkewed);
     return withHeaders(response, cors);
   },
   async queue(batch, env): Promise<void> {

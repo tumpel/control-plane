@@ -94,19 +94,31 @@ export class SessionTimer extends DurableObject<Env> {
       .filter(({ deadline }) => deadline.at <= now);
     for (const { name } of due) delete timers.deadlines[name];
     await this.save(timers);
-    const tenant = this.env.TENANT.getByName(timers.tenantId);
     const api = tenantApi(this.env.TENANT, timers.tenantId);
     const { tenantId } = timers;
-    for (const reached of due) {
+    const reach = async (reached: DueDeadline): Promise<unknown> => {
       if (reached.name === "ClaudeSetup")
-        await api.call("claudeSetupDeadlineReached", { tenantId, deadline: reached.deadline });
-      else if (reached.name === "CircleCIAuthorization")
-        await api.call("circleCIAuthorizationDeadlineReached", { tenantId, deadline: reached.deadline });
-      else if (reached.name === "OpenRouterAuthorization")
-        await api.call("openRouterAuthorizationDeadlineReached", { deadline: reached.deadline });
-      else if (isPrebuildDeadline(reached)) await api.call("prebuildDeadlineReached", { tenantId, due: reached });
-      else await tenant.deadlineReached(timers.tenantId, reached);
+        return api.call("claudeSetupDeadlineReached", { tenantId, deadline: reached.deadline });
+      if (reached.name === "CircleCIAuthorization")
+        return api.call("circleCIAuthorizationDeadlineReached", { tenantId, deadline: reached.deadline });
+      if (reached.name === "OpenRouterAuthorization")
+        return api.call("openRouterAuthorizationDeadlineReached", { deadline: reached.deadline });
+      if (isPrebuildDeadline(reached)) return api.call("prebuildDeadlineReached", { tenantId, due: reached });
+      return api.call("deadlineReached", { tenantId, due: reached });
+    };
+    for (const [at, reached] of due.entries()) {
+      await reach(reached).catch(async (error: unknown) => {
+        await this.restore(due.slice(at));
+        throw error;
+      });
     }
+  }
+
+  private async restore(unreached: DueDeadline[]): Promise<void> {
+    const timers = await this.ctx.storage.get<Timers>(TIMERS_KEY);
+    if (timers === undefined) throw new Error("the session timers vanished while their deadlines were being reached");
+    for (const { name, deadline } of unreached) timers.deadlines[name] ??= deadline as never;
+    await this.save(timers);
   }
 
   private async save(timers: Timers): Promise<void> {
