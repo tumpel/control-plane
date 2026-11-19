@@ -20,9 +20,9 @@
     "wrangler": "^4.150.0"
   },
   "dependencies": {
-    "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v0.8.4/tumpel-api-0.8.4.tgz",
+    "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v0.8.5/tumpel-api-0.8.5.tgz",
     "@tumpel/pages": "https://github.com/tumpel/dashboard/releases/download/v0.4.0/pages-0.4.0.tgz",
-    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.8.4/tumpel-schemas-0.8.4.tgz",
+    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.8.5/tumpel-schemas-0.8.5.tgz",
     "zod": "^4.6.7"
   }
 }

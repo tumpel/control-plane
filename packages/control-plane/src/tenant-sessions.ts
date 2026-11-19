@@ -2395,6 +2395,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const connectors = await Promise.all(
       uses.map(async (use) => ({
         connectorId: use.connector_id,
+        name: use.name,
         url: use.url,
         tokenUrl: `${session.endpoint}/v1/turns/${encodeURIComponent(turnId)}/connectors/${encodeURIComponent(use.connector_id)}/token`,
         tokenCredential: await turnToken(turnKey, tenantId, turnId, use.connector_id),
