@@ -25,6 +25,7 @@ import {
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
+import { TENANT_RPC_VERSION } from "./tenant-version.ts";
 
 export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
   boxMemoryMib: number;
@@ -166,6 +167,10 @@ export class Tenant extends TenantConnectors {
       await this.holdDataKey();
       await this.sealPlaintext();
     });
+  }
+
+  rpcVersion(): number {
+    return TENANT_RPC_VERSION;
   }
 
   supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {
