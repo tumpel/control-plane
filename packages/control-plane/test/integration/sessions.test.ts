@@ -1612,7 +1612,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(ProblemSchema.parse(await late.json()).code, "ClaudeSetupNotWaiting");
   });
 
-  test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and its persona stays", async () => {
+  test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and frees its persona for delete", async () => {
     const { github, host, refused, tool, readAll, sessionStart, createPersona, deletePersona } = await tenant();
     await createPersona("Archivable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
@@ -1679,11 +1679,16 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(inUse.status, 409);
     assert.match(
       ProblemSchema.parse(await inUse.json()).detail,
-      new RegExp(`persona ${start.personaId} is the persona of session ${sessionId}, which is not Failed$`),
+      new RegExp(
+        `persona ${start.personaId} is still used by session ${sessionId}, which is neither Failed nor Archived$`,
+      ),
     );
 
     const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
     assert.equal(archived.state, "Archived");
+    assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
+    assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).personaId, start.personaId);
+    assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
     assert.equal(await store.text(request.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
     assert.deepEqual(await readAll(sessionId, turnId, 10), [
@@ -1695,7 +1700,6 @@ suite("sessions", { concurrency: 8 }, () => {
     });
     assert.equal(archivedSend.code, "SessionArchived");
     assert.match(archivedSend.detail, new RegExp(`session ${sessionId} is archived`));
-    assert.equal((await deletePersona(start.personaId ?? "")).status, 409);
   });
 
   test("an archive discards an idle session's box without a snapshot and deletes its snapshots, and the list keeps sessions with no turn since a time", async () => {
