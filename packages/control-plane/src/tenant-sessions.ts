@@ -78,6 +78,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
+  type HeldBox,
   type ImageAvailability,
   placeSession,
   type ReportedHostUsage,
@@ -1213,6 +1214,45 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
   }
 
+  heldBoxes(): HeldBox[] {
+    return this.ctx.storage.sql
+      .exec<{
+        session_id: string;
+        host_id: string;
+        box_memory_mib: number;
+        box_disk_mib: number;
+        evictable: number;
+        last_turn_ended_at: number;
+      }>(
+        `SELECT s.session_id, s.host_id, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib,
+          (COALESCE(r.box_retention, 'Auto') = 'Auto' AND s.state = 'Idle'
+            AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.session_id AND t.state IN ('Offered', 'Running'))
+            AND NOT EXISTS (SELECT 1 FROM after_turn_releases a WHERE a.session_id = s.session_id)
+            AND NOT EXISTS (SELECT 1 FROM box_evictions e WHERE e.session_id = s.session_id)
+            AND NOT EXISTS (
+              SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
+                SELECT MAX(seq) FROM (
+                  SELECT snapshot_seq AS seq FROM snapshots WHERE session_id = s.session_id
+                  UNION ALL SELECT snapshot_seq FROM snapshot_requests WHERE session_id = s.session_id
+                )
+              ), -1)
+            )) AS evictable,
+          COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), s.updated_at) AS last_turn_ended_at
+        FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
+          LEFT JOIN session_box_retention r ON r.session_id = s.session_id
+        WHERE s.state IN ('Idle', 'Stopping')`,
+      )
+      .toArray()
+      .map((row) => ({
+        sessionId: row.session_id,
+        hostId: row.host_id,
+        boxMemoryMib: row.box_memory_mib,
+        boxDiskMib: row.box_disk_mib,
+        evictable: row.evictable === 1,
+        lastTurnEndedAt: row.last_turn_ended_at,
+      }));
+  }
+
   listHostUsage(tenantId: string): ReportedHostUsage[] {
     const sql = this.ctx.storage.sql;
     const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
@@ -1381,6 +1421,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       image.image,
       { boxMemoryMib, boxDiskMib },
       uses.length > 0,
+      this.heldBoxes(),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
@@ -1473,6 +1514,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       image.image,
       boxSizeOf(session),
       uses.length > 0,
+      this.heldBoxes(),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
@@ -1517,6 +1559,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       image.image,
       boxSizeOf(session),
       sessionConnectorUses(this.ctx.storage.sql, session.session_id).length > 0,
+      this.heldBoxes().filter((each) => each.sessionId !== session.session_id),
     );
     if (placement.kind === "Refused") return stay();
     if (placement.host.hostId === session.host_id) {
