@@ -318,6 +318,7 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
     connectorIds: [],
     boxMemoryMib: 4096,
     boxDiskMib: 32768,
+    boxRetention: "Auto",
     files: [],
   };
   const applied = await stub.applyConfig(

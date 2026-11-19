@@ -26,7 +26,7 @@ import { TenantConnectors } from "./tenant-connectors.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 
-export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds"> & {
+export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];
@@ -106,6 +106,7 @@ type PersonaRow = {
   secret_set_id: string;
   box_memory_mib: number;
   box_disk_mib: number;
+  box_retention: string;
   created_at: number;
   updated_at: number;
 };
@@ -119,7 +120,7 @@ type PersonaFileRow = {
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, created_at, updated_at FROM personas";
 
 export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
   sql
@@ -139,6 +140,7 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[], connectorIds: strin
     secretSetId: row.secret_set_id,
     boxMemoryMib: row.box_memory_mib,
     boxDiskMib: row.box_disk_mib,
+    boxRetention: row.box_retention,
     files: files.map((file) => ({
       path: file.path,
       digest: file.digest,
@@ -310,7 +312,7 @@ export class Tenant extends TenantConnectors {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           persona.name,
@@ -318,6 +320,7 @@ export class Tenant extends TenantConnectors {
           persona.secretSetId,
           persona.boxMemoryMib,
           persona.boxDiskMib,
+          persona.boxRetention,
           now,
           now,
         );
@@ -340,11 +343,12 @@ export class Tenant extends TenantConnectors {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
           persona.secretSetId,
           persona.boxMemoryMib,
           persona.boxDiskMib,
+          persona.boxRetention,
           now,
           tenantId,
           personaId,
@@ -660,7 +664,7 @@ export class Tenant extends TenantConnectors {
       case "CreatePersona": {
         const personaId = crypto.randomUUID();
         sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           write.persona.name,
@@ -668,6 +672,7 @@ export class Tenant extends TenantConnectors {
           write.persona.secretSetId,
           write.persona.boxMemoryMib,
           write.persona.boxDiskMib,
+          write.persona.boxRetention,
           now,
           now,
         );
@@ -677,11 +682,12 @@ export class Tenant extends TenantConnectors {
       }
       case "UpdatePersona": {
         sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           write.persona.name,
           write.persona.secretSetId,
           write.persona.boxMemoryMib,
           write.persona.boxDiskMib,
+          write.persona.boxRetention,
           now,
           tenantId,
           write.personaId,

@@ -6,6 +6,7 @@ import {
   dispatchVariables,
   type SecretMember,
 } from "@tumpel/api/credentials";
+import type { BoxRetentionSchema } from "@tumpel/schemas";
 import {
   CredentialHandoverSchema,
   HarnessSchema,
@@ -88,6 +89,7 @@ import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, imagesFor, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
+import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import {
   clearSupersededFailure,
@@ -109,6 +111,7 @@ export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
 export type SessionStart = z.infer<typeof SessionStartSchema>;
 export type StartedSession = z.infer<typeof StartedSessionSchema>;
 export type StartedSessionFromIssue = z.infer<typeof StartedSessionFromIssueSchema>;
+type BoxRetention = z.infer<typeof BoxRetentionSchema>;
 export type SessionIssue = z.infer<typeof SessionIssueSchema>;
 export type IssueOfSession = Omit<SessionIssue, "sessionId">;
 type TurnFailureReason = TurnFailure["reason"];
@@ -200,6 +203,7 @@ type SessionRow = {
   endpoint: string;
   box_memory_mib: number;
   box_disk_mib: number;
+  box_retention: BoxRetention;
   created_at: number;
   updated_at: number;
 };
@@ -348,12 +352,12 @@ type SnapshotRequestRow = {
 };
 
 const SESSION_SELECT =
-  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, created_at, updated_at FROM sessions";
+  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, COALESCE((SELECT box_retention FROM session_box_retention WHERE session_box_retention.session_id = sessions.session_id), 'Auto') AS box_retention, created_at, updated_at FROM sessions";
 const TURN_SELECT = `SELECT * FROM (
   SELECT turn_id, turns.session_id, host_id, box_id, prompt, (SELECT goal FROM turn_goals WHERE turn_goals.turn_id = turns.turn_id) AS goal, (SELECT warning FROM turn_warnings WHERE turn_warnings.turn_id = turns.turn_id) AS warning, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
   FROM turns LEFT JOIN turn_failures USING (turn_id)
 )`;
-const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib, s.created_at, s.updated_at,
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib, COALESCE(r.box_retention, 'Auto') AS box_retention, s.created_at, s.updated_at,
   t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.goal AS last_turn_goal, t.warning AS last_turn_warning, t.state AS last_turn_state,
   t.line_count AS last_turn_line_count, t.created_at AS last_turn_created_at, t.updated_at AS last_turn_at,
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
@@ -361,7 +365,8 @@ const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.b
   FROM sessions AS s
   JOIN (${TURN_SELECT}) AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
   LEFT JOIN session_issues AS i ON i.session_id = s.session_id
-  LEFT JOIN session_box_memory AS m ON m.session_id = s.session_id`;
+  LEFT JOIN session_box_memory AS m ON m.session_id = s.session_id
+  LEFT JOIN session_box_retention AS r ON r.session_id = s.session_id`;
 const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, NULL AS reason, NULL AS detail, NULL AS failed_at, created_at, updated_at FROM snapshots
   UNION ALL
@@ -434,6 +439,7 @@ const toSession = (
     harness: row.harness,
     harnessVersion: row.harness_version,
     model: row.model,
+    boxRetention: row.box_retention,
     state: row.state,
     lastTurnId: row.last_turn_id,
     lastTurnState: row.last_turn_state,
@@ -730,7 +736,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private latestTurn(sessionId: string, state: string | null): TurnRow | null {
     const [row] = this.ctx.storage.sql
       .exec<TurnRow>(
-        `${TURN_SELECT} WHERE session_id = ?1 AND (?2 IS NULL OR state = ?2) ORDER BY created_at DESC, turn_id DESC LIMIT 1`,
+        `${TURN_SELECT} WHERE session_id = ?1 AND (?2 IS NULL OR state = ?2)
+        AND turn_id NOT IN (SELECT turn_id FROM turn_release_waits WHERE session_id = ?1)
+        ORDER BY created_at DESC, turn_id DESC LIMIT 1`,
         sessionId,
         state,
       )
@@ -747,18 +755,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  protected personaRow(personaId: string): { secretSetId: string; boxMemoryMib: number; boxDiskMib: number } | null {
+  protected personaRow(
+    personaId: string,
+  ): { secretSetId: string; boxMemoryMib: number; boxDiskMib: number; boxRetention: BoxRetention } | null {
     const [row] = this.ctx.storage.sql
-      .exec<{ secret_set_id: string; box_memory_mib: number; box_disk_mib: number }>(
-        "SELECT secret_set_id, box_memory_mib, box_disk_mib FROM personas WHERE persona_id = ?",
+      .exec<{ secret_set_id: string; box_memory_mib: number; box_disk_mib: number; box_retention: BoxRetention }>(
+        "SELECT secret_set_id, box_memory_mib, box_disk_mib, box_retention FROM personas WHERE persona_id = ?",
         personaId,
       )
       .toArray();
     if (row === undefined) return null;
-    return { secretSetId: row.secret_set_id, boxMemoryMib: row.box_memory_mib, boxDiskMib: row.box_disk_mib };
+    return {
+      secretSetId: row.secret_set_id,
+      boxMemoryMib: row.box_memory_mib,
+      boxDiskMib: row.box_disk_mib,
+      boxRetention: row.box_retention,
+    };
   }
 
-  private boxSize(personaId: string): { boxMemoryMib: number; boxDiskMib: number } {
+  private boxSize(personaId: string): { boxMemoryMib: number; boxDiskMib: number; boxRetention: BoxRetention } {
     const persona = this.personaRow(personaId);
     if (persona === null) throw new Error(`persona ${personaId} is gone, so its box size is unknown`);
     return persona;
@@ -1013,6 +1028,149 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .finally(() => this.offering.delete(turn.turn_id));
   }
 
+  private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
+    if (victims.length === 0) return this.offer(tenantId, session, turn);
+    await this.armOffer(tenantId, session, turn);
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+    for (const victim of victims) {
+      const evicted = this.sessionRow(victim.sessionId);
+      if (evicted === null) throw new Error(`session ${victim.sessionId} was picked for eviction and then not found`);
+      this.ctx.storage.transactionSync(() => {
+        sql.exec(
+          "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
+          evicted.session_id,
+          evicted.box_id,
+          now,
+        );
+        sql.exec(
+          "INSERT INTO turn_eviction_waits (turn_id, session_id) VALUES (?, ?)",
+          turn.turn_id,
+          evicted.session_id,
+        );
+      });
+      if (evicted.state !== "Idle") continue;
+      const latest = this.latestTurn(evicted.session_id, null);
+      if (latest === null)
+        throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
+      this.setSessionState(evicted.session_id, "Stopping", now);
+      await this.timers(tenantId, evicted.session_id, { Snapshot: null });
+      await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
+    }
+  }
+
+  private releasing(sessionId: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM after_turn_releases WHERE session_id = ?1 UNION ALL SELECT 1 FROM box_evictions WHERE session_id = ?1",
+          sessionId,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  private async queueTurn(tenantId: string, session: SessionRow, send: TurnSend, now: number): Promise<Sent> {
+    if (this.sessionRow(session.session_id)?.state !== "Stopping" || !this.releasing(session.session_id)) {
+      return { kind: "Stopping" };
+    }
+    const turn = this.ctx.storage.transactionSync(() => {
+      const queued = this.insertTurn(session.session_id, session.host_id, crypto.randomUUID(), send, now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO turn_release_waits (turn_id, session_id) VALUES (?, ?)",
+        queued.turn_id,
+        session.session_id,
+      );
+      return queued;
+    });
+    await this.timers(tenantId, session.session_id, {
+      Total: { turnId: turn.turn_id, at: turn.created_at + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+    });
+    return { kind: "Sent", turn: toTurn(tenantId, turn) };
+  }
+
+  private async runQueued(tenantId: string, turnId: string): Promise<void> {
+    const turn = this.turnRow(turnId);
+    const session = turn === null ? null : this.sessionRow(turn.session_id);
+    if (turn === null || session === null || turn.state !== "Offered") return;
+    const now = Date.now();
+    const sql = this.ctx.storage.sql;
+    const move = (hostId: string, boxId: string) =>
+      this.ctx.storage.transactionSync(() => {
+        sql.exec(
+          "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
+          hostId,
+          boxId,
+          now,
+          session.session_id,
+        );
+        sql.exec(
+          "UPDATE turns SET host_id = ?, box_id = ?, updated_at = ? WHERE turn_id = ?",
+          hostId,
+          boxId,
+          now,
+          turnId,
+        );
+        return { ...session, state: "Running", host_id: hostId, box_id: boxId };
+      });
+    if (session.state === "Idle") return this.offer(tenantId, move(session.host_id, session.box_id), turn);
+    if (session.state !== "Stopped") return;
+    const hosts = await listHosts(this.env.DB, tenantId);
+    const image = await this.imageAvailability(session.harness, session.harness_version, now);
+    if (image.kind === "ReleaseUnreadable") {
+      return this.failTurn(tenantId, turnId, "ImageNotReleased", image.detail, iso(now), "Stopped");
+    }
+    const connectors = sessionConnectorUses(sql, session.session_id).length > 0;
+    const place = (candidates: HostRecord[]) =>
+      placeSession(
+        candidates,
+        this.listHostUsage(tenantId),
+        image.image,
+        boxSizeOf(session),
+        connectors,
+        this.heldBoxes(),
+      );
+    const stays = place(hosts.filter((host) => host.hostId === session.host_id && host.state === "Online"));
+    const placement = stays.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
+    if (placement.kind === "Refused") {
+      const detail = `the session's box was released while the turn waited, and no host has room for a new one: ${placement.hosts.map(why).join(", ")}`;
+      return this.failTurn(tenantId, turnId, "PoolExhausted", detail, iso(now), "Stopped");
+    }
+    await this.offerAfter(tenantId, move(placement.host.hostId, crypto.randomUUID()), turn, placement.evict);
+  }
+
+  private async evictionSettled(tenantId: string, sessionId: string): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    if (this.sessionRow(sessionId)?.state === "Stopping") return;
+    const queued = this.ctx.storage.transactionSync(() => {
+      const turnIds = sql
+        .exec<{ turn_id: string }>("SELECT turn_id FROM turn_release_waits WHERE session_id = ?", sessionId)
+        .toArray()
+        .map((row) => row.turn_id);
+      sql.exec("DELETE FROM turn_release_waits WHERE session_id = ?", sessionId);
+      sql.exec("DELETE FROM after_turn_releases WHERE session_id = ?", sessionId);
+      return turnIds;
+    });
+    for (const turnId of queued) await this.runQueued(tenantId, turnId);
+    const waiting = this.ctx.storage.transactionSync(() => {
+      const turnIds = sql
+        .exec<{ turn_id: string }>("SELECT turn_id FROM turn_eviction_waits WHERE session_id = ?", sessionId)
+        .toArray()
+        .map((row) => row.turn_id);
+      sql.exec("DELETE FROM turn_eviction_waits WHERE session_id = ?", sessionId);
+      sql.exec("DELETE FROM box_evictions WHERE session_id = ?", sessionId);
+      return turnIds.filter(
+        (turnId) => sql.exec("SELECT 1 FROM turn_eviction_waits WHERE turn_id = ?", turnId).toArray().length === 0,
+      );
+    });
+    for (const turnId of waiting) {
+      const turn = this.turnRow(turnId);
+      const session = turn === null ? null : this.sessionRow(turn.session_id);
+      if (turn === null || session === null || turn.state !== "Offered") continue;
+      await this.offer(tenantId, session, turn);
+    }
+  }
+
   offerSent(turnId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
   }
@@ -1177,6 +1335,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   async failLostTurns(tenantId: string, hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+    const gone = this.ctx.storage.sql
+      .exec<{ session_id: string }>(
+        "UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state = 'Idle' AND session_id NOT IN (SELECT value FROM json_each(?)) RETURNING session_id",
+        now,
+        hostId,
+        JSON.stringify(heldSessionIds),
+      )
+      .toArray();
+    for (const { session_id } of gone) {
+      await this.timers(tenantId, session_id, { Snapshot: null });
+      await this.evictionSettled(tenantId, session_id);
+    }
     const lost = this.ctx.storage.sql
       .exec<{ turn_id: string }>(
         "SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running' AND session_id NOT IN (SELECT value FROM json_each(?))",
@@ -1229,6 +1399,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.session_id AND t.state IN ('Offered', 'Running'))
             AND NOT EXISTS (SELECT 1 FROM after_turn_releases a WHERE a.session_id = s.session_id)
             AND NOT EXISTS (SELECT 1 FROM box_evictions e WHERE e.session_id = s.session_id)
+            AND NOT EXISTS (
+              SELECT 1 FROM stop_failures x WHERE x.session_id = s.session_id
+              AND x.created_at >= COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), 0)
+            )
             AND NOT EXISTS (
               SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
                 SELECT MAX(seq) FROM (
@@ -1414,7 +1588,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const uses = personaConnectorUses(this.ctx.storage.sql, start.personaId);
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
-    const { boxMemoryMib, boxDiskMib } = this.boxSize(start.personaId);
+    const persona = this.boxSize(start.personaId);
+    const { boxMemoryMib, boxDiskMib } = persona;
     const placement = placeSession(
       input.hosts,
       this.listHostUsage(tenantId),
@@ -1439,6 +1614,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       endpoint: input.endpoint,
       box_memory_mib: boxMemoryMib,
       box_disk_mib: boxDiskMib,
+      box_retention: start.boxRetention ?? persona.boxRetention,
       created_at: now,
       updated_at: now,
     };
@@ -1468,10 +1644,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
         session.box_memory_mib,
       );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO session_box_retention (session_id, box_retention) VALUES (?, ?)",
+        session.session_id,
+        session.box_retention,
+      );
       record(session.session_id);
       return this.insertTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
     });
-    await this.offer(tenantId, session, turn);
+    await this.offerAfter(tenantId, session, turn, placement.evict);
     return {
       kind: "Started",
       started: { session: this.presentSession(tenantId, session.session_id), turn: toTurn(tenantId, turn) },
@@ -1482,7 +1663,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
-    if (session.state === "Stopping") return { kind: "Stopping" };
+    if (session.state === "Stopping" && !this.releasing(sessionId)) return { kind: "Stopping" };
     if (session.state === "Failed") return { kind: "Failed" };
     const running = this.inFlightTurn(sessionId);
     if (running !== null) return { kind: "InFlight", turnId: running };
@@ -1492,12 +1673,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
+    if (session.state === "Stopping") return this.queueTurn(tenantId, session, send, now);
     const speaks = uses.length === 0 || this.channelProtocol(session.host_id) >= CONNECTORS_VERSION;
     const online = speaks && hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
     const backBy = hosts.some((host) => host.hostId === session.host_id && host.state === "Offline")
       ? restartDeadline(this.ctx.storage.sql, session.host_id, settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
       : null;
-    if (online || (backBy !== null && backBy > now)) {
+    if ((online && session.state !== "Stopped") || (!online && backBy !== null && backBy > now)) {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
       const turn = this.runTurn(session, session.host_id, boxId, send, now);
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
@@ -1508,20 +1690,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return image;
     const from = await this.hostName(tenantId, session.host_id);
-    const placement = placeSession(
-      hosts,
-      this.listHostUsage(tenantId),
-      image.image,
-      boxSizeOf(session),
-      uses.length > 0,
-      this.heldBoxes(),
-    );
+    const place = (candidates: HostRecord[]) =>
+      placeSession(
+        candidates,
+        this.listHostUsage(tenantId),
+        image.image,
+        boxSizeOf(session),
+        uses.length > 0,
+        this.heldBoxes(),
+      );
+    const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
+    const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, send, now);
-    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
+    await this.offerAfter(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn, placement.evict);
     await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
@@ -1563,6 +1748,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
     if (placement.kind === "Refused") return stay();
     if (placement.host.hostId === session.host_id) {
+      if (placement.evict.length > 0) return this.evictFirst(tenantId, session, turn, placement.evict);
       return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
     }
     const from = await this.hostName(tenantId, session.host_id);
@@ -1587,8 +1773,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     });
     await this.timers(tenantId, session.session_id, { SnapshotAnswer: null });
-    const offer = await this.armOffer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
+    const moved = { ...session, host_id: hostId, box_id: boxId };
+    if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
+    const offer = await this.armOffer(tenantId, moved, turn);
     return { type: "TurnHandoff", hostId, offer };
+  }
+
+  private async evictFirst(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<null> {
+    this.offerSent(turn.turn_id);
+    await this.offerAfter(tenantId, session, turn, victims);
+    return null;
   }
 
   private deferOffer(session: SessionRow, turn: TurnRow, now: number): null {
@@ -1789,10 +1983,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, session.session_id, { TeardownAnswer: null });
     if (message.type === "BoxGone") {
       this.setSessionState(session.session_id, "Stopped", Date.now());
+      await this.evictionSettled(tenantId, session.session_id);
       return null;
     }
     this.recordStopFailure(session.session_id, message.reason, message.detail, message.failedAt);
-    this.returnToIdle(session.session_id);
+    await this.returnToIdle(tenantId, session.session_id);
     await this.rearmSnapshot(tenantId, session.session_id);
     return null;
   }
@@ -1821,8 +2016,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
-  private returnToIdle(sessionId: string): void {
+  private async returnToIdle(tenantId: string, sessionId: string): Promise<void> {
     this.setSessionState(sessionId, "Idle", Date.now());
+    await this.evictionSettled(tenantId, sessionId);
   }
 
   private async rearmSnapshot(tenantId: string, sessionId: string): Promise<void> {
@@ -2794,7 +2990,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
       releaseConnectorCredentials(this.ctx.storage.sql);
     });
     this.turnEnded();
-    const delay = this.hostPrebuild(turn.session_id) === null ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
+    const session = this.sessionRow(turn.session_id);
+    const release = session?.state === "Idle" && session.box_retention === "Off";
+    if (release) {
+      this.ctx.storage.transactionSync(() => {
+        this.setSessionState(turn.session_id, "Stopping", now);
+        this.ctx.storage.sql.exec(
+          "INSERT INTO after_turn_releases (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
+          turn.session_id,
+          session.box_id,
+          now,
+        );
+      });
+    }
+    const delay =
+      this.hostPrebuild(turn.session_id) === null && !release ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
     await this.timers(tenantId, turn.session_id, {
       FirstLine: null,
       Total: null,
@@ -2817,6 +3027,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const host = await this.hostName(tenantId, session.host_id);
     if (name === "SnapshotAnswer") {
       this.snapshotUnanswered(session, turn, host, failedAt);
+      await this.evictionSettled(tenantId, sessionId);
       return this.prebuildUnstored(
         tenantId,
         session,
@@ -2831,7 +3042,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${host} did not answer the teardown of the session's box within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs, then stop the session again`,
         failedAt,
       );
-      return this.returnToIdle(sessionId);
+      return this.returnToIdle(tenantId, sessionId);
     }
     if (name === "HostOffline" && turn.state === "Running" && (await this.hostOffline(session.host_id))) {
       return this.failTurn(
@@ -2951,7 +3162,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     reason: TurnFailureReason,
     detail: string,
     failedAt: string,
-    sessionState: "Idle" | "Failed" | "Stopping" = "Idle",
+    sessionState: "Idle" | "Failed" | "Stopping" | "Stopped" = "Idle",
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
@@ -3046,7 +3257,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (requests.length > 0 && session.state === "Stopping") this.returnToIdle(session.session_id);
+    if (requests.length > 0 && session.state === "Stopping")
+      this.setSessionState(session.session_id, "Idle", Date.now());
   }
 
   private dropPlacements(snapshotId: string): void {
@@ -3135,14 +3347,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (session.state === "Stopping" && message.reason === "BoxNotFound") {
         await this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
       }
-      if (session.state === "Stopping" && message.reason !== "BoxNotFound") this.returnToIdle(session.session_id);
+      if (session.state === "Stopping" && message.reason !== "BoxNotFound")
+        await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
     if ((await this.env.STORE.head(request.storage_key)) === null) {
       const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
       this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
       await this.prebuildUnstored(tenantId, session, detail);
-      if (session.state === "Stopping") this.returnToIdle(session.session_id);
+      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
     const now = Date.now();
