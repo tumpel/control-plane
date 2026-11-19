@@ -69,6 +69,7 @@ import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, planConfig } from "./config-apply.ts";
 import { handleConnections } from "./connections.ts";
+import { handleConnectors } from "./connectors.ts";
 import { randomToken, sameSecret } from "./crypto";
 import { handleReleaseRollout } from "./deploy-drain";
 import {
@@ -107,6 +108,7 @@ import {
   issues,
   json,
   oauthError,
+  type Parsed,
   parseBody,
   problem,
   readJson,
@@ -446,6 +448,22 @@ const unknownSecretSet = (secretSetId: string): Response =>
 
 type PersonaBody = z.infer<typeof PersonaCreateSchema>;
 
+const personaBody = async <T>(request: Request, schema: z.ZodType<T>, operation: string): Promise<Parsed<T>> => {
+  const raw = await readJson(request.clone());
+  if (typeof raw === "object" && raw !== null && !("connectorIds" in raw)) {
+    return {
+      ok: false,
+      response: problem(400, {
+        code: "InvalidRequest",
+        title: "Connectors missing",
+        detail: `${operation} needs connectorIds, the whole list of the persona's connectors, and the request sent none`,
+        fix: "Send connectorIds: [] for a persona without connectors, or the persona's current list to keep it; update the tumpel CLI if it sent this request",
+      }),
+    };
+  }
+  return parseBody(request, schema, operation);
+};
+
 type PersonaWritten = { ok: true; value: PersonaWrite } | { ok: false; response: Response };
 
 const personaWrite = async (
@@ -456,6 +474,30 @@ const personaWrite = async (
   newSecretSet: boolean,
 ): Promise<PersonaWritten> => {
   const tenant = env.TENANT.getByName(caller.tenantId);
+  const repeated = body.connectorIds.filter((connectorId, at) => body.connectorIds.indexOf(connectorId) !== at);
+  if (repeated.length > 0) {
+    return {
+      ok: false,
+      response: problem(422, {
+        code: "InvalidRequest",
+        title: "Repeated connector",
+        detail: `${operation} lists the connector ${[...new Set(repeated)].join(", ")} more than once`,
+        fix: "List each connector of the persona once",
+      }),
+    };
+  }
+  const unknown = await tenant.unknownConnectors(body.connectorIds);
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      response: problem(422, {
+        code: "NotFound",
+        title: "No such connector",
+        detail: `your tenant has no connector ${unknown.join(", ")}`,
+        fix: "List your connectors with tumpel connector list and pass their connectorIds",
+      }),
+    };
+  }
   const read = await tenant.getSecretSet(caller.tenantId, body.secretSetId);
   if (read.kind === "NotFound") return { ok: false, response: unknownSecretSet(body.secretSetId) };
   if (read.kind === "Unreadable") return { ok: false, response: unreadable(operation, read) };
@@ -479,6 +521,7 @@ const personaWrite = async (
       name: body.name,
       harness: body.harness,
       secretSetId: body.secretSetId,
+      connectorIds: body.connectorIds,
       boxMemoryMib: body.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
       boxDiskMib: body.boxDiskMib ?? BoxDiskLimit.DefaultMib,
       files: stored.value,
@@ -489,7 +532,7 @@ const personaWrite = async (
 const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const body = await parseBody(request, PersonaCreateSchema, "personas.create");
+  const body = await personaBody(request, PersonaCreateSchema, "personas.create");
   if (!body.ok) return body.response;
   const write = await personaWrite(env, caller, body.value, "personas.create", true);
   if (!write.ok) return write.response;
@@ -523,7 +566,7 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
     });
   }
   if (request.method === "PUT") {
-    const body = await parseBody(request, PersonaUpdateSchema, "personas.update");
+    const body = await personaBody(request, PersonaUpdateSchema, "personas.update");
     if (!body.ok) return body.response;
     const current = await tenant.getPersona(caller.tenantId, personaId);
     if (current === null) return personaNotFound(personaId);
@@ -1471,6 +1514,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const claudeSetups = await handleClaudeSetups(request, url, env, deviceCaller);
   if (claudeSetups) return claudeSetups;
   const connections =
+    (await handleConnectors(request, url, env, deviceCaller)) ??
     (await handleConnections(request, url, env, deviceCaller)) ??
     (await handleCircleCIAuthorizations(request, url, env, deviceCaller)) ??
     (await handleOpenRouterAuthorizations(request, url, env, deviceCaller)) ??

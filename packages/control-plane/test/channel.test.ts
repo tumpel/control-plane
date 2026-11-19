@@ -85,6 +85,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
         credentialHandoverId: `grant-${minted}`,
         expiresAt: "2026-11-14T12:00:00+01:00",
         variables: [{ name: "API_KEY", value: `secret-${minted}` }],
+        connectors: [],
       },
       lastLineSeq: 0,
       snapshots: [],

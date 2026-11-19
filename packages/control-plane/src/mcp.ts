@@ -12,6 +12,8 @@ import {
   ConfigSecretValueSchema,
   ConfigSecretVariableSchema,
   ConfigSubscriptionTokenSchema,
+  ConnectorPathSchema,
+  ConnectorUpdateSchema,
   DevicePathSchema,
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
@@ -30,6 +32,7 @@ import {
   MetricTurnQuerySchema,
   MetricWindowSchema,
   NamespaceConnectionStartSchema,
+  OAuthConnectorCreateSchema,
   OAuthGrantPathSchema,
   OpenRouterAuthorizationPathSchema,
   OpenRouterAuthorizationStartSchema,
@@ -55,6 +58,7 @@ import {
   SessionStartSchema,
   SessionStopQuerySchema,
   SnapshotPathSchema,
+  StaticConnectorCreateSchema,
   SubscriptionTokenMemberSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
@@ -103,7 +107,7 @@ interface ToolDefinition {
   description: string;
   input: z.ZodObject;
   request: { method: Method; path: string; query?: string[] } | null;
-  answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand";
+  answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand" | "connectorTokenCommand";
 }
 
 const DONE: Record<string, string> = {
@@ -120,7 +124,11 @@ const DONE: Record<string, string> = {
   tumpel_circleci_delete: "CircleCI disconnected",
   tumpel_circleci_project_delete: "CircleCI project binding deleted",
   tumpel_secret_set_delete: "Secret set deleted",
+  tumpel_connector_delete: "Connector deleted",
 };
+
+const connectorTokenCommand = (args: z.infer<typeof ConnectorPathSchema>): string =>
+  `Connector tokens never pass through MCP and this tool writes nothing. Pipe the token into this command on your machine: tumpel connector set-token ${args.connectorId} --stdin`;
 
 const REPOSITORY_FORMAT =
   "The GitHub repository, as https://github.com/owner/name; owner/name and github.com/owner/name are accepted too.";
@@ -330,7 +338,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/personas",
     PersonaCreateSchema,
-    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to 65536 bytes) or Stored (digest and sizeBytes of an uploaded file), optionally boxMemoryMib, the memory of each box its sessions boot, from 4096 (the default) up to 65536, and optionally boxDiskMib, the disk of each box, from 32768 (the default) up to 262144.",
+    "Create a persona: the harness its sessions run, the secretSetId of the secret set they run on, connectorIds, the connectors its sessions get ([] for none), the harness's own config files at paths the harness catalog accepts, each Inline (base64 content, up to 65536 bytes) or Stored (digest and sizeBytes of an uploaded file), optionally boxMemoryMib, the memory of each box its sessions boot, from 4096 (the default) up to 65536, and optionally boxDiskMib, the disk of each box, from 32768 (the default) up to 262144.",
   ),
   rest(
     "tumpel_persona_upload_file",
@@ -346,7 +354,7 @@ export const TOOLS: ToolDefinition[] = [
     "PUT",
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
-    "Replace a persona's name, secret set, box memory, box disk and whole file set; its harness is fixed at create, a file left out is deleted, and a boxMemoryMib or boxDiskMib left out goes back to its default of 4096 or 32768 MiB. Name an unchanged file as Stored by its digest and sizeBytes.",
+    "Replace a persona's name, secret set, connectorIds (the whole list; [] for none), box memory, box disk and whole file set; sessions already started keep their connectors; its harness is fixed at create, a file left out is deleted, and a boxMemoryMib or boxDiskMib left out goes back to its default of 4096 or 32768 MiB. Name an unchanged file as Stored by its digest and sizeBytes.",
   ),
   rest(
     "tumpel_persona_delete",
@@ -586,6 +594,70 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/openrouter-connection/authorize",
     OpenRouterAuthorizationStartSchema,
     "Start minting an OpenRouter API key into a secret set through OpenRouter's PKCE flow, so the person copies no key. Takes {secretSetId}; the browser lands on the secret set's page afterwards. Returns the authorization, AwaitingCallback with authorizeUrl and callbackDueAt, 10 minutes out. Give the person authorizeUrl; OpenRouter sends their browser back to the control plane, which spends the code and stores the key as OPENROUTER_API_KEY for OpenRouter. The code and the key never pass through MCP. Read the outcome with tumpel_openrouter_get_authorization.",
+  ),
+  rest(
+    "tumpel_connector_list",
+    "GET",
+    "/v1/connectors",
+    NO_ARGUMENTS,
+    "List the tenant's connectors, the remote MCP servers its personas can give sessions: each Static (one token) or OAuth, with its url and status, NotConnected, Connected, Disconnected or AuthorizationFailed with the reason and the fix. Credentials are never returned.",
+  ),
+  rest(
+    "tumpel_connector_get",
+    "GET",
+    "/v1/connectors/{connectorId}",
+    ConnectorPathSchema,
+    "Read one connector with its status; after tumpel_connector_authorize, read it to learn whether the person finished consent.",
+  ),
+  rest(
+    "tumpel_connector_create_static",
+    "POST",
+    "/v1/static-connectors",
+    StaticConnectorCreateSchema,
+    "Create a connector for a remote MCP server that takes one bearer token, such as a GitHub personal access token: {name, url}, url the server's public https address. Owner only. It reads NotConnected until its token is set with tumpel_connector_set_token.",
+  ),
+  rest(
+    "tumpel_connector_create_oauth",
+    "POST",
+    "/v1/oauth-connectors",
+    OAuthConnectorCreateSchema,
+    "Create a connector for a remote MCP server that signs in with OAuth: {name, url}, url the server's public https address. Owner only. It reads NotConnected until tumpel_connector_authorize and the person's consent connect it.",
+  ),
+  {
+    name: "tumpel_connector_set_token",
+    description:
+      "Draft the write of a static connector's token. Tokens never pass through MCP and this tool writes nothing. Returns the tumpel connector set-token command that reads the token on stdin and stores it.",
+    input: ConnectorPathSchema,
+    request: { method: "GET", path: "/v1/connectors/{connectorId}" },
+    answer: "connectorTokenCommand",
+  },
+  rest(
+    "tumpel_connector_authorize",
+    "POST",
+    "/v1/oauth-connectors/{connectorId}/authorize",
+    ConnectorPathSchema,
+    "Start connecting an OAuth connector. Owner only. Returns authorizeUrl and callbackDueAt, 10 minutes out: give the person authorizeUrl to open in a browser and approve; the provider sends the browser back to the control plane, which stores the grant. Read the outcome with tumpel_connector_get. Refused ConnectorDiscoveryFailed or ConnectorRegistrationUnsupported, each with the fix.",
+  ),
+  rest(
+    "tumpel_connector_update",
+    "PUT",
+    "/v1/connectors/{connectorId}",
+    ConnectorPathSchema.extend(ConnectorUpdateSchema.shape),
+    "Rename a connector. Owner only. Its url and credential kind are fixed; a new address needs a new connector.",
+  ),
+  rest(
+    "tumpel_connector_clear_credential",
+    "DELETE",
+    "/v1/connectors/{connectorId}/credential",
+    ConnectorPathSchema,
+    "Disconnect a connector. Owner only. New turns that need it are refused; running turns keep it until they end, and stopping them cuts it off sooner. The control plane deletes its credential once no running turn uses it; revoke the grant on the provider's site too.",
+  ),
+  rest(
+    "tumpel_connector_delete",
+    "DELETE",
+    "/v1/connectors/{connectorId}",
+    ConnectorPathSchema,
+    "Delete a connector and its credential. Owner only. Refused ConnectorInUse while a persona lists it or a running turn uses it.",
   ),
   rest(
     "tumpel_openrouter_get_authorization",
@@ -882,6 +954,9 @@ const runTool = async (
       const text = answer.status === 204 ? "" : await answer.text();
       return { ok: true, text: text || (DONE[tool.name] ?? "Done") };
     }
+  }
+  if (tool.answer === "connectorTokenCommand") {
+    return { ok: true, text: connectorTokenCommand(ConnectorPathSchema.parse(args)) };
   }
   if (tool.answer === "memberCommand") return { ok: true, text: memberCommand(MEMBER_WITHOUT_VALUE.parse(args)) };
   if (tool.answer === "circleCIStartCommand") {

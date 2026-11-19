@@ -25,7 +25,7 @@ import {
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { TURN_CANCEL_VERSION } from "./channel/control.ts";
+import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import type {
   BootImage,
   HostMessage,
@@ -36,6 +36,15 @@ import type {
   StoredControlMessage,
 } from "./channel/protocol.ts";
 import { successResultOf } from "./compact.ts";
+import { TURN_TOKEN_PURPOSE, turnToken } from "./connector-oauth.ts";
+import {
+  copyPersonaConnectors,
+  DISCONNECTED_FIX,
+  disconnectedDetail,
+  personaConnectorUses,
+  releaseConnectorCredentials,
+  sessionConnectorUses,
+} from "./connector-rows.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
@@ -135,6 +144,7 @@ export type Started<T> =
   | { kind: "Started"; started: T }
   | { kind: "Draining" }
   | { kind: "Unplaced"; hosts: Unplaceable[] }
+  | { kind: "ConnectorDisconnected"; names: string[] }
   | ReleaseUnreadable;
 
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
@@ -144,6 +154,7 @@ export type Sent =
   | { kind: "Draining" }
   | { kind: "Stranded"; missingTurnIds: string[] }
   | { kind: "Unplaced"; hosts: Unplaceable[] }
+  | { kind: "ConnectorDisconnected"; names: string[] }
   | ReleaseUnreadable
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
@@ -1315,11 +1326,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
+    const uses = personaConnectorUses(this.ctx.storage.sql, start.personaId);
+    const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
+    if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     const { boxMemoryMib, boxDiskMib } = this.boxSize(start.personaId);
-    const placement = placeSession(input.hosts, this.listHostUsage(tenantId), image.image, {
-      boxMemoryMib,
-      boxDiskMib,
-    });
+    const placement = placeSession(
+      input.hosts,
+      this.listHostUsage(tenantId),
+      image.image,
+      { boxMemoryMib, boxDiskMib },
+      uses.length > 0,
+    );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
@@ -1360,6 +1377,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.created_at,
         session.updated_at,
       );
+      copyPersonaConnectors(this.ctx.storage.sql, session.session_id, session.persona_id);
       record(session.session_id);
       return this.insertTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
     });
@@ -1380,8 +1398,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (running !== null) return { kind: "InFlight", turnId: running };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
+    const uses = sessionConnectorUses(this.ctx.storage.sql, sessionId);
+    const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
+    if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    const online = hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
+    const speaks = uses.length === 0 || this.channelProtocol(session.host_id) >= CONNECTORS_VERSION;
+    const online = speaks && hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
     const backBy = hosts.some((host) => host.hostId === session.host_id && host.state === "Offline")
       ? restartDeadline(this.ctx.storage.sql, session.host_id, settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
       : null;
@@ -1396,7 +1418,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return image;
     const from = await this.hostName(tenantId, session.host_id);
-    const placement = placeSession(hosts, this.listHostUsage(tenantId), image.image, boxSizeOf(session));
+    const placement = placeSession(
+      hosts,
+      this.listHostUsage(tenantId),
+      image.image,
+      boxSizeOf(session),
+      uses.length > 0,
+    );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
@@ -1434,7 +1462,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const usages = this.listHostUsage(tenantId).map((usage) =>
       usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
     );
-    const placement = placeSession(hosts, usages, image.image, boxSizeOf(session));
+    const placement = placeSession(
+      hosts,
+      usages,
+      image.image,
+      boxSizeOf(session),
+      sessionConnectorUses(this.ctx.storage.sql, session.session_id).length > 0,
+    );
     if (placement.kind === "Refused") return stay();
     if (placement.host.hostId === session.host_id) {
       return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
@@ -2016,6 +2050,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, "CredentialRefused", detail, iso(now));
       return { kind: "Withdrawn" };
     }
+    const uses = sessionConnectorUses(this.ctx.storage.sql, session.session_id);
+    const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
+    if (unusable.length > 0) {
+      await this.failTurn(
+        tenantId,
+        turnId,
+        "ConnectorDisconnected",
+        `${disconnectedDetail(unusable)}; ${DISCONNECTED_FIX}`,
+        iso(now),
+      );
+      return { kind: "Withdrawn" };
+    }
+    const turnKey = await keyStoreOf(this.env).signingKey(TURN_TOKEN_PURPOSE);
+    const connectors = await Promise.all(
+      uses.map(async (use) => ({
+        connectorId: use.connector_id,
+        url: use.url,
+        tokenUrl: `${session.endpoint}/v1/turns/${encodeURIComponent(turnId)}/connectors/${encodeURIComponent(use.connector_id)}/token`,
+        tokenCredential: await turnToken(turnKey, tenantId, turnId, use.connector_id),
+      })),
+    );
     const { secretSetId } = persona;
     const prebuild = this.hostPrebuild(session.session_id);
     const members = prebuild === null ? await this.members(secretSetId) : [];
@@ -2141,6 +2196,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         expiresAt: iso(now + credentialSeconds * 1000),
         variables,
         arguments: dispatch.arguments,
+        connectors,
         ...(dispatch.credentialFile === undefined ? {} : { credentialFile: dispatch.credentialFile }),
       },
       lastLineSeq: session.last_line_seq,
@@ -2640,7 +2696,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
     await this.chunks.write(tenantId, turn.session_id, turn.turn_id, 1);
-    this.ctx.storage.transactionSync(record);
+    this.ctx.storage.transactionSync(() => {
+      record();
+      releaseConnectorCredentials(this.ctx.storage.sql);
+    });
     this.turnEnded();
     const delay = this.hostPrebuild(turn.session_id) === null ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
     await this.timers(tenantId, turn.session_id, {

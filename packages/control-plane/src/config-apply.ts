@@ -92,8 +92,16 @@ interface Prepare {
   setIds: Map<string, string>;
   members: Map<string, Member[]>;
   heldSets: Map<string, string>;
+  connectorIds: Map<string, string>;
   pins: HarnessPinCreate[];
 }
+
+const connectorIdsOf = (prepare: Prepare, names: readonly string[]): string[] =>
+  names.map((name) => {
+    const connectorId = prepare.connectorIds.get(name);
+    if (connectorId === undefined) throw new Error(`connector ${name} has no id after the plan held it`);
+    return connectorId;
+  });
 
 const setIdOf = (prepare: Prepare, name: string): string => {
   const secretSetId = prepare.setIds.get(name);
@@ -172,6 +180,7 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
             name: step.persona.name,
             harness: step.persona.harness,
             secretSetId,
+            connectorIds: connectorIdsOf(prepare, step.persona.connectorNames),
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
             boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
             files: files.value,
@@ -192,6 +201,7 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
           persona: {
             name: step.persona.name,
             secretSetId,
+            connectorIds: connectorIdsOf(prepare, step.persona.connectorNames),
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
             boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
             files: files.value,
@@ -232,6 +242,7 @@ const prepared = async (
     setIds: new Map(live.secretSets.map((set) => [set.name, set.secretSetId])),
     members: new Map(live.secretSets.map((set) => [set.name, set.keys])),
     heldSets: new Map(live.personas.map((persona) => [persona.personaId, persona.secretSetId])),
+    connectorIds: new Map(live.connectors.map((connector) => [connector.name, connector.connectorId])),
     pins: config.harnessPins,
   };
   for (const step of steps) {
@@ -258,6 +269,10 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
     ok: true,
     value: {
       personas: await tenant.listPersonas(tenantId),
+      connectors: (await tenant.listConnectors(tenantId, Date.now())).map(({ connectorId, name }) => ({
+        connectorId,
+        name,
+      })),
       secretSets: secretSets.secretSets,
       pins: effectiveVersions(await tenant.listPins()),
       hosts: await listHosts(env.DB, tenantId),

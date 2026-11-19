@@ -17,8 +17,14 @@ type TenantConfig = z.infer<typeof TenantConfigSchema>;
 type ConfigPersona = TenantConfig["personas"][number];
 type ConfigSecretSet = TenantConfig["secretSets"][number];
 
-const persona = (name: string, harness: string, secretSetName: string, files: unknown[] = []): ConfigPersona =>
-  TenantConfigSchema.shape.personas.element.parse({ name, harness, secretSetName, files });
+const persona = (
+  name: string,
+  harness: string,
+  secretSetName: string,
+  files: unknown[] = [],
+  connectorNames: string[] = [],
+): ConfigPersona =>
+  TenantConfigSchema.shape.personas.element.parse({ name, harness, secretSetName, files, connectorNames });
 
 const member = (key: string): Record<string, string> =>
   key === "ANTHROPIC_API_KEY" ? { kind: "ApiKey", name: key, provider: "Anthropic" } : { kind: "Variable", name: key };
@@ -46,6 +52,7 @@ const livePersona = (personaId: string, name: string, harness: string, secretSet
     name,
     harness,
     secretSetId,
+    connectorIds: [],
     boxMemoryMib: 4096,
     boxDiskMib: 32768,
     files,
@@ -115,6 +122,7 @@ const liveSession = (sessionId: string, personaId: string, state: string) =>
 
 const steady = (parts: Partial<Live> = {}): Live => ({
   personas: [livePersona("p1", "Default", "ClaudeCode", "s1")],
+  connectors: [],
   secretSets: [liveSecretSet("s1", "prod", ["ANTHROPIC_API_KEY"])],
   pins: EffectiveHarnessVersionSchema.array().parse([{ harness: "ClaudeCode", harnessVersion: "2.0.0", pinned: true }]),
   hosts: [liveHost("h1", "Online", ["gpu"])],
@@ -401,3 +409,18 @@ for (const each of cases) {
     assert.deepEqual(planOf(each.desired, each.live), each.planned);
   });
 }
+
+test("a persona naming a connector the tenant lacks fails the plan, and a changed connector list updates it", () => {
+  const live = steady({ connectors: [{ connectorId: "c1", name: "Recall" }] });
+  assert.deepEqual(
+    planOf(desired(config({ personas: [persona("Default", "ClaudeCode", "prod", [], ["Linear"])] })), live),
+    problems(
+      'persona "Default" names the connector "Linear", which your tenant does not have; create and connect it first, or drop it from connectorNames',
+    ),
+  );
+  const planned = planOf(
+    desired(config({ personas: [persona("Default", "ClaudeCode", "prod", [], ["Recall"])] })),
+    live,
+  );
+  assert.equal(planned.ok && planned.steps.some((step) => step.kind === "UpdatePersona"), true);
+});

@@ -146,6 +146,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         architectures: bootArchitectures(release, input.harness, input.harnessVersion),
       },
       { boxMemoryMib: BoxMemoryLimit.DefaultMib, boxDiskMib: BoxDiskLimit.DefaultMib },
+      false,
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);

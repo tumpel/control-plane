@@ -37,6 +37,9 @@ const NOUNS = {
   OAuthGrants: "oauth-grant",
   ClaudeSetups: "claude-setup",
   OpenRouterConnections: "openrouter",
+  Connectors: "connector",
+  StaticConnectors: "connector",
+  OAuthConnectors: "connector",
 };
 const VERBS = {
   Identity_listTenants: "tenants",
@@ -47,6 +50,8 @@ const VERBS = {
   Sessions_listCredentialHandovers: "handovers",
   Sessions_listStopFailures: "stop-failures",
   Prebuilds_getFailure: "failure",
+  StaticConnectors_create: "create-static",
+  OAuthConnectors_create: "create-oauth",
 };
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
@@ -106,6 +111,7 @@ const ALLOWLIST = {
   PrebuildInputs_read: BUILD_JOB,
   CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
   ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
+  ConnectorTokens_fetch: "box wire of the guest forwarder, signed by the turn's connector token, never by a principal",
 };
 
 const CLI_ONLY = {
@@ -157,7 +163,8 @@ const render = (rows) =>
       .map(([group, noun]) => `${group} \`${noun || "(none)"}\``)
       .join(", ")}.`,
     "`EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,",
-    "`Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`,",
+    "`Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`",
+    "the verbs `create-static` and `create-oauth`,",
     "`Sessions_listCredentialHandovers` the verb `handovers` and `Sessions_listStopFailures` the verb",
     "`stop-failures`. `Releases_current` needs no sign-in over REST and is listed because a signed-in",
     "principal reads it too. The CLI's `transcript read` takes a turnId and reads that turn's lines of its",

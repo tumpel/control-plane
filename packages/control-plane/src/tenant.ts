@@ -20,11 +20,11 @@ import {
   type SupervisorUpdates,
   supervisorUpdatesByHost,
 } from "./supervisor-updates";
+import { TenantConnectors } from "./tenant-connectors.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
-import { TenantOpenRouterAuthorizations } from "./tenant-openrouter-authorizations";
 import { memberRows, sealContext } from "./tenant-sessions";
 
-export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId"> & {
+export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds"> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];
@@ -127,8 +127,9 @@ export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFile
     )
     .toArray();
 
-const toPersona = (row: PersonaRow, files: PersonaFileRow[]): StoredPersona =>
+const toPersona = (row: PersonaRow, files: PersonaFileRow[], connectorIds: string[]): StoredPersona =>
   StoredPersonaSchema.parse({
+    connectorIds,
     personaId: row.persona_id,
     tenantId: row.tenant_id,
     name: row.name,
@@ -153,7 +154,7 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
-export class Tenant extends TenantOpenRouterAuthorizations {
+export class Tenant extends TenantConnectors {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
@@ -246,7 +247,15 @@ export class Tenant extends TenantOpenRouterAuthorizations {
   }
 
   private persona(row: PersonaRow): StoredPersona {
-    return toPersona(row, personaFileRows(this.ctx.storage.sql, row.persona_id));
+    const sql = this.ctx.storage.sql;
+    const connectorIds = sql
+      .exec<{ connector_id: string }>(
+        "SELECT connector_id FROM persona_connectors WHERE persona_id = ? ORDER BY rowid",
+        row.persona_id,
+      )
+      .toArray()
+      .map((each) => each.connector_id);
+    return toPersona(row, personaFileRows(sql, row.persona_id), connectorIds);
   }
 
   listPersonas(tenantId: string): StoredPersona[] {
@@ -284,6 +293,14 @@ export class Tenant extends TenantOpenRouterAuthorizations {
     }
   }
 
+  private writeConnectors(personaId: string, connectorIds: readonly string[]): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM persona_connectors WHERE persona_id = ?", personaId);
+    for (const connectorId of connectorIds) {
+      sql.exec("INSERT INTO persona_connectors (persona_id, connector_id) VALUES (?, ?)", personaId, connectorId);
+    }
+  }
+
   createPersona(tenantId: string, persona: PersonaWrite, now: number): Written<StoredPersona> {
     const personaId = crypto.randomUUID();
     const written = uniquely(() =>
@@ -301,6 +318,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
           now,
         );
         this.writeFiles(personaId, persona.files, now);
+        this.writeConnectors(personaId, persona.connectorIds);
       }),
     );
     if (!written.ok) return written;
@@ -329,6 +347,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
         );
         if (updated.rowsWritten === 0) return false;
         this.writeFiles(personaId, persona.files, now);
+        this.writeConnectors(personaId, persona.connectorIds);
         return true;
       }),
     );
@@ -649,6 +668,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
           now,
         );
         this.writeFiles(personaId, write.persona.files, now);
+        this.writeConnectors(personaId, write.persona.connectorIds);
         return;
       }
       case "UpdatePersona": {
@@ -663,6 +683,7 @@ export class Tenant extends TenantOpenRouterAuthorizations {
           write.personaId,
         );
         this.writeFiles(write.personaId, write.persona.files, now);
+        this.writeConnectors(write.personaId, write.persona.connectorIds);
         return;
       }
       case "DeletePersona":
