@@ -248,6 +248,7 @@ export const setupOffer = (
   claudeSetupId: row.claude_setup_id,
   tenantId,
   boxId: row.box_id,
+  harness: harnessOf(row),
   harnessVersion: row.harness_version,
   image,
   tokenUrl: tokenUrl(row.endpoint, row.claude_setup_id),
