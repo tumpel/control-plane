@@ -915,7 +915,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(offer.turnId, started.turn.turnId);
     assert.deepEqual(
       { boxMemoryMib: offer.boxMemoryMib, boxDiskMib: offer.boxDiskMib },
-      { boxMemoryMib: 4096, boxDiskMib: 32768 },
+      { boxMemoryMib: 2048, boxDiskMib: 32768 },
     );
     assert.equal(offer.sessionId, started.session.sessionId);
     assert.equal(offer.prompt, "fix the build");
@@ -2877,6 +2877,36 @@ suite("sessions", { concurrency: 8 }, () => {
     const response = await sized(131072);
     assert.equal(response.status, 200, await response.clone().text());
     assert.equal((await host.next("TurnOffer")).boxDiskMib, 131072);
+  });
+
+  test("a persona created without box memory reads 2048 MiB, takes 512 MiB, and is refused 511 MiB by name", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const [persona] = await getJson("/v1/personas", PersonaSchema.array());
+    assert.ok(persona);
+    assert.equal(persona.boxMemoryMib, 2048);
+    const sized = (boxMemoryMib: number) =>
+      server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...bearer },
+        body: JSON.stringify({
+          name: persona.name,
+          secretSetId: persona.secretSetId,
+          connectorIds: [],
+          boxMemoryMib,
+          files: [],
+        }),
+      });
+    const refused = await sized(511);
+    assert.equal(refused.status, 400);
+    const refusal = ProblemSchema.parse(await refused.json());
+    assert.equal(refusal.code, "InvalidRequest");
+    assert.match(refusal.detail, /boxMemoryMib/);
+    const small = await sized(512);
+    assert.equal(small.status, 200, await small.clone().text());
+    assert.equal((await getJson(`/v1/personas/${persona.personaId}`, PersonaSchema)).boxMemoryMib, 512);
+    const started = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "small job" }, bearer);
+    assert.equal(started.status, 200, await started.clone().text());
+    assert.equal((await host.next("TurnOffer")).boxMemoryMib, 512);
   });
 
   test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline, naming the refusal", async () => {

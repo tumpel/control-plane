@@ -1,5 +1,6 @@
 import { type CredentialRefusal, checkModelCredential, credentialProblem } from "@tumpel/api/credentials";
 import {
+  BoxMemoryLimit,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
@@ -139,7 +140,7 @@ export const why = (refused: Unplaceable): string => {
 export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoMemory")) {
-    return `Lower the persona's boxMemoryMib toward the 4096 MiB default, free memory on a host, or enrol a host with more memory, then ${retry}`;
+    return `Lower the persona's boxMemoryMib toward the ${BoxMemoryLimit.DefaultMib} MiB default, free memory on a host, or enrol a host with more memory, then ${retry}`;
   }
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoConnectors")) {
     return `Let a host update its supervisor to the current release, or use a persona without connectors, then ${retry}`;
