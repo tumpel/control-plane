@@ -345,7 +345,7 @@ const planPersonaDeletes = (desired: ConfigPersona[], live: Live, steps: Step[],
       .map((session) => session.sessionId);
     if (held.length > 0) {
       problems.push(
-        `delete persona ${persona.name} (${persona.personaId}) will be refused: it is still used by session ${held.join(", ")}, which is neither Failed nor Archived; archive those sessions, or keep the persona in the config`,
+        `delete persona ${persona.name} (${persona.personaId}) will be refused: it is still used by session ${held.join(", ")}, which is neither Failed nor Archived; archive or delete those sessions, or keep the persona in the config`,
       );
       continue;
     }

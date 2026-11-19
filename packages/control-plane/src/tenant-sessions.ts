@@ -194,6 +194,8 @@ export type Archive =
   | { kind: "NotFound" }
   | { kind: "NotStopped"; state: SessionState };
 
+export type SessionDelete = { kind: "Deleted" } | { kind: "NotFound" } | { kind: "NotStopped"; state: SessionState };
+
 export type TranscriptCursor = {
   sessionState: SessionState;
   harness: Session["harness"];
@@ -392,6 +394,38 @@ const CONTINUE_FIX =
   "The session keeps the turn's files and the harness's conversation, so send another turn on it to continue where this one stopped";
 const STORE_DELETE_BATCH = 1000;
 
+const TURN_ROWS = [
+  "turn_failures",
+  "credential_handovers",
+  "turn_metric_dimensions",
+  "deferred_offers",
+  "turn_results",
+  "turn_full_images",
+  "turn_layered_images",
+  "turn_goals",
+  "turn_refusals",
+  "turn_warnings",
+  "turn_eviction_waits",
+  "turn_release_waits",
+];
+
+const SESSION_ROWS = [
+  "transcript_pending",
+  "transcript_chunks",
+  "stop_failures",
+  "session_issues",
+  "session_connectors",
+  "session_box_memory",
+  "session_box_retention",
+  "session_prebuild_layers",
+  "session_layer_absences",
+  "after_turn_releases",
+  "box_evictions",
+  "prebuild_sessions",
+  "turns",
+  "sessions",
+];
+
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
@@ -425,12 +459,13 @@ const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/p
 const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.pack_digest = packs.pack_digest)";
 
 const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
-  AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
+  AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)
+  AND NOT EXISTS (SELECT 1 FROM prebuild_layer_chunks AS layer WHERE layer.digest = own.digest)`;
 
 const CHUNK_GRACE_MS = 24 * 60 * 60 * 1000;
 
 const LIVE_CHUNKS =
-  "SELECT digest FROM snapshot_manifest_chunks UNION SELECT digest FROM snapshot_chunks UNION SELECT digest FROM session_chunks";
+  "SELECT digest FROM snapshot_manifest_chunks UNION SELECT digest FROM snapshot_chunks UNION SELECT digest FROM session_chunks UNION SELECT digest FROM prebuild_layer_chunks";
 
 const toSession = (
   tenantId: string,
@@ -649,13 +684,42 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
         now,
       );
+      sql.exec(
+        "INSERT INTO prebuild_layer_roots (prebuild_id, snapshot_id, snapshot_seq, storage_key, created_at) VALUES (?, ?, ?, ?, ?)",
+        prebuild.prebuild_id,
+        request.snapshot_id,
+        request.snapshot_seq,
+        request.storage_key,
+        now,
+      );
+      sql.exec(
+        "INSERT INTO prebuild_layer_chunks (prebuild_id, digest) SELECT ?, digest FROM session_chunks WHERE session_id = ?",
+        prebuild.prebuild_id,
+        request.session_id,
+      );
       return true;
     });
     if (done) await this.archiveSupersededPrebuilds(tenantId, now);
   }
 
   private async archiveSupersededPrebuilds(tenantId: string, now: number): Promise<void> {
-    const superseded = this.ctx.storage.sql
+    const sql = this.ctx.storage.sql;
+    const released = sql
+      .exec<{ prebuild_id: string; storage_key: string }>(
+        `SELECT roots.prebuild_id, roots.storage_key FROM prebuild_layer_roots AS roots JOIN prebuilds AS older USING (prebuild_id)
+        WHERE EXISTS (SELECT 1 FROM prebuilds AS newer WHERE newer.repository = older.repository
+            AND newer.guest_image_digest = older.guest_image_digest AND newer.state = 'Done' AND newer.created_at > older.created_at)
+          AND NOT EXISTS (SELECT 1 FROM session_prebuild_layers AS consumer JOIN turns ON turns.session_id = consumer.session_id
+            WHERE consumer.prebuild_id = roots.prebuild_id AND turns.state IN (SELECT value FROM json_each(?))
+              AND NOT EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = consumer.session_id))`,
+        JSON.stringify(IN_FLIGHT),
+      )
+      .toArray();
+    for (const { prebuild_id } of released) {
+      sql.exec("DELETE FROM prebuild_layer_roots WHERE prebuild_id = ?", prebuild_id);
+    }
+    if (released.length > 0) await this.env.STORE.delete(released.map((root) => root.storage_key));
+    const superseded = sql
       .exec<{ session_id: string }>(
         `SELECT prebuild_sessions.session_id FROM prebuilds AS older
         JOIN prebuild_sessions ON prebuild_sessions.prebuild_id = older.prebuild_id
@@ -692,12 +756,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     const [layer] = sql
-      .exec<StoredSnapshotRow & { session_id: string; prebuild_id: string }>(
-        `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, snapshots.session_id, prebuilds.prebuild_id FROM prebuilds
-        JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
-        JOIN sessions ON sessions.session_id = prebuild_sessions.session_id
-        WHERE sessions.state != 'Archived' AND prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
-        ORDER BY prebuilds.created_at DESC, snapshots.snapshot_seq DESC LIMIT 1`,
+      .exec<StoredSnapshotRow & { prebuild_id: string }>(
+        `SELECT roots.snapshot_id, roots.snapshot_seq, roots.storage_key, prebuilds.prebuild_id FROM prebuilds
+        JOIN prebuild_layer_roots AS roots USING (prebuild_id)
+        WHERE prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
+        ORDER BY prebuilds.created_at DESC LIMIT 1`,
         session.repository,
         base.imageDigest,
       )
@@ -718,9 +781,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     sql.exec(
-      "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?, digest FROM session_chunks WHERE session_id = ?",
+      "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?, digest FROM prebuild_layer_chunks WHERE prebuild_id = ?",
       session.session_id,
-      layer.session_id,
+      layer.prebuild_id,
     );
     return { record: { layer: "Prebuild", prebuildId: layer.prebuild_id }, restored: [layer] };
   }
@@ -2155,10 +2218,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
         JSON.stringify(IN_FLIGHT),
       )
       .toArray();
-    if (restoring !== undefined) return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
+    if (restoring === undefined) await this.dropSnapshots(tenantId, sessionId);
+    return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
+  }
+
+  private async dropSnapshots(tenantId: string, sessionId: string): Promise<void> {
+    const sql = this.ctx.storage.sql;
     const keys = sql
       .exec<{ storage_key: string }>(
-        "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
+        `SELECT storage_key FROM (SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1
+          UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != '')
+        WHERE storage_key NOT IN (SELECT storage_key FROM prebuild_layer_roots)`,
         sessionId,
       )
       .toArray()
@@ -2182,7 +2252,32 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
     }
     await this.releaseChunks(tenantId, sessionId);
-    return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
+  }
+
+  protected async deleteSession(tenantId: string, sessionId: string): Promise<SessionDelete> {
+    const sql = this.ctx.storage.sql;
+    const archived = await this.archiveSession(tenantId, sessionId, Date.now());
+    if (archived.kind !== "Archived") return archived;
+    await this.dropSnapshots(tenantId, sessionId);
+    const keys = sql
+      .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
+      .toArray()
+      .map((row) => row.storage_key);
+    this.ctx.storage.transactionSync(() => {
+      for (const table of TURN_ROWS) {
+        sql.exec(`DELETE FROM ${table} WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?)`, sessionId);
+      }
+      sql.exec(
+        "DELETE FROM events WHERE event_id IN (SELECT event_id FROM event_sessions WHERE session_id = ?)",
+        sessionId,
+      );
+      for (const table of SESSION_ROWS) sql.exec(`DELETE FROM ${table} WHERE session_id = ?`, sessionId);
+    });
+    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+    }
+    await this.env.SESSION_TIMER.getByName(sessionId).clear();
+    return { kind: "Deleted" };
   }
 
   private releaseChunks(tenantId: string, sessionId: string): Promise<void> {
