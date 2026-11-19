@@ -529,6 +529,7 @@ export const sealContext = (secretSetId: string, name: string): string => `${sec
 
 export abstract class TenantSessions extends DurableObject<Env> {
   private readonly turnEndWaiters = new Set<() => void>();
+  private readonly offering = new Set<string>();
 
   protected abstract failPrebuild(
     tenantId: string,
@@ -977,7 +978,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async offer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
-    await this.host(session.host_id).send(await this.armOffer(tenantId, session, turn));
+    this.offering.add(turn.turn_id);
+    await this.armOffer(tenantId, session, turn)
+      .then((offer) => this.host(session.host_id).send(offer))
+      .then(() => this.offerSent(turn.turn_id))
+      .catch((error: unknown) => {
+        console.error(
+          `OfferQueued: turn ${turn.turn_id} did not reach host ${session.host_id} and waits for its next heartbeat: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => this.offering.delete(turn.turn_id));
+  }
+
+  offerSent(turnId: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
   }
 
   private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
@@ -1036,6 +1050,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turn.line_count,
       turn.created_at,
       turn.updated_at,
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT INTO deferred_offers (turn_id, host_id, created_at) VALUES (?, ?, ?)",
+      turn.turn_id,
+      hostId,
+      now,
     );
     if (turn.goal !== null) {
       this.ctx.storage.sql.exec(
@@ -1374,11 +1394,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, send, now);
+    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
     await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
-    await this.offer(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn);
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
@@ -1452,13 +1472,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const turnIds = sql
       .exec<{ turn_id: string }>("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId)
       .toArray()
-      .map((row) => row.turn_id);
+      .map((row) => row.turn_id)
+      .filter((turnId) => !this.offering.has(turnId));
     const handoffs: TurnHandoff[] = [];
     for (const turnId of turnIds) {
-      sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
       const turn = this.turnRow(turnId);
       const session = turn === null ? null : this.sessionRow(turn.session_id);
-      if (turn === null || session === null || turn.state !== "Offered") continue;
+      if (turn === null || session === null || turn.state !== "Offered") {
+        this.offerSent(turnId);
+        continue;
+      }
       const handoff = await this.placeOffered(tenantId, session, turn, true);
       if (handoff !== null) handoffs.push(handoff);
     }
@@ -1975,15 +1998,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (turn.state !== "Offered") return { kind: "Withdrawn" };
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) {
-      throw new Error(
-        `session ${session.session_id} runs ${session.harness} ${session.harness_version}, which left the catalog`,
-      );
+      const detail = `the session runs ${session.harness} ${session.harness_version}, which left the harness catalog, so no image runs the turn; start a new session on a listed version`;
+      await this.failTurn(tenantId, turnId, "ImageNotReleased", detail, iso(now));
+      return { kind: "Withdrawn" };
     }
     const persona = this.personaRow(session.persona_id);
     if (persona === null) {
-      throw new Error(
-        `session ${session.session_id} runs on persona ${session.persona_id}, which is gone; turn ${turnId} has no secret set to run on`,
-      );
+      const detail = `the session runs on persona ${session.persona_id}, which is gone, so the turn has no secret set to run on; start a new session on an existing persona`;
+      await this.failTurn(tenantId, turnId, "CredentialRefused", detail, iso(now));
+      return { kind: "Withdrawn" };
     }
     const { secretSetId } = persona;
     const prebuild = this.hostPrebuild(session.session_id);
@@ -1999,8 +2022,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.harness,
         "send the turn again",
       );
-      if (dispatch.kind !== "Expired") throw new Error(`turn ${turnId}: ${refused.detail}; ${refused.fix}`);
-      await this.failTurn(tenantId, turnId, "CredentialExpired", `${refused.detail}; ${refused.fix}`, iso(now));
+      const reason = dispatch.kind === "Expired" ? "CredentialExpired" : "CredentialRefused";
+      await this.failTurn(tenantId, turnId, reason, `${refused.detail}; ${refused.fix}`, iso(now));
       return { kind: "Withdrawn" };
     }
     this.ctx.storage.sql.exec(

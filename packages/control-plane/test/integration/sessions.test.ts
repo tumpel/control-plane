@@ -2955,6 +2955,127 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
+  const sealedValues = async (tenantId: string) =>
+    z
+      .object({ secret_set_id: z.string(), name: z.string(), sealed: z.string() })
+      .array()
+      .parse(await tenantSql(tenantId, "SELECT secret_set_id, name, sealed FROM secret_values"));
+
+  const writeSealed = async (
+    tenantId: string,
+    rows: { secret_set_id: string; name: string; sealed: string }[],
+    corrupt: boolean,
+  ): Promise<void> => {
+    for (const row of rows) {
+      await tenantSql(
+        tenantId,
+        "UPDATE secret_values SET sealed = ? WHERE secret_set_id = ? AND name = ?",
+        corrupt ? `${row.sealed.slice(0, -4)}AAAA` : row.sealed,
+        row.secret_set_id,
+        row.name,
+      );
+    }
+  };
+
+  test("a turn whose offer fails after the turn is stored is offered on the host's next heartbeat and runs", async () => {
+    const { tenantId, bearer, host, getJson, completedTurn } = await tenant();
+    const { session, offer: first } = await completedTurn("first");
+    assert.equal((await host.next("TurnClaimed")).turnId, first.turnId);
+    await until(
+      "the first turn reading Completed",
+      () => getJson(`/v1/turns/${first.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    const sealed = await sealedValues(tenantId);
+    assert.notEqual(sealed.length, 0);
+    await writeSealed(tenantId, sealed, true);
+    const sent = await postJson(
+      `/v1/sessions/${session.sessionId}/turns`,
+      { prompt: "sent while undecryptable" },
+      bearer,
+    );
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const queued = TurnSchema.parse(await sent.json());
+    assert.equal(queued.state, "Offered");
+    await writeSealed(tenantId, sealed, false);
+
+    const offer = await host.next("TurnOffer");
+    assert.equal(offer.turnId, queued.turnId);
+    assert.equal(offer.prompt, "sent while undecryptable");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, queued.turnId);
+    assert.equal((await getJson(`/v1/turns/${queued.turnId}`, TurnSchema)).state, "Running");
+  });
+
+  test("a queued turn whose persona is gone fails CredentialRefused and the next queued turn on its host is offered", async () => {
+    const { tenantId, bearer, host, getJson, completedTurn } = await tenant();
+    const sessions = [];
+    for (const prompt of ["first", "second"]) {
+      const { session, offer } = await completedTurn(prompt);
+      assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
+      await until(
+        `the ${prompt} turn reading Completed`,
+        () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+        (turn) => turn.state === "Completed",
+      );
+      sessions.push(session.sessionId);
+    }
+    const [doomedSession, waitingSession] = sessions;
+    assert.ok(doomedSession !== undefined && waitingSession !== undefined);
+    const sealed = await sealedValues(tenantId);
+    await writeSealed(tenantId, sealed, true);
+    const queued = [];
+    for (const sessionId of sessions) {
+      const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "queued" }, bearer);
+      assert.equal(sent.status, 200, await sent.clone().text());
+      queued.push(TurnSchema.parse(await sent.json()));
+    }
+    const [doomed, waiting] = queued;
+    assert.ok(doomed !== undefined && waiting !== undefined);
+    const gone = crypto.randomUUID();
+    await tenantSql(tenantId, "UPDATE sessions SET persona_id = ? WHERE session_id = ?", gone, doomedSession);
+    await writeSealed(tenantId, sealed, false);
+
+    const offer = await host.next("TurnOffer");
+    assert.equal(offer.turnId, waiting.turnId);
+    await until(
+      "the doomed turn reading Failed",
+      () => getJson(`/v1/turns/${doomed.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    const failure = await getJson(`/v1/turns/${doomed.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "CredentialRefused");
+    assert.equal(
+      failure.detail,
+      `the session runs on persona ${gone}, which is gone, so the turn has no secret set to run on; start a new session on an existing persona`,
+    );
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, waiting.turnId);
+  });
+
+  test("a repeated claim of a completed turn is withdrawn and a NotClaimed failure after it leaves the turn Completed", async () => {
+    const { host, getJson, completedTurn } = await tenant();
+    const { offer } = await completedTurn("ran once");
+    assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
+    await until(
+      "the turn reading Completed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.deepEqual(await host.next("TurnWithdrawn"), { type: "TurnWithdrawn", turnId: offer.turnId });
+    host.send({
+      type: "TurnFailed",
+      turnId: offer.turnId,
+      reason: "NotClaimed",
+      detail: "this supervisor stopped waiting for the answer to the claim",
+      failedAt: new Date().toISOString(),
+    });
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.deepEqual(await host.next("TurnWithdrawn"), { type: "TurnWithdrawn", turnId: offer.turnId });
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Completed");
+  });
+
   test("a turn the only host refuses HostUpdating is offered again when its swap fails", async () => {
     const { bearer, host, hostId, enrol, sessionStart, hostState } = await tenant();
     host.close();

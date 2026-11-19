@@ -210,9 +210,11 @@ export class HostChannel extends DurableObject<Env> {
     context: control.ControlContext,
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    for (const handoff of await this.env.TENANT.getByName(tenantId).deferredOffers(tenantId, hostId)) {
+    const tenant = this.env.TENANT.getByName(tenantId);
+    for (const handoff of await tenant.deferredOffers(tenantId, hostId)) {
       if (handoff.hostId === hostId) await control.send(attachment.connection, handoff.offer, context);
       else await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
+      await tenant.offerSent(handoff.offer.turnId);
     }
   }
 
