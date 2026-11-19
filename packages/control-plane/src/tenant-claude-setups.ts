@@ -147,6 +147,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       },
       { boxMemoryMib: BoxMemoryLimit.DefaultMib, boxDiskMib: BoxDiskLimit.DefaultMib },
       false,
+      this.heldBoxes(),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);
