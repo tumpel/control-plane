@@ -212,7 +212,7 @@ const stranded = (session: Session, hosts: HostRecord[], missingTurnIds: string[
   });
 };
 
-const tenantOf = (env: Env, caller: Caller) => env.TENANT.getByName(caller.tenantId);
+const tenantOf = (env: Env, caller: Caller) => tenantApi(env.TENANT, caller.tenantId);
 
 const personaNotFound = (personaId: string): Refused =>
   refuse(404, {
@@ -298,7 +298,10 @@ export const startSession = async (
 ): Promise<Outcome<StartedSession>> => {
   const prepared = await prepareStart(env, caller, start, endpoint, now);
   if (!prepared.ok) return prepared;
-  return placed(await tenantOf(env, caller).startSession(caller.tenantId, prepared.value, now));
+  return placed(
+    (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
+      .started,
+  );
 };
 
 export const startSessionFromIssue = async (
@@ -380,17 +383,19 @@ export const startSessionFromIssue = async (
   );
   if (!prepared.ok) return prepared;
   return placed(
-    await tenant.startSessionFromIssue(
-      caller.tenantId,
-      prepared.value,
-      { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
-      now,
-    ),
+    (
+      await tenant.call("startSessionFromIssue", {
+        tenantId: caller.tenantId,
+        input: prepared.value,
+        issue: { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
+        now,
+      })
+    ).started,
   );
 };
 
 export const getSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Session>> => {
-  const session = await tenantOf(env, caller).getSession(caller.tenantId, sessionId);
+  const { session } = await tenantOf(env, caller).call("getSession", { tenantId: caller.tenantId, sessionId });
   return session === null ? sessionNotFound(sessionId) : ok(session);
 };
 
@@ -399,7 +404,7 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.state !== undefined) filter.state = query.state;
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
-  return ok(await tenantOf(env, caller).listSessions(caller.tenantId, filter));
+  return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
 };
 
 const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
@@ -431,13 +436,13 @@ export const sendTurn = async (
   now: number,
 ): Promise<Outcome<Turn>> => {
   const tenant = tenantOf(env, caller);
-  const session = await tenant.getSession(caller.tenantId, sessionId);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
   const hosts = await listHosts(env.DB, caller.tenantId);
-  const sent = await tenant.sendTurn(caller.tenantId, sessionId, send, hosts, now);
+  const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
   if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
@@ -481,7 +486,7 @@ export const stopSession = async (
   now: number,
 ): Promise<Outcome<Session>> => {
   const tenant = tenantOf(env, caller);
-  const session = await tenant.getSession(caller.tenantId, sessionId);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
   if (session.state === "Archived") return sessionArchived(sessionId, "stop");
   if (session.state !== "Stopped" && session.state !== "Stopping" && session.state !== "Failed") {
@@ -489,7 +494,7 @@ export const stopSession = async (
     if (offline !== null) return offline;
   }
   const cancelledBy = query.cancelTurn === true ? (await whoamiOf(env.DB, caller)).principal.email : null;
-  const stopped = await tenant.stopSession(caller.tenantId, sessionId, cancelledBy, now);
+  const { stopped } = await tenant.call("stopSession", { tenantId: caller.tenantId, sessionId, cancelledBy, now });
   if (stopped.kind === "Stopping") return ok(stopped.session);
   if (stopped.kind === "NotFound") return sessionNotFound(sessionId);
   if (stopped.kind === "Archived") return sessionArchived(sessionId, "stop");
@@ -516,13 +521,13 @@ export const archiveSession = async (
   now: number,
 ): Promise<Outcome<Session>> => {
   const tenant = tenantOf(env, caller);
-  const session = await tenant.getSession(caller.tenantId, sessionId);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
   if (session.state === "Idle") {
     const offline = await hostOffline(env, caller, session, "archive the session again");
     if (offline !== null) return offline;
   }
-  const archived = await tenant.archiveSession(caller.tenantId, sessionId, now);
+  const { archived } = await tenant.call("archiveSession", { tenantId: caller.tenantId, sessionId, now });
   if (archived.kind === "Archived") return ok(archived.session);
   if (archived.kind === "NotFound") return sessionNotFound(sessionId);
   return refuse(409, {
@@ -534,12 +539,12 @@ export const archiveSession = async (
 };
 
 export const listTurns = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Turn[]>> => {
-  const turns = await tenantOf(env, caller).listTurns(caller.tenantId, sessionId);
+  const { turns } = await tenantOf(env, caller).call("listTurns", { tenantId: caller.tenantId, sessionId });
   return turns === null ? sessionNotFound(sessionId) : ok(turns);
 };
 
 export const getTurn = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<Turn>> => {
-  const turn = await tenantOf(env, caller).getTurn(caller.tenantId, turnId);
+  const { turn } = await tenantOf(env, caller).call("getTurn", { tenantId: caller.tenantId, turnId });
   return turn === null ? turnNotFound(turnId) : ok(turn);
 };
 
@@ -549,15 +554,19 @@ export const waitTurns = async (
   turnIds: string[],
   timeoutSeconds: number,
 ): Promise<Outcome<Turn[]>> => {
-  const waited = await tenantOf(env, caller).waitTurns(caller.tenantId, turnIds, timeoutSeconds);
+  const { waited } = await tenantOf(env, caller).call("waitTurns", {
+    tenantId: caller.tenantId,
+    turnIds,
+    timeoutSeconds,
+  });
   return waited.kind === "Read" ? ok(waited.turns) : turnNotFound(waited.turnId);
 };
 
 export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<TurnFailure>> => {
   const tenant = tenantOf(env, caller);
-  const failure = await tenant.getTurnFailure(caller.tenantId, turnId);
+  const { failure } = await tenant.call("getTurnFailure", { tenantId: caller.tenantId, turnId });
   if (failure !== null) return ok(failure);
-  const turn = await tenant.getTurn(caller.tenantId, turnId);
+  const { turn } = await tenant.call("getTurn", { tenantId: caller.tenantId, turnId });
   if (turn === null) return turnNotFound(turnId);
   return refuse(404, {
     code: "NotFound",
@@ -607,15 +616,17 @@ export const readTranscript = async (
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_BYTES;
   const chunkLines = settingsOf(env).transcriptChunkLines;
   const limit = query.limit ?? (compact ? null : chunkLines);
-  const readAfter = (page: Page) =>
-    tenantOf(env, caller).transcriptCursor(
-      caller.tenantId,
-      sessionId,
-      page.cursor,
-      query.turnId ?? null,
-      compact || limit === null ? chunkLines : limit - page.lines.length,
-      compact ? null : Math.max(1, maxBytes - page.bytes),
-    );
+  const readAfter = async (page: Page) =>
+    (
+      await tenantOf(env, caller).call("transcriptCursor", {
+        tenantId: caller.tenantId,
+        sessionId,
+        after: page.cursor,
+        turnId: query.turnId ?? null,
+        limit: compact || limit === null ? chunkLines : limit - page.lines.length,
+        ...(compact ? {} : { maxBytes: Math.max(1, maxBytes - page.bytes) }),
+      })
+    ).cursor;
   let page = emptyPage(query.after ?? 0);
   const cursor = await readAfter(page);
   if (cursor === null) return sessionNotFound(sessionId);
@@ -670,12 +681,12 @@ export const listStopFailures = async (
   caller: Caller,
   sessionId: string,
 ): Promise<Outcome<StopFailure[]>> => {
-  const failures = await tenantOf(env, caller).listStopFailures(caller.tenantId, sessionId);
+  const { failures } = await tenantOf(env, caller).call("listStopFailures", { tenantId: caller.tenantId, sessionId });
   return failures === null ? sessionNotFound(sessionId) : ok(failures);
 };
 
 export const listSnapshots = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Snapshot[]>> => {
-  const snapshots = await tenantOf(env, caller).listSnapshots(caller.tenantId, sessionId);
+  const { snapshots } = await tenantOf(env, caller).call("listSnapshots", { tenantId: caller.tenantId, sessionId });
   return snapshots === null ? sessionNotFound(sessionId) : ok(snapshots);
 };
 
@@ -684,12 +695,15 @@ export const listCredentialHandovers = async (
   caller: Caller,
   sessionId: string,
 ): Promise<Outcome<CredentialHandover[]>> => {
-  const handovers = await tenantOf(env, caller).listCredentialHandovers(caller.tenantId, sessionId);
+  const { handovers } = await tenantOf(env, caller).call("listCredentialHandovers", {
+    tenantId: caller.tenantId,
+    sessionId,
+  });
   return handovers === null ? sessionNotFound(sessionId) : ok(handovers);
 };
 
 export const getSnapshot = async (env: Env, caller: Caller, snapshotId: string): Promise<Outcome<Snapshot>> => {
-  const snapshot = await tenantOf(env, caller).getSnapshot(caller.tenantId, snapshotId);
+  const { snapshot } = await tenantOf(env, caller).call("getSnapshot", { tenantId: caller.tenantId, snapshotId });
   if (snapshot !== null) return ok(snapshot);
   return refuse(404, {
     code: "NotFound",
