@@ -21,6 +21,7 @@ import {
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
+import { type TenantInput, tenantApi } from "../../src/tenant-api.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
 import { pollInterval, TEST_SETTINGS } from "../timing.ts";
 
@@ -293,8 +294,6 @@ test("an apply refused at a later change writes none of the earlier ones", async
   assert.deepEqual(kept, held);
 });
 
-type ConfigApplier = { applyConfig(tenantId: string, writes: unknown[], now: number): Promise<{ kind: string }> };
-
 const tenantRows = async (): Promise<Record<string, unknown[]>> => {
   const storage = await server.getWorker().getDurableObjectStorage("TENANT", { name: tenant });
   const tables = (await storage.exec(
@@ -307,11 +306,9 @@ const tenantRows = async (): Promise<Record<string, unknown[]>> => {
 
 test("a write that breaks a constraint inside the apply transaction rolls back every earlier write", async () => {
   const held = await tenantRows();
-  const stub = (
-    await server.getWorker<{ TENANT: { getByName(name: string): ConfigApplier } }>().getEnv()
-  ).TENANT.getByName(tenant);
+  const tenants = (await server.getWorker<{ TENANT: Parameters<typeof tenantApi>[0] }>().getEnv()).TENANT;
   const secretSetId = crypto.randomUUID();
-  const persona = {
+  const persona: TenantInput<"createPersona">["persona"] = {
     name: "Rollback",
     harness: "ClaudeCode",
     secretSetId,
@@ -321,9 +318,9 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
     boxRetention: "Auto",
     files: [],
   };
-  const applied = await stub.applyConfig(
-    tenant,
-    [
+  const { applied } = await tenantApi(tenants, tenant).call("applyConfig", {
+    tenantId: tenant,
+    writes: [
       {
         kind: "CreateSecretSet",
         secretSetId,
@@ -337,8 +334,8 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
       { kind: "CreatePersona", persona },
       { kind: "CreatePersona", persona },
     ],
-    Date.now(),
-  );
+    now: Date.now(),
+  });
   assert.equal(applied.kind, "Conflict");
   assert.deepEqual(await tenantRows(), held);
 });

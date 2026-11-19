@@ -12,6 +12,7 @@ import type { Problem, ProblemStatus } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { NO_SUPERVISOR_UPDATES } from "./supervisor-updates";
+import { tenantApi } from "./tenant-api.ts";
 
 export type Host = z.infer<typeof HostSchema>;
 export type { HostRecord };
@@ -233,7 +234,9 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
 };
 
 export const withSupervisorUpdates = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
-  const updates = await env.TENANT.getByName(tenantId).supervisorUpdates(hosts.map((host) => host.hostId));
+  const { byHost: updates } = await tenantApi(env.TENANT, tenantId).call("supervisorUpdates", {
+    hostIds: hosts.map((host) => host.hostId),
+  });
   return hosts.map((host) => ({ ...host, ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES) }));
 };
 
