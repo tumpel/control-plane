@@ -62,6 +62,7 @@ import tenant0061 from "../migrations/tenant/0061_box_disk.sql";
 import tenant0062 from "../migrations/tenant/0062_session_placements.sql";
 import tenant0063 from "../migrations/tenant/0063_restore_session_chunks.sql";
 import tenant0064 from "../migrations/tenant/0064_connectors.sql";
+import tenant0065 from "../migrations/tenant/0065_box_memory_min_512.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -129,4 +130,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0062_session_placements", sql: tenant0062 },
   { name: "0063_restore_session_chunks", sql: tenant0063 },
   { name: "0064_connectors", sql: tenant0064 },
+  { name: "0065_box_memory_min_512", sql: tenant0065 },
 ];

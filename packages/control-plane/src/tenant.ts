@@ -1,4 +1,6 @@
 import {
+  BoxDiskLimit,
+  BoxMemoryLimit,
   type HarnessPinCreateSchema,
   HarnessPinSchema,
   type SecretSetCreateSchema,
@@ -234,12 +236,14 @@ export class Tenant extends TenantConnectors {
         now,
       );
       sql.exec(
-        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         crypto.randomUUID(),
         tenantId,
         DEFAULT_PERSONA.name,
         DEFAULT_PERSONA.harness,
         secretSetId,
+        BoxMemoryLimit.DefaultMib,
+        BoxDiskLimit.DefaultMib,
         now,
         now,
       );
