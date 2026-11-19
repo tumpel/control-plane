@@ -61,6 +61,7 @@ import {
   SessionStopQuerySchema,
   SnapshotPathSchema,
   StaticConnectorCreateSchema,
+  SteerCreateSchema,
   SubscriptionTokenMemberSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
@@ -842,6 +843,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/turns/{turnId}",
     TurnPathSchema,
     "Read one turn; state is Offered, Running, Completed or Failed.",
+  ),
+  rest(
+    "tumpel_turn_steer",
+    "POST",
+    "/v1/turns/{turnId}/steers",
+    TurnPathSchema.extend(SteerCreateSchema.shape),
+    "Send a prompt into a running turn: the harness reads it after its next tool call, or just before it would end the turn, and keeps working inside the same turn. Returns the steer, Pending. Read it back with tumpel_turn_list_steers: Delivered once the harness took it, TurnEnded when the turn ended first. Refused TurnNotRunning once the turn ended, and SteerUnsupported for a harness that reads no prompt mid-turn; only Claude Code takes a steer.",
+  ),
+  rest(
+    "tumpel_turn_list_steers",
+    "GET",
+    "/v1/turns/{turnId}/steers",
+    TurnPathSchema,
+    "List a turn's steers, oldest first; state is Pending, Delivered or TurnEnded.",
   ),
   rest(
     "tumpel_turn_wait",

@@ -18,12 +18,16 @@ import {
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
+  type SteerSchema,
+  type SteerTurnResultSchema,
   StopFailureSchema,
+  type TakeSteersResultSchema,
   TranscriptLineSchema,
   TurnFailureSchema,
   TurnImageSchema,
   TurnSchema,
   type TurnSendSchema,
+  TurnStateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
@@ -76,7 +80,7 @@ import { catalogEntry, GOAL_FOLDS } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
-import { personaFileKey, sha256Hex } from "./persona-files";
+import { personaFileKey, type StoredFile, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
   type HeldBox,
@@ -91,6 +95,7 @@ import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
+import { STEER_CONNECTOR_ID, STEER_CONNECTOR_NAME, STEER_SETTINGS_PATH, withSteerHooks } from "./steer.ts";
 import {
   clearSupersededFailure,
   forgetSupervisorUpdates,
@@ -104,6 +109,9 @@ import { type Dimensions, DimensionsSchema, offeredDimensions } from "./turn-met
 export type Session = z.infer<typeof SessionSchema>;
 export type Turn = z.infer<typeof TurnSchema>;
 export type TurnSend = z.infer<typeof TurnSendSchema>;
+type Steer = z.infer<typeof SteerSchema>;
+type SteerSent = z.infer<typeof SteerTurnResultSchema>["sent"];
+type SteersTaken = z.infer<typeof TakeSteersResultSchema>["taken"];
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
 type TurnImage = z.infer<typeof TurnImageSchema>;
@@ -1922,6 +1930,65 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
+  protected steerTurn(turnId: string, prompt: string, now: number): SteerSent {
+    const turn = this.turnRow(turnId);
+    if (turn === null) return { kind: "NotFound" };
+    const inbox = this.ctx.storage.sql.exec("SELECT 1 FROM steer_inboxes WHERE turn_id = ?", turnId).toArray();
+    if (!IN_FLIGHT.includes(turn.state) || (turn.state === "Offered" && inbox.length === 0)) {
+      return { kind: "NotRunning", state: TurnStateSchema.parse(turn.state) };
+    }
+    if (inbox.length === 0) return { kind: "Unsupported" };
+    const steerId = crypto.randomUUID();
+    this.ctx.storage.sql.exec(
+      "INSERT INTO steers (steer_id, turn_id, prompt, created_at) VALUES (?, ?, ?, ?)",
+      steerId,
+      turnId,
+      prompt,
+      now,
+    );
+    return { kind: "Sent", steer: { steerId, turnId, prompt, state: "Pending", createdAt: now } };
+  }
+
+  protected listSteers(turnId: string): Steer[] | null {
+    const turn = this.turnRow(turnId);
+    if (turn === null) return null;
+    return this.ctx.storage.sql
+      .exec<{ steer_id: string; prompt: string; created_at: number; delivered: number }>(
+        `SELECT steer_id, prompt, created_at, EXISTS (SELECT 1 FROM steer_deliveries d WHERE d.steer_id = s.steer_id) AS delivered
+        FROM steers s WHERE turn_id = ? ORDER BY created_at, steer_id`,
+        turnId,
+      )
+      .toArray()
+      .map((row) => ({
+        steerId: row.steer_id,
+        turnId,
+        prompt: row.prompt,
+        state: row.delivered === 1 ? "Delivered" : IN_FLIGHT.includes(turn.state) ? "Pending" : "TurnEnded",
+        createdAt: row.created_at,
+      }));
+  }
+
+  protected takeSteers(turnId: string, now: number): SteersTaken {
+    const turn = this.turnRow(turnId);
+    const inbox = this.ctx.storage.sql.exec("SELECT 1 FROM steer_inboxes WHERE turn_id = ?", turnId).toArray();
+    if (turn?.state !== "Running" || inbox.length === 0) return { kind: "Closed" };
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const pending = sql
+        .exec<{ steer_id: string; prompt: string }>(
+          `SELECT steer_id, prompt FROM steers s WHERE turn_id = ?
+          AND NOT EXISTS (SELECT 1 FROM steer_deliveries d WHERE d.steer_id = s.steer_id)
+          ORDER BY created_at, steer_id`,
+          turnId,
+        )
+        .toArray();
+      for (const row of pending) {
+        sql.exec("INSERT INTO steer_deliveries (steer_id, delivered_at) VALUES (?, ?)", row.steer_id, now);
+      }
+      return { kind: "Taken", prompts: pending.map((row) => row.prompt) };
+    });
+  }
+
   protected async stopSession(
     tenantId: string,
     sessionId: string,
@@ -2441,6 +2508,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
     const { secretSetId } = persona;
     const prebuild = this.hostPrebuild(session.session_id);
+    const steerFile =
+      prebuild === null && session.harness === "ClaudeCode" && this.channelProtocol(hostId) >= CONNECTORS_VERSION
+        ? await this.steerSettings(tenantId, session.persona_id)
+        : null;
+    if (steerFile !== null) {
+      this.ctx.storage.sql.exec("INSERT INTO steer_inboxes (turn_id) VALUES (?) ON CONFLICT DO NOTHING", turnId);
+      connectors.push({
+        connectorId: STEER_CONNECTOR_ID,
+        name: STEER_CONNECTOR_NAME,
+        url: `${session.endpoint}/v1/turns/${encodeURIComponent(turnId)}/steer-inbox`,
+        tokenUrl: `${session.endpoint}/v1/turns/${encodeURIComponent(turnId)}/connectors/${STEER_CONNECTOR_ID}/token`,
+        tokenCredential: await turnToken(turnKey, tenantId, turnId, STEER_CONNECTOR_ID),
+      });
+    }
     const members = prebuild === null ? await this.members(secretSetId) : [];
     const dispatch =
       prebuild === null
@@ -2556,7 +2637,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const credentialSeconds = turnCredentialSeconds(settings);
     const snapshots = await this.downloads(restored, credentialSeconds, now);
     const personaFiles =
-      prebuild === null ? await this.personaFiles(tenantId, session.persona_id, credentialSeconds, now) : [];
+      prebuild === null ? await this.personaFiles(tenantId, session.persona_id, steerFile, credentialSeconds, now) : [];
     return {
       kind: "Ready",
       credential: {
@@ -2596,18 +2677,44 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return picked.restored;
   }
 
+  private async steerSettings(tenantId: string, personaId: string): Promise<StoredFile | null> {
+    const [own] = this.ctx.storage.sql
+      .exec<{ digest: string }>(
+        "SELECT digest FROM persona_files WHERE persona_id = ? AND path = ?",
+        personaId,
+        STEER_SETTINGS_PATH,
+      )
+      .toArray();
+    const stored = own === undefined ? null : await this.env.STORE.get(personaFileKey(tenantId, own.digest));
+    if (stored === null && own !== undefined) {
+      throw new Error(
+        `persona ${personaId} lists ${STEER_SETTINGS_PATH} at digest ${own.digest}, which the store lacks`,
+      );
+    }
+    const merged = withSteerHooks(stored === null ? null : await stored.text());
+    if (merged === null) return null;
+    const bytes = new Uint8Array(new TextEncoder().encode(merged));
+    const digest = await sha256Hex(bytes);
+    const key = personaFileKey(tenantId, digest);
+    if ((await this.env.STORE.head(key)) === null) await this.env.STORE.put(key, bytes);
+    return { path: STEER_SETTINGS_PATH, digest, sizeBytes: bytes.byteLength };
+  }
+
   private async personaFiles(
     tenantId: string,
     personaId: string,
+    replacing: StoredFile | null,
     seconds: number,
     now: number,
   ): Promise<PersonaFileDownload[]> {
-    const files = this.ctx.storage.sql
+    const own = this.ctx.storage.sql
       .exec<{ path: string; digest: string; size_bytes: number }>(
         "SELECT path, digest, size_bytes FROM persona_files WHERE persona_id = ? ORDER BY path",
         personaId,
       )
-      .toArray();
+      .toArray()
+      .map((row) => ({ path: row.path, digest: row.digest, sizeBytes: row.size_bytes }));
+    const files = replacing === null ? own : [...own.filter((file) => file.path !== replacing.path), replacing];
     if (files.length === 0) return [];
     const signer = signerOf(
       this.env,
@@ -2620,7 +2727,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       downloads.push({
         path: file.path,
         digest: file.digest,
-        sizeBytes: file.size_bytes,
+        sizeBytes: file.sizeBytes,
         downloadUrl: await signer.presign("GET", personaFileKey(tenantId, file.digest), seconds, new Date(now)),
         downloadExpiresAt: iso(now + seconds * 1000),
       });

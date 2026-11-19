@@ -6,6 +6,7 @@ import {
   OAuthConnectorCreateSchema,
   StaticConnectorCreateSchema,
   StaticConnectorTokenWriteSchema,
+  TurnPathSchema,
 } from "@tumpel/schemas";
 import {
   CALLBACK_PATH,
@@ -24,6 +25,7 @@ import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { htmlPage } from "./pages";
+import { hookAnswer, isHookInput, mcpAnswer, STEER_CONNECTOR_ID, SteerInboxRequestSchema } from "./steer.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { ConnectorCallback, ConnectorWritten } from "./tenant-connectors.ts";
 
@@ -33,6 +35,7 @@ const CONNECTOR_PATH = /^\/v1\/connectors\/([^/]+)(\/credential)?$/;
 const AUTHORIZE_PATH = /^\/v1\/oauth-connectors\/([^/]+)\/authorize$/;
 const TOKEN_PATH = /^\/v1\/static-connectors\/([^/]+)\/token$/;
 const TURN_TOKEN_PATH = /^\/v1\/turns\/([^/]+)\/connectors\/([^/]+)\/token$/;
+const STEER_INBOX_PATH = /^\/v1\/turns\/([^/]+)\/steer-inbox$/;
 
 const notFound = (connectorId: string): Response =>
   problem(404, {
@@ -256,6 +259,7 @@ const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnec
   if (!(await turnTokenMatches(key, token, turnId, connectorId))) {
     return turnTokenRefused(`the token is not the one turn ${turnId} holds for connector ${connectorId}`);
   }
+  if (connectorId === STEER_CONNECTOR_ID) return json({ accessToken: token });
   const { served } = await tenantApi(env.TENANT, tenantId).call("serveConnectorToken", {
     turnId,
     connectorId,
@@ -285,6 +289,36 @@ const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnec
     detail: served.detail,
     fix: "Call the tool again; when the failure names a reconnect, an Owner authorizes the connector again",
   });
+};
+
+const steerInbox = async (request: Request, env: Env, rawTurn: string): Promise<Response> => {
+  const path = TurnPathSchema.safeParse({ turnId: decodeURIComponent(rawTurn) });
+  const authorization = request.headers.get("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
+  const tenantId = tenantOfTurnToken(token);
+  if (!path.success || tenantId === null) return turnTokenRefused("the request carries no steer turn token");
+  const { turnId } = path.data;
+  const key = await keyStoreOf(env).signingKey(TURN_TOKEN_PURPOSE);
+  if (!(await turnTokenMatches(key, token, turnId, STEER_CONNECTOR_ID))) {
+    return turnTokenRefused(`the token is not the one turn ${turnId} holds for its steer inbox`);
+  }
+  if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+  const body = await parseBody(request, SteerInboxRequestSchema, "steerInbox.take");
+  if (!body.ok) return body.response;
+  if (!isHookInput(body.value)) {
+    const answered = mcpAnswer(body.value);
+    return answered === null ? new Response(null, { status: 202 }) : json(answered);
+  }
+  const { taken } = await tenantApi(env.TENANT, tenantId).call("takeSteers", { turnId, now: Date.now() });
+  if (taken.kind === "Closed") {
+    return problem(409, {
+      code: "TurnNotRunning",
+      title: "Turn not running",
+      detail: `turn ${turnId} is not running, so its steer inbox is closed`,
+      fix: "Send the prompt as the session's next turn",
+    });
+  }
+  return json(hookAnswer(body.value, taken.prompts));
 };
 
 const resultPage = (title: string, mark: "Done" | "Error", detail: string, fix: string | null): Page => ({
@@ -352,6 +386,8 @@ export const handleConnectors = async (
   const turnToken = method === "POST" ? TURN_TOKEN_PATH.exec(pathname) : null;
   if (turnToken?.[1] !== undefined && turnToken[2] !== undefined)
     return fetchToken(request, env, turnToken[1], turnToken[2]);
+  const inbox = STEER_INBOX_PATH.exec(pathname)?.[1];
+  if (inbox !== undefined) return steerInbox(request, env, inbox);
   const listing = method === "GET" && pathname === "/v1/connectors";
   const creating = method === "POST" && (pathname === "/v1/static-connectors" || pathname === "/v1/oauth-connectors");
   const one = CONNECTOR_PATH.exec(pathname);
