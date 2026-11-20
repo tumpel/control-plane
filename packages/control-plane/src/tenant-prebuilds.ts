@@ -45,7 +45,7 @@ import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from ".
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { type FailureReport, type NewSession, PREBUILD_ARCHITECTURE, type Started } from "./tenant-sessions";
-import { TenantSubscriptions } from "./tenant-subscriptions.ts";
+import { TenantTriggers } from "./tenant-triggers.ts";
 
 export type Prebuild = z.infer<typeof PrebuildSchema>;
 export type PrebuildFailure = z.infer<typeof PrebuildFailureSchema>;
@@ -333,7 +333,7 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
     updatedAt: row.updated_at,
   });
 
-export class TenantPrebuilds extends TenantSubscriptions {
+export class TenantPrebuilds extends TenantTriggers {
   protected listPrebuilds(tenantId: string, repository: string | null): Prebuild[] {
     return this.ctx.storage.sql
       .exec<PrebuildRow>(

@@ -12,7 +12,7 @@ import type { z } from "zod";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt } from "./delivery-prompt.ts";
 import { DELIVERY_GOAL_ROUNDS, GOAL_FOLDS } from "./harness-catalog.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import { SESSION_TAG_LIMIT, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
+import { type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];

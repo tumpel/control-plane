@@ -1,14 +1,26 @@
 import assert from "node:assert/strict";
-import { createHmac, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
+import { createHmac, generateKeyPairSync, type KeyObject, randomUUID, sign } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DeviceAuthorizationSchema, DeviceTokenSchema, GitHubInstallationSchema, WhoamiSchema } from "@tumpel/schemas";
+import {
+  DeviceAuthorizationSchema,
+  DeviceTokenSchema,
+  EventPageSchema,
+  GitHubInstallationSchema,
+  PersonaSchema,
+  SecretSetSchema,
+  TenantApiProtocol,
+  TriggerSchema,
+  UpdateTriggerResultSchema,
+  WhoamiSchema,
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
 import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
+import { projectRoute } from "../src/trigger-routes.ts";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const ACCESS_AUD = "tumpel-github-installations-e2e";
@@ -80,6 +92,7 @@ before(async () => {
           ACCESS_ISSUER: keysOrigin,
           ACCESS_AUD,
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
+          API_ORIGIN: "https://api.tumpel.test",
           SECRETS_KEK,
           TUMPEL_SETTINGS: TEST_SETTINGS,
         },
@@ -144,7 +157,12 @@ const signedDelivery = async (event: string, payload: unknown) => {
   const signature = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex")}`;
   const response = await server.fetch(`${origin}/github/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-github-event": event, "x-hub-signature-256": signature },
+    headers: {
+      "content-type": "application/json",
+      "x-github-event": event,
+      "x-github-delivery": randomUUID(),
+      "x-hub-signature-256": signature,
+    },
     body,
   });
   assert.equal(response.status, 204, await response.text());
@@ -198,4 +216,136 @@ test("connecting another account from Tumpel adds its installation and keeps the
     ],
   );
   assert.equal((await linkInstallation(db, "another-tenant", tumpel, Date.now())).kind, "OtherTenant");
+});
+
+test("a trigger drops a delivery it does not match and records why a matched one started no session", async () => {
+  const secrets = [{ kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: "sk-ant-api03-trigger-test" }];
+  const secretSet = await send("POST", "/v1/secret-sets", { name: "reviewer secrets", secrets }, bearer);
+  assert.equal(secretSet.status, 200, await secretSet.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await secretSet.json());
+  const persona = await send(
+    "POST",
+    "/v1/personas",
+    { name: "Reviewer", harness: "ClaudeCode", secretSetId, connectorIds: [], files: [] },
+    bearer,
+  );
+  assert.equal(persona.status, 200, await persona.clone().text());
+  const { personaId } = PersonaSchema.parse(await persona.json());
+  const created = await send(
+    "POST",
+    "/v1/triggers",
+    {
+      name: "agent-review",
+      source: {
+        kind: "GitHub",
+        event: "status",
+        conditions: [
+          { field: "context", values: ["agent-review"] },
+          { field: "state", values: ["pending"] },
+        ],
+      },
+      personaId,
+      model: "claude-sonnet-5-5",
+      prompt: "Review {{target_url}} at {{sha}}",
+    },
+    bearer,
+  );
+  assert.equal(created.status, 200, await created.clone().text());
+  const { triggerId } = TriggerSchema.parse(await created.json());
+  const status = (state: string, extra: Record<string, unknown> = {}) => ({
+    installation: { id: INSTALLATION_ID },
+    repository: { full_name: "acme/app", html_url: "https://github.com/acme/app" },
+    context: "agent-review",
+    state,
+    sha: "4f1c9e2",
+    ...extra,
+  });
+  await signedDelivery("status", status("success", { target_url: "https://github.com/acme/app/pull/1" }));
+  await signedDelivery("status", status("pending"));
+  await signedDelivery("status", status("pending", { target_url: "https://github.com/acme/app/pull/1" }));
+  const events = await send("GET", `/v1/events?triggerId=${triggerId}&afterEventId=0&waitSeconds=0`, undefined, bearer);
+  assert.equal(events.status, 200, await events.clone().text());
+  assert.deepEqual(
+    EventPageSchema.parse(await events.json()).events.map((event) =>
+      event.event === "TriggerStartRefused" ? [event.triggerId, event.refusal.code] : [],
+    ),
+    [
+      [triggerId, "TriggerFieldMissing"],
+      [triggerId, "NoHostAvailable"],
+    ],
+  );
+});
+
+test("a stale route starts nothing its trigger rejects and is repaired, and an older projection never replaces a newer one", async () => {
+  const env = await server.getWorker<{ DB: Parameters<typeof projectRoute>[0] }>().getEnv();
+  const listed = await send("GET", "/v1/triggers", undefined, bearer);
+  const [trigger] = TriggerSchema.array().parse(await listed.json());
+  assert.ok(trigger);
+  const conditions = () =>
+    env.DB.prepare("SELECT COUNT(*) AS held FROM trigger_route_conditions WHERE trigger_id = ?")
+      .bind(trigger.triggerId)
+      .first<{ held: number }>();
+  await env.DB.prepare("DELETE FROM trigger_route_conditions WHERE trigger_id = ?").bind(trigger.triggerId).run();
+  await signedDelivery("status", {
+    installation: { id: INSTALLATION_ID },
+    repository: { full_name: "acme/app", html_url: "https://github.com/acme/app" },
+    context: "ci",
+    state: "pending",
+    sha: "4f1c9e2",
+    target_url: "https://github.com/acme/app/pull/1",
+  });
+  const events = await send(
+    "GET",
+    `/v1/events?triggerId=${trigger.triggerId}&afterEventId=0&waitSeconds=0`,
+    undefined,
+    bearer,
+  );
+  assert.equal(EventPageSchema.parse(await events.json()).events.length, 2);
+  assert.deepEqual(await conditions(), { held: 2 });
+  await projectRoute(env.DB, {
+    ...trigger,
+    updatedAt: trigger.updatedAt - 1,
+    source: { kind: "GitHub", event: "push", conditions: [] },
+  });
+  assert.deepEqual(
+    await env.DB.prepare("SELECT event FROM trigger_routes WHERE trigger_id = ?").bind(trigger.triggerId).first(),
+    { event: "status" },
+  );
+  assert.deepEqual(await conditions(), { held: 2 });
+});
+
+test("two trigger writes in one millisecond get increasing versions, so the older projection never replaces the newer route", async () => {
+  type Handle = { handle(request: unknown): Promise<{ result: unknown }> };
+  const env = await server
+    .getWorker<{ DB: Parameters<typeof projectRoute>[0]; TENANT: { getByName(name: string): Handle } }>()
+    .getEnv();
+  const [trigger] = TriggerSchema.array().parse(await (await send("GET", "/v1/triggers", undefined, bearer)).json());
+  assert.ok(trigger);
+  const update = async (event: "push" | "status") => {
+    const { result } = await env.TENANT.getByName(tenantId).handle({
+      tenantApiVersion: TenantApiProtocol.Version,
+      operation: "updateTrigger",
+      input: {
+        tenantId,
+        triggerId: trigger.triggerId,
+        patch: { source: { ...trigger.source, event } },
+        principalId: trigger.principalId,
+        now: trigger.updatedAt,
+      },
+    });
+    const { updated } = UpdateTriggerResultSchema.parse(result);
+    assert.equal(updated.kind, "Updated");
+    return updated.kind === "Updated" ? updated.trigger : trigger;
+  };
+  const older = await update("push");
+  const newer = await update("status");
+  assert.ok(older.updatedAt > trigger.updatedAt && newer.updatedAt > older.updatedAt);
+  await projectRoute(env.DB, newer);
+  await projectRoute(env.DB, older);
+  assert.deepEqual(
+    await env.DB.prepare("SELECT event, updated_at FROM trigger_routes WHERE trigger_id = ?")
+      .bind(trigger.triggerId)
+      .first(),
+    { event: "status", updated_at: newer.updatedAt },
+  );
 });

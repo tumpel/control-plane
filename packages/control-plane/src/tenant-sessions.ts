@@ -269,6 +269,8 @@ type SessionViewRow = SessionRow & {
   tags: string;
   origin_session_id: string | null;
   origin_turn_id: string | null;
+  origin_trigger_id: string | null;
+  origin_delivery_id: string | null;
 };
 
 type PersonaRow = {
@@ -414,13 +416,14 @@ const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.b
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
   i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch,
   (SELECT json_group_array(tag) FROM session_tags WHERE session_tags.session_id = s.session_id) AS tags,
-  o.origin_session_id, o.origin_turn_id
+  o.origin_session_id, o.origin_turn_id, g.trigger_id AS origin_trigger_id, g.delivery_id AS origin_delivery_id
   FROM sessions AS s
   JOIN (${TURN_SELECT}) AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
   LEFT JOIN session_issues AS i ON i.session_id = s.session_id
   LEFT JOIN session_box_memory AS m ON m.session_id = s.session_id
   LEFT JOIN session_box_retention AS r ON r.session_id = s.session_id
-  LEFT JOIN session_origins AS o ON o.session_id = s.session_id`;
+  LEFT JOIN session_origins AS o ON o.session_id = s.session_id
+  LEFT JOIN session_trigger_origins AS g ON g.session_id = s.session_id`;
 const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, NULL AS reason, NULL AS detail, NULL AS failed_at, created_at, updated_at FROM snapshots
   UNION ALL
@@ -471,6 +474,16 @@ const CHUNK_GRACE_MS = 24 * 60 * 60 * 1000;
 const LIVE_CHUNKS =
   "SELECT digest FROM snapshot_manifest_chunks UNION SELECT digest FROM snapshot_chunks UNION SELECT digest FROM session_chunks";
 
+const startedByOf = (row: SessionViewRow): SessionStartedBy => {
+  if (row.origin_trigger_id !== null && row.origin_delivery_id !== null) {
+    return { kind: "Trigger", triggerId: row.origin_trigger_id, deliveryId: row.origin_delivery_id };
+  }
+  if (row.origin_session_id !== null && row.origin_turn_id !== null) {
+    return { kind: "Turn", sessionId: row.origin_session_id, turnId: row.origin_turn_id };
+  }
+  return { kind: "Person", principalId: row.principal_id };
+};
+
 const toSession = (
   tenantId: string,
   row: SessionViewRow,
@@ -481,10 +494,7 @@ const toSession = (
     sessionId: row.session_id,
     tenantId,
     principalId: row.principal_id,
-    startedBy:
-      row.origin_session_id === null
-        ? { kind: "Person", principalId: row.principal_id }
-        : { kind: "Turn", sessionId: row.origin_session_id, turnId: row.origin_turn_id },
+    startedBy: startedByOf(row),
     tags: JSON.parse(row.tags).sort(),
     hostId: row.host_id,
     boxId: row.box_id,
@@ -2642,11 +2652,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
         AND NOT EXISTS (SELECT 1 FROM json_each(?4) AS wanted
           WHERE wanted.value NOT IN (SELECT tag FROM session_tags WHERE session_tags.session_id = s.session_id))
         AND NOT EXISTS (SELECT 1 FROM prebuild_sessions WHERE prebuild_sessions.session_id = s.session_id)
+        AND (?5 IS NULL OR g.trigger_id = ?5)
         ORDER BY s.created_at, s.session_id`,
         filter.state ?? null,
         filter.hostId ?? null,
         filter.lastTurnBefore ?? null,
         JSON.stringify(filter.tags ?? []),
+        filter.triggerId ?? null,
       )
       .toArray()
       .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));

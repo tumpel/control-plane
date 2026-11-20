@@ -7,7 +7,7 @@ names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`, Triggers `trigger`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
 `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`
 the verbs `create-static` and `create-oauth`,
@@ -139,6 +139,12 @@ nothing: the server cannot read your environment, so they return the config entr
 | `TenantConfigs_apply`                    | `tumpel_config_apply`                        | `tumpel config apply`                        |
 | `TenantConfigs_plan`                     | `tumpel_config_plan`                         | `tumpel config plan`                         |
 | `Transcripts_read`                       | `tumpel_transcript_read`                     | `tumpel transcript read`                     |
+| `Triggers_create`                        | `tumpel_trigger_create`                      | `tumpel trigger create`                      |
+| `Triggers_delete`                        | `tumpel_trigger_delete`                      | `tumpel trigger delete`                      |
+| `Triggers_get`                           | `tumpel_trigger_get`                         | `tumpel trigger get`                         |
+| `Triggers_list`                          | `tumpel_trigger_list`                        | `tumpel trigger list`                        |
+| `Triggers_test`                          | `tumpel_trigger_test`                        | `tumpel trigger test`                        |
+| `Triggers_update`                        | `tumpel_trigger_update`                      | `tumpel trigger update`                      |
 | `Turns_cancel`                           | `tumpel_turn_cancel`                         | `tumpel turn cancel`                         |
 | `Turns_get`                              | `tumpel_turn_get`                            | `tumpel turn get`                            |
 | `Turns_getFailure`                       | `tumpel_turn_failure`                        | `tumpel turn failure`                        |

@@ -22,15 +22,23 @@ import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
 import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
-import { GOAL_FOLDS, GOAL_TURN_CAP, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
+import {
+  GOAL_FOLDS,
+  GOAL_TURN_CAP,
+  HARNESS_CATALOG,
+  type HarnessCatalogEntry,
+  pinnedEntry,
+} from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
+import type { StoredPersona } from "./persona-files.ts";
 import type { Unplaceable } from "./placement.ts";
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
+import type { SecretSetRead } from "./tenant.ts";
 import { tenantApi } from "./tenant-api.ts";
 import {
   type CredentialHandover,
@@ -229,21 +237,20 @@ const personaNotFound = (personaId: string): Refused =>
     fix: "List your personas and start with one of their ids",
   });
 
-const prepareStart = async (
-  env: Env,
-  caller: Caller,
-  start: SessionStart,
-  endpoint: string,
-  now: number,
-): Promise<Outcome<NewSession>> => {
-  const target = githubRepository(start.repository);
-  if (target === null) return refuse(422, notARepository(start.repository));
-  const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
-    tenantId: caller.tenantId,
-    personaId: start.personaId,
-  });
-  if (persona === null) return personaNotFound(start.personaId);
-  const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, persona.harness);
+export interface StartCheck {
+  personaId: string;
+  persona: StoredPersona | null;
+  pins: readonly { harness: string; harnessVersion: string }[];
+  secretSet: (persona: StoredPersona) => SecretSetRead;
+  model: string;
+  operation: string;
+  now: number;
+}
+
+export const checkStart = (check: StartCheck): Outcome<HarnessCatalogEntry> => {
+  const { persona } = check;
+  if (persona === null) return personaNotFound(check.personaId);
+  const entry = pinnedEntry(check.pins, persona.harness);
   if (entry === undefined) {
     return refuse(422, {
       code: "HarnessNotInCatalog",
@@ -252,16 +259,13 @@ const prepareStart = async (
       fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
     });
   }
-  const { read } = await tenantApi(env.TENANT, caller.tenantId).call("getSecretSet", {
-    tenantId: caller.tenantId,
-    secretSetId: persona.secretSetId,
-  });
+  const read = check.secretSet(persona);
   if (read.kind === "NotFound") {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
-  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet("sessions.start", read));
+  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet(check.operation, read));
   const { secretSet } = read;
-  const credential = checkModelCredential(entry, secretSet.keys, start.model, now);
+  const credential = checkModelCredential(entry, secretSet.keys, check.model, check.now);
   if (credential.kind !== "Usable") {
     return credentialRefused(
       credential,
@@ -270,6 +274,42 @@ const prepareStart = async (
       "start again",
     );
   }
+  return ok(entry);
+};
+
+export const startable = async (
+  env: Env,
+  tenantId: string,
+  personaId: string,
+  model: string,
+  operation: string,
+  now: number,
+): Promise<Outcome<HarnessCatalogEntry>> => {
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const { persona } = await tenant.call("getPersona", { tenantId, personaId });
+  if (persona === null) return personaNotFound(personaId);
+  const { pins } = await tenant.call("listPins", {});
+  const { read } = await tenant.call("getSecretSet", { tenantId, secretSetId: persona.secretSetId });
+  return checkStart({ personaId, persona, pins, secretSet: () => read, model, operation, now });
+};
+
+export const startTarget = (repository: string): Outcome<string> => {
+  const target = githubRepository(repository);
+  return target === null ? refuse(422, notARepository(repository)) : ok(repositoryUrl(target));
+};
+
+const prepareStart = async (
+  env: Env,
+  caller: Caller,
+  start: SessionStart,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<NewSession>> => {
+  const repository = startTarget(start.repository);
+  if (!repository.ok) return repository;
+  const checked = await startable(env, caller.tenantId, start.personaId, start.model, "sessions.start", now);
+  if (!checked.ok) return checked;
+  const entry = checked.value;
   return ok({
     principalId: caller.principalId,
     startedBy: caller.origin,
@@ -277,7 +317,7 @@ const prepareStart = async (
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
-    start: { ...start, repository: repositoryUrl(target) },
+    start: { ...start, repository: repository.value },
   });
 };
 
@@ -421,6 +461,7 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
+  if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
   return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
 };
 
@@ -691,9 +732,9 @@ export const waitTurns = async (
   const { listed } = await tenant.call("listEvents", {
     tenantId,
     afterEventId: null,
+    triggerId: null,
     events: [],
     sessionId: null,
-    triggerId: null,
     waitSeconds: 0,
   });
   if (listed.kind !== "Read") throw new Error(`tenant ${tenantId} refused a read from the end of its event log`);
@@ -706,6 +747,7 @@ export const waitTurns = async (
     cursor: listed.page.lastEventId,
     events: ["TurnCompleted" as const, "TurnFailed" as const],
     sessionId: null,
+    triggerId: null,
   };
   await waitOnChannel(env, subscription, timeoutSeconds, (event) => turnIds.includes(String(event.turnId)));
   const next = (await read()).waited;

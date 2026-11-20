@@ -11,12 +11,14 @@ import {
   type SecretValueSchema,
   type SessionSchema,
   type TenantConfigPlanRequestSchema,
+  type TriggerSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { GitHubUser } from "./github.ts";
 import type { HostRecord } from "./host-record.ts";
 import { problem } from "./http.ts";
 import type { StoredFile, StoredPersona } from "./persona-files.ts";
+import { conditionRows } from "./trigger-match.ts";
 
 export type PlanRequest = z.infer<typeof TenantConfigPlanRequestSchema>;
 export type TenantConfig = PlanRequest["config"];
@@ -24,6 +26,8 @@ export type ConfigPersona = TenantConfig["personas"][number];
 type ConfigSecretSet = z.infer<typeof ConfigSecretSetSchema>;
 type ConfigSecret = ConfigSecretSet["secrets"][number];
 type ConfigHost = TenantConfig["hosts"][number];
+type ConfigTrigger = NonNullable<TenantConfig["triggers"]>[number];
+type Trigger = z.infer<typeof TriggerSchema>;
 export type HarnessPinCreate = TenantConfig["harnessPins"][number];
 type ConfigChange = z.infer<typeof ConfigChangeSchema>;
 type SecretSet = z.infer<typeof SecretSetSchema>;
@@ -51,7 +55,10 @@ export type ConfigWrite =
   | { kind: "UpdatePersona"; personaId: string; persona: Omit<PersonaWrite, "harness"> }
   | { kind: "DeletePersona"; personaId: string }
   | { kind: "Pin"; pin: HarnessPinWrite }
-  | { kind: "Unpin"; harness: string };
+  | { kind: "Unpin"; harness: string }
+  | { kind: "CreateTrigger"; trigger: ConfigTrigger; principalId: string }
+  | { kind: "UpdateTrigger"; triggerId: string; trigger: ConfigTrigger; principalId: string }
+  | { kind: "DeleteTrigger"; triggerId: string };
 
 export interface Live {
   personas: StoredPersona[];
@@ -60,6 +67,7 @@ export interface Live {
   pins: Pin[];
   hosts: HostRecord[];
   sessions: Session[];
+  triggers: Trigger[];
 }
 
 export interface LocalFile {
@@ -105,7 +113,12 @@ export type Step =
   | { kind: "CreatePin"; pin: HarnessPinCreate }
   | { kind: "UpdatePin"; pin: HarnessPinCreate; from: string }
   | { kind: "DeletePin"; harness: string }
-  | { kind: "LabelHost"; host: ConfigHost };
+  | { kind: "LabelHost"; host: ConfigHost }
+  | { kind: "CreateTrigger"; trigger: ConfigTrigger }
+  | { kind: "UpdateTrigger"; triggerId: string; trigger: ConfigTrigger }
+  | { kind: "DeleteTrigger"; triggerId: string; name: string };
+
+export const TRIGGER_STEPS: readonly Step["kind"][] = ["CreateTrigger", "UpdateTrigger", "DeleteTrigger"];
 
 export const stopped = (problems: string[]): Response =>
   problem(422, {
@@ -226,6 +239,27 @@ export const changeOf = (step: Step): ConfigChange => {
         resource: "Host",
         name: step.host.hostId,
         description: `update host ${step.host.hostId} labels: [${step.host.labels.join(", ")}]`,
+      };
+    case "CreateTrigger":
+      return {
+        action: "Create",
+        resource: "Trigger",
+        name: step.trigger.name,
+        description: `create trigger ${step.trigger.name} on ${step.trigger.source.kind} ${step.trigger.source.event} starting persona ${step.trigger.personaName}`,
+      };
+    case "UpdateTrigger":
+      return {
+        action: "Update",
+        resource: "Trigger",
+        name: step.trigger.name,
+        description: `update trigger ${step.trigger.name} (${step.triggerId}) on ${step.trigger.source.kind} ${step.trigger.source.event} starting persona ${step.trigger.personaName}`,
+      };
+    case "DeleteTrigger":
+      return {
+        action: "Delete",
+        resource: "Trigger",
+        name: step.name,
+        description: `delete trigger ${step.name} (${step.triggerId})`,
       };
   }
 };
@@ -414,6 +448,46 @@ const planHosts = (desired: ConfigHost[], live: HostRecord[], steps: Step[], pro
   }
 };
 
+const triggerShape = (trigger: ConfigTrigger): string =>
+  JSON.stringify([
+    trigger.source.kind,
+    trigger.source.event,
+    trigger.personaName,
+    trigger.model,
+    trigger.prompt,
+    conditionRows(trigger.source.conditions).sort(
+      (left, right) => left.position - right.position || left.value.localeCompare(right.value),
+    ),
+  ]);
+
+const planTriggers = (config: TenantConfig, live: Live, steps: Step[], problems: string[]): void => {
+  if (config.triggers === undefined) return;
+  const personas = new Set(config.personas.map((persona) => persona.name));
+  const personaNames = new Map(live.personas.map((persona) => [persona.personaId, persona.name]));
+  const byName = new Map(live.triggers.map((trigger) => [trigger.name, trigger]));
+  for (const trigger of config.triggers) {
+    if (!personas.has(trigger.personaName)) {
+      problems.push(
+        `trigger ${JSON.stringify(trigger.name)} names persona ${JSON.stringify(trigger.personaName)}, which the config does not hold; add it to personas or name one that is there`,
+      );
+      continue;
+    }
+    const current = byName.get(trigger.name);
+    if (current === undefined) {
+      steps.push({ kind: "CreateTrigger", trigger });
+      continue;
+    }
+    const held = { ...current, personaName: personaNames.get(current.personaId) ?? "" };
+    if (triggerShape(held) !== triggerShape(trigger)) {
+      steps.push({ kind: "UpdateTrigger", triggerId: current.triggerId, trigger });
+    }
+  }
+  const wanted = new Set(config.triggers.map((trigger) => trigger.name));
+  for (const trigger of live.triggers.filter((each) => !wanted.has(each.name))) {
+    steps.push({ kind: "DeleteTrigger", triggerId: trigger.triggerId, name: trigger.name });
+  }
+};
+
 export interface Desired {
   config: TenantConfig;
   files: Map<string, SentFile>;
@@ -426,11 +500,6 @@ export type Planned = { ok: true; steps: Step[] } | { ok: false; problems: strin
 export const planOf = (desired: Desired, live: Live): Planned => {
   const { config } = desired;
   const problems: string[] = [];
-  if ((config.triggers ?? []).length > 0) {
-    problems.push(
-      "the config lists triggers, and this control plane runs no triggers yet; remove triggers from the config",
-    );
-  }
   const rename = "give each one its own name";
   checkUnique(
     problems,
@@ -474,6 +543,12 @@ export const planOf = (desired: Desired, live: Live): Planned => {
   );
   checkUnique(
     problems,
+    "the trigger",
+    (config.triggers ?? []).map((trigger) => trigger.name),
+    rename,
+  );
+  checkUnique(
+    problems,
     "the host",
     config.hosts.map((host) => host.hostId),
     "list each host once",
@@ -502,6 +577,7 @@ export const planOf = (desired: Desired, live: Live): Planned => {
   planSecretSetDeletes(sets, live.secretSets, steps);
   planPins(config.harnessPins, live.pins, steps);
   planHosts(config.hosts, live.hosts, steps, problems);
+  planTriggers(config, live, steps, problems);
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, steps };
 };
