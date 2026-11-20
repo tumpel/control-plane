@@ -70,11 +70,11 @@ import tenant0069 from "../migrations/tenant/0069_events.sql";
 import tenant0070 from "../migrations/tenant/0070_snapshot_manifest_chunks.sql";
 import tenant0071 from "../migrations/tenant/0071_turn_timing_starts.sql";
 import tenant0072 from "../migrations/tenant/0072_turn_session_waits.sql";
-import tenant0073 from "../migrations/tenant/0073_persona_tumpel_mcp.sql";
-import tenant0074 from "../migrations/tenant/0074_steers.sql";
-import tenant0075 from "../migrations/tenant/0075_session_tags.sql";
-import tenant0076 from "../migrations/tenant/0076_session_origins.sql";
-import tenant0077 from "../migrations/tenant/0077_subscriptions.sql";
+import tenant0074 from "../migrations/tenant/0074_persona_tumpel_mcp.sql";
+import tenant0075 from "../migrations/tenant/0075_steers.sql";
+import tenant0076 from "../migrations/tenant/0076_session_tags.sql";
+import tenant0077 from "../migrations/tenant/0077_session_origins.sql";
+import tenant0078 from "../migrations/tenant/0078_subscriptions.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -150,9 +150,9 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0070_snapshot_manifest_chunks", sql: tenant0070 },
   { name: "0071_turn_timing_starts", sql: tenant0071 },
   { name: "0072_turn_session_waits", sql: tenant0072 },
-  { name: "0073_persona_tumpel_mcp", sql: tenant0073 },
-  { name: "0074_steers", sql: tenant0074 },
-  { name: "0075_session_tags", sql: tenant0075 },
-  { name: "0076_session_origins", sql: tenant0076 },
-  { name: "0077_subscriptions", sql: tenant0077 },
+  { name: "0074_persona_tumpel_mcp", sql: tenant0074 },
+  { name: "0075_steers", sql: tenant0075 },
+  { name: "0076_session_tags", sql: tenant0076 },
+  { name: "0077_session_origins", sql: tenant0077 },
+  { name: "0078_subscriptions", sql: tenant0078 },
 ];
