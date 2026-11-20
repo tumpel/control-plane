@@ -491,6 +491,20 @@ export class Tenant extends TenantConnectors {
     getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
     waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
+    listPushSubscriptions: ({ tenantId, principalId }) => ({
+      subscriptions: this.listPushSubscriptions(tenantId, principalId),
+    }),
+    createPushSubscription: async ({ tenantId, principalId, subscription, now }) => ({
+      subscription: await this.createPushSubscription(tenantId, principalId, subscription, now),
+    }),
+    deletePushSubscription: async ({ principalId, pushSubscriptionId }) => ({
+      deleted: await this.deletePushSubscription(principalId, pushSubscriptionId),
+    }),
+    forgetPushSubscription: ({ pushSubscriptionId }) => {
+      this.forgetPushSubscription(pushSubscriptionId);
+      return {};
+    },
+    pushTarget: async ({ pushSubscriptionId }) => ({ target: await this.pushTarget(pushSubscriptionId) }),
     getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
