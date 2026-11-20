@@ -238,13 +238,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected override startTags(startedBy: Session["startedBy"], tags: string[]): string[] {
     if (startedBy.kind !== "Turn") return tags;
-    const all = [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
-    if (all.length > SESSION_TAG_LIMIT) {
-      throw new Error(
-        `a session started by session ${startedBy.sessionId} would carry ${all.length} tags: ${all.join(", ")}`,
-      );
-    }
-    return all;
+    return [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
   }
 
   protected override tumpelMcp(sessionId: string): boolean {

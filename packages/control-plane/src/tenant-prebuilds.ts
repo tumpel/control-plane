@@ -761,6 +761,11 @@ export class TenantPrebuilds extends TenantSubscriptions {
         now,
       );
     });
+    if (begun.kind === "TagsOverLimit") {
+      throw new Error(
+        `prebuild ${commit.prebuildId} would carry ${begun.tags.length} tags, and a prebuild inherits none`,
+      );
+    }
     if (begun.kind !== "Started") return begun;
     return { kind: "Started", started: this.prebuildOf(tenantId, commit.prebuildId) };
   }

@@ -259,7 +259,18 @@ export class Tenant extends TenantConnectors {
       removed: this.removeSecretMember(tenantId, secretSetId, name, now),
     }),
     deleteSecretSet: ({ secretSetId }) => ({ deleted: this.deleteSecretSet(secretSetId) }),
-    applyConfig: async ({ tenantId, writes, now }) => ({ applied: await this.applyConfig(tenantId, writes, now) }),
+    applyConfig: async ({ tenantId, writes, now }) => ({
+      applied: await this.applyConfig(
+        tenantId,
+        writes.map((write) => {
+          if (write.kind === "CreateTrigger" || write.kind === "UpdateTrigger" || write.kind === "DeleteTrigger") {
+            throw new Error(`config apply got a ${write.kind} write, and this control plane runs no triggers`);
+          }
+          return write;
+        }),
+        now,
+      ),
+    }),
     listPins: () => ({ pins: this.listPins() }),
     pin: ({ pin, now }) => ({ pin: this.pin(pin, now) }),
     unpin: ({ harness }) => ({ unpinned: this.unpin(harness) }),

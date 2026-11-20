@@ -174,6 +174,8 @@ export type Started<T> =
   | { kind: "ConnectorDisconnected"; names: string[] }
   | ReleaseUnreadable;
 
+export type SessionStarted<T> = Started<T> | { kind: "TagsOverLimit"; tags: string[] };
+
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
 
 export type Sent =
@@ -1872,7 +1874,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  protected startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
+  protected startSession(tenantId: string, input: NewSession, now: number): Promise<SessionStarted<StartedSession>> {
     return this.begin(tenantId, input, now, () => undefined);
   }
 
@@ -1881,7 +1883,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     input: NewSession,
     issue: IssueOfSession,
     now: number,
-  ): Promise<Started<StartedSessionFromIssue>> {
+  ): Promise<SessionStarted<StartedSessionFromIssue>> {
     const begun = await this.begin(tenantId, input, now, (sessionId) => {
       this.ctx.storage.sql.exec(
         "INSERT INTO session_issues (session_id, issue_number, title, html_url, branch) VALUES (?, ?, ?, ?, ?)",
@@ -1904,7 +1906,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     input: NewSession,
     now: number,
     record: (sessionId: string) => void,
-  ): Promise<Started<StartedSession>> {
+  ): Promise<SessionStarted<StartedSession>> {
     const { start } = input;
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
@@ -1923,6 +1925,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.heldBoxes(),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    const tags = this.startTags(input.startedBy, start.tags ?? []);
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
@@ -1973,7 +1977,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
         session.box_retention,
       );
-      this.writeTags(session.session_id, this.startTags(input.startedBy, start.tags ?? []));
+      this.writeTags(session.session_id, tags);
       if (input.startedBy.kind === "Turn") {
         this.ctx.storage.sql.exec(
           "INSERT INTO session_origins (session_id, origin_session_id, origin_turn_id) VALUES (?, ?, ?)",

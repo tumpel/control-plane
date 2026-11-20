@@ -53,12 +53,14 @@ export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
           AND (?2 = 0 OR json_extract(events.payload, '$.event') IN (SELECT value FROM json_each(?3)))
           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM event_sessions
                 WHERE event_sessions.event_id = events.event_id AND event_sessions.session_id = ?4))
+          AND (?6 IS NULL OR json_extract(events.payload, '$.triggerId') = ?6)
         ORDER BY events.event_id LIMIT ?5`,
       after,
       input.events.length,
       JSON.stringify(input.events),
       input.sessionId,
       PAGE_SIZE,
+      input.triggerId,
     )
     .toArray();
   const events = rows.map((row) =>

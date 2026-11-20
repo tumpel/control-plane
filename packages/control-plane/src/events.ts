@@ -20,6 +20,7 @@ const read = async (env: Env, caller: Caller, query: EventQuery, afterEventId: n
     afterEventId,
     events: query.event ?? [],
     sessionId: query.sessionId ?? null,
+    triggerId: query.triggerId ?? null,
     waitSeconds: 0,
   });
   if (listed.kind === "Read") return { kind: "Read", page: listed.page };

@@ -426,6 +426,11 @@ export type Planned = { ok: true; steps: Step[] } | { ok: false; problems: strin
 export const planOf = (desired: Desired, live: Live): Planned => {
   const { config } = desired;
   const problems: string[] = [];
+  if ((config.triggers ?? []).length > 0) {
+    problems.push(
+      "the config lists triggers, and this control plane runs no triggers yet; remove triggers from the config",
+    );
+  }
   const rename = "give each one its own name";
   checkUnique(
     problems,

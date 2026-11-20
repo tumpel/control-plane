@@ -39,8 +39,8 @@ import {
   type Session,
   type SessionFilter,
   type SessionStart,
+  type SessionStarted,
   type Snapshot,
-  type Started,
   type StartedSession,
   type StartedSessionFromIssue,
   type StopFailure,
@@ -243,23 +243,6 @@ const prepareStart = async (
     personaId: start.personaId,
   });
   if (persona === null) return personaNotFound(start.personaId);
-  if (caller.origin.kind === "Turn") {
-    const { subscriptions } = await tenantApi(env.TENANT, caller.tenantId).call("listSubscriptions", {
-      tenantId: caller.tenantId,
-      filter: { sessionId: caller.origin.sessionId, state: "Active" },
-    });
-    const tags = [
-      ...new Set([...subscriptions.flatMap((subscription) => subscription.crewTags), ...(start.tags ?? [])]),
-    ];
-    if (tags.length > SESSION_TAG_LIMIT) {
-      return refuse(422, {
-        code: "InvalidRequest",
-        title: "Too many tags",
-        detail: `the crew session would carry ${tags.length} tags, its own and the crew tags of session ${caller.origin.sessionId}'s active subscriptions: ${tags.sort().join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
-        fix: `Start the session with ${tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
-      });
-    }
-  }
   const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, persona.harness);
   if (entry === undefined) {
     return refuse(422, {
@@ -306,9 +289,17 @@ const connectorDisconnected = (names: string[]): Refused =>
     fix: DISCONNECTED_FIX,
   });
 
-export const placed = <T>(started: Started<T>): Outcome<T> => {
+export const placed = <T>(started: SessionStarted<T>): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
+  if (started.kind === "TagsOverLimit") {
+    return refuse(422, {
+      code: "InvalidRequest",
+      title: "Too many tags",
+      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that starts it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
+      fix: `Start the session with ${started.tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+    });
+  }
   if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
   if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
   return ok(started.started);
@@ -702,6 +693,7 @@ export const waitTurns = async (
     afterEventId: null,
     events: [],
     sessionId: null,
+    triggerId: null,
     waitSeconds: 0,
   });
   if (listed.kind !== "Read") throw new Error(`tenant ${tenantId} refused a read from the end of its event log`);
