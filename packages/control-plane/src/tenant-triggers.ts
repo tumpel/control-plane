@@ -216,7 +216,7 @@ export abstract class TenantTriggers extends TenantSubscriptions {
 
   private replaceTrigger(triggerId: string, trigger: TriggerCreate, principalId: string, now: number): void {
     this.ctx.storage.sql.exec(
-      `UPDATE triggers SET name = ?, source = ?, event = ?, persona_id = ?, model = ?, prompt = ?, principal_id = ?, updated_at = ?
+      `UPDATE triggers SET name = ?, source = ?, event = ?, persona_id = ?, model = ?, prompt = ?, principal_id = ?, updated_at = MAX(?, updated_at + 1)
       WHERE trigger_id = ?`,
       trigger.name,
       trigger.source.kind,

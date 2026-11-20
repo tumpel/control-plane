@@ -11,7 +11,9 @@ import {
   GitHubInstallationSchema,
   PersonaSchema,
   SecretSetSchema,
+  TenantApiProtocol,
   TriggerSchema,
+  UpdateTriggerResultSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -310,4 +312,40 @@ test("a stale route starts nothing its trigger rejects and is repaired, and an o
     { event: "status" },
   );
   assert.deepEqual(await conditions(), { held: 2 });
+});
+
+test("two trigger writes in one millisecond get increasing versions, so the older projection never replaces the newer route", async () => {
+  type Handle = { handle(request: unknown): Promise<{ result: unknown }> };
+  const env = await server
+    .getWorker<{ DB: Parameters<typeof projectRoute>[0]; TENANT: { getByName(name: string): Handle } }>()
+    .getEnv();
+  const [trigger] = TriggerSchema.array().parse(await (await send("GET", "/v1/triggers", undefined, bearer)).json());
+  assert.ok(trigger);
+  const update = async (event: "push" | "status") => {
+    const { result } = await env.TENANT.getByName(tenantId).handle({
+      tenantApiVersion: TenantApiProtocol.Version,
+      operation: "updateTrigger",
+      input: {
+        tenantId,
+        triggerId: trigger.triggerId,
+        patch: { source: { ...trigger.source, event } },
+        principalId: trigger.principalId,
+        now: trigger.updatedAt,
+      },
+    });
+    const { updated } = UpdateTriggerResultSchema.parse(result);
+    assert.equal(updated.kind, "Updated");
+    return updated.kind === "Updated" ? updated.trigger : trigger;
+  };
+  const older = await update("push");
+  const newer = await update("status");
+  assert.ok(older.updatedAt > trigger.updatedAt && newer.updatedAt > older.updatedAt);
+  await projectRoute(env.DB, newer);
+  await projectRoute(env.DB, older);
+  assert.deepEqual(
+    await env.DB.prepare("SELECT event, updated_at FROM trigger_routes WHERE trigger_id = ?")
+      .bind(trigger.triggerId)
+      .first(),
+    { event: "status", updated_at: newer.updatedAt },
+  );
 });
