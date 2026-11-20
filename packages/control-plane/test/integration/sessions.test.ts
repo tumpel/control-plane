@@ -716,6 +716,13 @@ const tenant = async () => {
     return { session: started.session, offer };
   };
 
+  const storedSnapshot = async (sessionId: string): Promise<void> => {
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.sessionId, sessionId);
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+  };
+
   const storedChunks = async (
     sessionId: string,
     digests: string[],
@@ -755,6 +762,11 @@ const tenant = async () => {
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
       (snapshots) => snapshots.some((snapshot) => snapshot.outcome.state === "Stored"),
     );
+    await until(
+      "the snapshotted turn reading Completed",
+      () => tool("tumpel_turn_get", { turnId: request.turnId }, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
     return { request, held: answer.held, uploaded: uploads.uploads.map((upload) => upload.packDigest) };
   };
 
@@ -777,6 +789,7 @@ const tenant = async () => {
     deletePersona,
     hostState,
     completedTurn,
+    storedSnapshot,
     storedChunks,
   };
 };
@@ -1109,6 +1122,17 @@ suite("sessions", { concurrency: 8 }, () => {
     const result = JSON.stringify({ type: "result", subtype: "success", is_error: false });
     host.send({ type: "TurnLine", turnId, lineSeq: 4, text: result });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 4, completedAt: new Date().toISOString() });
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.sessionId, sessionId);
+    assert.equal(request.turnId, turnId);
+    assert.equal(request.snapshotSeq, 1);
+    const upload = new URL(request.uploadUrl);
+    assert.equal(upload.origin, R2_STUB_ORIGIN);
+    assert.equal(upload.pathname, `/tumpel-sessions/${request.storageKey}`);
+    assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
+    assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
     const completed = await until(
       "the turn reading Completed",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1132,17 +1156,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(pastDropped.turns, [{ turnId, lines: [{ lineSeq: 2, text: "on it" }] }]);
     assert.equal(pastDropped.cursor, 2);
 
-    const request = await host.next("SnapshotRequest");
-    assert.equal(request.sessionId, sessionId);
-    assert.equal(request.turnId, turnId);
-    assert.equal(request.snapshotSeq, 1);
-    const upload = new URL(request.uploadUrl);
-    assert.equal(upload.origin, R2_STUB_ORIGIN);
-    assert.equal(upload.pathname, `/tumpel-sessions/${request.storageKey}`);
-    assert.equal(upload.searchParams.get("X-Tumpel-Method"), "PUT");
-    assert.ok(Date.parse(request.uploadExpiresAt) > Date.now());
-    await storeRoot(request.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
     const [snapshot] = await until(
       "a stored snapshot",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -1203,6 +1216,10 @@ suite("sessions", { concurrency: 8 }, () => {
       host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
     });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 8, completedAt: new Date().toISOString() });
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.sessionId, sessionId);
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
     const completed = await until(
       "the turn reading Completed",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1226,11 +1243,6 @@ suite("sessions", { concurrency: 8 }, () => {
       texts.map((_, index) => index + 1),
     );
     assert.equal(compact.finished, true);
-
-    const request = await host.next("SnapshotRequest");
-    assert.equal(request.sessionId, sessionId);
-    await storeRoot(request.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 4096 });
 
     await tenantSql(
       started.session.tenantId,
@@ -1638,7 +1650,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(ProblemSchema.parse(await late.json()).code, "ClaudeSetupNotWaiting");
   });
 
-  test("a stop snapshots an idle session and frees its box, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and frees its persona for delete", async () => {
+  test("a stop frees an idle session's box once a snapshot holds its last turn, and an archive deletes its snapshots, keeps its transcript and refuses later sends, and frees its persona for delete", async () => {
     const { github, host, refused, tool, readAll, sessionStart, createPersona, deletePersona } = await tenant();
     await createPersona("Archivable", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
@@ -1668,6 +1680,11 @@ suite("sessions", { concurrency: 8 }, () => {
 
     host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.sessionId, sessionId);
+    assert.equal(request.turnId, turnId);
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     await until(
       "the turn reading Completed",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1686,11 +1703,6 @@ suite("sessions", { concurrency: 8 }, () => {
     }
     const stopping = await tool("tumpel_session_stop", { sessionId }, SessionSchema);
     assert.equal(stopping.state, "Stopping");
-    const request = await host.next("SnapshotRequest");
-    assert.equal(request.sessionId, sessionId);
-    assert.equal(request.turnId, turnId);
-    await storeRoot(request.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     const teardown = await host.next("BoxTeardown");
     assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId: offer.boxId });
     assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).state, "Stopping");
@@ -1776,6 +1788,9 @@ suite("sessions", { concurrency: 8 }, () => {
     const { session, offer } = await completedTurn("set up the repository");
     const { sessionId } = session;
     assert.equal(offer.prompt, "set up the repository");
+    const request = await host.next("SnapshotRequest");
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
     await until(
       "the first turn reading Completed",
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
@@ -1988,6 +2003,11 @@ suite("sessions", { concurrency: 8 }, () => {
       text: '{"type":"result","subtype":"success","is_error":false}',
     });
     host.send({ type: "TurnComplete", turnId: second.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const snapshot = await host.next("SnapshotRequest");
+    assert.equal(snapshot.turnId, second.turnId);
+    assert.equal(host.holds("TurnOffer"), false, "the third turn waits for the second turn's snapshot");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
 
     assert.equal((await host.next("TurnOffer")).turnId, third.turnId);
     assert.equal((await tool("tumpel_turn_get", { turnId: second.turnId }, TurnSchema)).state, "Completed");
@@ -2163,11 +2183,21 @@ suite("sessions", { concurrency: 8 }, () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({
+      type: "TurnLine",
+      turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"error_during_execution","is_error":false}',
+    });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    const warm = await host.next("SnapshotRequest");
+    await until(
+      "the turn reading Failed",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
 
     await tool("tumpel_session_stop", { sessionId }, SessionSchema);
+    const warm = await host.next("SnapshotRequest");
     host.send({
       type: "SnapshotFailed",
       snapshotId: warm.snapshotId,
@@ -2184,6 +2214,106 @@ suite("sessions", { concurrency: 8 }, () => {
     const timers = await storedTimers(sessionId);
     assert.equal(timers?.deadlines.Snapshot, undefined);
     assert.equal(host.snapshotRequestsFor(sessionId), 0);
+  });
+
+  test("a finished turn reads Running until its snapshot is stored, and fails SnapshotNotStored, never Completed, when the host fails the snapshot", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "lose my snapshot" }, StartedSessionSchema);
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const request = await host.next("SnapshotRequest");
+    assert.equal(request.turnId, turnId);
+    assert.equal((await tool("tumpel_turn_get", { turnId }, TurnSchema)).state, "Running");
+
+    host.send({
+      type: "SnapshotFailed",
+      snapshotId: request.snapshotId,
+      reason: "UploadRejected",
+      detail: "the store refused the upload",
+      failedAt: new Date().toISOString(),
+    });
+    const failed = await until(
+      "the turn reading Failed",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state !== "Running",
+    );
+    assert.equal(failed.state, "Failed");
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "SnapshotNotStored");
+    assert.match(failure.detail, /UploadRejected: the store refused the upload/);
+  });
+
+  test("a finished turn whose snapshot the host never answers fails SnapshotNotStored, never Completed", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "wait for my snapshot" },
+      StartedSessionSchema,
+    );
+    const { sessionId, tenantId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
+
+    const at = Date.now() + 500;
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { SnapshotAnswer: { turnId, at } } }, at);
+    const failed = await until(
+      "the turn reading Failed",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state !== "Running",
+    );
+    assert.equal(failed.state, "Failed");
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "SnapshotNotStored");
+    assert.match(failure.detail, /did not answer a snapshot within 60 seconds/);
+  });
+
+  test("a finished turn whose host goes offline before its snapshot lands fails SnapshotNotStored, never Completed", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "drop my host" }, StartedSessionSchema);
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
+
+    host.close();
+    await until(
+      "the turn reading Failed",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "SnapshotNotStored");
+    assert.match(failure.detail, /went offline during the turn/);
+  });
+
+  test("a stop with cancelTurn while a finished turn awaits its snapshot fails it SnapshotNotStored, never Completed", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "cancel my snapshot" },
+      StartedSessionSchema,
+    );
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
+
+    await tool("tumpel_session_stop", { sessionId: started.session.sessionId, cancelTurn: true }, SessionSchema);
+    assert.equal((await tool("tumpel_turn_get", { turnId }, TurnSchema)).state, "Failed");
+    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
+    assert.equal(failure.reason, "SnapshotNotStored");
+    assert.match(failure.detail, /cancelled the turn/);
   });
 
   test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive deletes the packs no live chunk lies in", async () => {
@@ -2336,8 +2466,20 @@ suite("sessions", { concurrency: 8 }, () => {
     const snapshotAgain = async (prompt: string, digest: string, pack: string) => {
       await tool("tumpel_turn_send", { sessionId, prompt }, TurnSchema);
       const offer = await host.next("TurnOffer");
+      const lineSeq = offer.lastLineSeq + 1;
       host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-      host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+      host.send({
+        type: "TurnLine",
+        turnId: offer.turnId,
+        lineSeq,
+        text: '{"type":"result","subtype":"success","is_error":false}',
+      });
+      host.send({
+        type: "TurnComplete",
+        turnId: offer.turnId,
+        lastLineSeq: lineSeq,
+        completedAt: new Date().toISOString(),
+      });
       return storedChunks(sessionId, [digest], { [pack]: [digest] });
     };
     const newer = await snapshotAgain("snapshot the second", two, packTwo);
@@ -2528,6 +2670,10 @@ suite("sessions", { concurrency: 8 }, () => {
       text: '{"type":"result","subtype":"success","is_error":false}',
     });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    let snapshot = await host.next("SnapshotRequest");
+    while (snapshot.turnId !== offer.turnId) snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
     const completed = await waiting;
     assert.ok(Date.now() - secondWait < 20_000);
     assert.deepEqual(
@@ -2585,6 +2731,9 @@ suite("sessions", { concurrency: 8 }, () => {
       text: '{"type":"result","subtype":"success","is_error":false}',
     });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
 
     const woken = await waiting;
     assert.deepEqual(
@@ -2817,15 +2966,21 @@ suite("sessions", { concurrency: 8 }, () => {
 
     first.close();
     await hostState(lost.id, "Offline");
-    const back = await connect(lost.id, lost.key, 8, { ...first.carried(), held: [held.sessionId] }, [
-      {
-        type: "TurnLine",
-        turnId: finished.turnId,
-        lineSeq: 1,
-        text: '{"type":"result","subtype":"success","is_error":false}',
-      },
-      { type: "TurnComplete", turnId: finished.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() },
-    ]);
+    const back = await connect(
+      lost.id,
+      lost.key,
+      8,
+      { ...first.carried(), held: [held.sessionId, finished.sessionId] },
+      [
+        {
+          type: "TurnLine",
+          turnId: finished.turnId,
+          lineSeq: 1,
+          text: '{"type":"result","subtype":"success","is_error":false}',
+        },
+        { type: "TurnComplete", turnId: finished.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() },
+      ],
+    );
     await until(
       "the turn whose box is gone failing",
       () => getJson(`/v1/turns/${gone.turnId}`, TurnSchema),
@@ -2835,7 +2990,15 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(failure.reason, "BoxLost");
     assert.match(failure.detail, /^host lost reconnected without the box that ran the turn/);
     assert.equal((await getJson(`/v1/turns/${held.turnId}`, TurnSchema)).state, "Running");
-    assert.equal((await getJson(`/v1/turns/${finished.turnId}`, TurnSchema)).state, "Completed");
+    const snapshot = await back.next("SnapshotRequest");
+    assert.equal(snapshot.turnId, finished.turnId);
+    await storeRoot(snapshot.storageKey);
+    back.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "the finished turn reading Completed",
+      () => getJson(`/v1/turns/${finished.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
     const session = await getJson(`/v1/sessions/${gone.sessionId}`, SessionSchema);
     assert.equal(session.state, "Idle");
     assert.equal(session.lastTurnState, "Failed");
@@ -2847,7 +3010,7 @@ suite("sessions", { concurrency: 8 }, () => {
     back.close();
   });
 
-  test("a session the first heartbeat after a reconnect stops before a snapshot held its last turn takes its next turn in a fresh box", async () => {
+  test("a finished turn whose host reconnects without its box before a snapshot holds it fails SnapshotNotStored, never Completed, and the session takes its next turn", async () => {
     const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
     host.close();
     await hostState(hostId, "Offline");
@@ -2867,27 +3030,29 @@ suite("sessions", { concurrency: 8 }, () => {
     });
     first.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     assert.equal((await first.next("SnapshotRequest")).sessionId, session.sessionId);
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Completed");
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
 
     first.close();
     await hostState(lost.id, "Offline");
     const back = await connect(lost.id, lost.key, 8, { ...first.carried(), held: [] });
-    await until(
-      "the session whose box is gone reading Stopped",
-      () => getJson(`/v1/sessions/${session.sessionId}`, SessionSchema),
-      (read) => read.state === "Stopped",
+    const failed = await until(
+      "the finished turn whose box is gone failing",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state !== "Running",
     );
+    assert.equal(failed.state, "Failed");
+    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "SnapshotNotStored");
+    assert.match(failure.detail, /reconnected without the box/);
     const sent = await postJson(`/v1/sessions/${session.sessionId}/turns`, { prompt: "again" }, bearer);
     assert.equal(sent.status, 200, await sent.clone().text());
     const next = TurnSchema.parse(await sent.json());
-    const again = await back.next("TurnOffer");
-    assert.equal(again.turnId, next.turnId);
-    assert.notEqual(again.boxId, offer.boxId);
+    assert.equal((await back.next("TurnOffer")).turnId, next.turnId);
     back.close();
   });
 
-  test("a session moves off its offline host once a snapshot holds its last completed turn, and the old host's late frames leave its channel working", async () => {
-    const { bearer, refused, getJson, enrol, sessionStart, hostState } = await tenant();
+  test("a session moves off its offline host once a snapshot completes its last turn, and the old host's late frames leave its channel working", async () => {
+    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("move-from");
     let from = await connect(first.id, first.key, 16);
     await hostState(first.id, "Online");
@@ -2909,12 +3074,6 @@ suite("sessions", { concurrency: 8 }, () => {
 
     from.close();
     await hostState(first.id, "Offline");
-    const stranded = await refused(`/v1/sessions/${sessionId}/turns`, {
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "not yet" }),
-    });
-    assert.equal(stranded.code, "HostOffline");
-    assert.match(stranded.detail, /host move-from, which is Offline, and its snapshots miss 1 completed turn,/);
 
     from = await connect(first.id, first.key, 16, from.carried());
     await hostState(first.id, "Online");
@@ -2924,6 +3083,11 @@ suite("sessions", { concurrency: 8 }, () => {
       "a stored snapshot",
       () => getJson(`/v1/sessions/${sessionId}/snapshots`, SnapshotSchema.array()),
       (snapshots) => snapshots.length === 1,
+    );
+    await until(
+      "the turn reading Completed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
     );
     const claimed = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "lost with its host" }, bearer);
     assert.equal(claimed.status, 200, await claimed.clone().text());
@@ -3199,6 +3363,9 @@ suite("sessions", { concurrency: 8 }, () => {
       completedAt: new Date().toISOString(),
       warning,
     });
+    const snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
     const turn = await until(
       "the turn reading Completed",
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
@@ -3444,6 +3611,9 @@ suite("sessions", { concurrency: 8 }, () => {
     await hostState(tight.id, "Online");
     const kept = await idleTurn(side, { ...(await sessionStart()), prompt: "keep me" }, bearer);
     assert.equal(kept.session.boxRetention, "Auto");
+    const snapshot = await side.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    side.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
     await until(
       "the first session reading Idle",
       () => getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema),
@@ -3453,7 +3623,11 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(response.status, 200, await response.clone().text());
     const next = StartedSessionSchema.parse(await response.json());
     assert.equal(next.session.hostId, tight.id);
-    await releasedBox(side, kept.session.sessionId, kept.offer.boxId);
+    assert.deepEqual(await side.next("BoxTeardown"), {
+      type: "BoxTeardown",
+      sessionId: kept.session.sessionId,
+      boxId: kept.offer.boxId,
+    });
     assert.equal(side.holds("TurnOffer"), false, "the new turn's offer waits for the evicted box's BoxGone");
     assert.equal((await getJson(`/v1/turns/${next.turn.turnId}`, TurnSchema)).state, "Offered");
     side.send({ type: "BoxGone", sessionId: kept.session.sessionId, boxId: kept.offer.boxId });
@@ -3487,13 +3661,13 @@ suite("sessions", { concurrency: 8 }, () => {
     const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
     const { sessionId } = off.session;
     const request = await host.next("SnapshotRequest");
+    await storeRoot(request.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+    const teardown = await host.next("BoxTeardown");
     const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "while releasing" }, bearer);
     assert.equal(sent.status, 200, await sent.clone().text());
     const queued = TurnSchema.parse(await sent.json());
     assert.equal(queued.state, "Offered");
-    await storeRoot(request.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
-    const teardown = await host.next("BoxTeardown");
     assert.equal(host.holds("TurnOffer"), false, "the queued turn waits for the released box's BoxGone");
     host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
     const offer = await host.next("TurnOffer");
@@ -3501,6 +3675,9 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.notEqual(offer.boxId, off.offer.boxId);
 
     const kept = await idleTurn(host, { ...(await sessionStart()), prompt: "keep" }, bearer);
+    const keptSnapshot = await host.next("SnapshotRequest");
+    await storeRoot(keptSnapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: keptSnapshot.snapshotId, uploadedBytes: 14 });
     await until(
       "the kept session reading Idle",
       () => getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema),
@@ -3638,8 +3815,9 @@ suite("sessions", { concurrency: 8 }, () => {
   };
 
   test("a turn whose offer fails after the turn is stored is offered on the host's next heartbeat and runs", async () => {
-    const { tenantId, bearer, host, getJson, completedTurn } = await tenant();
+    const { tenantId, bearer, host, getJson, completedTurn, storedSnapshot } = await tenant();
     const { session, offer: first } = await completedTurn("first");
+    await storedSnapshot(session.sessionId);
     assert.equal((await host.next("TurnClaimed")).turnId, first.turnId);
     await until(
       "the first turn reading Completed",
@@ -3668,10 +3846,11 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("a queued turn whose persona is gone fails CredentialRefused and the next queued turn on its host is offered", async () => {
-    const { tenantId, bearer, host, getJson, completedTurn } = await tenant();
+    const { tenantId, bearer, host, getJson, completedTurn, storedSnapshot } = await tenant();
     const sessions = [];
     for (const prompt of ["first", "second"]) {
       const { session, offer } = await completedTurn(prompt);
+      await storedSnapshot(session.sessionId);
       assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
       await until(
         `the ${prompt} turn reading Completed`,
@@ -3714,8 +3893,9 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("a repeated claim of a completed turn is withdrawn and a NotClaimed failure after it leaves the turn Completed", async () => {
-    const { host, getJson, completedTurn } = await tenant();
-    const { offer } = await completedTurn("ran once");
+    const { host, getJson, completedTurn, storedSnapshot } = await tenant();
+    const { session, offer } = await completedTurn("ran once");
+    await storedSnapshot(session.sessionId);
     assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
     await until(
       "the turn reading Completed",
@@ -3794,6 +3974,9 @@ suite("sessions", { concurrency: 8 }, () => {
       lastLineSeq: 1,
       completedAt: new Date().toISOString(),
     });
+    const firstSnapshot = await restarting.next("SnapshotRequest");
+    await storeRoot(firstSnapshot.storageKey);
+    restarting.send({ type: "SnapshotDone", snapshotId: firstSnapshot.snapshotId, uploadedBytes: 14 });
     await until(
       "the first turn completing",
       () => getJson(`/v1/turns/${first.turnId}`, TurnSchema),

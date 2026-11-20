@@ -3392,24 +3392,34 @@ export abstract class TenantSessions extends DurableObject<Env> {
         iso(now),
       );
     }
-    await this.endTurn(tenantId, turn, now, () => {
-      sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
-      if (message.warning !== undefined)
-        sql.exec(
-          "INSERT INTO turn_warnings (turn_id, warning, created_at) VALUES (?, ?, ?)",
-          turn.turn_id,
-          message.warning,
-          now,
-        );
+    if (this.snapshotAsked(turn.turn_id)) return;
+    await this.chunks.write(tenantId, session.session_id, turn.turn_id, 1);
+    if (message.warning !== undefined)
       sql.exec(
-        "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
-        prebuild ? "Stopping" : "Idle",
+        "INSERT INTO turn_warnings (turn_id, warning, created_at) VALUES (?, ?, ?)",
+        turn.turn_id,
+        message.warning,
         now,
-        session.session_id,
       );
-      this.appendEvent({ event: "TurnCompleted", turnId: turn.turn_id, sessionId: session.session_id }, now);
-      this.sessionEntered(session.session_id, prebuild ? "Stopping" : "Idle", now);
-    });
+    await this.requestSnapshot(tenantId, session, turn);
+    await this.timers(tenantId, session.session_id, { FirstLine: null, Total: null, HostOffline: null });
+  }
+
+  private snapshotAsked(turnId: string): boolean {
+    const [row] = this.ctx.storage.sql
+      .exec<{ snapshot_id: string }>("SELECT snapshot_id FROM snapshot_requests WHERE turn_id = ? LIMIT 1", turnId)
+      .toArray();
+    return row !== undefined;
+  }
+
+  private async snapshotNotStored(tenantId: string, request: SnapshotRequestRow, detail: string): Promise<void> {
+    await this.failTurn(
+      tenantId,
+      request.turn_id,
+      "SnapshotNotStored",
+      `${detail}; send the turn again`,
+      iso(Date.now()),
+    );
   }
 
   private printedResult(turnId: string): boolean {
@@ -3452,10 +3462,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session === null) return;
     const settings = settingsOf(this.env);
     const failedAt = iso(Date.now());
-    if (name === "Snapshot") return this.requestSnapshot(tenantId, session, turn);
+    if (name === "Snapshot") {
+      if (session.state !== "Idle" && session.state !== "Stopping") return;
+      return this.requestSnapshot(tenantId, session, turn);
+    }
     const host = await this.hostName(tenantId, session.host_id);
     if (name === "SnapshotAnswer") {
-      this.snapshotUnanswered(session, turn, host, failedAt);
+      await this.snapshotUnanswered(tenantId, session, turn, host, failedAt);
       await this.evictionSettled(tenantId, sessionId);
       return this.prebuildUnstored(
         tenantId,
@@ -3595,10 +3608,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
+    const unstored = reason === "SnapshotNotStored" || this.snapshotAsked(turnId);
+    const failure = unstored
+      ? {
+          reason: "SnapshotNotStored" as const,
+          detail: `the harness finished the turn, but the snapshot of its work was not stored, so the turn did not complete: ${detail}`,
+        }
+      : { reason, detail };
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     await this.endTurn(tenantId, turn, now, () => {
-      this.recordTurnFailure(turn.session_id, turnId, reason, detail, failedAt, now);
+      this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, now);
       sql.exec(
         "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
         sessionState,
@@ -3610,12 +3630,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const prebuild = this.hostPrebuild(turn.session_id);
     if (prebuild === null) return;
     const phase = turn.state === "Offered" ? "Dispatch" : "Build";
-    const report = { phase, detail: `turn ${turnId} failed ${reason}: ${detail}`, fix: PREBUILD_FIX } as const;
+    const report = {
+      phase,
+      detail: `turn ${turnId} failed ${failure.reason}: ${failure.detail}`,
+      fix: PREBUILD_FIX,
+    } as const;
     await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
   }
 
   private async requestSnapshot(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
-    if (session.state !== "Idle" && session.state !== "Stopping") return;
     const sql = this.ctx.storage.sql;
     const [latest] = sql
       .exec<{ seq: number | null }>(
@@ -3660,7 +3683,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  private snapshotUnanswered(session: SessionRow, turn: TurnRow, host: string, failedAt: string): void {
+  private async snapshotUnanswered(
+    tenantId: string,
+    session: SessionRow,
+    turn: TurnRow,
+    host: string,
+    failedAt: string,
+  ): Promise<void> {
     const sql = this.ctx.storage.sql;
     const requests = sql
       .exec<SnapshotRequestRow>(
@@ -3671,12 +3700,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     const seconds = settingsOf(this.env).snapshotDeadlineSeconds;
     for (const request of requests) {
-      this.recordSnapshotFailure(
-        request,
-        "NotAnswered",
-        `host ${host} did not answer a snapshot within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs`,
-        failedAt,
-      );
+      const detail = `host ${host} did not answer a snapshot within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs`;
+      this.recordSnapshotFailure(request, "NotAnswered", detail, failedAt);
+      await this.snapshotNotStored(tenantId, request, detail);
     }
     if (requests.length > 0 && session.state === "Stopping")
       this.setSessionState(session.session_id, "Idle", Date.now());
@@ -3760,11 +3786,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
     if (message.type === "SnapshotFailed") {
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
-      await this.prebuildUnstored(
-        tenantId,
-        session,
-        `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`,
-      );
+      const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
+      await this.prebuildUnstored(tenantId, session, detail);
+      await this.snapshotNotStored(tenantId, request, detail);
       if (session.state === "Stopping" && message.reason === "BoxNotFound") {
         await this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
       }
@@ -3776,6 +3800,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
       this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
       await this.prebuildUnstored(tenantId, session, detail);
+      await this.snapshotNotStored(tenantId, request, detail);
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
@@ -3783,7 +3808,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (digests === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
     const manifest = JSON.stringify(digests);
     const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
+    const completes = this.turnRow(request.turn_id)?.state === "Running";
+    const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
+    const next = this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
       this.promotePlacements(request.snapshot_id, now);
       sql.exec(
@@ -3808,9 +3835,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
         request.session_id,
         manifest,
       );
+      if (!completes) return null;
+      sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, request.turn_id);
+      sql.exec("UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?", state, now, request.session_id);
+      this.appendEvent({ event: "TurnCompleted", turnId: request.turn_id, sessionId: request.session_id }, now);
+      this.sessionEntered(request.session_id, state, now);
+      sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", request.turn_id);
+      sql.exec("DELETE FROM turn_claims WHERE turn_id = ?", request.turn_id);
+      releaseConnectorCredentials(sql);
+      return this.takeNextWaiting(request.session_id, now);
     });
     await this.prebuildStored(tenantId, request, message.uploadedBytes, now);
-    if (session.state === "Stopping") {
+    const completed = this.sessionRow(session.session_id);
+    if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
+      this.startAfterTurnRelease(completed, now);
+    if (next !== null) await this.startWaiting(tenantId, request.session_id, next, now);
+    if (this.sessionRow(session.session_id)?.state === "Stopping") {
       const latest = this.latestTurn(session.session_id, null);
       if (latest === null)
         throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
