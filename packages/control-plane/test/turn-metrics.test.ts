@@ -12,8 +12,8 @@ const entry = (harness: string) => {
   return found;
 };
 
-const offered = (harness: string, member: SecretMember) =>
-  offeredDimensions("persona-1", "set-1", checkModelCredential(entry(harness), [member], "anthropic/claude", NOW));
+const offered = (harness: string, member: SecretMember, model: string) =>
+  offeredDimensions("persona-1", "set-1", checkModelCredential(entry(harness), [member], model, NOW));
 
 const point = (metric: string, turnId: string, dimensions: Record<string, string>) => ({
   metric,
@@ -41,15 +41,15 @@ test("a subscription turn's cost is not billed, an API key's is billed, and a li
     expiresAt: "2027-11-17T12:00:00+01:00",
     value: "{}",
   };
-  assert.deepEqual(offered("ClaudeCode", subscription), {
+  assert.deepEqual(offered("ClaudeCode", subscription, "claude-opus-5-5"), {
     personaId: "persona-1",
     secretSetId: "set-1",
     provider: "Anthropic",
     costBasis: "NotBilled",
   });
-  assert.equal(offered("ClaudeCode", apiKey).costBasis, "Billed");
-  assert.equal(offered("ClaudeCode", openRouter).costBasis, "NotReported");
-  assert.equal(offered("Codex", chatGpt).costBasis, "NotReported");
+  assert.equal(offered("ClaudeCode", apiKey, "claude-opus-5-5").costBasis, "Billed");
+  assert.equal(offered("ClaudeCode", openRouter, "anthropic/claude-opus-5-5").costBasis, "NotReported");
+  assert.equal(offered("Codex", chatGpt, "gpt-5.6-sol").costBasis, "NotReported");
   assert.deepEqual(offeredDimensions("persona-1", "set-1", null), { personaId: "persona-1", secretSetId: "set-1" });
 });
 
