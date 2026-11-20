@@ -329,7 +329,13 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
 const connectorCallers = new WeakMap<Request, Caller>();
 
 const turnCaller = async (env: Env, token: string, now: number): Promise<Caller | null> =>
-  callerForTurnToken(env.DB, await keyStoreOf(env).signingKey(TURN_TOKEN_SIGNING_PURPOSE), token, now);
+  callerForTurnToken(
+    env.DB,
+    await keyStoreOf(env).signingKey(TURN_TOKEN_SIGNING_PURPOSE),
+    token,
+    now,
+    async (tenantId, turnId) => (await tenantApi(env.TENANT, tenantId).call("getTurn", { tenantId, turnId })).turn,
+  );
 
 const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
   const connector = connectorCallers.get(request);

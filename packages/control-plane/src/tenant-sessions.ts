@@ -1367,14 +1367,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
         );
         return { ...session, state: "Running", host_id: hostId, box_id: boxId };
       });
-    if (session.state === "Idle") return this.offer(tenantId, move(session.host_id, session.box_id), turn);
+    const connectors = this.usesConnectors(session.session_id);
+    if (session.state === "Idle" && (!connectors || this.channelProtocol(session.host_id) >= CONNECTORS_VERSION)) {
+      return this.offer(tenantId, move(session.host_id, session.box_id), turn);
+    }
+    if (session.state === "Idle") {
+      const handoff = await this.offerElsewhere(tenantId, move(session.host_id, session.box_id), turn);
+      if (handoff === null) return;
+      await this.host(handoff.hostId).send(handoff.offer);
+      return this.offerSent(turnId);
+    }
     if (session.state !== "Stopped") return;
     const hosts = await listHosts(this.env.DB, tenantId);
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") {
       return this.failTurn(tenantId, turnId, "ImageNotReleased", image.detail, iso(now), "Stopped");
     }
-    const connectors = this.usesConnectors(session.session_id);
     const place = (candidates: HostRecord[]) =>
       placeSession(
         candidates,
