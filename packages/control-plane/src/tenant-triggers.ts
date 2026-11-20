@@ -15,7 +15,7 @@ import { listHosts, type Outcome, type Refused } from "./hosts.ts";
 import { placed } from "./sessions.ts";
 import { apiOriginOf } from "./settings.ts";
 import type { NewSession } from "./tenant-sessions.ts";
-import { TenantSubscriptions } from "./tenant-subscriptions.ts";
+import { TenantWebhooks } from "./tenant-webhooks.ts";
 import { conditionRows, conditionsOf } from "./trigger-match.ts";
 
 export type Trigger = z.infer<typeof TriggerSchema>;
@@ -68,7 +68,7 @@ const toTrigger = (tenantId: string, row: TriggerRow): Trigger =>
     updatedAt: row.updated_at,
   });
 
-export abstract class TenantTriggers extends TenantSubscriptions {
+export abstract class TenantTriggers extends TenantWebhooks {
   protected listTriggers(tenantId: string): Trigger[] {
     return this.ctx.storage.sql
       .exec<TriggerRow>(`${TRIGGER_SELECT} ORDER BY t.created_at, t.trigger_id`)

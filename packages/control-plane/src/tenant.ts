@@ -38,6 +38,7 @@ import { TenantConnectors } from "./tenant-connectors.ts";
 import { listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
+import { webhookSenderName } from "./webhook-sender.ts";
 
 export type PersonaWrite = Pick<
   StoredPersona,
@@ -194,6 +195,7 @@ export class Tenant extends TenantConnectors {
     );
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
+    this.wakeWebhooks();
     this.drainObjects();
     return response;
   }
@@ -203,6 +205,7 @@ export class Tenant extends TenantConnectors {
     await this.armExpiry();
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
+    this.wakeWebhooks();
     this.drainObjects();
   }
 
@@ -220,6 +223,24 @@ export class Tenant extends TenantConnectors {
     if (!this.eventsAppended) return;
     this.eventsAppended = false;
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
+  }
+
+  private wakeWebhooks(): void {
+    if (this.webhookPokes.size === 0) return;
+    const tenantId = this.tenantName();
+    const pokes = [...this.webhookPokes];
+    this.webhookPokes.clear();
+    this.ctx.waitUntil(
+      Promise.all(
+        pokes.map(([webhookEndpointId, { startEventId, firstEventId }]) =>
+          this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, webhookEndpointId)).wake({
+            tenantId,
+            webhookEndpointId,
+            cursorEventId: Math.max(startEventId, firstEventId - 1),
+          }),
+        ),
+      ).then(() => undefined),
+    );
   }
 
   private readonly operations: TenantHandlers = {
@@ -491,6 +512,18 @@ export class Tenant extends TenantConnectors {
     getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
     waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
+    listWebhookEndpoints: () => ({ endpoints: this.listWebhookEndpoints() }),
+    createWebhookEndpoint: ({ tenantId, endpoint, now }) => ({
+      endpoint: this.createWebhookEndpoint(tenantId, endpoint, now),
+    }),
+    getWebhookEndpoint: ({ webhookEndpointId }) => ({ endpoint: this.getWebhookEndpoint(webhookEndpointId) }),
+    deleteWebhookEndpoint: ({ webhookEndpointId }) => ({
+      deleted: this.deleteWebhookEndpoint(webhookEndpointId),
+    }),
+    setWebhookEndpointStatus: ({ webhookEndpointId, status }) => {
+      this.setWebhookEndpointStatus(webhookEndpointId, status);
+      return {};
+    },
     getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),

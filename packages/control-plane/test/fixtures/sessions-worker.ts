@@ -1,7 +1,7 @@
 import worker, { Tenant as BaseTenant, type Env } from "../../src/index";
 import { SessionTimer as BaseSessionTimer } from "../../src/session-timer";
 
-export { EventChannel, HostChannel, TenantMetrics } from "../../src/index";
+export { EventChannel, HostChannel, TenantMetrics, WebhookSender } from "../../src/index";
 
 export class SessionTimer extends BaseSessionTimer {
   async store(timers: unknown, at: number): Promise<void> {

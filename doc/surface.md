@@ -1,13 +1,12 @@
 # Public surface
 
-Every tenant operation is one MCP tool and one CLI command, backed by the same REST handler, so an
-MCP session sets up and runs a whole tenant. `npm run surface` writes this file; `npm run surface:check`
-fails when an operation lacks a tool or a command and is not on the allowlist, when an allowlist entry
-names no operation or one that has a tool, or when this file is stale.
+Every tenant operation uses the same REST handler across its listed surfaces. `npm run surface` writes
+this file; `npm run surface:check` fails when a surface is missing without a listed exception, when an
+exception names no operation, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`, Triggers `trigger`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`, Triggers `trigger`, WebhookEndpoints `webhook-endpoint`, WebhookSigningKeys `webhook-signing-key`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
 `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`
 the verbs `create-static` and `create-oauth`,
@@ -153,11 +152,24 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_send`                             | `tumpel_turn_send`                           | `tumpel turn send`                           |
 | `Turns_steer`                            | `tumpel_turn_steer`                          | `tumpel turn steer`                          |
 | `Turns_wait`                             | `tumpel_turn_wait`                           | `tumpel turn wait`                           |
+| `WebhookEndpoints_create`                | `tumpel_webhook_endpoint_create`             | `tumpel webhook-endpoint create`             |
+| `WebhookEndpoints_delete`                | `tumpel_webhook_endpoint_delete`             | `tumpel webhook-endpoint delete`             |
+| `WebhookEndpoints_get`                   | `tumpel_webhook_endpoint_get`                | `tumpel webhook-endpoint get`                |
+| `WebhookEndpoints_list`                  | `tumpel_webhook_endpoint_list`               | `tumpel webhook-endpoint list`               |
+| `WebhookSigningKeys_get`                 | `tumpel_webhook_signing_key_get`             | `tumpel webhook-signing-key get`             |
 
 CLI only: tenant operations with a CLI command and no MCP tool:
 
 - `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
 - `CircleCIConnections_complete`: takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it.
+
+MCP only: tenant operations whose pinned CLI has no command:
+
+- `WebhookEndpoints_create`: the pinned CLI carries no webhook commands.
+- `WebhookEndpoints_delete`: the pinned CLI carries no webhook commands.
+- `WebhookEndpoints_get`: the pinned CLI carries no webhook commands.
+- `WebhookEndpoints_list`: the pinned CLI carries no webhook commands.
+- `WebhookSigningKeys_get`: the pinned CLI carries no webhook commands.
 
 Allowlist: operations that are not tenant operations, with no tool or command:
 
@@ -189,11 +201,6 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
 - `ConnectorTokens_fetch`: box wire of the guest forwarder, signed by the turn's connector token, never by a principal.
-- `WebhookEndpoints_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `WebhookEndpoints_delete`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `WebhookEndpoints_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `WebhookEndpoints_list`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `WebhookSigningKeys_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
 - `PushKeys_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
 - `PushSubscriptions_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
 - `PushSubscriptions_delete`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.

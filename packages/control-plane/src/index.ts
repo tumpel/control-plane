@@ -213,6 +213,8 @@ import { tenantApi, tenantSkewed } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
 import { handleTriggers } from "./triggers.ts";
 import { TURN_TOKEN_SIGNING_PURPOSE } from "./turn-token.ts";
+import type { WebhookSender } from "./webhook-sender.ts";
+import { handleWebhooks } from "./webhooks.ts";
 import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 export { EventChannel } from "./event-channel.ts";
@@ -220,6 +222,7 @@ export { HostChannel } from "./host-channel";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 export { TenantMetrics } from "./tenant-metrics";
+export { WebhookSender } from "./webhook-sender.ts";
 
 export interface Env extends SignerEnv {
   R2_BUCKET_NAME: string;
@@ -231,6 +234,7 @@ export interface Env extends SignerEnv {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   EVENTS: DurableObjectNamespace<EventChannel>;
+  WEBHOOKS: DurableObjectNamespace<WebhookSender>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
@@ -1715,6 +1719,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleSessions(request, url, env, deviceCaller)) ??
     (await handleSubscriptions(request, url, env, deviceCaller)) ??
     (await handleTriggers(request, url, env, deviceCaller)) ??
+    (await handleWebhooks(request, url, env, deviceCaller)) ??
     (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;
   const uploads =

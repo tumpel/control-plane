@@ -50,6 +50,36 @@ export const deriveSigningKey = async (base64: string | undefined, purpose: stri
   );
 };
 
+const ED25519_PKCS8_PREFIX = Uint8Array.from([48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32]);
+
+export const deriveEd25519KeyPair = async (
+  base64: string | undefined,
+  purpose: string,
+): Promise<{ privateKey: CryptoKey; publicKey: Uint8Array<ArrayBuffer> }> => {
+  const root = await crypto.subtle.importKey("raw", keyBytes(base64), "HKDF", false, ["deriveBits"]);
+  const seed = new Uint8Array(
+    await crypto.subtle.deriveBits(
+      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(), info: encoder.encode(purpose) },
+      root,
+      256,
+    ),
+  );
+  const pkcs8 = new Uint8Array(ED25519_PKCS8_PREFIX.byteLength + seed.byteLength);
+  pkcs8.set(ED25519_PKCS8_PREFIX);
+  pkcs8.set(seed, ED25519_PKCS8_PREFIX.byteLength);
+  const readable = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
+  const exported = await crypto.subtle.exportKey("jwk", readable);
+  if (!("x" in exported) || typeof exported.x !== "string") {
+    throw new Error(`the Ed25519 key for ${purpose} exported without its public half`);
+  }
+  const base64Public = exported.x.replaceAll("-", "+").replaceAll("_", "/");
+  const publicKey = Uint8Array.from(atob(base64Public + "=".repeat((4 - (base64Public.length % 4)) % 4)), (char) =>
+    char.charCodeAt(0),
+  );
+  const privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+  return { privateKey, publicKey };
+};
+
 export const generateDataKey = (): Promise<CryptoKey> =>
   crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(KEY_BYTES)), { name: "AES-GCM" }, true, [
     "encrypt",
