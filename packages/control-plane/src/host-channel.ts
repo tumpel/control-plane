@@ -19,7 +19,7 @@ import { problem } from "./http";
 import type { Env } from "./index";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
-import { tenantApi } from "./tenant-api.ts";
+import { TenantSkew, tenantApi } from "./tenant-api.ts";
 import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
@@ -192,7 +192,13 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    const reply = await this.forward(hostId, frame.message);
+    const reply = await this.forward(hostId, frame.message).catch((error: unknown): HostReply => {
+      if (error instanceof TenantSkew) throw error;
+      return {
+        type: "Refused",
+        reason: `the control plane failed to handle ${frame.message.type}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    });
     control.acknowledge(context, frame);
     if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;

@@ -2703,6 +2703,64 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await tenantSql(tenantId, "SELECT digest FROM chunks WHERE digest = ?", one), []);
   });
 
+  test("a snapshot whose manifest lists 80000 chunks is stored and records every chunk", async () => {
+    const { host, tool, completedTurn } = await tenant();
+    const { offer } = await completedTurn("snapshot a large tree");
+    const request = await host.next("SnapshotRequest");
+    const digests = Array.from({ length: 80_000 }, (_, index) =>
+      createHash("sha256").update(String(index)).digest("hex"),
+    );
+    await storeRoot(request.storageKey, digests);
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 5614295885 });
+    await until(
+      "the snapshotted turn reading Completed",
+      () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    const tenantId = request.storageKey.split("/")[0] ?? "";
+    assert.deepEqual(
+      await tenantSql(
+        tenantId,
+        "SELECT count(*) AS recorded FROM snapshot_manifest_chunks WHERE snapshot_id = ?",
+        request.snapshotId,
+      ),
+      [{ recorded: 80_001 }],
+    );
+    host.assertOpen("after the large snapshot");
+  });
+
+  test("a host frame whose handling throws is refused with the error and the channel carries the next frame", async () => {
+    const { host, tool, completedTurn } = await tenant();
+    const { offer } = await completedTurn("snapshot with a lost pack");
+    const request = await host.next("SnapshotRequest");
+    const lost = "e".repeat(64);
+    await store.put(
+      request.storageKey,
+      JSON.stringify({ manifest: [{ digest: lost, packDigest: lost, offset: 0, length: 1 }] }),
+    );
+    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
+    const refused = await host.refusal();
+    assert.equal(refused.seq, host.carried().sent);
+    assert.match(
+      refused.reason,
+      new RegExp(`failed to handle SnapshotDone: pack ${lost} .* is gone from object storage`),
+    );
+
+    host.send({
+      type: "SnapshotFailed",
+      snapshotId: request.snapshotId,
+      reason: "UploadRejected",
+      detail: "pack lost",
+      failedAt: new Date().toISOString(),
+    });
+    await until(
+      "the snapshotted turn failing",
+      () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    host.assertOpen("after the refusal");
+  });
+
   test("a turn whose host goes offline before claiming it stays Offered, is offered again at the next Welcome and runs", async () => {
     const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const flaky = await enrol("flaky");

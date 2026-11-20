@@ -433,6 +433,7 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
+const MANIFEST_DIGEST_BATCH = 10_000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
@@ -2458,6 +2459,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
     ];
   }
 
+  private recordManifest(snapshotId: string, digests: string[]): void {
+    for (let start = 0; start < digests.length; start += MANIFEST_DIGEST_BATCH) {
+      this.ctx.storage.sql.exec(
+        "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?1, value FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM snapshots WHERE snapshot_id = ?1)",
+        snapshotId,
+        JSON.stringify(digests.slice(start, start + MANIFEST_DIGEST_BATCH)),
+      );
+    }
+  }
+
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
     const sql = this.ctx.storage.sql;
     const older = sql
@@ -2492,12 +2503,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         );
         continue;
       }
-      const digests = JSON.stringify(read);
-      sql.exec(
-        "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?1, value FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM snapshots WHERE snapshot_id = ?1)",
-        snapshot.snapshot_id,
-        digests,
-      );
+      this.ctx.storage.transactionSync(() => this.recordManifest(snapshot.snapshot_id, read));
     }
     await this.archiveSupersededPrebuilds(tenantId, now);
     await this.dropChunks(tenantId, () => {
@@ -4102,7 +4108,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const digests = await this.manifestDigests(tenantId, request.storage_key);
     if (digests === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
-    const manifest = JSON.stringify(digests);
     const now = Date.now();
     const completes = this.turnRow(request.turn_id)?.state === "Running";
     const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
@@ -4121,15 +4126,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         now,
       );
+      this.recordManifest(request.snapshot_id, digests);
       sql.exec(
-        "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?, value FROM json_each(?)",
-        request.snapshot_id,
-        manifest,
-      );
-      sql.exec(
-        "DELETE FROM session_chunks WHERE session_id = ? AND digest NOT IN (SELECT value FROM json_each(?))",
+        "DELETE FROM session_chunks WHERE session_id = ? AND digest NOT IN (SELECT digest FROM snapshot_manifest_chunks WHERE snapshot_id = ?)",
         request.session_id,
-        manifest,
+        request.snapshot_id,
       );
       if (!completes) return null;
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, request.turn_id);
