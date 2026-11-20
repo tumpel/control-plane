@@ -78,6 +78,7 @@ import tenant0077 from "../migrations/tenant/0077_session_origins.sql";
 import tenant0078 from "../migrations/tenant/0078_subscriptions.sql";
 import tenant0079 from "../migrations/tenant/0079_object_cleanups.sql";
 import tenant0080 from "../migrations/tenant/0080_triggers.sql";
+import tenant0081 from "../migrations/tenant/0081_webhooks.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -161,4 +162,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0078_subscriptions", sql: tenant0078 },
   { name: "0079_object_cleanups", sql: tenant0079 },
   { name: "0080_triggers", sql: tenant0080 },
+  { name: "0081_webhooks", sql: tenant0081 },
 ];

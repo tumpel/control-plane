@@ -38,6 +38,7 @@ import { TenantConnectors } from "./tenant-connectors.ts";
 import { listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
+import { webhookSenderName } from "./webhook-sender.ts";
 
 export type PersonaWrite = Pick<
   StoredPersona,
@@ -194,15 +195,17 @@ export class Tenant extends TenantConnectors {
     );
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
+    await this.wakeWebhooks();
     this.drainObjects();
     return response;
   }
 
   override async alarm(): Promise<void> {
     this.expireSubscriptions(Date.now());
-    await this.armExpiry();
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
+    await this.wakeWebhooks();
+    await this.armExpiry();
     this.drainObjects();
   }
 
@@ -220,6 +223,27 @@ export class Tenant extends TenantConnectors {
     if (!this.eventsAppended) return;
     this.eventsAppended = false;
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
+  }
+
+  private async wakeWebhooks(): Promise<void> {
+    const tenantId = this.tenantName();
+    const wakes = this.ctx.storage.sql
+      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
+        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_wakes
+        JOIN webhook_endpoints AS w USING (webhook_endpoint_id) ORDER BY w.created_at, w.webhook_endpoint_id`,
+      )
+      .toArray();
+    if (wakes.length === 0) return;
+    await this.ctx.storage.setAlarm(Date.now());
+    for (const wake of wakes) {
+      await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id)).wake({
+        tenantId,
+        webhookEndpointId: wake.webhook_endpoint_id,
+        cursorEventId: wake.start_event_id,
+      });
+      this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+    }
+    await this.armExpiry();
   }
 
   private readonly operations: TenantHandlers = {
@@ -491,6 +515,20 @@ export class Tenant extends TenantConnectors {
     getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
     waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
+    listWebhookEndpoints: ({ tenantId }) => ({ endpoints: this.listWebhookEndpoints(tenantId) }),
+    createWebhookEndpoint: ({ tenantId, endpoint, now }) => ({
+      endpoint: this.createWebhookEndpoint(tenantId, endpoint, now),
+    }),
+    getWebhookEndpoint: ({ tenantId, webhookEndpointId }) => ({
+      endpoint: this.getWebhookEndpoint(tenantId, webhookEndpointId),
+    }),
+    deleteWebhookEndpoint: ({ webhookEndpointId }) => ({
+      deleted: this.deleteWebhookEndpoint(webhookEndpointId),
+    }),
+    setWebhookEndpointStatus: ({ webhookEndpointId, status }) => {
+      this.setWebhookEndpointStatus(webhookEndpointId, status);
+      return {};
+    },
     getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),

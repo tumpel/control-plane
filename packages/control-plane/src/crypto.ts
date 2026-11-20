@@ -17,8 +17,18 @@ export const randomToken = (): string => base64Url(crypto.getRandomValues(new Ui
 
 export const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
+type TimingSafeSubtle = SubtleCrypto & {
+  timingSafeEqual(left: ArrayBuffer | ArrayBufferView, right: ArrayBuffer | ArrayBufferView): boolean;
+};
+
+const hasTimingSafeEqual = (subtle: SubtleCrypto): subtle is TimingSafeSubtle => "timingSafeEqual" in subtle;
+
 export const sameSecret = (a: string, b: string): boolean => {
   const left = encoder.encode(a);
   const right = encoder.encode(b);
-  return left.byteLength === right.byteLength && crypto.subtle.timingSafeEqual(left, right);
+  if (left.byteLength !== right.byteLength) return false;
+  if (!hasTimingSafeEqual(crypto.subtle)) {
+    throw new Error("the runtime has no constant-time byte comparison");
+  }
+  return crypto.subtle.timingSafeEqual(left, right);
 };
