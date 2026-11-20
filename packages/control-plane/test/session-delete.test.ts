@@ -31,6 +31,25 @@ test("session ownership migration resumes after an interruption with many rows",
   db.exec(migration("0073_session_ownership.sql"));
   assert.equal(db.prepare("SELECT count(*) AS n FROM turns").get()?.n, 10000);
   assert.equal(db.prepare("SELECT count(*) AS n FROM credential_handovers").get()?.n, 10000);
+  assert.throws(
+    () =>
+      db.exec(
+        "INSERT INTO transcript_pending (session_id, line_seq, turn_id, text, created_at) VALUES ('missing', 1, 'trn', '', 1000)",
+      ),
+    /FOREIGN KEY constraint failed/,
+  );
+  assert.throws(
+    () =>
+      db.exec(
+        "INSERT INTO transcript_chunks (session_id, first_line_seq, last_line_seq, turn_id, storage_key, line_seqs, offsets) VALUES ('missing', 1, 1, 'trn', 'key', '[]', '[]')",
+      ),
+    /FOREIGN KEY constraint failed/,
+  );
+  db.exec("INSERT INTO events (payload, created_at) VALUES ('{}', 1000)");
+  assert.throws(
+    () => db.exec("INSERT INTO event_sessions (event_id, session_id) VALUES (1, 'missing')"),
+    /FOREIGN KEY constraint failed/,
+  );
 
   db.exec("DELETE FROM sessions WHERE session_id = 'ses'");
 

@@ -35,3 +35,39 @@ BEGIN
   DELETE FROM transcript_chunks WHERE session_id = OLD.session_id;
   DELETE FROM event_sessions WHERE session_id = OLD.session_id;
 END;
+
+CREATE TRIGGER IF NOT EXISTS transcript_pending_session_insert BEFORE INSERT ON transcript_pending
+WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id)
+BEGIN
+  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS transcript_pending_session_update BEFORE UPDATE OF session_id ON transcript_pending
+WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id)
+BEGIN
+  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS transcript_chunks_session_insert BEFORE INSERT ON transcript_chunks
+WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id)
+BEGIN
+  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS transcript_chunks_session_update BEFORE UPDATE OF session_id ON transcript_chunks
+WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id)
+BEGIN
+  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS event_sessions_session_insert BEFORE INSERT ON event_sessions
+WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id)
+BEGIN
+  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS event_sessions_session_update BEFORE UPDATE OF session_id ON event_sessions
+WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id)
+BEGIN
+  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');
+END;
