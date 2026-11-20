@@ -134,6 +134,7 @@ const steady = (parts: Partial<Live> = {}): Live => ({
   pins: EffectiveHarnessVersionSchema.array().parse([{ harness: "ClaudeCode", harnessVersion: "2.0.0", pinned: true }]),
   hosts: [liveHost("h1", "Online", ["gpu"])],
   sessions: [],
+  triggers: [],
   ...parts,
 });
 
@@ -441,5 +442,62 @@ test("an update to a persona keeps the tumpel MCP setting the config cannot expr
   assert.deepEqual(
     planned.ok && planned.steps.flatMap((step) => (step.kind === "UpdatePersona" ? [step.tumpelMcp] : [])),
     [true],
+  );
+});
+
+test("triggers plan by name: create, keep when only the condition rows reorder, update, delete, and stay when left out", () => {
+  const review = {
+    name: "review",
+    source: {
+      kind: "GitHub" as const,
+      event: "status" as const,
+      conditions: [
+        { field: "state", values: ["pending", "error"] },
+        { field: "context", values: ["agent-review"] },
+      ],
+    },
+    personaName: "Default",
+    model: "claude-test",
+    prompt: "Review {{sha}}",
+  };
+  const held = {
+    triggerId: "g1",
+    tenantId: "t1",
+    name: "review",
+    source: {
+      kind: "GitHub" as const,
+      event: "status" as const,
+      conditions: [
+        { field: "state", values: ["error", "pending"] },
+        { field: "context", values: ["agent-review"] },
+      ],
+    },
+    personaId: "p1",
+    model: "claude-test",
+    prompt: "Review {{sha}}",
+    principalId: "u1",
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  assert.deepEqual(
+    planOf(desired(config({ triggers: [review] })), steady()),
+    steps({ kind: "CreateTrigger", trigger: review }),
+  );
+  assert.deepEqual(planOf(desired(config({ triggers: [review] })), steady({ triggers: [held] })), steps());
+  const changed = { ...review, prompt: "Review {{sha}} again" };
+  assert.deepEqual(
+    planOf(desired(config({ triggers: [changed] })), steady({ triggers: [held] })),
+    steps({ kind: "UpdateTrigger", triggerId: "g1", trigger: changed }),
+  );
+  assert.deepEqual(
+    planOf(desired(config({ triggers: [] })), steady({ triggers: [held] })),
+    steps({ kind: "DeleteTrigger", triggerId: "g1", name: "review" }),
+  );
+  assert.deepEqual(planOf(desired(config()), steady({ triggers: [held] })), steps());
+  assert.deepEqual(
+    planOf(desired(config({ triggers: [{ ...review, personaName: "Reviewer" }] })), steady()),
+    problems(
+      'trigger "review" names persona "Reviewer", which the config does not hold; add it to personas or name one that is there',
+    ),
   );
 });

@@ -24,6 +24,7 @@ import {
   GitHubInstallStartSchema,
   GitHubIssueSchema,
   GitHubRepositorySchema,
+  GitHubTriggerEventSchema,
   type WhoamiSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
@@ -73,6 +74,7 @@ import {
   GitHubManifestStateSchema,
   GitHubSetupActionSchema,
   GitHubSetupCallbackSchema,
+  GitHubTriggerDeliverySchema,
   GitHubWorkflowRunEventSchema,
 } from "./github-schemas.ts";
 import {
@@ -100,6 +102,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { htmlPage } from "./pages";
 import { tenantApi } from "./tenant-api.ts";
+import { fireTriggers } from "./triggers.ts";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
 export type SignedInPerson = (request: Request, env: Env) => Promise<PersonCheck>;
@@ -860,6 +863,32 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
   return noContent;
 };
 
+const handleTriggerEvent = async (
+  env: Env,
+  event: string,
+  deliveryId: string | null,
+  body: ArrayBuffer,
+  noContent: Response,
+): Promise<Response> => {
+  const payload = parseJson(new TextDecoder().decode(body));
+  const delivery = GitHubTriggerDeliverySchema.safeParse(payload);
+  if (!delivery.success || deliveryId === null) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: `Not a ${event} event`,
+      detail: delivery.success
+        ? "the delivery carries no X-GitHub-Delivery header"
+        : `the ${event} delivery does not parse: ${issues(delivery.error)}`,
+      fix: `Send ${event} events as GitHub does, with an X-GitHub-Delivery header, an installation and a repository`,
+    });
+  }
+  const tenantId = await tenantOfInstallation(env.DB, delivery.data.installation.id);
+  if (tenantId === null) return noContent;
+  const repository = delivery.data.repository.html_url;
+  await fireTriggers(env, { tenantId, event, deliveryId, repository, payload });
+  return noContent;
+};
+
 export const handleGitHubWebhook = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   if (request.method !== "POST" || url.pathname !== WEBHOOK_PATH) return null;
   const secret = await webhookSecret(env.DB, keyStoreOf(env));
@@ -883,6 +912,11 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   const event = request.headers.get("x-github-event");
   if (event === "workflow_run") return handleWorkflowRun(env, body, noContent);
+  const triggered = GitHubTriggerEventSchema.safeParse(event);
+  if (triggered.success) {
+    const deliveryId = request.headers.get("x-github-delivery");
+    return handleTriggerEvent(env, triggered.data, deliveryId, body, noContent);
+  }
   if (event !== "installation") return noContent;
   const delivery = GitHubInstallationEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
   if (!delivery.success) {

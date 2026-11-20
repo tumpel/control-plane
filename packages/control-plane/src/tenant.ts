@@ -26,6 +26,7 @@ import {
   storedKeys,
   type UnreadableSecretSet,
 } from "./secret-members.ts";
+import { checkStart } from "./sessions.ts";
 import {
   recordSupervisorUpdate,
   type SupervisorUpdateMessage,
@@ -259,18 +260,7 @@ export class Tenant extends TenantConnectors {
       removed: this.removeSecretMember(tenantId, secretSetId, name, now),
     }),
     deleteSecretSet: ({ secretSetId }) => ({ deleted: this.deleteSecretSet(secretSetId) }),
-    applyConfig: async ({ tenantId, writes, now }) => ({
-      applied: await this.applyConfig(
-        tenantId,
-        writes.map((write) => {
-          if (write.kind === "CreateTrigger" || write.kind === "UpdateTrigger" || write.kind === "DeleteTrigger") {
-            throw new Error(`config apply got a ${write.kind} write, and this control plane runs no triggers`);
-          }
-          return write;
-        }),
-        now,
-      ),
-    }),
+    applyConfig: async ({ tenantId, writes, now }) => ({ applied: await this.applyConfig(tenantId, writes, now) }),
     listPins: () => ({ pins: this.listPins() }),
     pin: ({ pin, now }) => ({ pin: this.pin(pin, now) }),
     unpin: ({ harness }) => ({ unpinned: this.unpin(harness) }),
@@ -461,6 +451,28 @@ export class Tenant extends TenantConnectors {
       resumed: this.resumeSubscription(tenantId, subscriptionId, now),
     }),
     deleteSubscription: ({ subscriptionId, now }) => ({ deleted: this.deleteSubscription(subscriptionId, now) }),
+    createTrigger: ({ tenantId, trigger, principalId, now }) => ({
+      created: this.createTrigger(tenantId, trigger, principalId, now),
+    }),
+    listTriggers: ({ tenantId }) => ({ triggers: this.listTriggers(tenantId) }),
+    getTrigger: ({ tenantId, triggerId }) => ({ trigger: this.getTrigger(tenantId, triggerId) }),
+    updateTrigger: ({ tenantId, triggerId, patch, principalId, now }) => ({
+      updated: this.updateTrigger(tenantId, triggerId, patch, principalId, now),
+    }),
+    deleteTrigger: ({ triggerId }) => ({ deleted: this.deleteTrigger(triggerId) }),
+    triggerFired: async (input) => ({
+      fired: await this.triggerFired(input, (trigger) =>
+        checkStart({
+          personaId: trigger.personaId,
+          persona: this.getPersona(input.tenantId, trigger.personaId),
+          pins: this.listPins(),
+          secretSet: (persona) => this.getSecretSet(input.tenantId, persona.secretSetId),
+          model: trigger.model,
+          operation: "triggers.fire",
+          now: input.now,
+        }),
+      ),
+    }),
     completeSubscription: ({ tenantId, subscriptionId, now }) => ({
       completed: this.completeSubscription(tenantId, subscriptionId, now),
     }),
@@ -1171,6 +1183,15 @@ export class Tenant extends TenantConnectors {
         return;
       case "Unpin":
         this.unpin(write.harness);
+        return;
+      case "CreateTrigger":
+        this.writeConfigTrigger(null, write.trigger, write.principalId, now);
+        return;
+      case "UpdateTrigger":
+        this.writeConfigTrigger(write.triggerId, write.trigger, write.principalId, now);
+        return;
+      case "DeleteTrigger":
+        this.deleteTrigger(write.triggerId);
         return;
     }
   }

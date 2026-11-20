@@ -18,6 +18,7 @@ import {
   ConnectorWritePathSchema,
   CredentialFileUpdateSchema,
   DevicePathSchema,
+  DraftTriggerTestSchema,
   EditPersonaFilePatchSchema,
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
@@ -74,6 +75,7 @@ import {
   SnapshotPathSchema,
   StaticConnectorCreateSchema,
   SteerCreateSchema,
+  StoredTriggerTestSchema,
   SubscriptionCreateSchema,
   SubscriptionListQuerySchema,
   SubscriptionPathSchema,
@@ -83,6 +85,9 @@ import {
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
   TranscriptQuerySchema,
+  TriggerCreateSchema,
+  TriggerPatchSchema,
+  TriggerPathSchema,
   TurnPathSchema,
   TurnSendSchema,
   TurnWaitQuerySchema,
@@ -103,7 +108,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\n5. For a long job, such as working through a list of issues, start a session on a persona whose harness takes a goal, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, keeps its own turns short, pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
+  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\n5. For a long job, such as working through a list of issues, start a session on a persona whose harness takes a goal, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\n6. To start a session whenever something happens on GitHub, such as a pull request leaving draft, a push, a commit status or a label on an issue, create a trigger with tumpel_trigger_create: the event type, conditions on the webhook payload, a persona, a model and a prompt with {{field}} placeholders. Check it first on a sample payload with tumpel_trigger_test. Tumpel only listens, so the prompt tells the session how to report back. Only an Owner creates, changes or deletes a trigger; an agent inside a tumpel box tells its person instead.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, keeps its own turns short, pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -138,6 +143,7 @@ const DONE: Record<string, string> = {
   tumpel_harness_unpin: "Pin removed",
   tumpel_persona_delete: "Persona deleted",
   tumpel_subscription_delete: "Subscription deleted",
+  tumpel_trigger_delete: "Trigger deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
   tumpel_github_actions_delete: "GitHub Actions disconnected",
@@ -155,6 +161,15 @@ const REPOSITORY_FORMAT =
   "The GitHub repository, as https://github.com/owner/name; owner/name and github.com/owner/name are accepted too.";
 
 const NO_ARGUMENTS = z.object({});
+
+const TRIGGER_TEST = z
+  .object({
+    kind: z.enum(["Stored", "Draft"]),
+    triggerId: StoredTriggerTestSchema.shape.triggerId.optional(),
+    trigger: DraftTriggerTestSchema.shape.trigger.optional(),
+    payload: StoredTriggerTestSchema.shape.payload,
+  })
+  .strict();
 
 const KEY_NAMES_ONLY = ConfigSecretSetSchema.extend({
   secrets: z.array(
@@ -858,7 +873,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions",
     SessionListQuerySchema,
-    "List the tenant's sessions, optionally only those in one state, on one host, carrying every tag in tag, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset).",
+    "List the tenant's sessions, optionally only those in one state, on one host, carrying every tag in tag, started by the trigger triggerId, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset).",
   ),
   rest(
     "tumpel_session_get",
@@ -930,6 +945,36 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/subscriptions/{subscriptionId}/complete",
     SubscriptionPathSchema,
     "End a subscription because its goal holds: it ends with reason GoalMet, its waiting turn is cancelled and the person is told. The subscribed session calls it from inside its box once the goal holds; a person can call it too. Returns the Ended subscription.",
+  ),
+  rest(
+    "tumpel_trigger_create",
+    "POST",
+    "/v1/triggers",
+    TriggerCreateSchema,
+    "Create a trigger that starts a fresh session whenever a GitHub event of one type arrives through the stage's GitHub App and every condition holds on its payload. source is {kind: GitHub, event, conditions}: event is pull_request, push, status or issues; each condition names a dotted field path into the webhook payload, such as pull_request.base.ref, label.name or sender.login, and the values it may equal, compared as JSON text, so true matches a boolean; a path through an array matches any element. The session runs on personaId with model, on the event's repository, with prompt as its first prompt, where each {{field}} placeholder is filled from the payload. Every session runs as you. Tumpel only listens: tell the session in the prompt how to report back, such as with a review or a commit status. Test it first with tumpel_trigger_test. Only an Owner, outside a tumpel box, creates one.",
+  ),
+  rest("tumpel_trigger_list", "GET", "/v1/triggers", NO_ARGUMENTS, "List the tenant's triggers."),
+  rest("tumpel_trigger_get", "GET", "/v1/triggers/{triggerId}", TriggerPathSchema, "Read one trigger."),
+  rest(
+    "tumpel_trigger_update",
+    "PATCH",
+    "/v1/triggers/{triggerId}",
+    TriggerPathSchema.extend(TriggerPatchSchema.shape),
+    "Change the fields of a trigger you name and keep the rest; a named source replaces the whole source, its event and conditions included. Its sessions then run as you. Only an Owner, outside a tumpel box, changes one.",
+  ),
+  rest(
+    "tumpel_trigger_delete",
+    "DELETE",
+    "/v1/triggers/{triggerId}",
+    TriggerPathSchema,
+    "Delete a trigger; the sessions it started stay. Only an Owner, outside a tumpel box, deletes one.",
+  ),
+  rest(
+    "tumpel_trigger_test",
+    "POST",
+    "/v1/triggers/test",
+    TRIGGER_TEST,
+    "Match a trigger against a sample webhook payload, such as one from the recent deliveries in the GitHub App's settings, without starting anything. kind Stored tests the trigger triggerId; kind Draft tests trigger, the fields tumpel_trigger_create takes, before it exists. Returns matched, each condition with the values the payload holds at its field and whether it holds, the prompt the session would get, and missingFields, the placeholders the payload lacks, which would refuse a start.",
   ),
   rest(
     "tumpel_session_set_tags",

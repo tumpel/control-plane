@@ -26,16 +26,20 @@ import {
   type Step,
   stopped,
   type TenantConfig,
+  TRIGGER_STEPS,
 } from "./configs.ts";
 import { effectiveVersions } from "./harness-catalog.ts";
 import { hostOf, listHosts, setHostLabels } from "./hosts.ts";
 import { json, type Problem, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
+import { ownerRequired } from "./members.ts";
 import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-files.ts";
 import { keyPrefixMismatch, unreadableSecretSet } from "./secret-members.ts";
 import type { ConfigApplied } from "./tenant.ts";
 import { tenantApi } from "./tenant-api.ts";
+import { dropRoute, projectRoute } from "./trigger-routes.ts";
+import { turnRefused } from "./triggers.ts";
 import { personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 type ApplyRequest = z.infer<typeof TenantConfigApplySchema>;
@@ -89,6 +93,7 @@ const OPERATION = "tenantConfigs.apply";
 interface Prepare {
   env: Env;
   tenantId: string;
+  principalId: string;
   values: Map<string, string>;
   setIds: Map<string, string>;
   members: Map<string, Member[]>;
@@ -229,6 +234,20 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
       if (refused !== null) return { ok: false, response: refused };
       return { ok: true, value: null };
     }
+    case "CreateTrigger":
+      return { ok: true, value: { kind: "CreateTrigger", trigger: step.trigger, principalId: prepare.principalId } };
+    case "UpdateTrigger":
+      return {
+        ok: true,
+        value: {
+          kind: "UpdateTrigger",
+          triggerId: step.triggerId,
+          trigger: step.trigger,
+          principalId: prepare.principalId,
+        },
+      };
+    case "DeleteTrigger":
+      return { ok: true, value: { kind: "DeleteTrigger", triggerId: step.triggerId } };
   }
 };
 
@@ -238,11 +257,13 @@ const prepared = async (
   config: TenantConfig,
   values: Map<string, string>,
   env: Env,
-  tenantId: string,
+  caller: Caller,
 ): Promise<Outcome<ConfigWrite[]>> => {
+  const { tenantId, principalId } = caller;
   const prepare: Prepare = {
     env,
     tenantId,
+    principalId,
     values,
     setIds: new Map(live.secretSets.map((set) => [set.name, set.secretSetId])),
     members: new Map(live.secretSets.map((set) => [set.name, set.keys])),
@@ -284,6 +305,7 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
       pins: effectiveVersions((await api.call("listPins", {})).pins),
       hosts: await listHosts(env.DB, tenantId),
       sessions: (await api.call("listSessions", { tenantId, filter: {} })).sessions,
+      triggers: (await api.call("listTriggers", { tenantId })).triggers,
     },
   };
 };
@@ -338,6 +360,12 @@ const committed = (applied: ConfigApplied): Response | null => {
   });
 };
 
+const projectRoutes = async (env: Env, tenantId: string, steps: Step[]): Promise<void> => {
+  const { triggers } = await tenantApi(env.TENANT, tenantId).call("listTriggers", { tenantId });
+  for (const trigger of triggers) await projectRoute(env.DB, trigger);
+  for (const step of steps) if (step.kind === "DeleteTrigger") await dropRoute(env.DB, tenantId, step.triggerId);
+};
+
 export const applyConfig = async (body: ApplyRequest, env: Env, caller: Caller): Promise<Response> => {
   const { tenantId } = caller;
   const problems: string[] = [];
@@ -353,13 +381,17 @@ export const applyConfig = async (body: ApplyRequest, env: Env, caller: Caller):
   if (!planned.ok) return stopped(planned.problems);
   const missing = missingValues(planned.steps, values);
   if (missing.length > 0) return stopped(missing);
-  const writes = await prepared(planned.steps, live.value, body.config, values, env, tenantId);
+  const touchesTriggers = planned.steps.some((step) => TRIGGER_STEPS.includes(step.kind));
+  const forbidden = touchesTriggers ? (turnRefused(caller, OPERATION) ?? ownerRequired(caller, OPERATION)) : null;
+  if (forbidden !== null) return forbidden;
+  const writes = await prepared(planned.steps, live.value, body.config, values, env, caller);
   if (!writes.ok) return writes.response;
   const refused = committed(
     (await tenantApi(env.TENANT, tenantId).call("applyConfig", { tenantId, writes: writes.value, now: Date.now() }))
       .applied,
   );
   if (refused !== null) return refused;
+  if (body.config.triggers !== undefined) await projectRoutes(env, tenantId, planned.steps);
   const applied = planned.steps.filter((step) => step.kind !== "LabelHost").map(changeOf);
   for (const step of planned.steps) {
     if (step.kind !== "LabelHost") continue;
