@@ -190,7 +190,7 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    if (this.deliveriesToStart.size > 0) await this.startDeliveries(this.tenantName());
+    await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     return response;
   }
@@ -198,6 +198,7 @@ export class Tenant extends TenantConnectors {
   override async alarm(): Promise<void> {
     this.expireSubscriptions(Date.now());
     await this.armExpiry();
+    await this.startDeliveries(this.tenantName());
     this.wakeEvents();
   }
 

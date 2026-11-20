@@ -8,6 +8,18 @@ const idle = (eventId: number) => ({
   created_at: 1_000,
 });
 
+const failed = (eventId: number, detail: string) => ({
+  event_id: eventId,
+  payload: JSON.stringify({
+    event: "TurnFailed",
+    sessionId: "crew-1",
+    turnId: "turn-1",
+    reason: "HarnessReportedError",
+    detail,
+  }),
+  created_at: 1_000,
+});
+
 const fold = (prompt: string, goal: string) => `/goal ${prompt}\n\nDone when: ${goal}. Or stop after 5 turns.`;
 
 test("a delivery prompt holds the plan, then one JSON line per event in order", () => {
@@ -25,15 +37,23 @@ test("a delivery prompt holds the plan, then one JSON line per event in order", 
 
 test("a delivery prompt drops the latest events until the folded message fits the limit", () => {
   const events = [idle(1), idle(2), idle(3)];
-  const full = deliveryPrompt("Plan.", "done", "t1", events, fold, 4000);
   const two = deliveryPrompt("Plan.", "done", "t1", events.slice(0, 2), fold, 4000);
-  assert.ok(full !== null && two !== null);
+  assert.ok(two !== null);
   const batch = deliveryPrompt("Plan.", "done", "t1", events, fold, fold(two.prompt, "done").length);
-  assert.equal(batch?.lastEventId, 2);
-  assert.equal(batch?.prompt, two.prompt);
+  assert.deepEqual(batch, two);
 });
 
-test("a delivery prompt keeps one event even when it overflows the limit", () => {
-  const batch = deliveryPrompt("Plan.", "done", "t1", [idle(1), idle(2)], fold, 10);
-  assert.equal(batch?.lastEventId, 1);
+test("a delivery prompt delivers by reference an event too long to fit on its own", () => {
+  const batch = deliveryPrompt("Plan.", "done", "t1", [failed(41, "x".repeat(5000)), idle(42)], fold, 4000);
+  assert.deepEqual(batch, {
+    prompt: `Plan.\n\n${JSON.stringify({
+      eventId: 41,
+      event: "TurnFailed",
+      sessionId: "crew-1",
+      tooLongToInline:
+        "read it in full with GET /v1/events?afterEventId=40&event=TurnFailed&sessionId=crew-1 (tumpel_events_wait); it is the first event of the page",
+    })}`,
+    lastEventId: 41,
+  });
+  assert.ok(fold(batch.prompt, "done").length <= 4000);
 });

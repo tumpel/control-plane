@@ -9,7 +9,7 @@ export const TURN_TABLES = [
   "turn_goals",
   "turn_image_fetches",
   "turn_claims",
-  "subscription_pause_turns",
+  "subscription_delivery_failed_pauses",
 ] as const;
 
 export const SESSION_TABLES = [

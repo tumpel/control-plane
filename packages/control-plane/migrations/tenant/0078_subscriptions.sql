@@ -8,13 +8,12 @@ CREATE TABLE subscriptions (
   cursor_event_id INTEGER NOT NULL,
   crew_failures_in_a_row INTEGER NOT NULL CHECK (crew_failures_in_a_row >= 0),
   delivery_failures_in_a_row INTEGER NOT NULL CHECK (delivery_failures_in_a_row >= 0),
-  state TEXT NOT NULL CHECK (state IN ('Active', 'Paused', 'Ended')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
-CREATE INDEX subscriptions_session ON subscriptions (session_id, state);
-CREATE INDEX subscriptions_state ON subscriptions (state, expires_at_ms);
+CREATE INDEX subscriptions_session ON subscriptions (session_id);
+CREATE INDEX subscriptions_expiry ON subscriptions (expires_at_ms);
 
 CREATE TABLE subscription_events (
   subscription_id TEXT NOT NULL REFERENCES subscriptions (subscription_id) ON DELETE CASCADE,
@@ -28,20 +27,25 @@ CREATE TABLE subscription_crew_tags (
   PRIMARY KEY (subscription_id, tag)
 );
 
-CREATE TABLE subscription_pauses (
+CREATE TABLE subscription_actives (
+  subscription_id TEXT PRIMARY KEY REFERENCES subscriptions (subscription_id) ON DELETE CASCADE
+);
+
+CREATE TABLE subscription_requested_pauses (
   subscription_id TEXT PRIMARY KEY REFERENCES subscriptions (subscription_id) ON DELETE CASCADE,
-  reason TEXT NOT NULL CHECK (reason IN ('ByRequest', 'DeliveryFailed', 'CrewFailing')),
+  message TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND 500),
   paused_at TEXT NOT NULL
 );
 
-CREATE TABLE subscription_pause_messages (
-  subscription_id TEXT PRIMARY KEY REFERENCES subscription_pauses (subscription_id) ON DELETE CASCADE,
-  message TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND 500)
+CREATE TABLE subscription_delivery_failed_pauses (
+  subscription_id TEXT PRIMARY KEY REFERENCES subscriptions (subscription_id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL,
+  paused_at TEXT NOT NULL
 );
 
-CREATE TABLE subscription_pause_turns (
-  subscription_id TEXT PRIMARY KEY REFERENCES subscription_pauses (subscription_id) ON DELETE CASCADE,
-  turn_id TEXT NOT NULL
+CREATE TABLE subscription_crew_failing_pauses (
+  subscription_id TEXT PRIMARY KEY REFERENCES subscriptions (subscription_id) ON DELETE CASCADE,
+  paused_at TEXT NOT NULL
 );
 
 CREATE TABLE subscription_ends (

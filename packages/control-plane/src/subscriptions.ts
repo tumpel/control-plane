@@ -4,7 +4,7 @@ import {
   SubscriptionPathSchema,
   SubscriptionPauseSchema,
 } from "@tumpel/schemas";
-import { EVENT_ROOM } from "./delivery-prompt.ts";
+import { widestReference } from "./delivery-prompt.ts";
 import { DELIVERY_GOAL_ROUNDS, GOAL_FOLDS } from "./harness-catalog.ts";
 import { issues, json, type Problem, type ProblemStatus, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
@@ -82,11 +82,12 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   if (goal !== null) return refused(goal.status, goal.problem);
   const goalFold = GOAL_FOLDS.get(session.harness);
   if (goalFold === undefined) throw new Error(`${session.harness} passed the goal check and has no goal fold`);
-  const length = goalFold.fold(subscription.prompt, subscription.goal, DELIVERY_GOAL_ROUNDS).length + EVENT_ROOM;
+  const leanest = `${subscription.prompt}\n\n${widestReference(subscription.events)}`;
+  const length = goalFold.fold(leanest, subscription.goal, DELIVERY_GOAL_ROUNDS).length;
   if (length > goalFold.limit) {
     return invalid(
       "Plan and goal too long",
-      `the plan and goal leave no room for an event: each turn needs ${length} characters with one event, and ${session.harness} takes at most ${goalFold.limit}`,
+      `the plan and goal leave no room for an event: each turn needs ${length} characters with one event delivered by reference, and ${session.harness} takes at most ${goalFold.limit}`,
       `Shorten the plan or the goal by ${length - goalFold.limit} characters, then create it again`,
     );
   }

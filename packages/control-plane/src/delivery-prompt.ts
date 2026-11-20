@@ -1,9 +1,24 @@
 import { TenantEventSchema } from "@tumpel/schemas";
 
 export const DELIVERY_BATCH = 100;
-export const EVENT_ROOM = 500;
+const SESSION_ID_MAX = 64;
 
 export type DeliveryEvent = { event_id: number; payload: string; created_at: number };
+
+export const eventReference = (eventId: number, event: string, sessionId: string): string =>
+  JSON.stringify({
+    eventId,
+    event,
+    sessionId,
+    tooLongToInline: `read it in full with GET /v1/events?afterEventId=${eventId - 1}&event=${event}&sessionId=${sessionId} (tumpel_events_wait); it is the first event of the page`,
+  });
+
+export const widestReference = (events: string[]): string =>
+  eventReference(
+    Number.MAX_SAFE_INTEGER,
+    events.reduce((widest, event) => (event.length > widest.length ? event : widest), ""),
+    "x".repeat(SESSION_ID_MAX),
+  );
 
 export const deliveryPrompt = (
   plan: string,
@@ -13,21 +28,24 @@ export const deliveryPrompt = (
   fold: (prompt: string, goal: string) => string,
   limit: number,
 ): { prompt: string; lastEventId: number } | null => {
-  const lines = events.map((row) =>
-    JSON.stringify(
-      TenantEventSchema.parse({
-        ...JSON.parse(row.payload),
-        eventId: row.event_id,
-        tenantId,
-        createdAt: row.created_at,
-      }),
-    ),
+  const parsed = events.map((row) =>
+    TenantEventSchema.parse({ ...JSON.parse(row.payload), eventId: row.event_id, tenantId, createdAt: row.created_at }),
   );
-  for (let count = lines.length; count > 0; count--) {
-    const prompt = `${plan}\n\n${lines.slice(0, count).join("\n")}`;
-    const last = events[count - 1];
-    if (last === undefined) return null;
-    if (count === 1 || fold(prompt, goal).length <= limit) return { prompt, lastEventId: last.event_id };
+  const fits = (prompt: string) => fold(prompt, goal).length <= limit;
+  const lines = parsed.map((event) => JSON.stringify(event));
+  const batch = parsed
+    .map((event, index) => ({
+      prompt: `${plan}\n\n${lines.slice(0, index + 1).join("\n")}`,
+      lastEventId: event.eventId,
+    }))
+    .findLast((candidate) => fits(candidate.prompt));
+  if (batch !== undefined) return batch;
+  const [first] = parsed;
+  if (first === undefined) return null;
+  if (!("sessionId" in first)) throw new Error(`delivered event ${first.eventId} (${first.event}) names no session`);
+  const prompt = `${plan}\n\n${eventReference(first.eventId, first.event, first.sessionId)}`;
+  if (!fits(prompt)) {
+    throw new Error(`event ${first.eventId} does not fit even by reference after a plan the create check admitted`);
   }
-  return null;
+  return { prompt, lastEventId: first.eventId };
 };

@@ -36,35 +36,37 @@ type SubscriptionRow = {
   cursor_event_id: number;
   crew_failures_in_a_row: number;
   delivery_failures_in_a_row: number;
-  state: string;
+  state: Subscription["state"];
+  variant: string;
   created_at: number;
   updated_at: number;
   events: string;
   crew_tags: string;
-  pause_reason: string | null;
-  paused_at: string | null;
-  pause_message: string | null;
-  pause_turn_id: string | null;
-  end_reason: string | null;
-  ended_at: string | null;
 };
 
-const SUBSCRIPTION_SELECT = `SELECT s.subscription_id, s.session_id, s.prompt, s.goal, s.expires_at, s.cursor_event_id,
-  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, s.state, s.created_at, s.updated_at,
+const SUBSCRIPTION_STATES = `WITH states (subscription_id, state, variant) AS (
+  SELECT subscription_id, 'Active', json_object('state', 'Active') FROM subscription_actives
+  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+    'reason', json_object('kind', 'ByRequest', 'message', message), 'pausedAt', paused_at) FROM subscription_requested_pauses
+  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+    'reason', json_object('kind', 'DeliveryFailed', 'turnId', turn_id), 'pausedAt', paused_at) FROM subscription_delivery_failed_pauses
+  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+    'reason', json_object('kind', 'CrewFailing'), 'pausedAt', paused_at) FROM subscription_crew_failing_pauses
+  UNION ALL SELECT subscription_id, 'Ended', json_object('state', 'Ended', 'reason', reason, 'endedAt', ended_at) FROM subscription_ends
+)`;
+
+const SUBSCRIPTION_SELECT = `${SUBSCRIPTION_STATES} SELECT s.subscription_id, s.session_id, s.prompt, s.goal, s.expires_at, s.cursor_event_id,
+  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
   (SELECT json_group_array(event) FROM (SELECT event FROM subscription_events WHERE subscription_id = s.subscription_id ORDER BY event)) AS events,
-  (SELECT json_group_array(tag) FROM (SELECT tag FROM subscription_crew_tags WHERE subscription_id = s.subscription_id ORDER BY tag)) AS crew_tags,
-  p.reason AS pause_reason, p.paused_at, m.message AS pause_message, t.turn_id AS pause_turn_id, e.reason AS end_reason, e.ended_at
-  FROM subscriptions AS s
-  LEFT JOIN subscription_pauses AS p ON p.subscription_id = s.subscription_id
-  LEFT JOIN subscription_pause_messages AS m ON m.subscription_id = s.subscription_id
-  LEFT JOIN subscription_pause_turns AS t ON t.subscription_id = s.subscription_id
-  LEFT JOIN subscription_ends AS e ON e.subscription_id = s.subscription_id`;
+  (SELECT json_group_array(tag) FROM (SELECT tag FROM subscription_crew_tags WHERE subscription_id = s.subscription_id ORDER BY tag)) AS crew_tags
+  FROM subscriptions AS s JOIN states AS st ON st.subscription_id = s.subscription_id`;
 
-const pauseReasonOf = (row: SubscriptionRow): PauseReason => {
-  if (row.pause_reason === "ByRequest") return { kind: "ByRequest", message: row.pause_message ?? "" };
-  if (row.pause_reason === "DeliveryFailed") return { kind: "DeliveryFailed", turnId: row.pause_turn_id ?? "" };
-  return { kind: "CrewFailing" };
-};
+const STATE_TABLES = [
+  "subscription_actives",
+  "subscription_requested_pauses",
+  "subscription_delivery_failed_pauses",
+  "subscription_crew_failing_pauses",
+];
 
 const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription => {
   const base = {
@@ -82,20 +84,12 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-  if (row.state === "Paused") {
-    return SubscriptionSchema.parse({ ...base, state: "Paused", reason: pauseReasonOf(row), pausedAt: row.paused_at });
-  }
-  if (row.state === "Ended") {
-    return SubscriptionSchema.parse({ ...base, state: "Ended", reason: row.end_reason, endedAt: row.ended_at });
-  }
-  return SubscriptionSchema.parse({ ...base, state: "Active" });
+  return SubscriptionSchema.parse({ ...base, ...JSON.parse(row.variant) });
 };
 
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
 export abstract class TenantSubscriptions extends TenantSessions {
-  protected readonly deliveriesToStart = new Set<string>();
-
   protected getSubscription(tenantId: string, subscriptionId: string): Subscription | null {
     const row = this.subscriptionRow(subscriptionId);
     return row === null ? null : toSubscription(tenantId, row);
@@ -104,7 +98,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
   protected listSubscriptions(tenantId: string, filter: SubscriptionFilter): Subscription[] {
     return this.ctx.storage.sql
       .exec<SubscriptionRow>(
-        `${SUBSCRIPTION_SELECT} WHERE (?1 IS NULL OR s.session_id = ?1) AND (?2 IS NULL OR s.state = ?2)
+        `${SUBSCRIPTION_SELECT} WHERE (?1 IS NULL OR s.session_id = ?1) AND (?2 IS NULL OR st.state = ?2)
         ORDER BY s.created_at, s.subscription_id`,
         filter.sessionId ?? null,
         filter.state ?? null,
@@ -125,8 +119,8 @@ export abstract class TenantSubscriptions extends TenantSessions {
     this.ctx.storage.transactionSync(() => {
       sql.exec(
         `INSERT INTO subscriptions (subscription_id, session_id, prompt, goal, expires_at, expires_at_ms, cursor_event_id,
-          crew_failures_in_a_row, delivery_failures_in_a_row, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'Active', ?, ?)`,
+          crew_failures_in_a_row, delivery_failures_in_a_row, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
         subscriptionId,
         create.sessionId,
         create.prompt,
@@ -137,6 +131,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
         now,
         now,
       );
+      sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
       for (const event of new Set(create.events)) {
         sql.exec("INSERT INTO subscription_events (subscription_id, event) VALUES (?, ?)", subscriptionId, event);
       }
@@ -169,9 +164,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
         return { kind: "CursorExpired", cursorEventId: row.cursor_event_id, oldestEventId: oldest };
       }
       this.ctx.storage.transactionSync(() => {
-        sql.exec("DELETE FROM subscription_pauses WHERE subscription_id = ?", subscriptionId);
+        this.clearState(subscriptionId);
+        sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
         sql.exec(
-          `UPDATE subscriptions SET state = 'Active', crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, updated_at = ?
+          `UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, updated_at = ?
           WHERE subscription_id = ?`,
           now,
           subscriptionId,
@@ -202,14 +198,15 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected expireSubscriptions(now: number): void {
     const due = this.ctx.storage.sql
-      .exec<SubscriptionRow>(`${SUBSCRIPTION_SELECT} WHERE s.state != 'Ended' AND s.expires_at_ms <= ?`, now)
+      .exec<SubscriptionRow>(`${SUBSCRIPTION_SELECT} WHERE st.state != 'Ended' AND s.expires_at_ms <= ?`, now)
       .toArray();
     for (const row of due) this.ctx.storage.transactionSync(() => this.end(row, "Expired", now));
   }
 
   protected async armExpiry(): Promise<void> {
     const [next] = this.ctx.storage.sql
-      .exec<{ at: number | null }>("SELECT MIN(expires_at_ms) AS at FROM subscriptions WHERE state != 'Ended'")
+      .exec<{ at: number | null }>(`SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
+        WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)`)
       .toArray();
     if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
     return this.ctx.storage.setAlarm(next.at);
@@ -219,7 +216,8 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return this.ctx.storage.sql
       .exec<{ tag: string }>(
         `SELECT DISTINCT c.tag FROM subscription_crew_tags AS c JOIN subscriptions AS s ON s.subscription_id = c.subscription_id
-        WHERE s.session_id = ? AND s.state = 'Active' ORDER BY c.tag`,
+        JOIN subscription_actives AS a ON a.subscription_id = c.subscription_id
+        WHERE s.session_id = ? ORDER BY c.tag`,
         sessionId,
       )
       .toArray()
@@ -229,28 +227,38 @@ export abstract class TenantSubscriptions extends TenantSessions {
   protected subscribed(sessionId: string): boolean {
     return (
       this.ctx.storage.sql
-        .exec("SELECT 1 FROM subscriptions WHERE session_id = ? AND state = 'Active'", sessionId)
+        .exec(
+          `SELECT 1 FROM subscriptions AS s JOIN subscription_actives AS a ON a.subscription_id = s.subscription_id
+          WHERE s.session_id = ?`,
+          sessionId,
+        )
         .toArray().length > 0
     );
   }
 
   protected override startTags(startedBy: Session["startedBy"], tags: string[]): string[] {
     if (startedBy.kind !== "Turn") return tags;
-    return [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].slice(0, SESSION_TAG_LIMIT);
+    const all = [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
+    if (all.length > SESSION_TAG_LIMIT) {
+      throw new Error(
+        `a session started by session ${startedBy.sessionId} would carry ${all.length} tags: ${all.join(", ")}`,
+      );
+    }
+    return all;
   }
 
   protected override tumpelMcp(sessionId: string): boolean {
     return super.tumpelMcp(sessionId) || this.subscribed(sessionId);
   }
 
-  protected takeDeliveries(): string[] {
-    const sessions = [...this.deliveriesToStart];
-    this.deliveriesToStart.clear();
-    return sessions;
-  }
-
   protected async startDeliveries(tenantId: string): Promise<void> {
-    for (const sessionId of this.takeDeliveries()) {
+    const sessions = this.ctx.storage.sql
+      .exec<{ session_id: string }>(
+        `SELECT DISTINCT w.session_id FROM turn_session_waits AS w
+        JOIN subscription_turns AS st ON st.turn_id = w.turn_id ORDER BY w.session_id`,
+      )
+      .toArray();
+    for (const { session_id: sessionId } of sessions) {
       const now = Date.now();
       const next = this.ctx.storage.transactionSync(() => this.takeNextWaiting(sessionId, now));
       if (next !== null) await this.startWaiting(tenantId, sessionId, next, now);
@@ -333,7 +341,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   private openSubscriptions(sessionId: string): SubscriptionRow[] {
     return this.ctx.storage.sql
-      .exec<SubscriptionRow>(`${SUBSCRIPTION_SELECT} WHERE s.session_id = ? AND s.state != 'Ended'`, sessionId)
+      .exec<SubscriptionRow>(`${SUBSCRIPTION_SELECT} WHERE s.session_id = ? AND st.state != 'Ended'`, sessionId)
       .toArray();
   }
 
@@ -380,7 +388,6 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const turn = this.newTurn(row.session_id, row.host_id, row.box_id, { prompt: row.prompt, goal: row.goal }, now);
     sql.exec("INSERT INTO turn_session_waits (turn_id, session_id) VALUES (?, ?)", turn.turn_id, row.session_id);
     sql.exec("INSERT INTO subscription_turns (turn_id, subscription_id) VALUES (?, ?)", turn.turn_id, subscriptionId);
-    this.deliveriesToStart.add(row.session_id);
   }
 
   private cancelDelivery(row: SubscriptionRow, now: number): void {
@@ -407,29 +414,29 @@ export abstract class TenantSubscriptions extends TenantSessions {
   private pause(row: SubscriptionRow, reason: PauseReason, now: number): void {
     const sql = this.ctx.storage.sql;
     this.cancelDelivery(row, now);
-    sql.exec(
-      "UPDATE subscriptions SET state = 'Paused', updated_at = ? WHERE subscription_id = ?",
-      now,
-      row.subscription_id,
-    );
-    sql.exec(
-      "INSERT INTO subscription_pauses (subscription_id, reason, paused_at) VALUES (?, ?, ?)",
-      row.subscription_id,
-      reason.kind,
-      iso(now),
-    );
+    this.clearState(row.subscription_id);
+    sql.exec("UPDATE subscriptions SET updated_at = ? WHERE subscription_id = ?", now, row.subscription_id);
     if (reason.kind === "ByRequest") {
       sql.exec(
-        "INSERT INTO subscription_pause_messages (subscription_id, message) VALUES (?, ?)",
+        "INSERT INTO subscription_requested_pauses (subscription_id, message, paused_at) VALUES (?, ?, ?)",
         row.subscription_id,
         reason.message,
+        iso(now),
       );
     }
     if (reason.kind === "DeliveryFailed") {
       sql.exec(
-        "INSERT INTO subscription_pause_turns (subscription_id, turn_id) VALUES (?, ?)",
+        "INSERT INTO subscription_delivery_failed_pauses (subscription_id, turn_id, paused_at) VALUES (?, ?, ?)",
         row.subscription_id,
         reason.turnId,
+        iso(now),
+      );
+    }
+    if (reason.kind === "CrewFailing") {
+      sql.exec(
+        "INSERT INTO subscription_crew_failing_pauses (subscription_id, paused_at) VALUES (?, ?)",
+        row.subscription_id,
+        iso(now),
       );
     }
     this.appendEvent(
@@ -438,15 +445,17 @@ export abstract class TenantSubscriptions extends TenantSessions {
     );
   }
 
+  private clearState(subscriptionId: string): void {
+    for (const table of STATE_TABLES) {
+      this.ctx.storage.sql.exec(`DELETE FROM ${table} WHERE subscription_id = ?`, subscriptionId);
+    }
+  }
+
   private end(row: SubscriptionRow, reason: EndReason, now: number): void {
     const sql = this.ctx.storage.sql;
     this.cancelDelivery(row, now);
-    sql.exec("DELETE FROM subscription_pauses WHERE subscription_id = ?", row.subscription_id);
-    sql.exec(
-      "UPDATE subscriptions SET state = 'Ended', updated_at = ? WHERE subscription_id = ?",
-      now,
-      row.subscription_id,
-    );
+    this.clearState(row.subscription_id);
+    sql.exec("UPDATE subscriptions SET updated_at = ? WHERE subscription_id = ?", now, row.subscription_id);
     sql.exec(
       "INSERT INTO subscription_ends (subscription_id, reason, ended_at) VALUES (?, ?, ?)",
       row.subscription_id,
@@ -500,12 +509,15 @@ export abstract class TenantSubscriptions extends TenantSessions {
   private matchCrew(event: NewTenantEvent & { sessionId: string }, eventId: number, now: number): void {
     const sql = this.ctx.storage.sql;
     const crewOf = sql
-      .exec<{ subscription_id: string; state: string; listed: number }>(
-        `SELECT s.subscription_id, s.state,
+      .exec<{ subscription_id: string; active: number; listed: number }>(
+        `SELECT s.subscription_id,
+          EXISTS (SELECT 1 FROM subscription_actives AS a WHERE a.subscription_id = s.subscription_id) AS active,
           EXISTS (SELECT 1 FROM subscription_events AS e WHERE e.subscription_id = s.subscription_id AND e.event = ?2) AS listed
         FROM subscriptions AS s
-        WHERE s.state IN ('Active', 'Paused') AND s.session_id != ?1
-          AND NOT EXISTS (SELECT 1 FROM subscriptions AS own WHERE own.session_id = ?1 AND own.state = 'Active')
+        WHERE s.session_id != ?1
+          AND NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
+          AND NOT EXISTS (SELECT 1 FROM subscriptions AS own JOIN subscription_actives AS oa ON oa.subscription_id = own.subscription_id
+            WHERE own.session_id = ?1)
           AND NOT EXISTS (SELECT 1 FROM subscription_crew_tags AS c WHERE c.subscription_id = s.subscription_id
             AND NOT EXISTS (SELECT 1 FROM session_tags AS t WHERE t.session_id = ?1 AND t.tag = c.tag))`,
         event.sessionId,
@@ -517,7 +529,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
       if (crew.listed === 1) {
         sql.exec("INSERT INTO subscription_matches (subscription_id, event_id) VALUES (?, ?)", subscriptionId, eventId);
       }
-      if (crew.state !== "Active") continue;
+      if (crew.active === 0) continue;
       if (event.event === "TurnCompleted") {
         sql.exec(
           "UPDATE subscriptions SET crew_failures_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
