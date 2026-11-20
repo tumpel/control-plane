@@ -31,16 +31,17 @@ export const seeOther = (location: string): Response =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-export const MAX_BODY_BYTES = 1_500_000;
+export const MAX_BODY_BYTES = 4_000_000;
+export const MAX_CONFIG_BODY_BYTES = 16_000_000;
 
 export type BoundedBody = { ok: true; value: unknown } | { ok: false; detail: string };
 
-export const readBoundedJson = async (request: Request): Promise<BoundedBody> => {
+export const readBoundedJson = async (request: Request, maxBytes = MAX_BODY_BYTES): Promise<BoundedBody> => {
   const bytes = await request.arrayBuffer();
-  if (bytes.byteLength > MAX_BODY_BYTES) {
+  if (bytes.byteLength > maxBytes) {
     return {
       ok: false,
-      detail: `the body is ${bytes.byteLength} bytes, over the ${MAX_BODY_BYTES}-byte bound on a request body`,
+      detail: `the body is ${bytes.byteLength} bytes, over the ${maxBytes}-byte bound on this request body`,
     };
   }
   return { ok: true, value: await new Response(bytes).json().catch(() => null) };
@@ -64,8 +65,13 @@ export const issues = (error: z.ZodError): string =>
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; response: Response };
 
-export const parseBody = async <T>(request: Request, schema: z.ZodType<T>, operation: string): Promise<Parsed<T>> => {
-  const body = await readBoundedJson(request);
+export const parseBody = async <T>(
+  request: Request,
+  schema: z.ZodType<T>,
+  operation: string,
+  maxBytes = MAX_BODY_BYTES,
+): Promise<Parsed<T>> => {
+  const body = await readBoundedJson(request, maxBytes);
   if (!body.ok) {
     return {
       ok: false,

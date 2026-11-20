@@ -331,7 +331,7 @@ test("a frame over the host frame bound is refused before it is read, and the ne
   assert.equal(link.closed, null);
   const refusals = link.sent.filter((envelope) => envelope.type === "FrameRefused");
   assert.equal(refusals[0]?.type === "FrameRefused" && refusals[0].seq, 1);
-  assert.match((refusals[0]?.type === "FrameRefused" && refusals[0].reason) || "", /over the 1500000-byte bound/);
+  assert.match((refusals[0]?.type === "FrameRefused" && refusals[0].reason) || "", /over the 4000000-byte bound/);
   assert.equal(link.events.at(-1)?.kind, "Message");
 });
 

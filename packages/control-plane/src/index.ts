@@ -114,6 +114,7 @@ import {
 import {
   issues,
   json,
+  MAX_CONFIG_BODY_BYTES,
   noContent,
   oauthError,
   type Parsed,
@@ -376,7 +377,7 @@ const handleListTenants = async (request: Request, env: Env): Promise<Response> 
 const handleConfigPlan = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const body = await parseBody(request, TenantConfigPlanRequestSchema, "tenantConfigs.plan");
+  const body = await parseBody(request, TenantConfigPlanRequestSchema, "tenantConfigs.plan", MAX_CONFIG_BODY_BYTES);
   if (!body.ok) return body.response;
   return planConfig(body.value, env, caller);
 };
@@ -384,7 +385,7 @@ const handleConfigPlan = async (request: Request, _url: URL, env: Env): Promise<
 const handleConfigApply = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  const body = await parseBody(request, TenantConfigApplySchema, "tenantConfigs.apply");
+  const body = await parseBody(request, TenantConfigApplySchema, "tenantConfigs.apply", MAX_CONFIG_BODY_BYTES);
   if (!body.ok) return body.response;
   return applyConfig(body.value, env, caller);
 };

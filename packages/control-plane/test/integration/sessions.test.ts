@@ -2517,7 +2517,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.match(failure.detail, /cancelled the turn/);
   });
 
-  test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive deletes the packs no live chunk lies in", async () => {
+  test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive keeps every pack", async () => {
     const { host, getJson, tool, completedTurn, storedChunks } = await tenant();
     const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
     const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
@@ -2635,55 +2635,45 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Stopped",
     );
     await tool("tumpel_session_archive", { sessionId: first.session.sessionId }, SessionSchema);
-    assert.equal(await store.text(`${tenantId}/packs/${packOne}`), null);
+    assert.notEqual(await store.text(`${tenantId}/packs/${packOne}`), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packTwo}`), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packThree}`), null);
 
     const third = await completedTurn("chunk the third");
-    const again = await storedChunks(third.session.sessionId, [one, two], { [packOne]: [one] });
+    const again = await storedChunks(third.session.sessionId, [one, two], {});
     assert.deepEqual(
       again.held.map((placement) => placement.digest),
-      [two],
+      [one, two],
     );
-    assert.deepEqual(again.uploaded, [packOne]);
+    assert.deepEqual(again.uploaded, []);
   });
 
-  test("a stored snapshot records its manifest's chunks with it, deletes the session's older root, and its sweep deletes a chunk a day after its last reference goes", async () => {
+  test("a stored snapshot deletes the session's older root and keeps the packs its chunks lie in", async () => {
     const { host, tool, completedTurn, storedChunks } = await tenant();
-    const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
-    const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
+    const [one, two] = ["1", "2"].map((digit) => digit.repeat(64)) as [string, string];
+    const [packOne, packTwo] = ["a", "b"].map((digit) => digit.repeat(64)) as [string, string];
     const first = await completedTurn("snapshot the first");
     const { sessionId } = first.session;
     const older = await storedChunks(sessionId, [one], { [packOne]: [one] });
     const tenantId = older.request.storageKey.split("/")[0] ?? "";
-    const recorded = await tenantSql(
-      tenantId,
-      "SELECT digest FROM snapshot_manifest_chunks WHERE snapshot_id = ? AND digest = ?",
-      older.request.snapshotId,
-      one,
-    );
-    assert.deepEqual(recorded, [{ digest: one }]);
 
-    const snapshotAgain = async (prompt: string, digest: string, pack: string) => {
-      await tool("tumpel_turn_send", { sessionId, prompt }, TurnSchema);
-      const offer = await host.next("TurnOffer");
-      const lineSeq = offer.lastLineSeq + 1;
-      host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-      host.send({
-        type: "TurnLine",
-        turnId: offer.turnId,
-        lineSeq,
-        text: '{"type":"result","subtype":"success","is_error":false}',
-      });
-      host.send({
-        type: "TurnComplete",
-        turnId: offer.turnId,
-        lastLineSeq: lineSeq,
-        completedAt: new Date().toISOString(),
-      });
-      return storedChunks(sessionId, [digest], { [pack]: [digest] });
-    };
-    const newer = await snapshotAgain("snapshot the second", two, packTwo);
+    await tool("tumpel_turn_send", { sessionId, prompt: "snapshot the second" }, TurnSchema);
+    const offer = await host.next("TurnOffer");
+    const lineSeq = offer.lastLineSeq + 1;
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({
+      type: "TurnComplete",
+      turnId: offer.turnId,
+      lastLineSeq: lineSeq,
+      completedAt: new Date().toISOString(),
+    });
+    const newer = await storedChunks(sessionId, [two], { [packTwo]: [two] });
     await until(
       "the older snapshot gone",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -2691,19 +2681,9 @@ suite("sessions", { concurrency: 8 }, () => {
     );
     assert.equal(await store.text(older.request.storageKey), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packOne}`), null);
-
-    await tenantSql(tenantId, "UPDATE chunk_releases SET released_at = 0 WHERE digest = ?", one);
-    await snapshotAgain("snapshot the third", three, packThree);
-    await until(
-      "the released pack deleted",
-      () => store.text(`${tenantId}/packs/${packOne}`),
-      (text) => text === null,
-    );
-    assert.notEqual(await store.text(`${tenantId}/packs/${packTwo}`), null);
-    assert.deepEqual(await tenantSql(tenantId, "SELECT digest FROM chunks WHERE digest = ?", one), []);
   });
 
-  test("a snapshot whose manifest lists 140000 chunks, too many for one bound SQLite value, is stored and records every chunk", async () => {
+  test("a snapshot whose manifest lists 140000 chunks is stored", async () => {
     const { host, tool, completedTurn } = await tenant();
     const { offer } = await completedTurn("snapshot a large tree");
     const request = await host.next("SnapshotRequest");
@@ -2717,41 +2697,25 @@ suite("sessions", { concurrency: 8 }, () => {
       () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
       (turn) => turn.state === "Completed",
     );
-    const tenantId = request.storageKey.split("/")[0] ?? "";
-    assert.deepEqual(
-      await tenantSql(
-        tenantId,
-        "SELECT count(*) AS recorded FROM snapshot_manifest_chunks WHERE snapshot_id = ?",
-        request.snapshotId,
-      ),
-      [{ recorded: 140_001 }],
-    );
     host.assertOpen("after the large snapshot");
   });
 
   test("a host frame whose handling throws is refused with the error and the channel carries the next frame", async () => {
     const { host, tool, completedTurn } = await tenant();
-    const { offer } = await completedTurn("snapshot with a lost pack");
+    const { offer } = await completedTurn("snapshot with an unreadable root");
     const request = await host.next("SnapshotRequest");
-    const lost = "e".repeat(64);
-    await store.put(
-      request.storageKey,
-      JSON.stringify({ manifest: [{ digest: lost, packDigest: lost, offset: 0, length: 1 }] }),
-    );
+    await store.put(request.storageKey, JSON.stringify({ manifest: "not a list" }));
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
     const refused = await host.refusal();
     assert.equal(refused.seq, host.carried().sent);
     assert.ok((await storedTimers(request.sessionId))?.deadlines.SnapshotAnswer);
-    assert.match(
-      refused.reason,
-      new RegExp(`failed to handle SnapshotDone: pack ${lost} .* is gone from object storage`),
-    );
+    assert.match(refused.reason, /failed to handle SnapshotDone: .*manifest/);
 
     host.send({
       type: "SnapshotFailed",
       snapshotId: request.snapshotId,
       reason: "UploadRejected",
-      detail: "pack lost",
+      detail: "the root is unreadable",
       failedAt: new Date().toISOString(),
     });
     await until(

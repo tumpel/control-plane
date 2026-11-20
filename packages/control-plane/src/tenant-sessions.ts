@@ -20,7 +20,6 @@ import {
   type SessionStartSchema,
   type SessionTagsPatchSchema,
   type SetSessionTagsResultSchema,
-  SnapshotManifestSchema,
   SnapshotRootSchema,
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
@@ -433,7 +432,6 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
-const MANIFEST_BATCH_BYTES = 1_000_000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
@@ -464,16 +462,6 @@ export type HostReply =
 const refused = (reason: string): Refused => ({ type: "Refused", reason });
 
 const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
-
-const DEAD_PACKS = "FROM packs WHERE NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.pack_digest = packs.pack_digest)";
-
-const ORPHAN_CHUNKS = `SELECT digest FROM session_chunks AS own WHERE own.session_id = ?1
-  AND NOT EXISTS (SELECT 1 FROM session_chunks AS other WHERE other.digest = own.digest AND other.session_id != ?1)`;
-
-const CHUNK_GRACE_MS = 24 * 60 * 60 * 1000;
-
-const LIVE_CHUNKS =
-  "SELECT digest FROM snapshot_manifest_chunks UNION SELECT digest FROM snapshot_chunks UNION SELECT digest FROM session_chunks";
 
 const startedByOf = (row: SessionViewRow): SessionStartedBy => {
   if (row.origin_trigger_id !== null && row.origin_delivery_id !== null) {
@@ -2404,7 +2392,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
       await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
     }
-    await this.releaseChunks(tenantId, sessionId);
+    sql.exec("DELETE FROM session_chunks WHERE session_id = ?", sessionId);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -2425,61 +2413,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
     return { kind: "Deleted" };
-  }
-
-  private releaseChunks(tenantId: string, sessionId: string): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    return this.dropChunks(tenantId, () => {
-      sql.exec(`DELETE FROM chunks WHERE digest IN (${ORPHAN_CHUNKS})`, sessionId);
-      sql.exec("DELETE FROM session_chunks WHERE session_id = ?", sessionId);
-    });
-  }
-
-  private async manifestDigests(tenantId: string, storageKey: string): Promise<string[] | null> {
-    const root = await this.env.STORE.get(storageKey);
-    if (root === null) return null;
-    const places = SnapshotRootSchema.parse(await root.json()).manifest;
-    const parts = await Promise.all(
-      places.map(async (place) => {
-        const pack = await this.env.STORE.get(packKey(tenantId, place.packDigest), {
-          range: { offset: place.offset, length: place.length },
-        });
-        if (pack === null) {
-          throw new Error(
-            `pack ${place.packDigest} of snapshot root ${storageKey} is gone from object storage; archive its session`,
-          );
-        }
-        return pack.arrayBuffer();
-      }),
-    );
-    const manifest = SnapshotManifestSchema.parse(JSON.parse(await new Blob(parts).text()));
-    return [
-      ...places.map((place) => place.digest),
-      ...manifest.entries.flatMap((entry) => (entry.kind === "File" ? entry.chunks.map((chunk) => chunk.digest) : [])),
-    ];
-  }
-
-  private recordManifest(snapshotId: string, digests: string[]): void {
-    const insert = (batch: string[]): void => {
-      this.ctx.storage.sql.exec(
-        "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?1, value FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM snapshots WHERE snapshot_id = ?1)",
-        snapshotId,
-        JSON.stringify(batch),
-      );
-    };
-    let batch: string[] = [];
-    let bytes = 2;
-    for (const digest of digests) {
-      const size = JSON.stringify(digest).length + 1;
-      if (batch.length > 0 && bytes + size > MANIFEST_BATCH_BYTES) {
-        insert(batch);
-        batch = [];
-        bytes = 2;
-      }
-      batch.push(digest);
-      bytes += size;
-    }
-    if (batch.length > 0) insert(batch);
   }
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
@@ -2503,56 +2436,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
       await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
     }
-    const unread = sql
-      .exec<{ snapshot_id: string; storage_key: string }>(
-        "SELECT snapshot_id, storage_key FROM snapshots WHERE NOT EXISTS (SELECT 1 FROM snapshot_manifest_chunks WHERE snapshot_manifest_chunks.snapshot_id = snapshots.snapshot_id)",
-      )
-      .toArray();
-    for (const snapshot of unread) {
-      const read = await this.manifestDigests(tenantId, snapshot.storage_key);
-      if (read === null) {
-        console.error(
-          `snapshot ${snapshot.snapshot_id} of tenant ${tenantId} has no root under ${snapshot.storage_key}, so its session_chunks keep its chunks; archive its session to free them`,
-        );
-        continue;
-      }
-      this.ctx.storage.transactionSync(() => this.recordManifest(snapshot.snapshot_id, read));
-    }
     await this.archiveSupersededPrebuilds(tenantId, now);
-    await this.dropChunks(tenantId, () => {
-      sql.exec(
-        `DELETE FROM chunk_releases WHERE digest IN (${LIVE_CHUNKS}) OR digest NOT IN (SELECT digest FROM chunks)`,
-      );
-      sql.exec(
-        `INSERT OR IGNORE INTO chunk_releases (digest, released_at) SELECT DISTINCT digest, ?1 FROM chunks WHERE digest NOT IN (${LIVE_CHUNKS})`,
-        now,
-      );
-      sql.exec(
-        "DELETE FROM chunks WHERE digest IN (SELECT digest FROM chunk_releases WHERE released_at < ?1)",
-        now - CHUNK_GRACE_MS,
-      );
-      sql.exec("DELETE FROM chunk_releases WHERE released_at < ?1", now - CHUNK_GRACE_MS);
-    });
-  }
-
-  private dropChunks(tenantId: string, drop: () => void): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    return this.ctx.blockConcurrencyWhile(async () => {
-      const dead = this.ctx.storage.transactionSync(() => {
-        drop();
-        const packs = sql
-          .exec<{ pack_digest: string }>(`SELECT pack_digest ${DEAD_PACKS}`)
-          .toArray()
-          .map((row) => row.pack_digest);
-        sql.exec(`DELETE ${DEAD_PACKS}`);
-        return packs;
-      });
-      for (let start = 0; start < dead.length; start += STORE_DELETE_BATCH) {
-        await this.env.STORE.delete(
-          dead.slice(start, start + STORE_DELETE_BATCH).map((packDigest) => packKey(tenantId, packDigest)),
-        );
-      }
-    });
   }
 
   private async snapshotOrTeardown(tenantId: string, session: SessionRow, latest: TurnRow): Promise<void> {
@@ -4120,8 +4004,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
-    const digests = await this.manifestDigests(tenantId, request.storage_key);
-    if (digests === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
+    const root = await this.env.STORE.get(request.storage_key);
+    if (root === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
+    const parsed = SnapshotRootSchema.safeParse(await root.json());
+    if (!parsed.success) {
+      throw new Error(
+        `snapshot root ${request.storage_key} is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+      );
+    }
     const now = Date.now();
     const completes = this.turnRow(request.turn_id)?.state === "Running";
     const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
@@ -4139,12 +4029,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         message.uploadedBytes,
         now,
         now,
-      );
-      this.recordManifest(request.snapshot_id, digests);
-      sql.exec(
-        "DELETE FROM session_chunks WHERE session_id = ? AND digest NOT IN (SELECT digest FROM snapshot_manifest_chunks WHERE snapshot_id = ?)",
-        request.session_id,
-        request.snapshot_id,
       );
       if (!completes) return null;
       sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, request.turn_id);

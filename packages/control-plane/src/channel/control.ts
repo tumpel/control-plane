@@ -36,7 +36,7 @@ export type ControlConnection =
   | { phase: "Closed" };
 
 export const TURN_CANCEL_VERSION = 23;
-export const MAX_HOST_FRAME_BYTES = 1_500_000;
+export const MAX_HOST_FRAME_BYTES = 4_000_000;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
