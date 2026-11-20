@@ -4,22 +4,33 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
 const MIGRATIONS = new URL("../migrations/tenant/", import.meta.url);
+const migration = (name: string): string => readFileSync(new URL(name, MIGRATIONS), "utf8");
 
-test("deleting a session removes its turns and their credential handovers", () => {
+test("session ownership migration resumes after an interruption with many rows", () => {
   const db = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
-  for (const name of readdirSync(MIGRATIONS).sort()) db.exec(readFileSync(new URL(name, MIGRATIONS), "utf8"));
+  for (const name of readdirSync(MIGRATIONS).sort()) {
+    if (name >= "0073") break;
+    db.exec(migration(name));
+  }
   db.exec(
     `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, created_at, updated_at)
     VALUES ('ses', 'prn', 'hst', 'box', 'prs', 'https://github.com/acme/app', 'ClaudeCode', '2.1.4', 'model', 'Archived', 1, '', 1000, 1000)`,
   );
   db.exec(
-    `INSERT INTO turns (turn_id, session_id, box_id, prompt, state, line_count, created_at, updated_at, host_id)
-    VALUES ('trn', 'ses', 'box', 'hello', 'Completed', 1, 1000, 1000, 'hst')`,
+    `WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 10000)
+    INSERT INTO turns (turn_id, session_id, box_id, prompt, state, line_count, created_at, updated_at, host_id)
+    SELECT printf('trn-%05d', n), 'ses', 'box', 'hello', 'Completed', 1, 1000, 1000, 'hst' FROM rows`,
   );
   db.exec(
     `INSERT INTO credential_handovers (credential_handover_id, turn_id, host_id, variable_names, created_at)
-    VALUES ('chd', 'trn', 'hst', '[]', 1000)`,
+    SELECT 'chd-' || turn_id, turn_id, 'hst', '[]', 1000 FROM turns`,
   );
+
+  db.exec("DROP TRIGGER credential_handovers_append_only_delete");
+  db.exec(migration("0073_session_ownership.sql"));
+  db.exec(migration("0073_session_ownership.sql"));
+  assert.equal(db.prepare("SELECT count(*) AS n FROM turns").get()?.n, 10000);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM credential_handovers").get()?.n, 10000);
 
   db.exec("DELETE FROM sessions WHERE session_id = 'ses'");
 
