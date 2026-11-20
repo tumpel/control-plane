@@ -7,16 +7,18 @@ export { EventChannel, HostChannel, SessionTimer, TenantMetrics } from "../../sr
 
 export class Tenant extends BaseTenant {
   async emit(event: NewTenantEvent, now: number): Promise<void> {
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", JSON.stringify(event), now);
+    if ("sessionId" in event) {
       this.ctx.storage.sql.exec(
-        `INSERT OR IGNORE INTO webhook_wakes (webhook_endpoint_id)
-        SELECT w.webhook_endpoint_id FROM webhook_endpoints AS w
-        JOIN webhook_deliverings AS d USING (webhook_endpoint_id)
-        JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ?`,
-        event.event,
+        `INSERT OR IGNORE INTO sessions
+          (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version,
+            model, state, last_line_seq, endpoint, created_at, updated_at)
+          VALUES (?, 'principal', 'host', 'box', 'persona', 'repository', 'codex', '1', 'model', 'Idle', 0, '', ?, ?)`,
+        event.sessionId,
+        now,
+        now,
       );
-    });
+    }
+    this.appendEvent(event, now);
     await this.handle({
       tenantApiVersion: TenantApiProtocol.Version,
       operation: "listEvents",
@@ -37,14 +39,18 @@ export class WebhookSender extends BaseWebhookSender {
     return this.ctx.storage.get("state");
   }
 
+  failure(): Promise<unknown> {
+    return this.ctx.storage.get("failure");
+  }
+
   alarmAt(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
   }
 
   async failSince(at: number): Promise<void> {
-    const state = await this.ctx.storage.get<Record<string, unknown>>("state");
-    if (state === undefined) throw new Error("the webhook sender has no state");
-    await this.ctx.storage.put("state", { ...state, failingSince: at });
+    const failure = await this.ctx.storage.get<Record<string, unknown>>("failure");
+    if (failure === undefined) throw new Error("the webhook sender has no failure");
+    await this.ctx.storage.put("failure", { ...failure, failingSince: at });
   }
 
   runAlarm(): Promise<void> {
@@ -102,7 +108,11 @@ export default {
         await stub.runAlarm();
         return new Response(null, { status: 204 });
       }
-      return Response.json({ state: (await stub.state()) ?? null, alarmAt: await stub.alarmAt() });
+      return Response.json({
+        state: (await stub.state()) ?? null,
+        failure: (await stub.failure()) ?? null,
+        alarmAt: await stub.alarmAt(),
+      });
     }
     if (url.pathname === "/__fixture/endpoint") {
       const tenantId = url.searchParams.get("tenantId") ?? "";

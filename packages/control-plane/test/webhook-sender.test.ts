@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { createPrivateKey } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { ServerResponse } from "node:http";
+import { createServer, type Server } from "node:https";
 import { after, before, test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -23,19 +24,45 @@ const { env: _stages, ...config }: WorkerConfig & { env?: unknown } = JSON.parse
 
 const KEK = Buffer.alloc(32, 7).toString("base64");
 const TENANT_ID = crypto.randomUUID();
+const TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+const RECEIVER_KEY = createPrivateKey({
+  key: Buffer.from(
+    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgdynz+5rG3bU73ruz1aaUJ6vq/n1jHnb/F3d9QVAsRgShRANCAARkSovDgMmdATixB8GZXnwenNV027ar2Q8AIj6KGhltjm5RIJCjRD/7UHY+63wGm9XwjtokTEGcOArKIbbwOyfG",
+    "base64",
+  ),
+  format: "der",
+  type: "pkcs8",
+}).export({ format: "pem", type: "pkcs8" });
+const RECEIVER_CERT = `-----BEGIN CERTIFICATE-----
+MIIBjzCCATSgAwIBAgIUfyIB1U7QagRkV1SL5Pxxb5ODdScwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTEyMDIyMTU0OVoXDTM2MTExNzIy
+MTU0OVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAEZEqLw4DJnQE4sQfBmV58HpzVdNu2q9kPACI+ihoZbY5uUSCQo0Q/+1B2
+Put8BpvV8I7aJExBnDgKyiG28DsnxqNkMGIwHQYDVR0OBBYEFOJU6bpwvvS3BKmW
+IteX+/LaS3rJMB8GA1UdIwQYMBaAFOJU6bpwvvS3BKmWIteX+/LaS3rJMA8GA1Ud
+EwEB/wQFMAMBAf8wDwYDVR0RBAgwBocEfwAAATAKBggqhkjOPQQDAgNJADBGAiEA
+icmobc7N6CfhV5Zoy5g7X1GcKv/IABtcO7f9330MS94CIQCmwmmPGX5nxtw6e7Yc
+ZskS6IATrUKTfTeyDuTha9kNZQ==
+-----END CERTIFICATE-----`;
 const SenderStateSchema = z.object({
   tenantId: z.string(),
   webhookEndpointId: z.string(),
   cursorEventId: z.int(),
+  generation: z.int(),
+});
+const FailureSchema = z.object({
   failures: z.int(),
-  failingSince: z.number().nullable(),
+  failingSince: z.number(),
 });
 const EndpointResultSchema = z.object({ result: z.object({ endpoint: WebhookEndpointSchema.nullable() }) });
 
-let receiver: Server;
 let server: TestHarness;
 let origin: string;
+let receiverServer: Server | undefined;
+let receiverOrigin: string;
 let receiverStatus = 204;
+let holdReceiver = false;
+const blockedResponses: ServerResponse[] = [];
 const received: { body: string; eventId: string | undefined; signature: string | undefined }[] = [];
 
 const post = (path: string, body: unknown): ReturnType<TestHarness["fetch"]> =>
@@ -50,11 +77,19 @@ const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> => {
   return Uint8Array.from(atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4)), (char) => char.charCodeAt(0));
 };
 
-const firstHeader = (value: string | string[] | undefined): string | undefined =>
-  Array.isArray(value) ? value[0] : value;
+const finishReceiver = (response: ServerResponse): void => {
+  response.writeHead(receiverStatus);
+  response.end();
+};
+
+const releaseReceiver = (): void => {
+  holdReceiver = false;
+  for (const response of blockedResponses.splice(0)) finishReceiver(response);
+};
 
 before(async () => {
-  receiver = createServer((request, response) => {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  const localReceiver = createServer({ key: RECEIVER_KEY, cert: RECEIVER_CERT }, (request, response) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk: string) => {
@@ -63,15 +98,24 @@ before(async () => {
     request.on("end", () => {
       received.push({
         body,
-        eventId: firstHeader(request.headers["tumpel-event-id"]),
-        signature: firstHeader(request.headers["tumpel-signature"]),
+        eventId: Array.isArray(request.headers["tumpel-event-id"])
+          ? request.headers["tumpel-event-id"][0]
+          : request.headers["tumpel-event-id"],
+        signature: Array.isArray(request.headers["tumpel-signature"])
+          ? request.headers["tumpel-signature"][0]
+          : request.headers["tumpel-signature"],
       });
-      response.writeHead(receiverStatus);
-      response.end();
+      if (holdReceiver) blockedResponses.push(response);
+      else finishReceiver(response);
     });
   });
-  await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
-  const receiverOrigin = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}`;
+  receiverServer = localReceiver;
+  await new Promise<void>((resolve) => localReceiver.listen(0, "127.0.0.1", resolve));
+  const receiverAddress = localReceiver.address();
+  if (receiverAddress === null || typeof receiverAddress === "string") {
+    throw new Error("the webhook receiver did not listen on a TCP port");
+  }
+  receiverOrigin = `https://127.0.0.1:${receiverAddress.port}`;
   server = createTestHarness({
     root: fileURLToPath(new URL("..", import.meta.url)),
     workers: [
@@ -79,7 +123,7 @@ before(async () => {
         config: {
           ...config,
           main: "./test/fixtures/webhook-worker.ts",
-          vars: { ...config.vars, SECRETS_KEK: KEK, WEBHOOK_STUB_ORIGIN: receiverOrigin },
+          vars: { ...config.vars, SECRETS_KEK: KEK },
         },
       },
     ],
@@ -89,14 +133,20 @@ before(async () => {
 
 after(async () => {
   await server?.close();
-  receiver?.close();
+  if (receiverServer !== undefined) {
+    await new Promise<void>((resolve, reject) =>
+      receiverServer?.close((error) => (error === undefined ? resolve() : reject(error))),
+    );
+  }
+  if (TLS_REJECT_UNAUTHORIZED === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  else process.env.NODE_TLS_REJECT_UNAUTHORIZED = TLS_REJECT_UNAUTHORIZED;
 });
 
 test("the sender signs ordered events, retries its cursor, fails after three days and stops on deletion", async () => {
   const created = await post("/__fixture/create", {
     tenantId: TENANT_ID,
     endpoint: {
-      url: "https://receiver.example.test/hooks/events",
+      url: `${receiverOrigin}/hooks/events`,
       events: ["SubscriptionPaused", "SubscriptionEnded"],
     },
     now: 1,
@@ -105,7 +155,8 @@ test("the sender signs ordered events, retries its cursor, fails after three day
   if (endpoint === null) throw new Error("the created webhook endpoint read back null");
   const senderPath = `/__fixture/sender/${TENANT_ID}/${endpoint.webhookEndpointId}`;
 
-  await post("/__fixture/emit", {
+  holdReceiver = true;
+  const firstEmit = post("/__fixture/emit", {
     tenantId: TENANT_ID,
     event: {
       event: "SubscriptionPaused",
@@ -115,7 +166,12 @@ test("the sender signs ordered events, retries its cursor, fails after three day
     },
     now: 2,
   });
-  await post("/__fixture/emit", {
+  await until(
+    "the blocked webhook event",
+    async () => received.length,
+    (length) => length === 1,
+  );
+  const secondEmit = post("/__fixture/emit", {
     tenantId: TENANT_ID,
     event: {
       event: "SubscriptionEnded",
@@ -125,6 +181,19 @@ test("the sender signs ordered events, retries its cursor, fails after three day
     },
     now: 3,
   });
+  await until(
+    "the concurrent sender wake",
+    async () => {
+      const snapshot = z
+        .object({ state: SenderStateSchema.nullable() })
+        .passthrough()
+        .parse(await (await server.fetch(`${origin}${senderPath}`)).json());
+      return snapshot.state?.generation ?? 0;
+    },
+    (generation) => generation === 2,
+  );
+  releaseReceiver();
+  await Promise.all([firstEmit, secondEmit]);
   await until(
     "two webhook events",
     async () => received.length,
@@ -172,9 +241,11 @@ test("the sender signs ordered events, retries its cursor, fails after three day
     (length) => length === 3,
   );
   const failed = await server.fetch(`${origin}${senderPath}`);
-  const firstFailure = z.object({ state: SenderStateSchema, alarmAt: z.number() }).parse(await failed.json());
+  const firstFailure = z
+    .object({ state: SenderStateSchema, failure: FailureSchema, alarmAt: z.number() })
+    .parse(await failed.json());
   assert.equal(firstFailure.state.cursorEventId, 2);
-  assert.equal(firstFailure.state.failures, 1);
+  assert.equal(firstFailure.failure.failures, 1);
   assert.ok(firstFailure.alarmAt >= failedAt + 59_000 && firstFailure.alarmAt <= Date.now() + 61_000);
 
   const failingSince = Date.now() - 3 * 24 * 60 * 60 * 1000;
@@ -199,9 +270,9 @@ test("the sender signs ordered events, retries its cursor, fails after three day
   });
   assert.deepEqual(await deleted.json(), { result: { deleted: true } });
   const stopped = z
-    .object({ state: z.null(), alarmAt: z.null() })
+    .object({ state: z.null(), failure: z.null(), alarmAt: z.null() })
     .parse(await (await server.fetch(`${origin}${senderPath}`)).json());
-  assert.deepEqual(stopped, { state: null, alarmAt: null });
+  assert.deepEqual(stopped, { state: null, failure: null, alarmAt: null });
   receiverStatus = 204;
   await post("/__fixture/emit", {
     tenantId: TENANT_ID,

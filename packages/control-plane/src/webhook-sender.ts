@@ -15,8 +15,12 @@ type SenderState = {
   tenantId: string;
   webhookEndpointId: string;
   cursorEventId: number;
+  generation: number;
+};
+
+type Failure = {
   failures: number;
-  failingSince: number | null;
+  failingSince: number;
 };
 
 type Wake = { tenantId: string; webhookEndpointId: string; cursorEventId: number };
@@ -30,20 +34,24 @@ export class WebhookSender extends DurableObject<Env> {
   private delivering: Promise<void> = Promise.resolve();
 
   async wake(input: Wake): Promise<void> {
-    let state = await this.ctx.storage.get<SenderState>("state");
-    if (state === undefined) {
-      state = {
-        tenantId: input.tenantId,
-        webhookEndpointId: input.webhookEndpointId,
-        cursorEventId: input.cursorEventId,
-        failures: 0,
-        failingSince: null,
-      };
-      await this.ctx.storage.put("state", state);
-    }
-    if ((await this.ctx.storage.getAlarm()) !== null && state.failures > 0) return;
-    await this.ctx.storage.setAlarm(Date.now() + FIRST_RETRY_MS);
-    this.ctx.waitUntil(this.deliver());
+    const retrying = await this.ctx.storage.transaction(async (transaction) => {
+      const stored = await transaction.get<SenderState>("state");
+      const state: SenderState =
+        stored === undefined
+          ? {
+              tenantId: input.tenantId,
+              webhookEndpointId: input.webhookEndpointId,
+              cursorEventId: input.cursorEventId,
+              generation: 1,
+            }
+          : { ...stored, generation: stored.generation + 1 };
+      await transaction.put("state", state);
+      const failure = await transaction.get<Failure>("failure");
+      if (failure === undefined) await transaction.setAlarm(Date.now() + FIRST_RETRY_MS);
+      return failure !== undefined;
+    });
+    if (retrying) return;
+    this.ctx.waitUntil(this.deliver(false));
   }
 
   async stop(): Promise<void> {
@@ -53,18 +61,20 @@ export class WebhookSender extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    await this.deliver();
+    await this.deliver(true);
   }
 
-  private deliver(): Promise<void> {
-    const send = (): Promise<void> => this.sendPending();
+  private deliver(retry: boolean): Promise<void> {
+    const send = (): Promise<void> => this.sendPending(retry);
     this.delivering = this.delivering.then(send, send);
     return this.delivering;
   }
 
-  private async sendPending(): Promise<void> {
+  private async sendPending(retry: boolean): Promise<void> {
     let state = await this.ctx.storage.get<SenderState>("state");
     if (state === undefined) return;
+    if (!retry && (await this.ctx.storage.get<Failure>("failure")) !== undefined) return;
+    const generation = state.generation;
     const tenant = tenantApi(this.env.TENANT, state.tenantId);
     const { endpoint } = await tenant.call("getWebhookEndpoint", {
       tenantId: state.tenantId,
@@ -72,6 +82,7 @@ export class WebhookSender extends DurableObject<Env> {
     });
     if (endpoint === null || endpoint.status.delivery === "Failing") {
       await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.delete("failure");
       if (endpoint === null) await this.ctx.storage.deleteAll();
       return;
     }
@@ -95,11 +106,7 @@ export class WebhookSender extends DurableObject<Env> {
         const body = JSON.stringify(event);
         const signature = await signWebhook(keyStoreOf(this.env), state.tenantId, body);
         const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-        const endpointUrl = new URL(endpoint.url);
-        const target = this.env.WEBHOOK_STUB_ORIGIN
-          ? `${this.env.WEBHOOK_STUB_ORIGIN}${endpointUrl.pathname}${endpointUrl.search}`
-          : endpoint.url;
-        const response = await fetch(target, {
+        const response = await fetch(endpoint.url, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -119,33 +126,56 @@ export class WebhookSender extends DurableObject<Env> {
           await this.failed(state, detail);
           return;
         }
-        state = { ...state, cursorEventId: event.eventId, failures: 0, failingSince: null };
-        await this.ctx.storage.put("state", state);
+        await this.ctx.storage.delete("failure");
+        state = await this.advanceCursor(event.eventId);
       }
-      state = { ...state, cursorEventId: listed.page.lastEventId };
-      await this.ctx.storage.put("state", state);
+      state = await this.advanceCursor(listed.page.lastEventId);
       if (listed.page.events.length < 100) {
-        await this.ctx.storage.deleteAlarm();
+        await this.ctx.storage.transaction(async (transaction) => {
+          const current = await transaction.get<SenderState>("state");
+          if (current?.generation === generation) await transaction.deleteAlarm();
+        });
         return;
       }
     }
   }
 
+  private advanceCursor(cursorEventId: number): Promise<SenderState> {
+    return this.ctx.storage.transaction(async (transaction) => {
+      const state = await transaction.get<SenderState>("state");
+      if (state === undefined) throw new Error("the webhook sender lost its state while advancing its cursor");
+      const advanced = { ...state, cursorEventId };
+      await transaction.put("state", advanced);
+      return advanced;
+    });
+  }
+
   private async failed(state: SenderState, detail: string): Promise<void> {
     const now = Date.now();
-    const failingSince = state.failingSince ?? now;
-    const failures = state.failures + 1;
-    await this.ctx.storage.put("state", { ...state, failures, failingSince });
+    const failure = await this.ctx.storage.transaction(async (transaction) => {
+      const stored = await transaction.get<Failure>("failure");
+      const failingSince = stored?.failingSince ?? now;
+      const failures = (stored?.failures ?? 0) + 1;
+      const next = { failures, failingSince };
+      await transaction.put("failure", next);
+      if (now - failingSince < FAILING_AFTER_MS) {
+        const delay = Math.min(FIRST_RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
+        await transaction.setAlarm(Math.min(now + delay, failingSince + FAILING_AFTER_MS));
+      }
+      return next;
+    });
+    const { failingSince } = failure;
     if (now - failingSince >= FAILING_AFTER_MS) {
       await tenantApi(this.env.TENANT, state.tenantId).call("setWebhookEndpointStatus", {
         tenantId: state.tenantId,
         webhookEndpointId: state.webhookEndpointId,
         status: { delivery: "Failing", detail, failingSince: new Date(failingSince).toISOString() },
       });
-      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.transaction(async (transaction) => {
+        await transaction.delete("failure");
+        await transaction.deleteAlarm();
+      });
       return;
     }
-    const delay = Math.min(FIRST_RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
-    await this.ctx.storage.setAlarm(Math.min(now + delay, failingSince + FAILING_AFTER_MS));
   }
 }
