@@ -239,6 +239,12 @@ const tenantSql = async (tenantId: string, query: string, ...bindings: (string |
   return z.array(z.unknown()).parse(await response.json());
 };
 
+const heldBoxes = async (tenantId: string): Promise<{ sessionId: string; evictable: boolean }[]> => {
+  const response = await call(`/__fixture/held/${tenantId}`);
+  assert.equal(response.status, 200, await response.clone().text());
+  return z.array(z.object({ sessionId: z.string(), evictable: z.boolean() })).parse(await response.json());
+};
+
 const d1Run = async (query: string, ...bindings: (string | number)[]): Promise<void> => {
   const response = await call("/__fixture/d1", { method: "POST", body: JSON.stringify({ query, bindings }) });
   assert.equal(response.status, 204, await response.text());
@@ -2323,7 +2329,7 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
-    const { host, getJson, tool, sessionStart } = await tenant();
+    const { tenantId, host, getJson, tool, sessionStart } = await tenant();
     const started = await tool(
       "tumpel_session_start",
       { ...(await sessionStart()), prompt: "keep my box" },
@@ -2360,6 +2366,10 @@ suite("sessions", { concurrency: 8 }, () => {
       failures.map((failure) => [failure.sessionId, failure.reason, failure.detail, failure.failedAt]),
       [[sessionId, "BoxDirty", detail, failedAt]],
     );
+    assert.equal(
+      await heldBoxes(tenantId).then((boxes) => boxes.find((box) => box.sessionId === sessionId)?.evictable),
+      false,
+    );
 
     const again = await host.next("SnapshotRequest");
     assert.equal(again.sessionId, sessionId);
@@ -2370,6 +2380,10 @@ suite("sessions", { concurrency: 8 }, () => {
       "the second snapshot stored in place of the first",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
       (snapshots) => snapshots.length === 1 && snapshots[0]?.snapshotId === again.snapshotId,
+    );
+    assert.equal(
+      await heldBoxes(tenantId).then((boxes) => boxes.find((box) => box.sessionId === sessionId)?.evictable),
+      true,
     );
   });
 

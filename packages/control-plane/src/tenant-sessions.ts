@@ -1738,6 +1738,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
             AND NOT EXISTS (
               SELECT 1 FROM stop_failures x WHERE x.session_id = s.session_id
               AND x.created_at >= COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), 0)
+              AND x.created_at > COALESCE((SELECT MAX(p.updated_at) FROM snapshots p WHERE p.session_id = s.session_id), 0)
             )
             AND NOT EXISTS (
               SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
