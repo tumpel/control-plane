@@ -58,7 +58,8 @@
       { "name": "HOST", "class_name": "HostChannel" },
       { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
       { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
-      { "name": "EVENTS", "class_name": "EventChannel" }
+      { "name": "EVENTS", "class_name": "EventChannel" },
+      { "name": "PUSH_SENDER", "class_name": "PushSender" }
     ]
   },
   "migrations": [
@@ -66,7 +67,8 @@
     { "tag": "v2", "new_sqlite_classes": ["HostChannel"] },
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
-    { "tag": "v5", "new_sqlite_classes": ["EventChannel"] }
+    { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
+    { "tag": "v6", "new_sqlite_classes": ["PushSender"] }
   ],
   "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
@@ -124,7 +126,8 @@
           { "name": "HOST", "class_name": "HostChannel" },
           { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
           { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
-          { "name": "EVENTS", "class_name": "EventChannel" }
+          { "name": "EVENTS", "class_name": "EventChannel" },
+          { "name": "PUSH_SENDER", "class_name": "PushSender" }
         ]
       },
       "migrations": [
@@ -132,7 +135,8 @@
         { "tag": "v2", "new_sqlite_classes": ["HostChannel"] },
         { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
         { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
-        { "tag": "v5", "new_sqlite_classes": ["EventChannel"] }
+        { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
+        { "tag": "v6", "new_sqlite_classes": ["PushSender"] }
       ]
     }
   }

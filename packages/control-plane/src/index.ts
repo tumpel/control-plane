@@ -201,6 +201,8 @@ import { handlePrebuildTemplates } from "./prebuild-templates.ts";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
+import type { PushSender } from "./push-sender.ts";
+import { handlePushSubscriptions } from "./push-subscriptions.ts";
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
 import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
@@ -217,6 +219,7 @@ import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryToken
 
 export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
+export { PushSender } from "./push-sender.ts";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 export { TenantMetrics } from "./tenant-metrics";
@@ -231,6 +234,7 @@ export interface Env extends SignerEnv {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   EVENTS: DurableObjectNamespace<EventChannel>;
+  PUSH_SENDER: DurableObjectNamespace<PushSender>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
@@ -251,6 +255,7 @@ export interface Env extends SignerEnv {
   CIRCLECI_OIDC_ORIGIN: string;
   CIRCLECI_APP_ORIGIN: string;
   OPENROUTER_ORIGIN: string;
+  VAPID_PRIVATE_KEY?: string;
 }
 
 let verifier: { key: string; verify: Verify } | undefined;
@@ -1714,6 +1719,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const sessions =
     (await handleSessions(request, url, env, deviceCaller)) ??
     (await handleSubscriptions(request, url, env, deviceCaller)) ??
+    (await handlePushSubscriptions(request, url, env, deviceCaller)) ??
     (await handleTriggers(request, url, env, deviceCaller)) ??
     (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;

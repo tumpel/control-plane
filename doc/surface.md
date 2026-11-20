@@ -7,7 +7,7 @@ names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`, Triggers `trigger`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`, Triggers `trigger`, PushKeys `push-key`, PushSubscriptions `push-subscription`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
 `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`
 the verbs `create-static` and `create-oauth`,
@@ -105,6 +105,10 @@ nothing: the server cannot read your environment, so they return the config entr
 | `PrebuildTemplates_getPullRequest`       | `tumpel_prebuild_template_get_pull_request`  | `tumpel prebuild-template get-pull-request`  |
 | `PrebuildTemplates_list`                 | `tumpel_prebuild_template_list`              | `tumpel prebuild-template list`              |
 | `PrebuildTemplates_openPullRequest`      | `tumpel_prebuild_template_open_pull_request` | `tumpel prebuild-template open-pull-request` |
+| `PushKeys_get`                           | `tumpel_push_key_get`                        | `(none)`                                     |
+| `PushSubscriptions_create`               | `tumpel_push_subscription_create`            | `(none)`                                     |
+| `PushSubscriptions_delete`               | `tumpel_push_subscription_delete`            | `(none)`                                     |
+| `PushSubscriptions_list`                 | `tumpel_push_subscription_list`              | `(none)`                                     |
 | `Releases_current`                       | `tumpel_release_current`                     | `tumpel release current`                     |
 | `SecretSets_create`                      | `tumpel_secret_set_create`                   | `tumpel secret-set create`                   |
 | `SecretSets_delete`                      | `tumpel_secret_set_delete`                   | `tumpel secret-set delete`                   |
@@ -159,6 +163,13 @@ CLI only: tenant operations with a CLI command and no MCP tool:
 - `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
 - `CircleCIConnections_complete`: takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it.
 
+MCP only: browser notification operations with no CLI command:
+
+- `PushKeys_get`: browser notification setup; the pinned CLI has no command.
+- `PushSubscriptions_create`: browser notification setup; the pinned CLI has no command.
+- `PushSubscriptions_delete`: browser notification setup; the pinned CLI has no command.
+- `PushSubscriptions_list`: browser notification setup; the pinned CLI has no command.
+
 Allowlist: operations that are not tenant operations, with no tool or command:
 
 - `DeviceFlow_approve`: browser-only page behind the identity-aware proxy, signed in by its assertion.
@@ -194,7 +205,3 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `WebhookEndpoints_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
 - `WebhookEndpoints_list`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
 - `WebhookSigningKeys_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `PushKeys_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `PushSubscriptions_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `PushSubscriptions_delete`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
-- `PushSubscriptions_list`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
