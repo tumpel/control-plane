@@ -1,8 +1,8 @@
 import { type EventPageSchema, EventQuerySchema } from "@tumpel/schemas";
 import type { z } from "zod";
-import { channelUrl, type Subscription } from "./event-channel.ts";
+import { channelUrl, eventCursorExpired, type Subscription } from "./event-channel.ts";
 import type { Authenticate } from "./github-handlers.ts";
-import { eventCursorExpired, issues, json, problem } from "./http.ts";
+import { issues, json, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
 import { tenantApi } from "./tenant-api.ts";

@@ -1,9 +1,4 @@
-import {
-  EventCursorExpiredProblemSchema,
-  OAuthErrorSchema,
-  type ProblemResponseSchema,
-  ProblemSchema,
-} from "@tumpel/schemas";
+import { OAuthErrorSchema, type ProblemResponseSchema, ProblemSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 
 export type Problem = z.infer<typeof ProblemSchema>;
@@ -23,18 +18,6 @@ export const json = (body: unknown, status = 200, headers: Record<string, string
 
 export const problem = (status: ProblemStatus, body: Problem, headers: Record<string, string> = {}): Response =>
   json(ProblemSchema.parse(body), status, headers);
-
-export const eventCursorExpired = (afterEventId: number, oldestEventId: number): Response =>
-  json(
-    EventCursorExpiredProblemSchema.parse({
-      code: "EventCursorExpired",
-      title: "Event cursor expired",
-      detail: `event ${afterEventId} is older than the oldest event kept, ${oldestEventId}; the log keeps 7 days`,
-      fix: "Read the current state of what you follow, then read events again without afterEventId",
-      oldestEventId,
-    }),
-    410,
-  );
 
 export const signedOut = (detail: string, fix: string): Response =>
   problem(401, { code: "SignedOut", title: "Not signed in", detail, fix }, { "www-authenticate": "Bearer" });

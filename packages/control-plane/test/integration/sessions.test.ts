@@ -23,6 +23,7 @@ import {
   ClaudeSetupSchema,
   CompactTranscriptPageSchema,
   CredentialHandoverSchema,
+  EventCursorExpiredProblemSchema,
   EventPageSchema,
   FailedTurnSchema,
   HostSchema,
@@ -2968,7 +2969,7 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("tenant events record a turn's start, completion and the idle session in order, wake an MCP wait and stream over a WebSocket, also to a browser that sends its token as a subprotocol", async () => {
-    const { bearer, host, tool, toolRefusal, sessionStart } = await tenant();
+    const { tenantId, bearer, host, tool, toolRefusal, sessionStart } = await tenant();
     const start = await tool("tumpel_events_wait", { waitSeconds: 0 }, EventPageSchema);
     assert.deepEqual(start.events, []);
 
@@ -3043,6 +3044,16 @@ suite("sessions", { concurrency: 8 }, () => {
       [],
     );
     assert.match(await toolRefusal("tumpel_events_wait", { waitSeconds: 51 }), /waitSeconds/);
+
+    const first = all.events[0];
+    const second = all.events[1];
+    assert.ok(first && second);
+    await tenantSql(tenantId, "DELETE FROM events WHERE event_id <= ?", first.eventId);
+    for (const headers of [bearer, { ...bearer, upgrade: "websocket" }]) {
+      const expired = await call(`/v1/events?waitSeconds=0&afterEventId=${start.lastEventId}`, { headers });
+      assert.equal(expired.status, 410);
+      assert.equal(EventCursorExpiredProblemSchema.parse(await expired.json()).oldestEventId, second.eventId);
+    }
   });
 
   test("a start from an issue over MCP refuses a missing or closed issue, and an open one offers its prompt and reads back the issue", async () => {

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import { TenantEventTypeSchema } from "@tumpel/schemas";
+import { EventCursorExpiredProblemSchema, TenantEventTypeSchema } from "@tumpel/schemas";
 import { z } from "zod";
-import { eventCursorExpired } from "./http.ts";
+import { json } from "./http.ts";
 import type { Env } from "./index.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
@@ -27,6 +27,18 @@ export const matches = (subscription: Subscription, event: NewTenantEvent): bool
   (subscription.events.length === 0 || subscription.events.includes(event.event)) &&
   (subscription.sessionId === null || ("sessionId" in event && event.sessionId === subscription.sessionId)) &&
   (subscription.triggerId === null || ("triggerId" in event && event.triggerId === subscription.triggerId));
+
+export const eventCursorExpired = (afterEventId: number, oldestEventId: number): Response =>
+  json(
+    EventCursorExpiredProblemSchema.parse({
+      code: "EventCursorExpired",
+      title: "Event cursor expired",
+      detail: `event ${afterEventId} is older than the oldest event kept, ${oldestEventId}; the log keeps 7 days`,
+      fix: "Read the current state of what you follow, then read events again without afterEventId",
+      oldestEventId,
+    }),
+    410,
+  );
 
 export class EventChannel extends DurableObject<Env> {
   private delivering: Promise<void> = Promise.resolve();
