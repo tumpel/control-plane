@@ -243,6 +243,23 @@ const prepareStart = async (
     personaId: start.personaId,
   });
   if (persona === null) return personaNotFound(start.personaId);
+  if (caller.origin.kind === "Turn") {
+    const { subscriptions } = await tenantApi(env.TENANT, caller.tenantId).call("listSubscriptions", {
+      tenantId: caller.tenantId,
+      filter: { sessionId: caller.origin.sessionId, state: "Active" },
+    });
+    const tags = [
+      ...new Set([...subscriptions.flatMap((subscription) => subscription.crewTags), ...(start.tags ?? [])]),
+    ];
+    if (tags.length > SESSION_TAG_LIMIT) {
+      return refuse(422, {
+        code: "InvalidRequest",
+        title: "Too many tags",
+        detail: `the crew session would carry ${tags.length} tags, its own and the crew tags of session ${caller.origin.sessionId}'s active subscriptions: ${tags.sort().join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
+        fix: `Start the session with ${tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+      });
+    }
+  }
   const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, persona.harness);
   if (entry === undefined) {
     return refuse(422, {
