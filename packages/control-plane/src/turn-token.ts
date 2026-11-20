@@ -1,3 +1,4 @@
+import type { TurnSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { readSignedState, signState } from "./github.ts";
 
@@ -24,3 +25,8 @@ export const verifyTurnToken = async (key: CryptoKey, token: string, now: number
   if (!read.ok || read.claims.expiresAt <= now) return null;
   return read.claims;
 };
+
+export type LiveTurn = Pick<z.infer<typeof TurnSchema>, "sessionId" | "state">;
+
+export const turnTokenLive = (claims: TurnClaims, turn: LiveTurn | null): boolean =>
+  turn?.state === "Running" && turn.sessionId === claims.sessionId;
