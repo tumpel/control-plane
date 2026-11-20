@@ -14,14 +14,8 @@ export const recordObjectCleanups = (sql: CleanupSql, keys: readonly string[]): 
   for (const key of keys) sql.exec("INSERT OR IGNORE INTO object_cleanups (storage_key) VALUES (?)", key);
 };
 
-export const drainObjectCleanups = async (sql: CleanupSql, store: CleanupStore, tenantId: string): Promise<void> => {
+export const drainObjectCleanups = async (sql: CleanupSql, store: CleanupStore): Promise<void> => {
   for (;;) {
-    sql.exec(
-      `DELETE FROM object_cleanups WHERE storage_key IN (
-        SELECT ?1 || '/persona-files/' || digest FROM persona_files
-        UNION SELECT ?1 || '/persona-files/' || digest FROM turn_steer_settings)`,
-      tenantId,
-    );
     const keys = sql
       .exec<{ storage_key: string }>(
         "SELECT storage_key FROM object_cleanups ORDER BY storage_key LIMIT ?",

@@ -2253,11 +2253,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turnId,
       now,
     );
-    this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO turn_steer_settings (turn_id, digest) VALUES (?, ?)",
-      turnId,
-      digest,
-    );
     await this.env.STORE.put(personaFileKey(tenantId, digest), bytes);
     const signer = signerOf(
       this.env,
@@ -2409,19 +2404,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
     this.ctx.storage.transactionSync(() => {
-      recordObjectCleanups(sql, [
-        ...sql
+      recordObjectCleanups(
+        sql,
+        sql
           .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
           .toArray()
           .map((row) => row.storage_key),
-        ...sql
-          .exec<{ digest: string }>(
-            "SELECT DISTINCT digest FROM turn_steer_settings WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?)",
-            sessionId,
-          )
-          .toArray()
-          .map((row) => personaFileKey(tenantId, row.digest)),
-      ]);
+      );
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
     return { kind: "Deleted" };
