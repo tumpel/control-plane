@@ -2,7 +2,8 @@ CREATE TABLE trigger_routes (
   trigger_id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants (tenant_id),
   source TEXT NOT NULL CHECK (source IN ('GitHub')),
-  event TEXT NOT NULL CHECK (event IN ('issues', 'pull_request', 'push', 'status'))
+  event TEXT NOT NULL CHECK (event IN ('issues', 'pull_request', 'push', 'status')),
+  updated_at INTEGER NOT NULL
 );
 
 CREATE INDEX trigger_routes_tenant_event ON trigger_routes (tenant_id, source, event);

@@ -18,6 +18,7 @@ import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
 import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
+import { projectRoute } from "../src/trigger-routes.ts";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const ACCESS_AUD = "tumpel-github-installations-e2e";
@@ -271,4 +272,42 @@ test("a trigger drops a delivery it does not match and records why a matched one
       [triggerId, "NoHostAvailable"],
     ],
   );
+});
+
+test("a stale route starts nothing its trigger rejects and is repaired, and an older projection never replaces a newer one", async () => {
+  const env = await server.getWorker<{ DB: Parameters<typeof projectRoute>[0] }>().getEnv();
+  const listed = await send("GET", "/v1/triggers", undefined, bearer);
+  const [trigger] = TriggerSchema.array().parse(await listed.json());
+  assert.ok(trigger);
+  const conditions = () =>
+    env.DB.prepare("SELECT COUNT(*) AS held FROM trigger_route_conditions WHERE trigger_id = ?")
+      .bind(trigger.triggerId)
+      .first<{ held: number }>();
+  await env.DB.prepare("DELETE FROM trigger_route_conditions WHERE trigger_id = ?").bind(trigger.triggerId).run();
+  await signedDelivery("status", {
+    installation: { id: INSTALLATION_ID },
+    repository: { full_name: "acme/app", html_url: "https://github.com/acme/app" },
+    context: "ci",
+    state: "pending",
+    sha: "4f1c9e2",
+    target_url: "https://github.com/acme/app/pull/1",
+  });
+  const events = await send(
+    "GET",
+    `/v1/events?triggerId=${trigger.triggerId}&afterEventId=0&waitSeconds=0`,
+    undefined,
+    bearer,
+  );
+  assert.equal(EventPageSchema.parse(await events.json()).events.length, 2);
+  assert.deepEqual(await conditions(), { held: 2 });
+  await projectRoute(env.DB, {
+    ...trigger,
+    updatedAt: trigger.updatedAt - 1,
+    source: { kind: "GitHub", event: "push", conditions: [] },
+  });
+  assert.deepEqual(
+    await env.DB.prepare("SELECT event FROM trigger_routes WHERE trigger_id = ?").bind(trigger.triggerId).first(),
+    { event: "status" },
+  );
+  assert.deepEqual(await conditions(), { held: 2 });
 });

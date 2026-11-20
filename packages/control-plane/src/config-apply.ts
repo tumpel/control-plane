@@ -38,7 +38,7 @@ import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-fil
 import { keyPrefixMismatch, unreadableSecretSet } from "./secret-members.ts";
 import type { ConfigApplied } from "./tenant.ts";
 import { tenantApi } from "./tenant-api.ts";
-import { syncRoutes } from "./trigger-routes.ts";
+import { dropRoute, projectRoute } from "./trigger-routes.ts";
 import { turnRefused } from "./triggers.ts";
 import { personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
@@ -360,6 +360,12 @@ const committed = (applied: ConfigApplied): Response | null => {
   });
 };
 
+const projectRoutes = async (env: Env, tenantId: string, steps: Step[]): Promise<void> => {
+  const { triggers } = await tenantApi(env.TENANT, tenantId).call("listTriggers", { tenantId });
+  for (const trigger of triggers) await projectRoute(env.DB, trigger);
+  for (const step of steps) if (step.kind === "DeleteTrigger") await dropRoute(env.DB, tenantId, step.triggerId);
+};
+
 export const applyConfig = async (body: ApplyRequest, env: Env, caller: Caller): Promise<Response> => {
   const { tenantId } = caller;
   const problems: string[] = [];
@@ -385,7 +391,7 @@ export const applyConfig = async (body: ApplyRequest, env: Env, caller: Caller):
       .applied,
   );
   if (refused !== null) return refused;
-  if (touchesTriggers) await syncRoutes(env, tenantId);
+  if (body.config.triggers !== undefined) await projectRoutes(env, tenantId, planned.steps);
   const applied = planned.steps.filter((step) => step.kind !== "LabelHost").map(changeOf);
   for (const step of planned.steps) {
     if (step.kind !== "LabelHost") continue;

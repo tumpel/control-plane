@@ -15,8 +15,8 @@ import { ownerRequired } from "./members.ts";
 import { startable, startTarget } from "./sessions.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { Trigger } from "./tenant-triggers.ts";
-import { fillPrompt, verdicts } from "./trigger-match.ts";
-import { matchedTriggers, syncRoutes } from "./trigger-routes.ts";
+import { fillPrompt, matches, verdicts } from "./trigger-match.ts";
+import { dropRoute, matchedTriggers, projectRoute } from "./trigger-routes.ts";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 type TriggerCreate = z.infer<typeof TriggerCreateSchema>;
@@ -91,7 +91,7 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   });
   if (created.kind === "NameTaken") return nameTaken(trigger.name);
   if (created.kind === "PersonaNotFound") return personaNotFound(trigger.personaId);
-  await syncRoutes(env, tenantId);
+  await projectRoute(env.DB, created.trigger);
   return json(created.trigger);
 };
 
@@ -115,7 +115,7 @@ const update = async (request: Request, env: Env, caller: Caller, current: Trigg
   if (updated.kind === "NotFound") return notFound(triggerId);
   if (updated.kind === "NameTaken") return nameTaken(patch.name ?? current.name);
   if (updated.kind === "PersonaNotFound") return personaNotFound(patch.personaId ?? current.personaId);
-  await syncRoutes(env, tenantId);
+  await projectRoute(env.DB, updated.trigger);
   return json(updated.trigger);
 };
 
@@ -129,7 +129,7 @@ const remove = async (env: Env, caller: Caller, triggerId: string): Promise<Resp
     now: Date.now(),
   });
   if (!deleted) return notFound(triggerId);
-  await syncRoutes(env, tenantId);
+  await dropRoute(env.DB, tenantId, triggerId);
   return noContent();
 };
 
@@ -225,11 +225,16 @@ export const fireTriggers = async (env: Env, delivery: Delivery): Promise<void> 
   for (const triggerId of await matchedTriggers(env.DB, tenantId, "GitHub", delivery.event, delivery.payload)) {
     const { trigger } = await tenant.call("getTrigger", { tenantId, triggerId });
     if (trigger === null) {
-      await syncRoutes(env, tenantId);
+      await dropRoute(env.DB, tenantId, triggerId);
+      continue;
+    }
+    const { source } = trigger;
+    if (source.event !== delivery.event || !matches(source.conditions, delivery.payload)) {
+      await projectRoute(env.DB, trigger);
       continue;
     }
     const fired = matchedOf(trigger, delivery.payload, delivery.repository);
     const answer = await tenant.call("triggerFired", { tenantId, triggerId, deliveryId, fired, now: Date.now() });
-    if (answer.fired.kind === "NotFound") await syncRoutes(env, tenantId);
+    if (answer.fired.kind === "NotFound") await dropRoute(env.DB, tenantId, triggerId);
   }
 };
