@@ -101,6 +101,7 @@ import {
   enrolHost,
   hostNotFound,
   hostOf,
+  hostReads,
   listEnrolmentTokens,
   listHosts,
   mintEnrolmentToken,
@@ -109,11 +110,11 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
-  withSupervisorUpdates,
 } from "./hosts";
 import {
   issues,
   json,
+  noContent,
   oauthError,
   type Parsed,
   parseBody,
@@ -128,6 +129,7 @@ import {
   bearerOf,
   type Caller,
   callerForDeviceToken,
+  callerForTurnToken,
   callerOf,
   listTenants,
   membershipsOfEmail,
@@ -144,6 +146,7 @@ import {
   OPENID_CONFIGURATION_PATH,
   openIdConfiguration,
 } from "./issuer.ts";
+import { keyStoreOf } from "./key-store.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
 import { handleMembers } from "./members";
 import { handleMetrics } from "./metrics";
@@ -204,9 +207,11 @@ import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from
 import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
+import { handleSubscriptions } from "./subscriptions.ts";
 import type { PersonaWrite, Tenant } from "./tenant";
 import { tenantApi, tenantSkewed } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
+import { TURN_TOKEN_SIGNING_PURPOSE } from "./turn-token.ts";
 import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 export { EventChannel } from "./event-channel.ts";
@@ -323,12 +328,24 @@ const handleSignUp = async (request: Request, url: URL, env: Env): Promise<Respo
 
 const connectorCallers = new WeakMap<Request, Caller>();
 
+const turnCaller = async (env: Env, token: string, now: number): Promise<Caller | null> =>
+  callerForTurnToken(
+    env.DB,
+    await keyStoreOf(env).signingKey(TURN_TOKEN_SIGNING_PURPOSE),
+    token,
+    now,
+    async (tenantId, turnId) => (await tenantApi(env.TENANT, tenantId).call("getTurn", { tenantId, turnId })).turn,
+  );
+
 const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
   const connector = connectorCallers.get(request);
   if (connector !== undefined) return connector;
   const token = bearerOf(request);
   const now = Date.now();
-  const caller = (await callerForDeviceToken(env.DB, token, now)) ?? (await callerForAccessToken(env.DB, token, now));
+  const caller =
+    (await callerForDeviceToken(env.DB, token, now)) ??
+    (await callerForAccessToken(env.DB, token, now)) ??
+    (await turnCaller(env, token, now));
   return (
     caller ??
     signedOut(
@@ -403,8 +420,6 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   const now = Date.now();
   return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
 };
-
-const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 
 const personaNotFound = (personaId: string): Response =>
   problem(404, {
@@ -544,6 +559,7 @@ const personaWrite = async (
       boxMemoryMib: body.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
       boxDiskMib: body.boxDiskMib ?? BoxDiskLimit.DefaultMib,
       boxRetention: body.boxRetention ?? "Auto",
+      tumpelMcp: body.tumpelMcp ?? false,
       files: stored.value,
     },
   };
@@ -1006,7 +1022,7 @@ const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Respo
 const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await withSupervisorUpdates(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
+  return json(await hostReads(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
 };
 
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -1130,7 +1146,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
     if (!body.ok) return body.response;
     const labelled = await setHostLabels(env.DB, caller.tenantId, hostId, body.value.labels, Date.now());
     if (!labelled.ok) return refusal(labelled);
-    const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+    const [host] = await hostReads(env, caller.tenantId, [labelled.value]);
     return json(host);
   }
   if (revoking) {
@@ -1139,7 +1155,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
   if (host === null) return refusal(hostNotFound(hostId));
-  const [withUpdates] = await withSupervisorUpdates(env, caller.tenantId, [host]);
+  const [withUpdates] = await hostReads(env, caller.tenantId, [host]);
   return json(withUpdates);
 };
 
@@ -1154,7 +1170,7 @@ const handleHostLabelsPatch = async (request: Request, url: URL, env: Env): Prom
   if (!body.ok) return body.response;
   const labelled = await patchHostLabels(env.DB, caller.tenantId, decodeURIComponent(matched), body.value, Date.now());
   if (!labelled.ok) return refusal(labelled);
-  const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+  const [host] = await hostReads(env, caller.tenantId, [labelled.value]);
   return json(host);
 };
 
@@ -1385,7 +1401,10 @@ const mcpCaller = async (request: Request, env: Env): Promise<Caller | Response>
     );
   }
   const now = Date.now();
-  const caller = (await callerForAccessToken(env.DB, token, now)) ?? (await callerForDeviceToken(env.DB, token, now));
+  const caller =
+    (await callerForAccessToken(env.DB, token, now)) ??
+    (await callerForDeviceToken(env.DB, token, now)) ??
+    (await turnCaller(env, token, now));
   if (caller === null) {
     return mcpRefusal(
       401,
@@ -1692,7 +1711,9 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleUnpin(request, url, env));
   if (resource) return resource;
   const sessions =
-    (await handleSessions(request, url, env, deviceCaller)) ?? (await handleEvents(request, url, env, deviceCaller));
+    (await handleSessions(request, url, env, deviceCaller)) ??
+    (await handleSubscriptions(request, url, env, deviceCaller)) ??
+    (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;
   const uploads =
     (await handlePrebuildUploads(request, url, env)) ??

@@ -7,7 +7,7 @@ names no operation or one that has a tool, or when this file is stale.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
-Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`.
+Identity `(none)`, Devices `devices`, Members `member`, Invitations `invitation`, EnrolmentTokens `host`, Hosts `host`, HarnessCatalog `harness`, Releases `release`, Personas `persona`, SecretSets `secret-set`, GitHubConnections `github`, Sessions `session`, Turns `turn`, Transcripts `transcript`, Snapshots `snapshot`, Prebuilds `prebuild`, PrebuildTemplates `prebuild-template`, Connections `connection`, GitHubActionsConnections `github-actions`, CircleCIConnections `circleci`, CircleCIProjects `circleci project`, NamespaceConnections `namespace`, TenantConfigs `config`, OAuthGrants `oauth-grant`, ClaudeSetups `claude-setup`, OpenRouterConnections `openrouter`, Connectors `connector`, Events `events`, StaticConnectors `connector`, OAuthConnectors `connector`, Subscriptions `subscription`.
 `EnrolmentTokens_mint`, `_list` and `_revoke` take the verbs `mint-token`, `list-tokens` and `revoke-token`,
 `Turns_getFailure` and `Prebuilds_getFailure` the verb `failure`, `StaticConnectors_create` and `OAuthConnectors_create`
 the verbs `create-static` and `create-oauth`,
@@ -115,10 +115,13 @@ nothing: the server cannot read your environment, so they return the config entr
 | `SecretSets_setMember`                   | `tumpel_secret_set_set_member`               | `tumpel secret-set set-member`               |
 | `SecretSets_update`                      | `tumpel_secret_set_update`                   | `tumpel secret-set update`                   |
 | `Sessions_archive`                       | `tumpel_session_archive`                     | `tumpel session archive`                     |
+| `Sessions_delete`                        | `tumpel_session_delete`                      | `tumpel session delete`                      |
 | `Sessions_get`                           | `tumpel_session_get`                         | `tumpel session get`                         |
 | `Sessions_list`                          | `tumpel_session_list`                        | `tumpel session list`                        |
 | `Sessions_listCredentialHandovers`       | `tumpel_session_handovers`                   | `tumpel session handovers`                   |
 | `Sessions_listStopFailures`              | `tumpel_session_stop_failures`               | `tumpel session stop-failures`               |
+| `Sessions_patchTags`                     | `tumpel_session_patch_tags`                  | `tumpel session patch-tags`                  |
+| `Sessions_setTags`                       | `tumpel_session_set_tags`                    | `tumpel session set-tags`                    |
 | `Sessions_start`                         | `tumpel_session_start`                       | `tumpel session start`                       |
 | `Sessions_startFromIssue`                | `tumpel_session_start_from_issue`            | `tumpel session start-from-issue`            |
 | `Sessions_stop`                          | `tumpel_session_stop`                        | `tumpel session stop`                        |
@@ -126,6 +129,13 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Snapshots_list`                         | `tumpel_snapshot_list`                       | `tumpel snapshot list`                       |
 | `StaticConnectors_create`                | `tumpel_connector_create_static`             | `tumpel connector create-static`             |
 | `StaticConnectors_setToken`              | `tumpel_connector_set_token`                 | `tumpel connector set-token`                 |
+| `Subscriptions_complete`                 | `tumpel_subscription_complete`               | `tumpel subscription complete`               |
+| `Subscriptions_create`                   | `tumpel_subscription_create`                 | `tumpel subscription create`                 |
+| `Subscriptions_delete`                   | `tumpel_subscription_delete`                 | `tumpel subscription delete`                 |
+| `Subscriptions_get`                      | `tumpel_subscription_get`                    | `tumpel subscription get`                    |
+| `Subscriptions_list`                     | `tumpel_subscription_list`                   | `tumpel subscription list`                   |
+| `Subscriptions_pause`                    | `tumpel_subscription_pause`                  | `tumpel subscription pause`                  |
+| `Subscriptions_resume`                   | `tumpel_subscription_resume`                 | `tumpel subscription resume`                 |
 | `TenantConfigs_apply`                    | `tumpel_config_apply`                        | `tumpel config apply`                        |
 | `TenantConfigs_plan`                     | `tumpel_config_plan`                         | `tumpel config plan`                         |
 | `Transcripts_read`                       | `tumpel_transcript_read`                     | `tumpel transcript read`                     |
@@ -133,7 +143,9 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_get`                              | `tumpel_turn_get`                            | `tumpel turn get`                            |
 | `Turns_getFailure`                       | `tumpel_turn_failure`                        | `tumpel turn failure`                        |
 | `Turns_list`                             | `tumpel_turn_list`                           | `tumpel turn list`                           |
+| `Turns_listSteers`                       | `tumpel_turn_list_steers`                    | `tumpel turn list-steers`                    |
 | `Turns_send`                             | `tumpel_turn_send`                           | `tumpel turn send`                           |
+| `Turns_steer`                            | `tumpel_turn_steer`                          | `tumpel turn steer`                          |
 | `Turns_wait`                             | `tumpel_turn_wait`                           | `tumpel turn wait`                           |
 
 CLI only: tenant operations with a CLI command and no MCP tool:

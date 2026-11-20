@@ -18,7 +18,7 @@ import { credentialStanding } from "./circleci-oauth.ts";
 import { deleteCircleCIWebhooks } from "./circleci-projects.ts";
 import { callerWorkflowExample, DEFAULT_CALLER_WORKFLOW, REUSABLE_WORKFLOW } from "./github-actions.ts";
 import { installationsOf, storedApp } from "./github-store.ts";
-import { json, parseBody, problem } from "./http";
+import { json, noContent, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { issuerSubject } from "./issuer.ts";
@@ -55,8 +55,6 @@ const subjectPattern = (tenantId: string): string => {
 };
 
 const tenantOf = (env: Env, caller: Caller) => tenantApi(env.TENANT, caller.tenantId);
-
-const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 
 const summary = (kind: string, account: string | null, configured: boolean): ConnectionSummary => {
   if (!configured) return NotConfiguredConnectionSchema.parse({ kind, state: "NotConfigured" });

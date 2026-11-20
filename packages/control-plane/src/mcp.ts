@@ -69,8 +69,15 @@ import {
   SessionStartFromIssueSchema,
   SessionStartSchema,
   SessionStopQuerySchema,
+  SessionTagsPatchSchema,
+  SessionTagsSchema,
   SnapshotPathSchema,
   StaticConnectorCreateSchema,
+  SteerCreateSchema,
+  SubscriptionCreateSchema,
+  SubscriptionListQuerySchema,
+  SubscriptionPathSchema,
+  SubscriptionPauseSchema,
   SubscriptionTokenMemberSchema,
   SubscriptionTokenUpdateSchema,
   TenantConfigApplySchema,
@@ -96,7 +103,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
+  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\n5. For a long job, such as working through a list of issues, start a session on a persona whose harness takes a goal, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, keeps its own turns short, pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -130,6 +137,7 @@ const DONE: Record<string, string> = {
   tumpel_host_revoke_token: "Enrolment token revoked",
   tumpel_harness_unpin: "Pin removed",
   tumpel_persona_delete: "Persona deleted",
+  tumpel_subscription_delete: "Subscription deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
   tumpel_github_actions_delete: "GitHub Actions disconnected",
@@ -415,7 +423,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/personas/{personaId}",
     PersonaPathSchema,
-    "Delete a persona; refused while any session of the persona is neither Failed nor Archived. Archived sessions stay readable.",
+    "Delete a persona and its files; a file another persona holds stays. Refused while any session of the persona is neither Failed nor Archived. Archived sessions stay readable.",
   ),
   {
     name: "tumpel_secret_set_create",
@@ -836,21 +844,21 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/sessions",
     SessionStartSchema.extend({ repository: SessionStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. A model that tumpel_harness_list does not list for the credential the turn uses is refused ModelUnsupported, before any box boots. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed.",
+    "Start a session with its first prompt on the online host of the tenant least busy across box slots, load and memory; when no host has room, it first evicts the least recently used idle boxes kept by Auto sessions, and is refused PoolExhausted when no host has memory for the persona's box even then, or, on a host that reports no memory budget, when it runs or keeps a box in every slot; it runs its persona's harness at the pinned version, with the persona's files and secret set. A model that tumpel_harness_list does not list for the credential the turn uses is refused ModelUnsupported, before any box boots. boxRetention, Off, Warm or Auto, decides what happens to the session's box after each turn and defaults to the persona's. tags, up to 16, group the session for tumpel_session_list. Returns {session, turn}. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. For a long job that needs many sessions, give a session a goal and a subscription with tumpel_subscription_create.",
   ),
   rest(
     "tumpel_session_start_from_issue",
     "POST",
     "/v1/sessions/from-issue",
     SessionStartFromIssueSchema,
-    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass the owner and name tumpel_github_list_repositories prints. Returns the session and its first turn; issue names the issue and the branch. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused IssueNotFound for a missing issue and IssueNotOpen for a closed one or a pull request.",
+    "Start a session from an open issue of a GitHub repository, as tumpel_session_start does, with a first prompt the control plane writes from the issue: work the issue on the branch ticket/<issueNumber>-<slug>, push it and open a draft pull request that closes the issue. Pass the owner and name tumpel_github_list_repositories prints. Returns the session and its first turn; issue names the issue and the branch. The turn is Offered: accepted, not started or confirmed. Check back later with tumpel_turn_get for Running, Completed or Failed. Refused IssueNotFound for a missing issue and IssueNotOpen for a closed one or a pull request. For a long job that needs many sessions, give a session a goal and a subscription with tumpel_subscription_create.",
   ),
   rest(
     "tumpel_session_list",
     "GET",
     "/v1/sessions",
     SessionListQuerySchema,
-    "List the tenant's sessions, optionally only those in one state, on one host, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset).",
+    "List the tenant's sessions, optionally only those in one state, on one host, carrying every tag in tag, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset).",
   ),
   rest(
     "tumpel_session_get",
@@ -873,6 +881,76 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/sessions/{sessionId}/archive",
     SessionPathSchema,
     "Archive an Idle, Stopped or Failed session: discard an Idle session's box without a snapshot, delete its snapshots, keep its transcript readable and refuse every later send. Final; archiving an Archived session returns it as it is. Refused while a turn runs or the session stops, and while an Idle session's host is offline. Returns the archived session.",
+  ),
+  rest(
+    "tumpel_subscription_create",
+    "POST",
+    "/v1/subscriptions",
+    SubscriptionCreateSchema,
+    "Give a session a subscription for a long job: prompt is the plan, goal the condition that ends the work, events the session event types to react to, crewTags the tags a session must carry to count as its crew, and expiresAt (an ISO 8601 time with offset) the time it ends at the latest. Each matching event of a crew session becomes a new turn of the session, with the plan, the events and the goal; sessions that this session starts inherit the crew tags. Only a person creates one: a call from inside a tumpel session is refused, so an agent in a box tells its person instead. The session must run a harness that takes a goal. Returns the Active subscription.",
+  ),
+  rest(
+    "tumpel_subscription_list",
+    "GET",
+    "/v1/subscriptions",
+    SubscriptionListQuerySchema,
+    "List the tenant's subscriptions, optionally only those of one session or in one state: Active, Paused or Ended.",
+  ),
+  rest(
+    "tumpel_subscription_get",
+    "GET",
+    "/v1/subscriptions/{subscriptionId}",
+    SubscriptionPathSchema,
+    "Read one subscription with its state, the reason it paused or ended, its cursor and its failure counts in a row.",
+  ),
+  rest(
+    "tumpel_subscription_pause",
+    "POST",
+    "/v1/subscriptions/{subscriptionId}/pause",
+    SubscriptionPathSchema.extend(SubscriptionPauseSchema.shape),
+    "Pause a subscription with a short message of up to 500 characters that reaches the person, for example when the session needs a decision. Events keep collecting and arrive after a resume. A person, or the subscribed session itself from inside its box, can pause it. Returns the Paused subscription.",
+  ),
+  rest(
+    "tumpel_subscription_resume",
+    "POST",
+    "/v1/subscriptions/{subscriptionId}/resume",
+    SubscriptionPathSchema,
+    "Resume a Paused subscription: it becomes Active, its failure counts start over and the events after its cursor arrive in the next turn. Send a reply with tumpel_turn_send first when it paused with a question. Only a person resumes one. Refused when it paused so long that its events left the event log; delete it and create a new one then.",
+  ),
+  rest(
+    "tumpel_subscription_delete",
+    "DELETE",
+    "/v1/subscriptions/{subscriptionId}",
+    SubscriptionPathSchema,
+    "Delete a subscription and cancel its waiting turn. A person, or the subscribed session itself from inside its box, can delete it.",
+  ),
+  rest(
+    "tumpel_subscription_complete",
+    "POST",
+    "/v1/subscriptions/{subscriptionId}/complete",
+    SubscriptionPathSchema,
+    "End a subscription because its goal holds: it ends with reason GoalMet, its waiting turn is cancelled and the person is told. The subscribed session calls it from inside its box once the goal holds; a person can call it too. Returns the Ended subscription.",
+  ),
+  rest(
+    "tumpel_session_set_tags",
+    "PUT",
+    "/v1/sessions/{sessionId}/tags",
+    SessionPathSchema.extend(SessionTagsSchema.shape),
+    "Replace every tag of a session with tags, up to 16, each lower-case letters, digits and :._- of at most 63 characters. Returns the session. Refused for an archived session.",
+  ),
+  rest(
+    "tumpel_session_patch_tags",
+    "PATCH",
+    "/v1/sessions/{sessionId}/tags",
+    SessionPathSchema.extend(SessionTagsPatchSchema.shape),
+    "Remove the tags in remove and add the tags in add; every other tag of the session stays. Returns the session. Refused when the session would carry more than 16 tags, and for an archived session.",
+  ),
+  rest(
+    "tumpel_session_delete",
+    "DELETE",
+    "/v1/sessions/{sessionId}",
+    SessionPathSchema,
+    "Delete an Idle, Stopped, Failed or Archived session for good: its turns, transcript and snapshots. A snapshot chunk or prebuild layer another session or a prebuild still holds stays. Refused while a turn runs or the session stops, and while an Idle session's host is offline.",
   ),
   rest(
     "tumpel_session_stop_failures",
@@ -922,6 +1000,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/turns/{turnId}/cancel",
     TurnPathSchema,
     "Cancel a turn that waits Offered behind another turn of its session and has not started: it fails Cancelled, naming you in its failure detail, and the turns behind it keep their order. Returns the turn. Refused TurnNotWaiting once the turn started or ended; tumpel_session_stop with cancelTurn true ends a running turn.",
+  ),
+  rest(
+    "tumpel_turn_steer",
+    "POST",
+    "/v1/turns/{turnId}/steers",
+    TurnPathSchema.extend(SteerCreateSchema.shape),
+    "Send a prompt to a Running turn: the harness reads it after its next tool call, or before it ends the turn, and keeps working inside the same turn. Returns the steer, Pending. Refused TurnNotRunning once the turn ended, and SteerUnsupported when the turn's box reads no steer: only a Claude Code turn on a host that runs connectors takes one. Send a follow-up turn instead then.",
+  ),
+  rest(
+    "tumpel_turn_list_steers",
+    "GET",
+    "/v1/turns/{turnId}/steers",
+    TurnPathSchema,
+    "List a turn's steers, oldest first, each Pending, Delivered when the harness took it, or TurnEnded when the turn ended first.",
   ),
   rest(
     "tumpel_turn_failure",

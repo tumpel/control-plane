@@ -187,6 +187,8 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       usage: USAGE,
       supervisorVersion: "0.1.0",
       protocolVersion: ChannelProtocol.Version,
+      channelProtocolOldest: undefined,
+      guestProtocol: undefined,
     },
   ]);
   assert.deepEqual(
@@ -213,6 +215,8 @@ test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () =
     usage: USAGE,
     supervisorVersion: "0.1.0",
     protocolVersion: ChannelProtocol.Oldest,
+    channelProtocolOldest: undefined,
+    guestProtocol: undefined,
   });
 });
 

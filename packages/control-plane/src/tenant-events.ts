@@ -11,7 +11,7 @@ type Listed = z.infer<typeof ListEventsResultSchema>["listed"];
 export const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 100;
 
-export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number): void => {
+export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number): number => {
   const [row] = sql
     .exec<{ event_id: number }>(
       "INSERT INTO events (payload, created_at) VALUES (?, ?) RETURNING event_id",
@@ -24,12 +24,13 @@ export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number)
     sql.exec("INSERT INTO event_sessions (event_id, session_id) VALUES (?, ?)", row.event_id, event.sessionId);
   }
   sql.exec("DELETE FROM events WHERE created_at < ?", now - EVENT_RETENTION_MS);
+  return row.event_id;
 };
 
-const endOfLog = (sql: SqlStorage): number =>
+export const endOfLog = (sql: SqlStorage): number =>
   sql.exec<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'").toArray()[0]?.seq ?? 0;
 
-const oldestKept = (sql: SqlStorage, end: number): number =>
+export const oldestKept = (sql: SqlStorage, end: number): number =>
   sql.exec<{ oldest: number | null }>("SELECT MIN(event_id) AS oldest FROM events").one().oldest ?? end + 1;
 
 type EventRow = { event_id: number; payload: string; created_at: number };
@@ -52,12 +53,14 @@ export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
           AND (?2 = 0 OR json_extract(events.payload, '$.event') IN (SELECT value FROM json_each(?3)))
           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM event_sessions
                 WHERE event_sessions.event_id = events.event_id AND event_sessions.session_id = ?4))
+          AND (?6 IS NULL OR json_extract(events.payload, '$.triggerId') = ?6)
         ORDER BY events.event_id LIMIT ?5`,
       after,
       input.events.length,
       JSON.stringify(input.events),
       input.sessionId,
       PAGE_SIZE,
+      input.triggerId,
     )
     .toArray();
   const events = rows.map((row) =>

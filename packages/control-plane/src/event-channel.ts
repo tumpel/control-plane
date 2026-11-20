@@ -72,6 +72,7 @@ export class EventChannel extends DurableObject<Env> {
         afterEventId: cursor,
         events: [],
         sessionId: null,
+        triggerId: null,
         waitSeconds: 0,
       });
       if (listed.kind === "CursorExpired") {

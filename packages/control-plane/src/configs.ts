@@ -34,7 +34,10 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
+type PersonaWrite = Pick<
+  StoredPersona,
+  "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention" | "tumpelMcp"
+> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];
@@ -86,7 +89,14 @@ export interface ResolvedSet {
 
 export type Step =
   | { kind: "CreatePersona"; persona: ConfigPersona; files: PlannedFile[] }
-  | { kind: "UpdatePersona"; personaId: string; persona: ConfigPersona; files: PlannedFile[]; removed: string[] }
+  | {
+      kind: "UpdatePersona";
+      personaId: string;
+      persona: ConfigPersona;
+      tumpelMcp: boolean;
+      files: PlannedFile[];
+      removed: string[];
+    }
   | { kind: "DeletePersona"; personaId: string; name: string }
   | { kind: "CreateSecretSet"; secretSet: ResolvedSet }
   | { kind: "UpdateSecretSet"; secretSetId: string; secretSet: ResolvedSet }
@@ -332,7 +342,14 @@ const planPersonas = (
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {
-      steps.push({ kind: "UpdatePersona", personaId: current.personaId, persona, files, removed });
+      steps.push({
+        kind: "UpdatePersona",
+        personaId: current.personaId,
+        persona,
+        tumpelMcp: current.tumpelMcp,
+        files,
+        removed,
+      });
     }
   }
 };
@@ -409,6 +426,11 @@ export type Planned = { ok: true; steps: Step[] } | { ok: false; problems: strin
 export const planOf = (desired: Desired, live: Live): Planned => {
   const { config } = desired;
   const problems: string[] = [];
+  if ((config.triggers ?? []).length > 0) {
+    problems.push(
+      "the config lists triggers, and this control plane runs no triggers yet; remove triggers from the config",
+    );
+  }
   const rename = "give each one its own name";
   checkUnique(
     problems,

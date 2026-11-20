@@ -36,6 +36,7 @@ import {
   StartedSessionFromIssueSchema,
   StartedSessionSchema,
   StopFailureSchema,
+  SubscriptionSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
   TurnFailureSchema,
@@ -49,6 +50,7 @@ import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
 import { workersSecretKeyStore } from "../../src/key-store.ts";
 import type { ReleaseManifest } from "../../src/releases.ts";
+import { steerSettings } from "../../src/steer.ts";
 import {
   type ChunkLedger,
   type ChunkStore,
@@ -629,7 +631,7 @@ const tenant = async () => {
     });
     const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
     assert.equal(code, 0, stderr);
-    const enrolled = HostSchema.parse(JSON.parse(stdout));
+    const enrolled = HostSchema.pick({ hostId: true }).parse(JSON.parse(stdout));
     const stored = SupervisorHostKeySchema.parse(JSON.parse(readFileSync(join(dir, "host-key.json"), "utf8")));
     const key = createPrivateKey({ key: Buffer.from(stored.privateKey, "base64"), format: "der", type: "pkcs8" });
     return { id: enrolled.hostId, key };
@@ -942,6 +944,7 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       deployedCommit: DEPLOYED_COMMIT,
       drained: false,
       hosts: [{ hostId, tenantId: started.session.tenantId, runningTurns: 1 }],
+      channelProtocols: [],
     });
 
     const start = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during the drain" }, bearer);
@@ -963,7 +966,12 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
-    assert.deepEqual(await report(), { deployedCommit: DEPLOYED_COMMIT, drained: true, hosts: [] });
+    assert.deepEqual(await report(), {
+      deployedCommit: DEPLOYED_COMMIT,
+      drained: true,
+      hosts: [],
+      channelProtocols: [],
+    });
 
     const send = await postJson(`/v1/sessions/${started.session.sessionId}/turns`, { prompt: "draining" }, bearer);
     assert.equal(send.status, 503);
@@ -1013,10 +1021,15 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(Date.parse(offer.credential.expiresAt) > Date.now());
     assert.equal(offer.lastLineSeq, 0);
     assert.deepEqual(offer.snapshots, []);
-    const digest = createHash("sha256").update(SETTINGS_FILE).digest("hex");
+    const settings = steerSettings(SETTINGS_FILE) ?? "";
+    const digest = createHash("sha256").update(settings).digest("hex");
     assert.deepEqual(
       offer.personaFiles.map((file) => [file.path, file.digest, file.sizeBytes]),
-      [[".claude/settings.json", digest, SETTINGS_FILE.length]],
+      [[".claude/settings.json", digest, Buffer.byteLength(settings)]],
+    );
+    assert.deepEqual(
+      offer.credential.connectors.map((connector) => [connector.connectorId, new URL(connector.url).pathname]),
+      [["steer", `/v1/turns/${offer.turnId}/steer-inbox`]],
     );
     assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
     assert.match(
@@ -1800,6 +1813,34 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
   });
 
+  test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
+    const { tool, toolRefusal, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "tag me", tags: ["crew:a", "b"] },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    assert.deepEqual(started.session.tags, ["b", "crew:a"]);
+    assert.deepEqual(started.session.startedBy, { kind: "Person", principalId: started.session.principalId });
+    const listed = async (tag: string[]) =>
+      (await tool("tumpel_session_list", { tag }, SessionSchema.array())).map((session) => session.sessionId);
+    assert.deepEqual(await listed(["crew:a", "b"]), [sessionId]);
+    assert.deepEqual(await listed(["crew:a", "x"]), []);
+
+    const patched = await tool(
+      "tumpel_session_patch_tags",
+      { sessionId, add: ["x", "crew:a"], remove: ["b"] },
+      SessionSchema,
+    );
+    assert.deepEqual(patched.tags, ["crew:a", "x"]);
+    assert.deepEqual(await listed(["crew:a", "x"]), [sessionId]);
+    const many = Array.from({ length: 15 }, (_, index) => `t${index}`);
+    assert.match(await toolRefusal("tumpel_session_patch_tags", { sessionId, add: many }), /at most 16/);
+    assert.deepEqual((await tool("tumpel_session_set_tags", { sessionId, tags: [] }, SessionSchema)).tags, []);
+    assert.deepEqual((await tool("tumpel_session_get", { sessionId }, SessionSchema)).tags, []);
+  });
+
   test("a goal reaches Claude Code as one /goal prompt with a turn cap and reads back on the turn", async () => {
     const { tenantId, bearer, host, getJson, tool, completedTurn } = await tenant();
     const { session, offer } = await completedTurn("set up the repository");
@@ -1854,6 +1895,149 @@ suite("sessions", { concurrency: 8 }, () => {
       ProblemSchema.parse(await codex.json()).detail,
       /runs Codex, which takes no goal; ClaudeCode takes one$/,
     );
+  });
+
+  test("a foreman subscribed to its crew gets each crew turn as a delivery turn until its goal is met, and a turn token dies with its turn", async () => {
+    const { bearer, host, getJson, tool, storedSnapshot, sessionStart } = await tenant();
+    const [defaults] = await getJson("/v1/personas", PersonaSchema.array());
+    const created = await postJson(
+      "/v1/personas",
+      { name: "Foreman", harness: "ClaudeCode", secretSetId: defaults?.secretSetId, connectorIds: [], tumpelMcp: true },
+      bearer,
+    );
+    assert.equal(created.status, 200, await created.clone().text());
+    const start = await sessionStart("Foreman");
+    const asTurn = async (token: string, name: string, args: Record<string, unknown>) => {
+      mcpId += 1;
+      const response = await postJson(
+        "/mcp",
+        { jsonrpc: "2.0", id: mcpId, method: "tools/call", params: { name, arguments: args } },
+        { authorization: `Bearer ${token}` },
+      );
+      return { status: response.status, text: await response.text() };
+    };
+    const turnToken = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<string> => {
+      const connector = offer.credential.connectors.find((each) => each.connectorId === "tumpel");
+      assert.ok(connector, `turn ${offer.turnId} carries no tumpel connector`);
+      const served = await call(new URL(connector.tokenUrl).pathname, {
+        method: "POST",
+        headers: { authorization: `Bearer ${connector.tokenCredential}` },
+      });
+      assert.equal(served.status, 200, await served.clone().text());
+      return z.object({ accessToken: z.string() }).parse(await served.json()).accessToken;
+    };
+    const finish = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<void> => {
+      const result = '{"type":"result","subtype":"success","is_error":false}';
+      host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: offer.lastLineSeq + 1, text: result });
+      host.send({
+        type: "TurnComplete",
+        turnId: offer.turnId,
+        lastLineSeq: offer.lastLineSeq + 1,
+        completedAt: new Date().toISOString(),
+      });
+      await storedSnapshot(offer.sessionId);
+      await until(
+        `turn ${offer.turnId} reading Completed`,
+        () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
+        (turn) => turn.state === "Completed",
+      );
+    };
+
+    const foreman = await tool(
+      "tumpel_session_start",
+      { ...start, prompt: "work through the open issues" },
+      StartedSessionSchema,
+    );
+    const foremanId = foreman.session.sessionId;
+    const subscription = await tool(
+      "tumpel_subscription_create",
+      {
+        sessionId: foremanId,
+        prompt: "start a crew session per open issue and review what it did",
+        goal: "every open issue has a merged pull request",
+        events: ["TurnCompleted"],
+        crewTags: ["crew:issues"],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      SubscriptionSchema,
+    );
+    assert.equal(subscription.state, "Active");
+
+    const foremanTurn = await host.next("TurnOffer");
+    assert.equal(foremanTurn.sessionId, foremanId);
+    host.send({ type: "TurnClaim", turnId: foremanTurn.turnId, boxId: foremanTurn.boxId });
+    await until(
+      "the foreman turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: foremanTurn.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const foremanToken = await turnToken(foremanTurn);
+    const overLimit = await asTurn(foremanToken, "tumpel_session_start", {
+      ...start,
+      prompt: "too many tags",
+      tags: Array.from({ length: 16 }, (_, index) => `own-${index}`),
+    });
+    assert.match(overLimit.text, /would carry 17 tags, its own and the crew tags it inherits/);
+    const crewStart = await asTurn(foremanToken, "tumpel_session_start", {
+      ...start,
+      prompt: "fix issue 12",
+      tags: ["issue-12"],
+    });
+    const crew = StartedSessionSchema.parse(
+      JSON.parse(
+        z
+          .object({ result: z.object({ content: z.array(z.object({ text: z.string() })) }) })
+          .parse(JSON.parse(crewStart.text)).result.content[0]?.text ?? "",
+      ),
+    );
+    assert.deepEqual(crew.session.tags, ["crew:issues", "issue-12"]);
+    assert.deepEqual(crew.session.startedBy, { kind: "Turn", sessionId: foremanId, turnId: foremanTurn.turnId });
+    await finish(foremanTurn);
+    const afterTurn = await asTurn(foremanToken, "tumpel_whoami", {});
+    assert.equal(afterTurn.status, 401, `a token of a completed turn still answered ${afterTurn.text}`);
+
+    const crewTurn = await host.next("TurnOffer");
+    assert.equal(crewTurn.sessionId, crew.session.sessionId);
+    host.send({ type: "TurnClaim", turnId: crewTurn.turnId, boxId: crewTurn.boxId });
+    await until(
+      "the crew turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: crewTurn.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const crewToken = await turnToken(crewTurn);
+    const refused = await asTurn(crewToken, "tumpel_subscription_resume", {
+      subscriptionId: subscription.subscriptionId,
+    });
+    assert.match(refused.text, /only a person creates or resumes a subscription/);
+    await finish(crewTurn);
+
+    const delivery = await host.next("TurnOffer");
+    assert.equal(delivery.sessionId, foremanId);
+    assert.ok(delivery.credential.connectors.some((connector) => connector.connectorId === "tumpel"));
+    assert.match(delivery.prompt, /^\/goal start a crew session per open issue and review what it did\n\n/);
+    const events = delivery.prompt
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => TenantEventSchema.parse(JSON.parse(line)));
+    assert.deepEqual(
+      events.map((event) => [event.event, "sessionId" in event ? event.sessionId : null]),
+      [["TurnCompleted", crew.session.sessionId]],
+    );
+    host.send({ type: "TurnClaim", turnId: delivery.turnId, boxId: delivery.boxId });
+    await finish(delivery);
+    const delivered = await tool(
+      "tumpel_subscription_get",
+      { subscriptionId: subscription.subscriptionId },
+      SubscriptionSchema,
+    );
+    assert.equal(delivered.cursorEventId, events[0]?.eventId);
+
+    const completed = await tool(
+      "tumpel_subscription_complete",
+      { subscriptionId: subscription.subscriptionId },
+      SubscriptionSchema,
+    );
+    assert.equal(completed.state === "Ended" ? completed.reason : completed.state, "GoalMet");
   });
 
   test("a stop with cancelTurn fails the running turn Cancelled, snapshots and frees its box, and the next send boots a fresh box", async () => {

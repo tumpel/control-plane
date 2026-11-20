@@ -44,13 +44,8 @@ import { keyStoreOf } from "./key-store.ts";
 import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
 import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
-import {
-  type FailureReport,
-  type NewSession,
-  PREBUILD_ARCHITECTURE,
-  type Started,
-  TenantSessions,
-} from "./tenant-sessions";
+import { type FailureReport, type NewSession, PREBUILD_ARCHITECTURE, type Started } from "./tenant-sessions";
+import { TenantSubscriptions } from "./tenant-subscriptions.ts";
 
 export type Prebuild = z.infer<typeof PrebuildSchema>;
 export type PrebuildFailure = z.infer<typeof PrebuildFailureSchema>;
@@ -338,7 +333,7 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
     updatedAt: row.updated_at,
   });
 
-export class TenantPrebuilds extends TenantSessions {
+export class TenantPrebuilds extends TenantSubscriptions {
   protected listPrebuilds(tenantId: string, repository: string | null): Prebuild[] {
     return this.ctx.storage.sql
       .exec<PrebuildRow>(
@@ -766,6 +761,11 @@ export class TenantPrebuilds extends TenantSessions {
         now,
       );
     });
+    if (begun.kind === "TagsOverLimit") {
+      throw new Error(
+        `prebuild ${commit.prebuildId} would carry ${begun.tags.length} tags, and a prebuild inherits none`,
+      );
+    }
     if (begun.kind !== "Started") return begun;
     return { kind: "Started", started: this.prebuildOf(tenantId, commit.prebuildId) };
   }

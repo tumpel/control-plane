@@ -253,9 +253,27 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
-    await this.env.DB.prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?")
-      .bind(welcomed.supervisorVersion, now, hostId)
-      .run();
+    const db = this.env.DB;
+    const { channelProtocolOldest, guestProtocol } = welcomed;
+    await db.batch([
+      db
+        .prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?")
+        .bind(welcomed.supervisorVersion, now, hostId),
+      channelProtocolOldest === undefined
+        ? db.prepare("DELETE FROM host_channel_protocols WHERE host_id = ?").bind(hostId)
+        : db
+            .prepare(
+              "INSERT OR REPLACE INTO host_channel_protocols (host_id, channel_protocol_oldest, channel_protocol_version) VALUES (?, ?, ?)",
+            )
+            .bind(hostId, channelProtocolOldest, welcomed.protocolVersion),
+      guestProtocol === undefined
+        ? db.prepare("DELETE FROM host_guest_protocols WHERE host_id = ?").bind(hostId)
+        : db
+            .prepare(
+              "INSERT OR REPLACE INTO host_guest_protocols (host_id, guest_protocol_oldest, guest_protocol_version) VALUES (?, ?, ?)",
+            )
+            .bind(hostId, guestProtocol.guestProtocolOldest, guestProtocol.guestProtocolVersion),
+    ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
       hostId,

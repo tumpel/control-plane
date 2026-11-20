@@ -79,11 +79,14 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
       ),
     )
   ).flat();
+  const { results: channelProtocols } = await env.DB.prepare(
+    "SELECT p.channel_protocol_version AS channelProtocolVersion, COUNT(*) AS hostCount FROM host_channel_protocols AS p JOIN hosts AS h ON h.host_id = p.host_id WHERE h.state = 'Online' GROUP BY p.channel_protocol_version ORDER BY p.channel_protocol_version",
+  ).all<{ channelProtocolVersion: number; hostCount: number }>();
   const rollout: ReleaseRollout = {
     deployedCommit: env.DEPLOYED_COMMIT,
     drained: hosts.length === 0,
     hosts,
-    channelProtocols: [],
+    channelProtocols,
   };
   return json(rollout);
 };

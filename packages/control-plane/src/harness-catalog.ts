@@ -11,7 +11,8 @@ const CODEX_SIBLING_BINARY_PATHS = ["codex-code-mode-host", "codex-exec-server"]
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
 
-const GOAL_TURN_CAP = 20;
+export const GOAL_TURN_CAP = 20;
+export const DELIVERY_GOAL_ROUNDS = 5;
 
 const ANTHROPIC_MODELS = [
   "claude-fable-5-2",
@@ -46,14 +47,14 @@ const CODEX_CHATGPT_MODELS = [
   "gpt-5.6-luna",
 ];
 
-export type GoalFold = { fold: (prompt: string, goal: string) => string; limit: number };
+export type GoalFold = { fold: (prompt: string, goal: string, rounds: number) => string; limit: number };
 
 export const GOAL_FOLDS: ReadonlyMap<string, GoalFold> = new Map([
   [
     "ClaudeCode",
     {
-      fold: (prompt: string, goal: string): string =>
-        `/goal ${prompt}\n\nDone when: ${goal}. Or stop after ${GOAL_TURN_CAP} turns.`,
+      fold: (prompt: string, goal: string, rounds: number): string =>
+        `/goal ${prompt}\n\nDone when: ${goal}. Or stop after ${rounds} turns.`,
       limit: 4000,
     },
   ],
