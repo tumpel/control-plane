@@ -230,6 +230,14 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const labelled = await toolJson(HostSchema, "tumpel_host_set_labels", { hostId, labels: ["gpu"] });
   assert.deepEqual(labelled.labels, ["gpu"]);
   assert.deepEqual(labelled, await rest(HostSchema, "GET", `/v1/hosts/${hostId}`));
+  const relabelled = await toolJson(HostSchema, "tumpel_host_patch_labels", {
+    hostId,
+    add: ["arm", "gpu"],
+    remove: ["ssd"],
+  });
+  assert.deepEqual(relabelled.labels, ["gpu", "arm"]);
+  const unlabelled = await toolJson(HostSchema, "tumpel_host_patch_labels", { hostId, remove: ["gpu"] });
+  assert.deepEqual(unlabelled.labels, ["arm"]);
 
   assert.deepEqual(
     await toolJson(HarnessCatalogEntrySchema.array(), "tumpel_harness_list"),
@@ -302,6 +310,20 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     files: [{ source: "Inline", path: ".claude/CLAUDE.md", content: Buffer.from("Review closely").toString("base64") }],
   });
   assert.notEqual(updated.files[0]?.digest, persona.files[0]?.digest);
+  const renamed = await toolJson(PersonaSchema, "tumpel_persona_patch", {
+    personaId: persona.personaId,
+    name: "Close reviewer",
+    boxMemoryMib: 4096,
+  });
+  assert.deepEqual(renamed, { ...updated, name: "Close reviewer", boxMemoryMib: 4096, updatedAt: renamed.updatedAt });
+  const keylessPatch = await send(
+    "PATCH",
+    `/v1/personas/${persona.personaId}`,
+    { secretSetId: defaultSet.secretSetId },
+    bearer,
+  );
+  assert.equal(keylessPatch.status, 422);
+  assert.equal(ProblemSchema.parse(await keylessPatch.json()).code, "NoCredential");
   const keyless = await send(
     "PUT",
     `/v1/personas/${persona.personaId}`,
@@ -446,6 +468,40 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     drafted.content[0]?.text.split(": ")[1],
     `tumpel secret-set set-member variable ${secretSet.secretSetId} --name GITHUB_TOKEN --stdin`,
   );
+  await rest(SecretSetSchema, "PUT", `/v1/secret-sets/${secretSet.secretSetId}/members`, {
+    kind: "Variable",
+    name: "REVIEW_MODE",
+    value: "strict",
+  });
+  const patchedSet = await toolJson(SecretSetSchema, "tumpel_secret_set_patch", {
+    secretSetId: secretSet.secretSetId,
+    name: "prod-patched",
+    secrets: [{ kind: "Variable", name: "REVIEW_LEVEL", previousName: "REVIEW_MODE" }],
+  });
+  assert.equal(patchedSet.name, "prod-patched");
+  assert.deepEqual(patchedSet.keys.map((key) => key.name).sort(), ["ANTHROPIC_API_KEY", "REVIEW_LEVEL"]);
+  assert.deepEqual(
+    patchedSet.keys.find((key) => key.name === "ANTHROPIC_API_KEY"),
+    secretSet.keys[0],
+  );
+  const patchedValue = await tool("tumpel_secret_set_patch", {
+    secretSetId: secretSet.secretSetId,
+    secrets: [{ kind: "Variable", name: "REVIEW_LEVEL", value: SECRET }],
+  });
+  assert.ok(patchedValue.isError);
+  assert.ok(!JSON.stringify(patchedValue).includes(SECRET));
+  const renamedOnto = await send(
+    "PATCH",
+    `/v1/secret-sets/${secretSet.secretSetId}`,
+    { secrets: [{ kind: "Variable", name: "ANTHROPIC_API_KEY", previousName: "REVIEW_LEVEL" }] },
+    bearer,
+  );
+  assert.equal(renamedOnto.status, 409);
+  assert.deepEqual(await rest(SecretSetSchema, "GET", `/v1/secret-sets/${secretSet.secretSetId}`), patchedSet);
+  await toolJson(SecretSetSchema, "tumpel_secret_set_remove_member", {
+    secretSetId: secretSet.secretSetId,
+    name: "REVIEW_LEVEL",
+  });
   const removed = await toolJson(SecretSetSchema, "tumpel_secret_set_remove_member", {
     secretSetId: secretSet.secretSetId,
     name: "ANTHROPIC_API_KEY",

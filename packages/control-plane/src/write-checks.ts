@@ -2,7 +2,7 @@ import { checkCredential } from "@tumpel/api/credentials";
 import type { HarnessPinCreateSchema, SecretSetSchema, SecretValueSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { type GitHubUser, REPOSITORY_TOKEN, tokenUser } from "./github.ts";
-import { inCatalog, pinnedEntry } from "./harness-catalog.ts";
+import { type HarnessCatalogEntry, inCatalog, pinnedEntry } from "./harness-catalog.ts";
 import { listHosts } from "./hosts.ts";
 import { problem } from "./http.ts";
 import type { Env } from "./index.ts";
@@ -23,12 +23,10 @@ export interface PersonaCheck {
   newSecretSet: boolean;
 }
 
-export const personaFiles = async (
-  env: Env,
-  tenantId: string,
-  check: PersonaCheck,
+export const harnessCredential = (
+  check: Omit<PersonaCheck, "files">,
   operation: string,
-): Promise<{ ok: true; value: StoredFile[] } | { ok: false; response: Response }> => {
+): { ok: true; entry: HarnessCatalogEntry } | { ok: false; response: Response } => {
   const entry = pinnedEntry(check.pins, check.harness);
   if (entry === undefined) {
     return {
@@ -51,7 +49,18 @@ export const personaFiles = async (
     );
     return { ok: false, response: problem(refused.status, refused.problem) };
   }
-  const checked = await checkFiles(entry, check.files, operation);
+  return { ok: true, entry };
+};
+
+export const personaFiles = async (
+  env: Env,
+  tenantId: string,
+  check: PersonaCheck,
+  operation: string,
+): Promise<{ ok: true; value: StoredFile[] } | { ok: false; response: Response }> => {
+  const harness = harnessCredential(check, operation);
+  if (!harness.ok) return harness;
+  const checked = await checkFiles(harness.entry, check.files, operation);
   if (!checked.ok) return { ok: false, response: problem(422, checked.problem) };
   const stored = await storeFiles(env.STORE, tenantId, checked.files, operation);
   if (!stored.ok) return { ok: false, response: problem(422, stored.problem) };

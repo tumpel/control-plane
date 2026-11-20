@@ -3,7 +3,9 @@ import {
   BoxMemoryLimit,
   type HarnessPinCreateSchema,
   HarnessPinSchema,
+  type PersonaPatchChangeSchema,
   type SecretSetCreateSchema,
+  type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
@@ -15,7 +17,14 @@ import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
-import { type MemberUpdate, memberWith, planUpdate, storedKeys, type UnreadableSecretSet } from "./secret-members.ts";
+import {
+  type MemberUpdate,
+  memberWith,
+  type PlannedMember,
+  planUpdate,
+  storedKeys,
+  type UnreadableSecretSet,
+} from "./secret-members.ts";
 import {
   recordSupervisorUpdate,
   type SupervisorUpdateMessage,
@@ -37,6 +46,8 @@ export type PersonaChange = Omit<PersonaWrite, "harness">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 export type SecretSetChange = z.infer<typeof SecretSetUpdateSchema>;
+export type PersonaPatch = z.infer<typeof PersonaPatchChangeSchema>;
+export type SecretSetPatch = z.infer<typeof SecretSetPatchSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
 
@@ -190,6 +201,9 @@ export class Tenant extends TenantConnectors {
     updatePersona: ({ tenantId, personaId, persona, now }) => ({
       written: this.updatePersona(tenantId, personaId, persona, now),
     }),
+    patchPersona: ({ tenantId, personaId, patch, now }) => ({
+      written: this.patchPersona(tenantId, personaId, patch, now),
+    }),
     deletePersona: ({ tenantId, personaId }) => ({ deleted: this.deletePersona(tenantId, personaId) }),
     open: ({ tenantId, now }) => {
       this.open(tenantId, now);
@@ -207,6 +221,9 @@ export class Tenant extends TenantConnectors {
     }),
     updateSecretSet: async ({ tenantId, secretSetId, change, githubUser, now }) => ({
       updated: await this.updateSecretSet(tenantId, secretSetId, change, githubUser, now),
+    }),
+    patchSecretSet: async ({ tenantId, secretSetId, patch, githubUser, now }) => ({
+      patched: await this.patchSecretSet(tenantId, secretSetId, patch, githubUser, now),
     }),
     setSecretMember: async ({ tenantId, secretSetId, member, githubUser, now }) => ({
       set: await this.setSecretMember(tenantId, secretSetId, member, githubUser, now),
@@ -662,6 +679,36 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
+  protected patchPersona(
+    tenantId: string,
+    personaId: string,
+    patch: PersonaPatch,
+    now: number,
+  ): Written<StoredPersona | null> {
+    const written = uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        const current = this.getPersona(tenantId, personaId);
+        if (current === null) return false;
+        const merged = { ...current, ...patch };
+        this.ctx.storage.sql.exec(
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          merged.name,
+          merged.secretSetId,
+          merged.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
+          merged.boxDiskMib ?? BoxDiskLimit.DefaultMib,
+          merged.boxRetention,
+          now,
+          tenantId,
+          personaId,
+        );
+        if (patch.connectorIds !== undefined) this.writeConnectors(personaId, patch.connectorIds);
+        return true;
+      }),
+    );
+    if (!written.ok) return written;
+    return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
+  }
+
   protected deletePersona(tenantId: string, personaId: string): PersonaDeleted {
     const sql = this.ctx.storage.sql;
     const sessions = sql
@@ -830,9 +877,75 @@ export class Tenant extends TenantConnectors {
     if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
     const plan = planUpdate(memberRows(this.ctx.storage.sql, secretSetId), change.secrets);
     if (plan.kind !== "Planned") return plan;
+    const sealed = await this.sealPlanned(secretSetId, plan.members, now);
+    const written = uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
+        const updated = sql.exec(
+          "UPDATE secret_sets SET name = ?, updated_at = ? WHERE secret_set_id = ?",
+          change.name,
+          now,
+          secretSetId,
+        );
+        if (updated.rowsWritten === 0) return false;
+        sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
+        if (!plan.keepsGitHubUser) this.writeGitHubUser(secretSetId, githubUser, now);
+        for (const member of sealed) this.writeMember(secretSetId, member);
+        return true;
+      }),
+    );
+    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
+    if (!written.value) return { kind: "SetNotFound" };
+    return { kind: "Updated", secretSet: this.rewrittenSecretSet(tenantId, secretSetId) };
+  }
+
+  protected async patchSecretSet(
+    tenantId: string,
+    secretSetId: string,
+    patch: SecretSetPatch,
+    githubUser: GitHubUser | null,
+    now: number,
+  ): Promise<SecretSetUpdated> {
+    if (!this.hasSecretSet(secretSetId)) return { kind: "SetNotFound" };
+    const listed = patch.secrets ?? [];
+    const plan = planUpdate(memberRows(this.ctx.storage.sql, secretSetId), listed);
+    if (plan.kind !== "Planned") return plan;
+    const sealed = await this.sealPlanned(secretSetId, plan.members, now);
+    const sources = listed.map((member) => member.previousName ?? member.name);
+    const token = listed.some((member) => member.name === REPOSITORY_TOKEN || member.previousName === REPOSITORY_TOKEN);
+    const written = uniquely(() =>
+      this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
+        const updated = sql.exec(
+          "UPDATE secret_sets SET name = COALESCE(?, name), updated_at = ? WHERE secret_set_id = ?",
+          patch.name ?? null,
+          now,
+          secretSetId,
+        );
+        if (updated.rowsWritten === 0) return false;
+        for (const name of sources) {
+          sql.exec("DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?", secretSetId, name);
+        }
+        if (token && !plan.keepsGitHubUser) {
+          this.writeGitHubUser(secretSetId, githubUser, now);
+        }
+        for (const member of sealed) this.writeMember(secretSetId, member);
+        return true;
+      }),
+    );
+    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
+    if (!written.value) return { kind: "SetNotFound" };
+    return { kind: "Updated", secretSet: this.rewrittenSecretSet(tenantId, secretSetId) };
+  }
+
+  private async sealPlanned(
+    secretSetId: string,
+    members: readonly PlannedMember[],
+    now: number,
+  ): Promise<SealedMember[]> {
     const dataKey = await this.dataKey();
     const sealed: SealedMember[] = [];
-    for (const planned of plan.members) {
+    for (const planned of members) {
       if (planned.kind === "Written") {
         const { member } = planned;
         sealed.push({
@@ -855,25 +968,7 @@ export class Tenant extends TenantConnectors {
         updatedAt: now,
       });
     }
-    const written = uniquely(() =>
-      this.ctx.storage.transactionSync(() => {
-        const sql = this.ctx.storage.sql;
-        const updated = sql.exec(
-          "UPDATE secret_sets SET name = ?, updated_at = ? WHERE secret_set_id = ?",
-          change.name,
-          now,
-          secretSetId,
-        );
-        if (updated.rowsWritten === 0) return false;
-        sql.exec("DELETE FROM secret_values WHERE secret_set_id = ?", secretSetId);
-        if (!plan.keepsGitHubUser) this.writeGitHubUser(secretSetId, githubUser, now);
-        for (const member of sealed) this.writeMember(secretSetId, member);
-        return true;
-      }),
-    );
-    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
-    if (!written.value) return { kind: "SetNotFound" };
-    return { kind: "Updated", secretSet: this.rewrittenSecretSet(tenantId, secretSetId) };
+    return sealed;
   }
 
   protected async setSecretMember(

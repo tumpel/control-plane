@@ -1,5 +1,6 @@
 import {
   ApiKeyMemberSchema,
+  ApiKeyUpdateSchema,
   CircleCIAuthorizationChooseSchema,
   CircleCIConnectionStartSchema,
   CircleCIProjectAddSchema,
@@ -15,6 +16,7 @@ import {
   ConnectorPathSchema,
   ConnectorUpdateSchema,
   ConnectorWritePathSchema,
+  CredentialFileUpdateSchema,
   DevicePathSchema,
   EditPersonaFilePatchSchema,
   EnrolmentTokenMintSchema,
@@ -25,6 +27,7 @@ import {
   GitHubRepositoryPathSchema,
   HarnessPathSchema,
   HarnessPinCreateSchema,
+  HostLabelsPatchSchema,
   HostLabelsSchema,
   HostPathSchema,
   InvitationCreateSchema,
@@ -42,6 +45,7 @@ import {
   PersonaCreateSchema,
   PersonaFilePatchKindSchema,
   PersonaFileUploadRequestSchema,
+  PersonaPatchSchema,
   PersonaPathSchema,
   PersonaUpdateSchema,
   PrebuildListQuerySchema,
@@ -56,8 +60,10 @@ import {
   PutPersonaFilePatchSchema,
   RemovePersonaFilePatchSchema,
   SecretMemberPathSchema,
+  SecretSetPatchSchema,
   SecretSetPathSchema,
   SecretVariableMemberSchema,
+  SecretVariableUpdateSchema,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
@@ -66,6 +72,7 @@ import {
   SnapshotPathSchema,
   StaticConnectorCreateSchema,
   SubscriptionTokenMemberSchema,
+  SubscriptionTokenUpdateSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
   TranscriptQuerySchema,
@@ -106,7 +113,7 @@ export type Dispatch = (request: Request) => Promise<Response>;
 
 export type Authorize = () => Promise<Dispatch | Response>;
 
-type Method = "GET" | "POST" | "PUT" | "DELETE";
+type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 interface ToolDefinition {
   name: string;
@@ -160,6 +167,20 @@ const MEMBER_WITHOUT_VALUE = SecretSetPathSchema.extend({
     ApiKeyMemberSchema.strict(),
     SubscriptionTokenMemberSchema.strict(),
   ]),
+}).strict();
+
+const PATCH_WITHOUT_VALUES = SecretSetPathSchema.extend({
+  name: SecretSetPatchSchema.shape.name,
+  secrets: z
+    .array(
+      z.discriminatedUnion("kind", [
+        SecretVariableUpdateSchema.omit({ value: true }).strict(),
+        ApiKeyUpdateSchema.omit({ value: true }).strict(),
+        SubscriptionTokenUpdateSchema.omit({ value: true }).strict(),
+        CredentialFileUpdateSchema.omit({ value: true }).strict(),
+      ]),
+    )
+    .optional(),
 }).strict();
 
 const memberCommand = (args: z.infer<typeof MEMBER_WITHOUT_VALUE>): string => {
@@ -305,6 +326,13 @@ export const TOOLS: ToolDefinition[] = [
     "Replace every label of a host.",
   ),
   rest(
+    "tumpel_host_patch_labels",
+    "PATCH",
+    "/v1/hosts/{hostId}/labels",
+    HostPathSchema.extend(HostLabelsPatchSchema.shape),
+    "Add the labels in add and remove the labels in remove; every other label of the host stays.",
+  ),
+  rest(
     "tumpel_harness_list",
     "GET",
     "/v1/harnesses",
@@ -361,6 +389,13 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/personas/{personaId}",
     PersonaPathSchema.extend(PersonaUpdateSchema.shape),
     "Replace a persona's name, secret set, connectorIds (the whole list; [] for none), box memory, box disk and whole file set; sessions already started keep their connectors; its harness is fixed at create, a file left out is deleted, and a boxMemoryMib or boxDiskMib left out goes back to its default of 2048 or 32768 MiB, and a boxRetention left out goes back to Auto. Name an unchanged file as Stored by its digest and sizeBytes.",
+  ),
+  rest(
+    "tumpel_persona_patch",
+    "PATCH",
+    "/v1/personas/{personaId}",
+    PersonaPathSchema.extend(PersonaPatchSchema.shape),
+    "Change only the persona fields you send: name, secretSetId, connectorIds (the whole list; [] for none), boxMemoryMib, boxDiskMib or boxRetention. Every field you leave out and every file stay as they are; its harness is fixed at create. tumpel_persona_patch_file changes one file.",
   ),
   rest(
     "tumpel_persona_patch_file",
@@ -767,6 +802,13 @@ export const TOOLS: ToolDefinition[] = [
     request: { method: "GET", path: "/v1/secret-sets/{secretSetId}" },
     answer: "configSecretSet",
   },
+  rest(
+    "tumpel_secret_set_patch",
+    "PATCH",
+    "/v1/secret-sets/{secretSetId}",
+    PATCH_WITHOUT_VALUES,
+    "Rename a secret set, or rename members and change their provider or expiresAt, without values: each member you list keeps the value stored under its previousName, or under its name when you do not rename it. Every member you leave out keeps its value. Secret values never pass through MCP; tumpel_secret_set_set_member drafts the command that writes a new value.",
+  ),
   {
     name: "tumpel_secret_set_set_member",
     description:
@@ -952,7 +994,7 @@ const toolRequest = (
 ): Request => {
   const keys = pathKeys(request.path);
   const path = request.path.replace(PATH_KEY, (_, key: string) => encodeURIComponent(String(args[key])));
-  const carriesBody = tool.answer === "rest" && (request.method === "POST" || request.method === "PUT");
+  const carriesBody = tool.answer === "rest" && ["POST", "PUT", "PATCH"].includes(request.method);
   const rest = Object.entries(args).filter(([key]) => !keys.includes(key));
   const queried = (key: string): boolean => request.method === "GET" || (request.query ?? []).includes(key);
   const body = Object.fromEntries(rest.filter(([key]) => !queried(key)));

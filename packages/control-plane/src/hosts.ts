@@ -1,6 +1,7 @@
 import {
   EnrolmentTokenSchema,
   type HostEnrolSchema,
+  type HostLabelsPatchSchema,
   type HostSchema,
   MintedEnrolmentTokenSchema,
 } from "@tumpel/schemas";
@@ -259,6 +260,14 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, state: "Revoked", updatedAt: now } };
 };
 
+const hostRevoked = (hostId: string): Refused =>
+  refuse(410, {
+    code: "HostRevoked",
+    title: "Host revoked",
+    detail: `host ${hostId} is revoked and takes no labels`,
+    fix: "Drop it from your tenant config, or enrol the machine again and label the new host",
+  });
+
 export const setHostLabels = async (
   db: D1Database,
   tenantId: string,
@@ -268,17 +277,41 @@ export const setHostLabels = async (
 ): Promise<Outcome<HostRecord>> => {
   const host = await hostOf(db, tenantId, hostId);
   if (host === null) return hostNotFound(hostId);
-  if (host.state === "Revoked") {
-    return refuse(410, {
-      code: "HostRevoked",
-      title: "Host revoked",
-      detail: `host ${hostId} is revoked and takes no labels`,
-      fix: "Drop it from your tenant config, or enrol the machine again and label the new host",
-    });
-  }
+  if (host.state === "Revoked") return hostRevoked(hostId);
   await db
     .prepare("UPDATE hosts SET labels = ?, updated_at = ? WHERE host_id = ? AND tenant_id = ?")
     .bind(JSON.stringify(labels), now, hostId, tenantId)
     .run();
   return { ok: true, value: { ...host, labels, updatedAt: now } };
+};
+
+export const patchHostLabels = async (
+  db: D1Database,
+  tenantId: string,
+  hostId: string,
+  patch: z.infer<typeof HostLabelsPatchSchema>,
+  now: number,
+): Promise<Outcome<HostRecord>> => {
+  const row = await db
+    .prepare(
+      `UPDATE hosts SET labels = (
+        SELECT json_group_array(value) FROM (
+          SELECT value, 0 AS part, key AS at FROM json_each(hosts.labels)
+          WHERE value NOT IN (SELECT value FROM json_each(?1))
+          UNION ALL
+          SELECT value, 1, MIN(key) FROM json_each(?2)
+          WHERE value NOT IN (
+            SELECT value FROM json_each(hosts.labels) WHERE value NOT IN (SELECT value FROM json_each(?1))
+          )
+          GROUP BY value
+          ORDER BY part, at
+        )
+      ), updated_at = ?3
+      WHERE host_id = ?4 AND tenant_id = ?5 AND state != 'Revoked'
+      RETURNING ${HOST_SELECT}`,
+    )
+    .bind(JSON.stringify(patch.remove ?? []), JSON.stringify(patch.add ?? []), now, hostId, tenantId)
+    .first<HostRow>();
+  if (row !== null) return { ok: true, value: toHost(row) };
+  return (await hostOf(db, tenantId, hostId)) === null ? hostNotFound(hostId) : hostRevoked(hostId);
 };

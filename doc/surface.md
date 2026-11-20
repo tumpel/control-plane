@@ -65,6 +65,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Hosts_get`                              | `tumpel_host_get`                            | `tumpel host get`                            |
 | `Hosts_list`                             | `tumpel_host_list`                           | `tumpel host list`                           |
 | `Hosts_listUsage`                        | `tumpel_host_list_usage`                     | `tumpel host list-usage`                     |
+| `Hosts_patchLabels`                      | `tumpel_host_patch_labels`                   | `tumpel host patch-labels`                   |
 | `Hosts_revoke`                           | `tumpel_host_revoke`                         | `tumpel host revoke`                         |
 | `Hosts_setLabels`                        | `tumpel_host_set_labels`                     | `tumpel host set-labels`                     |
 | `Identity_listTenants`                   | `tumpel_tenants`                             | `tumpel tenants`                             |
@@ -90,6 +91,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Personas_delete`                        | `tumpel_persona_delete`                      | `tumpel persona delete`                      |
 | `Personas_get`                           | `tumpel_persona_get`                         | `tumpel persona get`                         |
 | `Personas_list`                          | `tumpel_persona_list`                        | `tumpel persona list`                        |
+| `Personas_patch`                         | `tumpel_persona_patch`                       | `tumpel persona patch`                       |
 | `Personas_patchFile`                     | `tumpel_persona_patch_file`                  | `tumpel persona patch-file`                  |
 | `Personas_update`                        | `tumpel_persona_update`                      | `tumpel persona update`                      |
 | `Personas_uploadFile`                    | `tumpel_persona_upload_file`                 | `tumpel persona upload-file`                 |
@@ -108,6 +110,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `SecretSets_delete`                      | `tumpel_secret_set_delete`                   | `tumpel secret-set delete`                   |
 | `SecretSets_get`                         | `tumpel_secret_set_get`                      | `tumpel secret-set get`                      |
 | `SecretSets_list`                        | `tumpel_secret_set_list`                     | `tumpel secret-set list`                     |
+| `SecretSets_patch`                       | `tumpel_secret_set_patch`                    | `tumpel secret-set patch`                    |
 | `SecretSets_removeMember`                | `tumpel_secret_set_remove_member`            | `tumpel secret-set remove-member`            |
 | `SecretSets_setMember`                   | `tumpel_secret_set_set_member`               | `tumpel secret-set set-member`               |
 | `SecretSets_update`                      | `tumpel_secret_set_update`                   | `tumpel secret-set update`                   |

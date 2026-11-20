@@ -34,6 +34,7 @@ import {
   HarnessPinSchema,
   HealthSchema,
   HostEnrolSchema,
+  HostLabelsPatchSchema,
   HostLabelsSchema,
   IssuerJwksSchema,
   OAuthAuthorizationCodeRequestSchema,
@@ -45,12 +46,14 @@ import {
   PersonaFilePatchSchema,
   PersonaFileUploadRequestSchema,
   PersonaFileUploadSchema,
+  PersonaPatchSchema,
   PersonaPathSchema,
   PersonaUpdateSchema,
   ReleaseCliPathSchema,
   ReleaseSupervisorPathSchema,
   SecretMemberPathSchema,
   SecretSetCreateSchema,
+  SecretSetPatchSchema,
   SecretSetPathSchema,
   SecretSetSchema,
   SecretSetUpdateSchema,
@@ -101,6 +104,7 @@ import {
   listEnrolmentTokens,
   listHosts,
   mintEnrolmentToken,
+  patchHostLabels,
   type Refused,
   revokeEnrolmentToken,
   revokeHost,
@@ -203,7 +207,7 @@ import { settingsOf } from "./settings";
 import type { PersonaWrite, Tenant } from "./tenant";
 import { tenantApi, tenantSkewed } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
-import { noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
+import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
 export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
@@ -474,6 +478,33 @@ const personaBody = async <T>(request: Request, schema: z.ZodType<T>, operation:
 
 type PersonaWritten = { ok: true; value: PersonaWrite } | { ok: false; response: Response };
 
+const connectorRefusal = async (
+  env: Env,
+  caller: Caller,
+  connectorIds: readonly string[],
+  operation: string,
+): Promise<Response | null> => {
+  const repeated = connectorIds.filter((connectorId, at) => connectorIds.indexOf(connectorId) !== at);
+  if (repeated.length > 0) {
+    return problem(422, {
+      code: "InvalidRequest",
+      title: "Repeated connector",
+      detail: `${operation} lists the connector ${[...new Set(repeated)].join(", ")} more than once`,
+      fix: "List each connector of the persona once",
+    });
+  }
+  const { unknownConnectorIds: unknown } = await tenantApi(env.TENANT, caller.tenantId).call("unknownConnectors", {
+    connectorIds: [...connectorIds],
+  });
+  if (unknown.length === 0) return null;
+  return problem(422, {
+    code: "NotFound",
+    title: "No such connector",
+    detail: `your tenant has no connector ${unknown.join(", ")}`,
+    fix: "List your connectors with tumpel connector list and pass their connectorIds",
+  });
+};
+
 const personaWrite = async (
   env: Env,
   caller: Caller,
@@ -481,33 +512,8 @@ const personaWrite = async (
   operation: string,
   newSecretSet: boolean,
 ): Promise<PersonaWritten> => {
-  const tenant = tenantApi(env.TENANT, caller.tenantId);
-  const repeated = body.connectorIds.filter((connectorId, at) => body.connectorIds.indexOf(connectorId) !== at);
-  if (repeated.length > 0) {
-    return {
-      ok: false,
-      response: problem(422, {
-        code: "InvalidRequest",
-        title: "Repeated connector",
-        detail: `${operation} lists the connector ${[...new Set(repeated)].join(", ")} more than once`,
-        fix: "List each connector of the persona once",
-      }),
-    };
-  }
-  const { unknownConnectorIds: unknown } = await tenant.call("unknownConnectors", {
-    connectorIds: body.connectorIds,
-  });
-  if (unknown.length > 0) {
-    return {
-      ok: false,
-      response: problem(422, {
-        code: "NotFound",
-        title: "No such connector",
-        detail: `your tenant has no connector ${unknown.join(", ")}`,
-        fix: "List your connectors with tumpel connector list and pass their connectorIds",
-      }),
-    };
-  }
+  const refused = await connectorRefusal(env, caller, body.connectorIds, operation);
+  if (refused !== null) return { ok: false, response: refused };
   const { read } = await tenantApi(env.TENANT, caller.tenantId).call("getSecretSet", {
     tenantId: caller.tenantId,
     secretSetId: body.secretSetId,
@@ -633,6 +639,63 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
   return persona === null ? personaNotFound(personaId) : json(await readPersona(env, persona, Date.now()));
 };
 
+const secretSetRefusal = async (
+  env: Env,
+  caller: Caller,
+  current: StoredPersona,
+  secretSetId: string,
+  operation: string,
+): Promise<Response | null> => {
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
+  const { read } = await tenant.call("getSecretSet", { tenantId: caller.tenantId, secretSetId });
+  if (read.kind === "NotFound") return unknownSecretSet(secretSetId);
+  if (read.kind === "Unreadable") return unreadable(operation, read);
+  const checked = harnessCredential(
+    {
+      harness: current.harness,
+      secretSetName: read.secretSet.name,
+      members: read.secretSet.keys,
+      pins: (await tenant.call("listPins", {})).pins,
+      newSecretSet: true,
+    },
+    operation,
+  );
+  return checked.ok ? null : checked.response;
+};
+
+const handlePersonaPatch = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const [, matched, filePatches] = PERSONA_PATH.exec(url.pathname) ?? [];
+  if (matched === undefined || filePatches !== undefined || request.method !== "PATCH") return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const raw = decodeURIComponent(matched);
+  const path = PersonaPathSchema.safeParse({ personaId: raw });
+  if (!path.success) return personaNotFound(raw);
+  const { personaId } = path.data;
+  const body = await parseBody(request, PersonaPatchSchema, "personas.patch");
+  if (!body.ok) return body.response;
+  const patch = body.value;
+  const tenant = tenantApi(env.TENANT, caller.tenantId);
+  const { persona: current } = await tenant.call("getPersona", { tenantId: caller.tenantId, personaId });
+  if (current === null) return personaNotFound(personaId);
+  if (patch.connectorIds !== undefined) {
+    const refused = await connectorRefusal(env, caller, patch.connectorIds, "personas.patch");
+    if (refused !== null) return refused;
+  }
+  if (patch.secretSetId !== undefined && patch.secretSetId !== current.secretSetId) {
+    const refused = await secretSetRefusal(env, caller, current, patch.secretSetId, "personas.patch");
+    if (refused !== null) return refused;
+  }
+  const { written } = await tenant.call("patchPersona", {
+    tenantId: caller.tenantId,
+    personaId,
+    patch,
+    now: Date.now(),
+  });
+  if (!written.ok) return conflict("personas.patch", patch.name ?? current.name, written.constraint);
+  return written.value === null ? personaNotFound(personaId) : json(await readPersona(env, written.value, Date.now()));
+};
+
 const handlePersonaFileUpload = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
@@ -740,6 +803,49 @@ const handleSecretSet = async (request: Request, url: URL, env: Env): Promise<Re
   if (read.kind === "NotFound") return secretSetNotFound(secretSetId);
   if (read.kind === "Unreadable") return unreadable("secretSets.get", read);
   return json(SecretSetSchema.parse(read.secretSet));
+};
+
+const handleSecretSetPatch = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const matched = SECRET_SET_PATH.exec(url.pathname)?.[1];
+  if (matched === undefined || request.method !== "PATCH") return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const raw = decodeURIComponent(matched);
+  const path = SecretSetPathSchema.safeParse({ secretSetId: raw });
+  if (!path.success) return secretSetNotFound(raw);
+  const { secretSetId } = path.data;
+  const body = await parseBody(request, SecretSetPatchSchema, "secretSets.patch");
+  if (!body.ok) return body.response;
+  const listed = body.value.secrets ?? [];
+  const mismatch = keyPrefixMismatch(listed, "secretSets.patch");
+  if (mismatch !== null) return problem(422, mismatch);
+  const githubUser = await repositoryTokenUser(env, listed, "secretSets.patch");
+  if (!githubUser.ok) return githubUser.response;
+  const { patched } = await tenantApi(env.TENANT, caller.tenantId).call("patchSecretSet", {
+    tenantId: caller.tenantId,
+    secretSetId,
+    patch: body.value,
+    githubUser: githubUser.user,
+    now: Date.now(),
+  });
+  const name = body.value.name ?? secretSetId;
+  if (patched.kind === "Updated") return json(SecretSetSchema.parse(patched.secretSet));
+  if (patched.kind === "SetNotFound") return secretSetNotFound(secretSetId);
+  if (patched.kind === "Conflict") return conflict("secretSets.patch", name, patched.constraint);
+  if (patched.kind === "NoStoredValue") {
+    return problem(422, {
+      code: "InvalidRequest",
+      title: "No stored value to keep",
+      detail: `secretSets.patch sent member ${patched.name} without a value, and secret set ${name} stores no member ${patched.source}`,
+      fix: `Enter a value for ${patched.name}, or send previousName with the name it had before`,
+    });
+  }
+  return problem(422, {
+    code: "InvalidRequest",
+    title: "GitHub token needs its value",
+    detail: `secretSets.patch renames member ${patched.source} to ${REPOSITORY_TOKEN} without a value; GitHub checks every new ${REPOSITORY_TOKEN} before it is stored`,
+    fix: `Enter the value of ${REPOSITORY_TOKEN}`,
+  });
 };
 
 const SECRET_MEMBERS_PATH = /^\/v1\/secret-sets\/([^/]+)\/members(?:\/([^/]+))?$/;
@@ -1035,6 +1141,21 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   if (host === null) return refusal(hostNotFound(hostId));
   const [withUpdates] = await withSupervisorUpdates(env, caller.tenantId, [host]);
   return json(withUpdates);
+};
+
+const HOST_LABELS_PATH = /^\/v1\/hosts\/([^/]+)\/labels$/;
+
+const handleHostLabelsPatch = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
+  const matched = HOST_LABELS_PATH.exec(url.pathname)?.[1];
+  if (matched === undefined || request.method !== "PATCH") return null;
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const body = await parseBody(request, HostLabelsPatchSchema, "hosts.patchLabels");
+  if (!body.ok) return body.response;
+  const labelled = await patchHostLabels(env.DB, caller.tenantId, decodeURIComponent(matched), body.value, Date.now());
+  if (!labelled.ok) return refusal(labelled);
+  const [host] = await withSupervisorUpdates(env, caller.tenantId, [labelled.value]);
+  return json(host);
 };
 
 const handleDeviceStart = async (request: Request, url: URL, env: Env): Promise<Response> => {
@@ -1563,7 +1684,9 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     return handleRevokeEnrolmentToken(request, url, env);
   }
   const resource =
+    (await handlePersonaPatch(request, url, env)) ??
     (await handlePersona(request, url, env)) ??
+    (await handleSecretSetPatch(request, url, env)) ??
     (await handleSecretSet(request, url, env)) ??
     (await handleSecretMember(request, url, env)) ??
     (await handleUnpin(request, url, env));
@@ -1604,7 +1727,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleGitHubPage(request, url, env, assertedEmail)) ??
     (await handleGitHubWebhook(request, url, env));
   if (github) return github;
-  const host = await handleHost(request, url, env);
+  const host = (await handleHostLabelsPatch(request, url, env)) ?? (await handleHost(request, url, env));
   if (host) return host;
   if (request.method === "GET") {
     const download = await handleReleaseDownload(request, url, env);
