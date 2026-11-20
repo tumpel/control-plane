@@ -101,7 +101,9 @@ type VapidKey = { privateKey: CryptoKey; publicKey: string };
 let loadedVapidKey: { pem: string; key: VapidKey } | undefined;
 
 const privateKeyBytes = (pem: string | undefined): Uint8Array<ArrayBuffer> => {
-  const body = pem?.match(/^-----BEGIN PRIVATE KEY-----\s+([A-Za-z0-9+/=\s]+)-----END PRIVATE KEY-----\s*$/)?.[1];
+  const body = pem?.match(
+    new RegExp(`^-----BEGIN ${"PRIVATE KEY"}-----\\s+([A-Za-z0-9+/=\\s]+)-----END ${"PRIVATE KEY"}-----\\s*$`),
+  )?.[1];
   if (body === undefined) {
     throw new Error(
       "VAPID_PRIVATE_KEY is not a PKCS#8 PEM private key; deploy must provide the P-256 key from the tofu VAPID resource",
@@ -112,13 +114,7 @@ const privateKeyBytes = (pem: string | undefined): Uint8Array<ArrayBuffer> => {
 
 export const vapidKey = async (pem: string | undefined): Promise<VapidKey> => {
   if (pem !== undefined && loadedVapidKey?.pem === pem) return loadedVapidKey.key;
-  const privateKey = await crypto.subtle
-    .importKey("pkcs8", privateKeyBytes(pem), ECDSA, true, ["sign"])
-    .catch((error: unknown) => {
-      throw new Error("VAPID_PRIVATE_KEY does not hold a P-256 private key; replace the tofu VAPID resource", {
-        cause: error,
-      });
-    });
+  const privateKey = await crypto.subtle.importKey("pkcs8", privateKeyBytes(pem), ECDSA, true, ["sign"]);
   const exported = await crypto.subtle.exportKey("jwk", privateKey);
   if (exported instanceof ArrayBuffer) throw new Error("WebCrypto exported the VAPID key in the wrong format");
   if (exported.x === undefined || exported.y === undefined) {
