@@ -9,7 +9,7 @@ import {
 import { z } from "zod";
 import { base64Url, randomToken, sameSecret, sha256Hex } from "./crypto";
 import type { OAuthErrorCode } from "./http";
-import type { Caller, Role } from "./identity";
+import { type Caller, personCaller, type Role } from "./identity";
 
 export { MCP_PATH };
 
@@ -512,7 +512,7 @@ export const callerForAccessToken = async (db: D1Database, token: string, now: n
     )
     .bind(await sha256Hex(token), now)
     .first<{ tenant_id: string; principal_id: string; role: Role }>();
-  return row === null ? null : { tenantId: row.tenant_id, principalId: row.principal_id, role: row.role };
+  return row === null ? null : personCaller(row.tenant_id, row.principal_id, row.role);
 };
 
 const RegisteredRedirects = z.tuple([z.url()], z.url());

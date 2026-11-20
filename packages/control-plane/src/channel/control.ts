@@ -101,7 +101,15 @@ export interface ControlContext {
 
 export type ControlEvent =
   | { kind: "None" }
-  | { kind: "Welcomed"; boxCapacity: number; usage: HostUsage; supervisorVersion: string; protocolVersion: number }
+  | {
+      kind: "Welcomed";
+      boxCapacity: number;
+      usage: HostUsage;
+      supervisorVersion: string;
+      protocolVersion: number;
+      channelProtocolOldest: Hello["channelProtocolOldest"];
+      guestProtocol: Hello["guestProtocol"];
+    }
   | { kind: "Heartbeat"; usage: HostUsage }
   | { kind: "FirstHeartbeat"; usage: HostUsage; heldSessionIds: string[] }
   | { kind: "Message"; frame: Frame<HostMessage> }
@@ -242,6 +250,8 @@ const hello = async (
       usage: envelope.usage,
       supervisorVersion: envelope.supervisorVersion,
       protocolVersion: envelope.protocolVersion,
+      channelProtocolOldest: envelope.channelProtocolOldest,
+      guestProtocol: envelope.guestProtocol,
     },
   };
 };

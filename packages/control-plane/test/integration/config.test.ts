@@ -320,6 +320,7 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
     boxMemoryMib: 4096,
     boxDiskMib: 32768,
     boxRetention: "Auto",
+    tumpelMcp: false,
     files: [],
   };
   const { applied } = await tenantApi(tenants, tenant).call("applyConfig", {

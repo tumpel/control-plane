@@ -49,6 +49,7 @@ import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
 import { workersSecretKeyStore } from "../../src/key-store.ts";
 import type { ReleaseManifest } from "../../src/releases.ts";
+import { steerSettings } from "../../src/steer.ts";
 import {
   type ChunkLedger,
   type ChunkStore,
@@ -629,7 +630,7 @@ const tenant = async () => {
     });
     const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
     assert.equal(code, 0, stderr);
-    const enrolled = HostSchema.parse(JSON.parse(stdout));
+    const enrolled = HostSchema.pick({ hostId: true }).parse(JSON.parse(stdout));
     const stored = SupervisorHostKeySchema.parse(JSON.parse(readFileSync(join(dir, "host-key.json"), "utf8")));
     const key = createPrivateKey({ key: Buffer.from(stored.privateKey, "base64"), format: "der", type: "pkcs8" });
     return { id: enrolled.hostId, key };
@@ -942,6 +943,7 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       deployedCommit: DEPLOYED_COMMIT,
       drained: false,
       hosts: [{ hostId, tenantId: started.session.tenantId, runningTurns: 1 }],
+      channelProtocols: [],
     });
 
     const start = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during the drain" }, bearer);
@@ -963,7 +965,12 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
       (turn) => turn.state === "Failed",
     );
-    assert.deepEqual(await report(), { deployedCommit: DEPLOYED_COMMIT, drained: true, hosts: [] });
+    assert.deepEqual(await report(), {
+      deployedCommit: DEPLOYED_COMMIT,
+      drained: true,
+      hosts: [],
+      channelProtocols: [],
+    });
 
     const send = await postJson(`/v1/sessions/${started.session.sessionId}/turns`, { prompt: "draining" }, bearer);
     assert.equal(send.status, 503);
@@ -1013,10 +1020,15 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(Date.parse(offer.credential.expiresAt) > Date.now());
     assert.equal(offer.lastLineSeq, 0);
     assert.deepEqual(offer.snapshots, []);
-    const digest = createHash("sha256").update(SETTINGS_FILE).digest("hex");
+    const settings = steerSettings(SETTINGS_FILE) ?? "";
+    const digest = createHash("sha256").update(settings).digest("hex");
     assert.deepEqual(
       offer.personaFiles.map((file) => [file.path, file.digest, file.sizeBytes]),
-      [[".claude/settings.json", digest, SETTINGS_FILE.length]],
+      [[".claude/settings.json", digest, Buffer.byteLength(settings)]],
+    );
+    assert.deepEqual(
+      offer.credential.connectors.map((connector) => [connector.connectorId, new URL(connector.url).pathname]),
+      [["steer", `/v1/turns/${offer.turnId}/steer-inbox`]],
     );
     assert.equal(new URL(offer.personaFiles[0]?.downloadUrl ?? "").origin, R2_STUB_ORIGIN);
     assert.match(
@@ -1798,6 +1810,34 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
     assert.equal(await store.text(warm.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
+  });
+
+  test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
+    const { tool, toolRefusal, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "tag me", tags: ["crew:a", "b"] },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    assert.deepEqual(started.session.tags, ["b", "crew:a"]);
+    assert.deepEqual(started.session.startedBy, { kind: "Person", principalId: started.session.principalId });
+    const listed = async (tag: string[]) =>
+      (await tool("tumpel_session_list", { tag }, SessionSchema.array())).map((session) => session.sessionId);
+    assert.deepEqual(await listed(["crew:a", "b"]), [sessionId]);
+    assert.deepEqual(await listed(["crew:a", "x"]), []);
+
+    const patched = await tool(
+      "tumpel_session_patch_tags",
+      { sessionId, add: ["x", "crew:a"], remove: ["b"] },
+      SessionSchema,
+    );
+    assert.deepEqual(patched.tags, ["crew:a", "x"]);
+    assert.deepEqual(await listed(["crew:a", "x"]), [sessionId]);
+    const many = Array.from({ length: 15 }, (_, index) => `t${index}`);
+    assert.match(await toolRefusal("tumpel_session_patch_tags", { sessionId, add: many }), /at most 16/);
+    assert.deepEqual((await tool("tumpel_session_set_tags", { sessionId, tags: [] }, SessionSchema)).tags, []);
+    assert.deepEqual((await tool("tumpel_session_get", { sessionId }, SessionSchema)).tags, []);
   });
 
   test("a goal reaches Claude Code as one /goal prompt with a turn cap and reads back on the turn", async () => {

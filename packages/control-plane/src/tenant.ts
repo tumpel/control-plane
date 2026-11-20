@@ -16,7 +16,7 @@ import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import { personaFileKey, type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
   type MemberUpdate,
   memberWith,
@@ -37,7 +37,10 @@ import { listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 
-export type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
+export type PersonaWrite = Pick<
+  StoredPersona,
+  "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention" | "tumpelMcp"
+> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];
@@ -120,6 +123,7 @@ type PersonaRow = {
   box_memory_mib: number;
   box_disk_mib: number;
   box_retention: string;
+  tumpel_mcp: number;
   created_at: number;
   updated_at: number;
 };
@@ -133,7 +137,7 @@ type PersonaFileRow = {
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, created_at, updated_at FROM personas";
 
 export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
   sql
@@ -154,6 +158,7 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[], connectorIds: strin
     boxMemoryMib: row.box_memory_mib,
     boxDiskMib: row.box_disk_mib,
     boxRetention: row.box_retention,
+    tumpelMcp: row.tumpel_mcp === 1,
     files: files.map((file) => ({
       path: file.path,
       digest: file.digest,
@@ -185,13 +190,27 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    if (this.eventsAppended) {
-      this.eventsAppended = false;
-      const tenantId = this.ctx.id.name;
-      if (tenantId === undefined) throw new Error("the tenant Durable Object appended events but has no name");
-      this.ctx.waitUntil(this.env.EVENTS.getByName(tenantId).wake());
-    }
+    if (this.deliveriesToStart.size > 0) await this.startDeliveries(this.tenantName());
+    this.wakeEvents();
     return response;
+  }
+
+  override async alarm(): Promise<void> {
+    this.expireSubscriptions(Date.now());
+    await this.armExpiry();
+    this.wakeEvents();
+  }
+
+  private tenantName(): string {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) throw new Error("the tenant Durable Object has no name");
+    return tenantId;
+  }
+
+  private wakeEvents(): void {
+    if (!this.eventsAppended) return;
+    this.eventsAppended = false;
+    this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
   }
 
   private readonly operations: TenantHandlers = {
@@ -204,7 +223,7 @@ export class Tenant extends TenantConnectors {
     patchPersona: ({ tenantId, personaId, patch, now }) => ({
       written: this.patchPersona(tenantId, personaId, patch, now),
     }),
-    deletePersona: ({ tenantId, personaId }) => ({ deleted: this.deletePersona(tenantId, personaId) }),
+    deletePersona: async ({ tenantId, personaId }) => ({ deleted: await this.deletePersona(tenantId, personaId) }),
     open: ({ tenantId, now }) => {
       this.open(tenantId, now);
       return {};
@@ -400,11 +419,40 @@ export class Tenant extends TenantConnectors {
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),
+    steerTurn: ({ tenantId, turnId, steer, now }) => ({ sent: this.steerTurn(tenantId, turnId, steer.prompt, now) }),
+    listSteers: ({ tenantId, turnId }) => ({ steers: this.listSteers(tenantId, turnId) }),
+    takeSteers: ({ turnId, now }) => ({ taken: this.takeSteers(turnId, now) }),
     cancelTurn: ({ tenantId, turnId, cancelledBy, now }) => ({
       cancelled: this.cancelTurn(tenantId, turnId, cancelledBy, now),
     }),
     archiveSession: async ({ tenantId, sessionId, now }) => ({
       archived: await this.archiveSession(tenantId, sessionId, now),
+    }),
+    createSubscription: async ({ tenantId, subscription, now }) => ({
+      created: await this.createSubscription(tenantId, subscription, now),
+    }),
+    listSubscriptions: ({ tenantId, filter }) => ({ subscriptions: this.listSubscriptions(tenantId, filter) }),
+    getSubscription: ({ tenantId, subscriptionId }) => ({
+      subscription: this.getSubscription(tenantId, subscriptionId),
+    }),
+    pauseSubscription: ({ tenantId, subscriptionId, message, now }) => ({
+      paused: this.pauseSubscription(tenantId, subscriptionId, message, now),
+    }),
+    resumeSubscription: ({ tenantId, subscriptionId, now }) => ({
+      resumed: this.resumeSubscription(tenantId, subscriptionId, now),
+    }),
+    deleteSubscription: ({ subscriptionId, now }) => ({ deleted: this.deleteSubscription(subscriptionId, now) }),
+    completeSubscription: ({ tenantId, subscriptionId, now }) => ({
+      completed: this.completeSubscription(tenantId, subscriptionId, now),
+    }),
+    setSessionTags: ({ tenantId, sessionId, tags, now }) => ({
+      tagged: this.setSessionTags(tenantId, sessionId, tags, now),
+    }),
+    patchSessionTags: ({ tenantId, sessionId, patch, now }) => ({
+      tagged: this.patchSessionTags(tenantId, sessionId, patch, now),
+    }),
+    deleteSession: async ({ tenantId, sessionId }) => ({
+      deleted: await this.deleteSession(tenantId, sessionId, Date.now()),
     }),
     getSession: ({ tenantId, sessionId }) => ({ session: this.getSession(tenantId, sessionId) }),
     listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
@@ -628,7 +676,7 @@ export class Tenant extends TenantConnectors {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           persona.name,
@@ -637,6 +685,7 @@ export class Tenant extends TenantConnectors {
           persona.boxMemoryMib,
           persona.boxDiskMib,
           persona.boxRetention,
+          persona.tumpelMcp ? 1 : 0,
           now,
           now,
         );
@@ -659,12 +708,13 @@ export class Tenant extends TenantConnectors {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
           persona.secretSetId,
           persona.boxMemoryMib,
           persona.boxDiskMib,
           persona.boxRetention,
+          persona.tumpelMcp ? 1 : 0,
           now,
           tenantId,
           personaId,
@@ -691,12 +741,13 @@ export class Tenant extends TenantConnectors {
         if (current === null) return false;
         const merged = { ...current, ...patch };
         this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           merged.name,
           merged.secretSetId,
           merged.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
           merged.boxDiskMib ?? BoxDiskLimit.DefaultMib,
           merged.boxRetention,
+          merged.tumpelMcp ? 1 : 0,
           now,
           tenantId,
           personaId,
@@ -709,7 +760,28 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
-  protected deletePersona(tenantId: string, personaId: string): PersonaDeleted {
+  private personaDigests(personaIds: string[]): string[] {
+    return this.ctx.storage.sql
+      .exec<{ digest: string }>(
+        "SELECT DISTINCT digest FROM persona_files WHERE persona_id IN (SELECT value FROM json_each(?))",
+        JSON.stringify(personaIds),
+      )
+      .toArray()
+      .map((row) => row.digest);
+  }
+
+  private async dropPersonaFiles(tenantId: string, digests: string[]): Promise<void> {
+    const held = new Set(
+      this.ctx.storage.sql
+        .exec<{ digest: string }>("SELECT DISTINCT digest FROM persona_files")
+        .toArray()
+        .map((row) => row.digest),
+    );
+    const keys = digests.filter((digest) => !held.has(digest)).map((digest) => personaFileKey(tenantId, digest));
+    if (keys.length > 0) await this.env.STORE.delete(keys);
+  }
+
+  protected async deletePersona(tenantId: string, personaId: string): Promise<PersonaDeleted> {
     const sql = this.ctx.storage.sql;
     const sessions = sql
       .exec<{ session_id: string }>(
@@ -719,9 +791,12 @@ export class Tenant extends TenantConnectors {
       .toArray()
       .map((row) => row.session_id);
     if (sessions.length > 0) return { kind: "InUse", sessions };
+    const digests = this.personaDigests([personaId]);
     const deleted =
       sql.exec("DELETE FROM personas WHERE tenant_id = ? AND persona_id = ?", tenantId, personaId).rowsWritten > 0;
-    return deleted ? { kind: "Deleted" } : { kind: "NotFound" };
+    if (!deleted) return { kind: "NotFound" };
+    await this.dropPersonaFiles(tenantId, digests);
+    return { kind: "Deleted" };
   }
 
   private secretSetsWhere(tenantId: string, where: string, ...bindings: string[]): SecretSetsRead {
@@ -1058,7 +1133,7 @@ export class Tenant extends TenantConnectors {
       case "CreatePersona": {
         const personaId = crypto.randomUUID();
         sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           write.persona.name,
@@ -1067,6 +1142,7 @@ export class Tenant extends TenantConnectors {
           write.persona.boxMemoryMib,
           write.persona.boxDiskMib,
           write.persona.boxRetention,
+          write.persona.tumpelMcp ? 1 : 0,
           now,
           now,
         );
@@ -1076,12 +1152,13 @@ export class Tenant extends TenantConnectors {
       }
       case "UpdatePersona": {
         sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           write.persona.name,
           write.persona.secretSetId,
           write.persona.boxMemoryMib,
           write.persona.boxDiskMib,
           write.persona.boxRetention,
+          write.persona.tumpelMcp ? 1 : 0,
           now,
           tenantId,
           write.personaId,
@@ -1125,12 +1202,17 @@ export class Tenant extends TenantConnectors {
     }
     const deleted = this.deletedDuringApply(tenantId, writes);
     if (deleted !== null) return { kind: "Deleted", resource: deleted };
+    const digests = this.personaDigests(
+      writes.flatMap((write) => (write.kind === "DeletePersona" ? [write.personaId] : [])),
+    );
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         for (const write of writes) this.writeConfig(tenantId, write, sealed, now);
       }),
     );
-    return written.ok ? { kind: "Applied" } : { kind: "Conflict", constraint: written.constraint };
+    if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
+    await this.dropPersonaFiles(tenantId, digests);
+    return { kind: "Applied" };
   }
 
   protected listPins(): HarnessPin[] {

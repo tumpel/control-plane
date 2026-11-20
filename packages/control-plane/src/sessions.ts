@@ -6,6 +6,10 @@ import {
   SessionStartFromIssueSchema,
   SessionStartSchema,
   SessionStopQuerySchema,
+  SessionTagsPatchSchema,
+  SessionTagsSchema,
+  SteerCreateSchema,
+  type SteerSchema,
   TranscriptPageSchema,
   TranscriptQuerySchema,
   TurnPathSchema,
@@ -18,9 +22,9 @@ import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
 import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
-import { GOAL_FOLDS, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
+import { GOAL_FOLDS, GOAL_TURN_CAP, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
-import { issues, json, parseBody, problem } from "./http.ts";
+import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { Unplaceable } from "./placement.ts";
@@ -28,21 +32,22 @@ import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
 import { tenantApi } from "./tenant-api.ts";
-import type {
-  CredentialHandover,
-  NewSession,
-  Session,
-  SessionFilter,
-  SessionStart,
-  Snapshot,
-  Started,
-  StartedSession,
-  StartedSessionFromIssue,
-  StopFailure,
-  TranscriptCursor,
-  Turn,
-  TurnFailure,
-  TurnSend,
+import {
+  type CredentialHandover,
+  type NewSession,
+  SESSION_TAG_LIMIT,
+  type Session,
+  type SessionFilter,
+  type SessionStart,
+  type Snapshot,
+  type Started,
+  type StartedSession,
+  type StartedSessionFromIssue,
+  type StopFailure,
+  type TranscriptCursor,
+  type Turn,
+  type TurnFailure,
+  type TurnSend,
 } from "./tenant-sessions.ts";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
 import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type TranscriptLine } from "./transcript.ts";
@@ -50,6 +55,7 @@ import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type Tra
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
 export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+type Steer = z.infer<typeof SteerSchema>;
 type SessionStopQuery = z.infer<typeof SessionStopQuerySchema>;
 export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
 
@@ -266,6 +272,7 @@ const prepareStart = async (
   }
   return ok({
     principalId: caller.principalId,
+    startedBy: caller.origin,
     hosts: await listHosts(env.DB, caller.tenantId),
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
@@ -378,7 +385,7 @@ export const startSessionFromIssue = async (
   const prepared = await prepareStart(
     env,
     caller,
-    { personaId: start.personaId, repository: repositoryUrl(target), model: start.model, prompt },
+    { personaId: start.personaId, repository: repositoryUrl(target), model: start.model, prompt, tags: start.tags },
     endpoint,
     now,
   );
@@ -405,10 +412,11 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.state !== undefined) filter.state = query.state;
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
+  if (query.tag !== undefined) filter.tags = query.tag;
   return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
 };
 
-const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
+export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
   if (send.goal === undefined) return null;
   const goalFold = GOAL_FOLDS.get(session.harness);
   if (goalFold === undefined) {
@@ -419,7 +427,7 @@ const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
       fix: "Send the turn without goal, and state the condition in the prompt",
     });
   }
-  const length = goalFold.fold(send.prompt, send.goal).length;
+  const length = goalFold.fold(send.prompt, send.goal, GOAL_TURN_CAP).length;
   if (length <= goalFold.limit) return null;
   return refuse(400, {
     code: "InvalidRequest",
@@ -531,6 +539,75 @@ export const archiveSession = async (
   });
 };
 
+export const setSessionTags = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  tags: string[],
+  now: number,
+): Promise<Outcome<Session>> => {
+  const tenant = tenantOf(env, caller);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
+  if (session === null) return sessionNotFound(sessionId);
+  if (session.state === "Archived") return sessionArchived(sessionId, "tags");
+  const { tagged } = await tenant.call("setSessionTags", { tenantId: caller.tenantId, sessionId, tags, now });
+  return tagged.kind === "Tagged" ? ok(tagged.session) : sessionNotFound(sessionId);
+};
+
+export const patchSessionTags = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  patch: z.infer<typeof SessionTagsPatchSchema>,
+  now: number,
+): Promise<Outcome<Session>> => {
+  const tenant = tenantOf(env, caller);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
+  if (session === null) return sessionNotFound(sessionId);
+  if (session.state === "Archived") return sessionArchived(sessionId, "tags");
+  const { tagged } = await tenant.call("patchSessionTags", { tenantId: caller.tenantId, sessionId, patch, now });
+  if (tagged.kind === "Tagged") return ok(tagged.session);
+  if (tagged.kind === "NotFound") return sessionNotFound(sessionId);
+  return refuse(422, {
+    code: "InvalidRequest",
+    title: "Too many tags",
+    detail: `session ${sessionId} would carry ${tagged.tags.length} tags, and a session carries at most ${SESSION_TAG_LIMIT}`,
+    fix: `Add fewer tags or remove ${tagged.tags.length - SESSION_TAG_LIMIT} more in the same patch, then send it again`,
+  });
+};
+
+export const deleteSession = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  now: number,
+): Promise<Outcome<null>> => {
+  const tenant = tenantOf(env, caller);
+  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
+  if (session === null) return sessionNotFound(sessionId);
+  if (session.state === "Idle") {
+    const offline = await hostOffline(env, caller, session, "delete the session again");
+    if (offline !== null) return offline;
+  }
+  const { deleted } = await tenant.call("deleteSession", { tenantId: caller.tenantId, sessionId });
+  if (deleted.kind === "Deleted") return ok(null);
+  if (deleted.kind === "NotFound") return sessionNotFound(sessionId);
+  if (deleted.state === "Archived") {
+    return refuse(409, {
+      code: "SessionNotStopped",
+      title: "Session snapshot in use",
+      detail: `a turn of another session is restoring from the prebuild that session ${sessionId} built, so its snapshot stays until that restore ends`,
+      fix: `Wait for that turn to start running, then delete session ${sessionId} again`,
+    });
+  }
+  return refuse(409, {
+    code: "SessionNotStopped",
+    title: "Session not stopped",
+    detail: `session ${sessionId} is ${deleted.state}, and only an Idle, Stopped, Failed or Archived session can be deleted`,
+    fix: `Wait until session ${sessionId} reads Idle or Stopped, then delete again`,
+  });
+};
+
 export const listTurns = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Turn[]>> => {
   const { turns } = await tenantOf(env, caller).call("listTurns", { tenantId: caller.tenantId, sessionId });
   return turns === null ? sessionNotFound(sessionId) : ok(turns);
@@ -557,6 +634,42 @@ export const cancelTurn = async (env: Env, caller: Caller, turnId: string, now: 
     detail: `turn ${turnId} is ${cancelled.state} and no longer waits behind another turn, so it cannot be cancelled`,
     fix: "Cancel only a turn that waits Offered behind another turn of its session; stop the session with cancelTurn true to end a running turn",
   });
+};
+
+export const steerTurn = async (
+  env: Env,
+  caller: Caller,
+  turnId: string,
+  prompt: string,
+  now: number,
+): Promise<Outcome<Steer>> => {
+  const { sent } = await tenantOf(env, caller).call("steerTurn", {
+    tenantId: caller.tenantId,
+    turnId,
+    steer: { prompt },
+    now,
+  });
+  if (sent.kind === "Sent") return ok(sent.steer);
+  if (sent.kind === "NotFound") return turnNotFound(turnId);
+  if (sent.kind === "NotRunning") {
+    return refuse(409, {
+      code: "TurnNotRunning",
+      title: "Turn not running",
+      detail: `turn ${turnId} is ${sent.state}, and only a Running turn takes a steer`,
+      fix: "Send the prompt as the session's next turn instead",
+    });
+  }
+  return refuse(409, {
+    code: "SteerUnsupported",
+    title: "Turn takes no steer",
+    detail: `turn ${turnId} runs in a box that reads no steer: only a Claude Code turn on a host that runs connectors, with a persona .claude/settings.json that is a JSON object, takes one`,
+    fix: "Send the prompt as the session's next turn instead",
+  });
+};
+
+export const listSteers = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<Steer[]>> => {
+  const { steers } = await tenantOf(env, caller).call("listSteers", { tenantId: caller.tenantId, turnId });
+  return steers === null ? turnNotFound(turnId) : ok(steers);
 };
 
 export const waitTurns = async (
@@ -767,11 +880,12 @@ const answer = <T>(outcome: Outcome<T>): Response =>
   outcome.ok ? json(outcome.value) : problem(outcome.status, outcome.problem);
 
 const SESSION_PATH =
-  /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop-failures|\/stop|\/archive)?$/;
+  /^\/v1\/sessions\/([^/]+)(\/turns|\/transcript|\/snapshots|\/credential-handovers|\/stop-failures|\/stop|\/archive|\/tags)?$/;
 const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers", "/stop-failures"];
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
+const SESSION_TAG_METHODS = ["PUT", "PATCH"];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
-const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel)?$/;
+const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel|\/steers)?$/;
 const TURN_WAIT_PATH = "/v1/turns/wait";
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
@@ -799,6 +913,20 @@ const sessionRoute = async (
     return answer(await stopSession(env, caller, sessionId, query.data, Date.now()));
   }
   if (action === "/archive") return answer(await archiveSession(env, caller, sessionId, Date.now()));
+  if (action === "/tags" && request.method === "PUT") {
+    const body = await parseBody(request, SessionTagsSchema, "sessions.setTags");
+    if (!body.ok) return body.response;
+    return answer(await setSessionTags(env, caller, sessionId, body.value.tags, Date.now()));
+  }
+  if (action === "/tags") {
+    const body = await parseBody(request, SessionTagsPatchSchema, "sessions.patchTags");
+    if (!body.ok) return body.response;
+    return answer(await patchSessionTags(env, caller, sessionId, body.value, Date.now()));
+  }
+  if (request.method === "DELETE") {
+    const deleted = await deleteSession(env, caller, sessionId, Date.now());
+    return deleted.ok ? noContent() : answer(deleted);
+  }
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
   if (action === "/snapshots") return answer(await listSnapshots(env, caller, sessionId));
   if (action === "/credential-handovers") return answer(await listCredentialHandovers(env, caller, sessionId));
@@ -827,7 +955,10 @@ export const handleSessions = async (
     (pathname === "/v1/sessions" && (posting || request.method === "GET")) ||
     (session !== null &&
       (posting ? SESSION_POSTS : request.method === "GET" ? SESSION_GETS : []).includes(session[2] ?? "")) ||
-    (turn !== null && (posting ? turn[2] === "/cancel" : request.method === "GET" && turn[2] !== "/cancel")) ||
+    (session?.[2] === "/tags" && SESSION_TAG_METHODS.includes(request.method)) ||
+    (session !== null && request.method === "DELETE" && session[2] === undefined) ||
+    (turn !== null &&
+      (posting ? ["/cancel", "/steers"].includes(turn[2] ?? "") : request.method === "GET" && turn[2] !== "/cancel")) ||
     (snapshot !== null && request.method === "GET");
   if (!routed) return null;
   const caller = await authenticate(request, env);
@@ -843,7 +974,8 @@ export const handleSessions = async (
     return answer(await startSession(env, caller, body.value, url.origin, Date.now()));
   }
   if (pathname === "/v1/sessions") {
-    const query = SessionListQuerySchema.safeParse(queryOf(url, []));
+    const tag = url.searchParams.getAll("tag");
+    const query = SessionListQuerySchema.safeParse({ ...queryOf(url, []), ...(tag.length > 0 ? { tag } : {}) });
     if (!query.success) return invalidQuery("sessions.list", query.error);
     return answer(await listSessions(env, caller, query.data));
   }
@@ -864,6 +996,12 @@ export const handleSessions = async (
     if (!path.success) return answer(turnNotFound(raw));
     if (turn[2] === "/cancel") return answer(await cancelTurn(env, caller, path.data.turnId, Date.now()));
     if (turn[2] === "/failure") return answer(await getTurnFailure(env, caller, path.data.turnId));
+    if (turn[2] === "/steers" && posting) {
+      const body = await parseBody(request, SteerCreateSchema, "turns.steer");
+      if (!body.ok) return body.response;
+      return answer(await steerTurn(env, caller, path.data.turnId, body.value.prompt, Date.now()));
+    }
+    if (turn[2] === "/steers") return answer(await listSteers(env, caller, path.data.turnId));
     return answer(await getTurn(env, caller, path.data.turnId));
   }
   return answer(await getSnapshot(env, caller, decodeURIComponent(snapshot?.[1] ?? "")));

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   EffectiveHarnessVersionSchema,
+  HostSchema,
   PersonaFileLimit,
   SecretSetSchema,
   SessionSchema,
@@ -10,7 +11,6 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { type Desired, type Live, type Planned, planOf, type SentFile, type Step } from "../src/configs.ts";
-import { HostRecordSchema } from "../src/host-record.ts";
 import { StoredPersonaSchema } from "../src/persona-files.ts";
 
 type TenantConfig = z.infer<typeof TenantConfigSchema>;
@@ -56,6 +56,7 @@ const livePersona = (personaId: string, name: string, harness: string, secretSet
     boxMemoryMib: 2048,
     boxDiskMib: 32768,
     boxRetention: "Auto",
+    tumpelMcp: false,
     files,
     createdAt: 1,
     updatedAt: 1,
@@ -72,7 +73,7 @@ const liveSecretSet = (secretSetId: string, name: string, keys: string[]) =>
   });
 
 const liveHost = (hostId: string, state: string, labels: string[]) =>
-  HostRecordSchema.parse({
+  HostSchema.parse({
     hostId,
     tenantId: "t1",
     name: hostId,
@@ -83,6 +84,10 @@ const liveHost = (hostId: string, state: string, labels: string[]) =>
     publicKey: "key",
     supervisorVersion: "0.1.0",
     labels,
+    supervisorUpdateStep: { state: "NotReported" },
+    supervisorUpdateFailure: { state: "NotReported" },
+    channelProtocol: { state: "NotReported" },
+    guestProtocol: { state: "NotReported" },
     createdAt: 1,
     updatedAt: 1,
   });
@@ -96,6 +101,8 @@ const liveSession = (sessionId: string, personaId: string, state: string) =>
     boxId: "b1",
     personaId,
     boxRetention: "Auto",
+    startedBy: { kind: "Person", principalId: "u1" },
+    tags: [],
     repository: "https://github.com/acme/app.git",
     origin: { kind: "Prompt" },
     harness: "ClaudeCode",

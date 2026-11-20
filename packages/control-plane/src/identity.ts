@@ -1,16 +1,33 @@
-import { MembershipSchema, type PrincipalRoleSchema, WhoamiSchema } from "@tumpel/schemas";
+import {
+  MembershipSchema,
+  type PersonOriginSchema,
+  type PrincipalRoleSchema,
+  type TurnOriginSchema,
+  WhoamiSchema,
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
+import { verifyTurnToken } from "./turn-token.ts";
 
 export type Whoami = z.infer<typeof WhoamiSchema>;
 export type Membership = z.infer<typeof MembershipSchema>;
 export type Role = z.infer<typeof PrincipalRoleSchema>;
 
+export type Origin = z.infer<typeof PersonOriginSchema> | z.infer<typeof TurnOriginSchema>;
+
 export interface Caller {
   tenantId: string;
   principalId: string;
   role: Role;
+  origin: Origin;
 }
+
+export const personCaller = (tenantId: string, principalId: string, role: Role): Caller => ({
+  tenantId,
+  principalId,
+  role,
+  origin: { kind: "Person", principalId },
+});
 
 const LAST_USED_RESOLUTION_MS = 3_600_000;
 
@@ -50,11 +67,8 @@ const toWhoami = (row: WhoamiRow): Whoami =>
     },
   });
 
-export const callerOf = (whoami: Whoami): Caller => ({
-  tenantId: whoami.tenant.tenantId,
-  principalId: whoami.principal.principalId,
-  role: whoami.principal.role,
-});
+export const callerOf = (whoami: Whoami): Caller =>
+  personCaller(whoami.tenant.tenantId, whoami.principal.principalId, whoami.principal.role);
 
 export const whoamiOf = async (db: D1Database, caller: Caller): Promise<Whoami> => {
   const row = await db
@@ -137,7 +151,28 @@ export const callerForDeviceToken = async (db: D1Database, token: string, now: n
   if (now - row.last_used_at >= LAST_USED_RESOLUTION_MS) {
     await db.prepare("UPDATE devices SET last_used_at = ? WHERE device_id = ?").bind(now, row.device_id).run();
   }
-  return { tenantId: row.tenant_id, principalId: row.principal_id, role: row.role };
+  return personCaller(row.tenant_id, row.principal_id, row.role);
+};
+
+export const callerForTurnToken = async (
+  db: D1Database,
+  key: CryptoKey,
+  token: string,
+  now: number,
+): Promise<Caller | null> => {
+  const claims = await verifyTurnToken(key, token, now);
+  if (claims === null) return null;
+  const membership = await db
+    .prepare("SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?")
+    .bind(claims.tenantId, claims.principalId)
+    .first<{ role: Role }>();
+  if (membership === null) return null;
+  return {
+    tenantId: claims.tenantId,
+    principalId: claims.principalId,
+    role: membership.role,
+    origin: { kind: "Turn", sessionId: claims.sessionId, turnId: claims.turnId },
+  };
 };
 
 export const bearerOf = (request: Request): string => {
@@ -186,7 +221,7 @@ export const proofCaller = async (
     .first<{ role: Role }>();
   if (membership === null) throw new Error(`the proof principal ${principalId} has no membership of ${tenantId}`);
   return {
-    caller: { tenantId, principalId, role: membership.role },
+    caller: personCaller(tenantId, principalId, membership.role),
     created: tenant?.results.length === 1,
   };
 };

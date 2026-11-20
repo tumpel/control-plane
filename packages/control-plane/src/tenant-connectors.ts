@@ -27,6 +27,7 @@ import { seal, unseal } from "./envelope.ts";
 import { type Fetch, signState } from "./github.ts";
 import { keyStoreOf } from "./key-store.ts";
 import { TenantOpenRouterAuthorizations } from "./tenant-openrouter-authorizations";
+import { TUMPEL_CONNECTOR_ID } from "./turn-token.ts";
 
 export type Connector = z.infer<typeof ConnectorSchema>;
 export type ConnectorAuthorization = z.infer<typeof ConnectorAuthorizationSchema>;
@@ -521,6 +522,7 @@ export class TenantConnectors extends TenantOpenRouterAuthorizations {
   }
 
   protected async serveConnectorToken(turnId: string, connectorId: string, now: number): Promise<ConnectorTokenServed> {
+    if (connectorId === TUMPEL_CONNECTOR_ID) return this.serveTurnToken(turnId);
     const sql = this.ctx.storage.sql;
     const [turn] = sql
       .exec<{ state: string }>(

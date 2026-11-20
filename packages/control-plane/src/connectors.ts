@@ -7,6 +7,7 @@ import {
   StaticConnectorCreateSchema,
   StaticConnectorTokenWriteSchema,
 } from "@tumpel/schemas";
+import { z } from "zod";
 import {
   CALLBACK_PATH,
   refusedAddress,
@@ -24,6 +25,7 @@ import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { htmlPage } from "./pages";
+import { isSteerEvent, STEER_CONNECTOR_ID, STEER_EVENT_HEADER, steerHookOutput } from "./steer.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { ConnectorCallback, ConnectorWritten } from "./tenant-connectors.ts";
 
@@ -33,6 +35,7 @@ const CONNECTOR_PATH = /^\/v1\/connectors\/([^/]+)(\/credential)?$/;
 const AUTHORIZE_PATH = /^\/v1\/oauth-connectors\/([^/]+)\/authorize$/;
 const TOKEN_PATH = /^\/v1\/static-connectors\/([^/]+)\/token$/;
 const TURN_TOKEN_PATH = /^\/v1\/turns\/([^/]+)\/connectors\/([^/]+)\/token$/;
+const STEER_INBOX_PATH = /^\/v1\/turns\/([^/]+)\/steer-inbox$/;
 
 const notFound = (connectorId: string): Response =>
   problem(404, {
@@ -242,7 +245,14 @@ const setToken = async (
   return answered(written, connectorId, "");
 };
 
-const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnector: string): Promise<Response> => {
+type TurnBearer = { tenantId: string; token: string; turnId: string; connectorId: string };
+
+const turnBearer = async (
+  request: Request,
+  env: Env,
+  rawTurn: string,
+  rawConnector: string,
+): Promise<TurnBearer | Response> => {
   const path = ConnectorTokenPathSchema.safeParse({
     turnId: decodeURIComponent(rawTurn),
     connectorId: decodeURIComponent(rawConnector),
@@ -256,6 +266,71 @@ const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnec
   if (!(await turnTokenMatches(key, token, turnId, connectorId))) {
     return turnTokenRefused(`the token is not the one turn ${turnId} holds for connector ${connectorId}`);
   }
+  return { tenantId, token, turnId, connectorId };
+};
+
+const steerInboxClosed = (turnId: string): Response =>
+  problem(409, {
+    code: "ConnectorTurnNotRunning",
+    title: "Turn not running",
+    detail: `turn ${turnId} is not running, so its steer inbox is closed`,
+    fix: "Send the prompt as the session's next turn instead",
+  });
+
+const JsonRpcSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  method: z.string(),
+  params: z.object({ protocolVersion: z.string().optional() }).optional(),
+});
+
+const steerMcp = async (request: Request): Promise<Response> => {
+  if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+  const message = await parseBody(request, JsonRpcSchema, "steerInbox.mcp");
+  if (!message.ok) return message.response;
+  const { id, method, params } = message.value;
+  if (id === undefined) return new Response(null, { status: 202 });
+  const result =
+    method === "initialize"
+      ? {
+          protocolVersion: params?.protocolVersion ?? "2025-06-18",
+          capabilities: {},
+          serverInfo: { name: "tumpel-steer", version: "1" },
+        }
+      : method === "tools/list"
+        ? { tools: [] }
+        : method === "ping"
+          ? {}
+          : null;
+  if (result === null) return json({ jsonrpc: "2.0", id, error: { code: -32601, message: `no method ${method}` } });
+  return json({ jsonrpc: "2.0", id, result });
+};
+
+const steerInbox = async (request: Request, env: Env, rawTurn: string): Promise<Response> => {
+  const bearer = await turnBearer(request, env, rawTurn, STEER_CONNECTOR_ID);
+  if (bearer instanceof Response) return bearer;
+  const event = request.headers.get(STEER_EVENT_HEADER);
+  if (event === null) return steerMcp(request);
+  if (!isSteerEvent(event)) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Unknown steer hook",
+      detail: `the ${STEER_EVENT_HEADER} header reads ${event}, not PostToolUse or Stop`,
+      fix: "Call the steer inbox from the hooks the box's .claude/settings.json carries",
+    });
+  }
+  const { taken } = await tenantApi(env.TENANT, bearer.tenantId).call("takeSteers", {
+    turnId: bearer.turnId,
+    now: Date.now(),
+  });
+  if (taken.kind === "Closed") return steerInboxClosed(bearer.turnId);
+  return json(steerHookOutput(event, taken.prompts));
+};
+
+const fetchToken = async (request: Request, env: Env, rawTurn: string, rawConnector: string): Promise<Response> => {
+  const bearer = await turnBearer(request, env, rawTurn, rawConnector);
+  if (bearer instanceof Response) return bearer;
+  const { tenantId, token, turnId, connectorId } = bearer;
+  if (connectorId === STEER_CONNECTOR_ID) return json({ accessToken: token });
   const { served } = await tenantApi(env.TENANT, tenantId).call("serveConnectorToken", {
     turnId,
     connectorId,
@@ -352,6 +427,8 @@ export const handleConnectors = async (
   const turnToken = method === "POST" ? TURN_TOKEN_PATH.exec(pathname) : null;
   if (turnToken?.[1] !== undefined && turnToken[2] !== undefined)
     return fetchToken(request, env, turnToken[1], turnToken[2]);
+  const inbox = STEER_INBOX_PATH.exec(pathname)?.[1];
+  if (inbox !== undefined) return steerInbox(request, env, inbox);
   const listing = method === "GET" && pathname === "/v1/connectors";
   const creating = method === "POST" && (pathname === "/v1/static-connectors" || pathname === "/v1/oauth-connectors");
   const one = CONNECTOR_PATH.exec(pathname);

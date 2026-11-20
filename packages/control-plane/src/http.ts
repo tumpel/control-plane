@@ -11,6 +11,8 @@ const NO_STORE = { "cache-control": "no-store" };
 export const storedJson = (text: string): Response =>
   new Response(text, { headers: { ...NO_STORE, "content-type": "application/json" } });
 
+export const noContent = (): Response => new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+
 export const json = (body: unknown, status = 200, headers: Record<string, string> = {}): Response =>
   Response.json(body, { status, headers: { ...NO_STORE, ...headers } });
 

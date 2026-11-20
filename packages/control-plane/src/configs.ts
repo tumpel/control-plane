@@ -34,7 +34,10 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<StoredPersona, "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention"> & {
+type PersonaWrite = Pick<
+  StoredPersona,
+  "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention" | "tumpelMcp"
+> & {
   boxMemoryMib: number;
   boxDiskMib: number;
   files: StoredFile[];

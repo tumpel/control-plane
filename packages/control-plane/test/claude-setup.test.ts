@@ -106,6 +106,7 @@ test("the setup offer carries the box's image, its token URL and credential, and
     "boxId",
     "claudeSetupId",
     "expiresAt",
+    "harness",
     "harnessVersion",
     "image",
     "tenantId",
@@ -113,6 +114,7 @@ test("the setup offer carries the box's image, its token URL and credential, and
     "tokenUrl",
     "type",
   ]);
+  assert.equal(offer.harness, "ClaudeCode");
   assert.equal(offer.tokenUrl, "https://api.example.test/v1/claude-setups/setup-1/token");
   assert.match(offer.expiresAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/);
 });

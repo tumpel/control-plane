@@ -398,6 +398,7 @@ export const startPrebuild = async (
     provider: start.provider,
     input: {
       principalId: caller.principalId,
+      startedBy: { kind: "Person", principalId: caller.principalId },
       hosts: await listHosts(env.DB, caller.tenantId),
       harness: entry.harness,
       harnessVersion: entry.harnessVersion,

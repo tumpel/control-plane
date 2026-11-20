@@ -60,9 +60,44 @@ const toHost = (row: HostRow): HostRecord =>
     updatedAt: row.updated_at,
   });
 
-const NOT_REPORTED: Pick<Host, "channelProtocol" | "guestProtocol"> = {
+type HostProtocols = Pick<Host, "channelProtocol" | "guestProtocol">;
+
+const NO_PROTOCOLS: HostProtocols = {
   channelProtocol: { state: "NotReported" },
   guestProtocol: { state: "NotReported" },
+};
+
+const protocolsOf = async (db: D1Database, hostIds: string[]): Promise<Record<string, HostProtocols>> => {
+  const byHost: Record<string, HostProtocols> = Object.fromEntries(
+    hostIds.map((hostId) => [hostId, { ...NO_PROTOCOLS }]),
+  );
+  if (hostIds.length === 0) return byHost;
+  const marks = hostIds.map(() => "?").join(", ");
+  const [channel, guest] = await db.batch<{ host_id: string; oldest: number; version: number }>([
+    db
+      .prepare(
+        `SELECT host_id, channel_protocol_oldest AS oldest, channel_protocol_version AS version FROM host_channel_protocols WHERE host_id IN (${marks})`,
+      )
+      .bind(...hostIds),
+    db
+      .prepare(
+        `SELECT host_id, guest_protocol_oldest AS oldest, guest_protocol_version AS version FROM host_guest_protocols WHERE host_id IN (${marks})`,
+      )
+      .bind(...hostIds),
+  ]);
+  for (const row of channel?.results ?? []) {
+    byHost[row.host_id] = {
+      ...NO_PROTOCOLS,
+      channelProtocol: { state: "Reported", channelProtocolOldest: row.oldest, channelProtocolVersion: row.version },
+    };
+  }
+  for (const row of guest?.results ?? []) {
+    byHost[row.host_id] = {
+      ...(byHost[row.host_id] ?? NO_PROTOCOLS),
+      guestProtocol: { state: "Reported", guestProtocolOldest: row.oldest, guestProtocolVersion: row.version },
+    };
+  }
+  return byHost;
 };
 
 const mintFix = "Mint a new enrolment token and enrol with it";
@@ -220,7 +255,7 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   if (!inserted?.meta.changes) return spent;
   const host = await hostOf(env.DB, token.tenant_id, hostId);
   if (host === null) throw new Error(`host ${hostId} was enrolled and then not found`);
-  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NOT_REPORTED } };
+  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
 };
 
 export const listHosts = async (db: D1Database, tenantId: string): Promise<HostRecord[]> => {
@@ -239,11 +274,17 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
   return row === null ? null : toHost(row);
 };
 
-export const withSupervisorUpdates = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
-  const { byHost: updates } = await tenantApi(env.TENANT, tenantId).call("supervisorUpdates", {
-    hostIds: hosts.map((host) => host.hostId),
-  });
-  return hosts.map((host) => ({ ...host, ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES), ...NOT_REPORTED }));
+export const hostReads = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
+  const hostIds = hosts.map((host) => host.hostId);
+  const [{ byHost: updates }, protocols] = await Promise.all([
+    tenantApi(env.TENANT, tenantId).call("supervisorUpdates", { hostIds }),
+    protocolsOf(env.DB, hostIds),
+  ]);
+  return hosts.map((host) => ({
+    ...host,
+    ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES),
+    ...(protocols[host.hostId] ?? NO_PROTOCOLS),
+  }));
 };
 
 export const hostNotFound = (hostId: string): Refused =>
@@ -262,7 +303,7 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
     .run();
   await tenantApi(env.TENANT, tenantId).call("forgetHostUsage", { hostId });
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
-  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NOT_REPORTED, state: "Revoked", updatedAt: now } };
+  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS, state: "Revoked", updatedAt: now } };
 };
 
 const hostRevoked = (hostId: string): Refused =>

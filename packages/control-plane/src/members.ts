@@ -19,7 +19,7 @@ import type { z } from "zod";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
 import type { PersonCheck } from "./github-handlers.ts";
 import { json, parseBody, problem } from "./http";
-import { type Caller, type Role, type Whoami, whoamiOf } from "./identity";
+import { type Caller, personCaller, type Role, type Whoami, whoamiOf } from "./identity";
 import type { Env } from "./index";
 import { htmlPage, INVITATION_ACCEPT_PATH } from "./pages";
 
@@ -250,7 +250,7 @@ export const acceptInvitation = async (
       throw new Error(`accepting invitation ${invitation.invitation_id} left ${email} no membership`);
     return {
       kind: "Accepted",
-      whoami: await whoamiOf(db, { tenantId, principalId: principal.principal_id, role: principal.role }),
+      whoami: await whoamiOf(db, personCaller(tenantId, principal.principal_id, principal.role)),
     };
   }
   const row = await db

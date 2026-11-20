@@ -242,7 +242,7 @@ suite("hosts", { concurrency: true }, () => {
     const token = await mint();
     const first = await enrol("first", token);
     assert.equal(first.finished.code, 0, first.finished.stderr);
-    const host = HostSchema.parse(JSON.parse(first.finished.stdout));
+    const host = HostSchema.pick({ hostId: true, state: true, name: true }).parse(JSON.parse(first.finished.stdout));
     assert.equal(host.state, "Enrolled");
     assert.equal(host.name, "first");
     for (const file of ["supervisor.json", "host-key.json", "channel.json"]) {
@@ -292,7 +292,7 @@ suite("hosts", { concurrency: true }, () => {
   test("a running supervisor's host samples land in its tenant's metrics store under its signed host id", async () => {
     const enrolled = await enrol("telemetry", await mint());
     assert.equal(enrolled.finished.code, 0, enrolled.finished.stderr);
-    const { hostId } = HostSchema.parse(JSON.parse(enrolled.finished.stdout));
+    const { hostId } = HostSchema.pick({ hostId: true }).parse(JSON.parse(enrolled.finished.stdout));
     supervisor(enrolled.dir, ["run"]);
     const SeriesSchema = z.array(z.object({ metric: z.string(), dimensions: z.string() }));
     await until(
