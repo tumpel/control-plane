@@ -91,8 +91,6 @@ import {
   TurnPathSchema,
   TurnSendSchema,
   TurnWaitQuerySchema,
-  WebhookEndpointCreateSchema,
-  WebhookEndpointPathSchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
@@ -146,7 +144,6 @@ const DONE: Record<string, string> = {
   tumpel_persona_delete: "Persona deleted",
   tumpel_subscription_delete: "Subscription deleted",
   tumpel_trigger_delete: "Trigger deleted",
-  tumpel_webhook_endpoint_delete: "Webhook endpoint deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
   tumpel_github_actions_delete: "GitHub Actions disconnected",
@@ -948,41 +945,6 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/subscriptions/{subscriptionId}/complete",
     SubscriptionPathSchema,
     "End a subscription because its goal holds: it ends with reason GoalMet, its waiting turn is cancelled and the person is told. The subscribed session calls it from inside its box once the goal holds; a person can call it too. Returns the Ended subscription.",
-  ),
-  rest(
-    "tumpel_webhook_endpoint_create",
-    "POST",
-    "/v1/webhook-endpoints",
-    WebhookEndpointCreateSchema,
-    "Create a webhook endpoint that receives the listed event types from the next event onward. Each event is one signed JSON POST in eventId order. Owner only.",
-  ),
-  rest(
-    "tumpel_webhook_endpoint_list",
-    "GET",
-    "/v1/webhook-endpoints",
-    NO_ARGUMENTS,
-    "List the tenant's webhook endpoints and whether each is delivering or stopped after three days of failure.",
-  ),
-  rest(
-    "tumpel_webhook_endpoint_get",
-    "GET",
-    "/v1/webhook-endpoints/{webhookEndpointId}",
-    WebhookEndpointPathSchema,
-    "Read one webhook endpoint with its event types and delivery status.",
-  ),
-  rest(
-    "tumpel_webhook_endpoint_delete",
-    "DELETE",
-    "/v1/webhook-endpoints/{webhookEndpointId}",
-    WebhookEndpointPathSchema,
-    "Delete a webhook endpoint. No request starts after the request already in flight. Owner only.",
-  ),
-  rest(
-    "tumpel_webhook_signing_key_get",
-    "GET",
-    "/v1/webhook-signing-key",
-    NO_ARGUMENTS,
-    "Read the tenant's Ed25519 public key for verifying webhook request signatures.",
   ),
   rest(
     "tumpel_trigger_create",

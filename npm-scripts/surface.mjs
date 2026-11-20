@@ -43,8 +43,6 @@ const NOUNS = {
   OAuthConnectors: "connector",
   Subscriptions: "subscription",
   Triggers: "trigger",
-  WebhookEndpoints: "webhook-endpoint",
-  WebhookSigningKeys: "webhook-signing-key",
 };
 const VERBS = {
   Identity_listTenants: "tenants",
@@ -119,18 +117,15 @@ const ALLOWLIST = {
   CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
   ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
   ConnectorTokens_fetch: "box wire of the guest forwarder, signed by the turn's connector token, never by a principal",
+  WebhookEndpoints_create: DELIVERY_CHANNEL,
+  WebhookEndpoints_delete: DELIVERY_CHANNEL,
+  WebhookEndpoints_get: DELIVERY_CHANNEL,
+  WebhookEndpoints_list: DELIVERY_CHANNEL,
+  WebhookSigningKeys_get: DELIVERY_CHANNEL,
   PushKeys_get: DELIVERY_CHANNEL,
   PushSubscriptions_create: DELIVERY_CHANNEL,
   PushSubscriptions_delete: DELIVERY_CHANNEL,
   PushSubscriptions_list: DELIVERY_CHANNEL,
-};
-
-const MCP_ONLY = {
-  WebhookEndpoints_create: "the pinned CLI carries no webhook commands",
-  WebhookEndpoints_delete: "the pinned CLI carries no webhook commands",
-  WebhookEndpoints_get: "the pinned CLI carries no webhook commands",
-  WebhookEndpoints_list: "the pinned CLI carries no webhook commands",
-  WebhookSigningKeys_get: "the pinned CLI carries no webhook commands",
 };
 
 const CLI_ONLY = {
@@ -171,9 +166,10 @@ const render = (rows) =>
   [
     "# Public surface",
     "",
-    "Every tenant operation uses the same REST handler across its listed surfaces. `npm run surface` writes",
-    "this file; `npm run surface:check` fails when a surface is missing without a listed exception, when an",
-    "exception names no operation, or when this file is stale.",
+    "Every tenant operation is one MCP tool and one CLI command, backed by the same REST handler, so an",
+    "MCP session sets up and runs a whole tenant. `npm run surface` writes this file; `npm run surface:check`",
+    "fails when an operation lacks a tool or a command and is not on the allowlist, when an allowlist entry",
+    "names no operation or one that has a tool, or when this file is stale.",
     "",
     "Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command",
     "`tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:",
@@ -205,10 +201,6 @@ const render = (rows) =>
     "",
     ...Object.entries(CLI_ONLY).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
     "",
-    "MCP only: tenant operations whose pinned CLI has no command:",
-    "",
-    ...Object.entries(MCP_ONLY).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
-    "",
     "Allowlist: operations that are not tenant operations, with no tool or command:",
     "",
     ...Object.entries(ALLOWLIST).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
@@ -238,17 +230,11 @@ const failures = [
     .map(
       (operationId) => `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the CLI-only list`,
     ),
-  ...Object.keys(MCP_ONLY)
-    .filter((operationId) => !all.some((op) => op.operationId === operationId))
-    .map((operationId) => `the MCP-only list names ${operationId}, which is no operation`),
-  ...Object.keys(MCP_ONLY)
-    .filter((operationId) => !toolNames.has(namesFor(operationId).tool))
-    .map((operationId) => `${operationId} has no MCP tool ${namesFor(operationId).tool}`),
   ...rows
     .filter((row) => !(row.operationId in CLI_ONLY) && !toolNames.has(row.tool))
     .map((row) => `${row.operationId} has no MCP tool ${row.tool}`),
   ...rows
-    .filter((row) => !(row.operationId in MCP_ONLY) && !commandNames.has(row.command))
+    .filter((row) => !commandNames.has(row.command))
     .map((row) => `${row.operationId} has no CLI command ${row.command}`),
   ...[...toolNames]
     .filter((tool) => !rows.some((row) => row.tool === tool))
@@ -265,5 +251,5 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log(
-  `surface: ${rows.length} tenant operations; ${Object.keys(CLI_ONLY).length} CLI-only; ${Object.keys(MCP_ONLY).length} MCP-only; ${Object.keys(ALLOWLIST).length} allowlisted`,
+  `surface: ${rows.length} operations each have a CLI command and all but ${Object.keys(CLI_ONLY).length} an MCP tool; ${Object.keys(ALLOWLIST).length} allowlisted`,
 );

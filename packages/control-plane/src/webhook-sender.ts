@@ -4,10 +4,11 @@ import type { z } from "zod";
 import type { Env } from "./index.ts";
 import { keyStoreOf } from "./key-store.ts";
 import { tenantApi } from "./tenant-api.ts";
-import { webhookRetryDelay } from "./webhook-retry.ts";
 import { signWebhook } from "./webhook-signing.ts";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const FIRST_RETRY_MS = 60_000;
+const MAX_RETRY_MS = 60 * 60 * 1000;
 const FAILING_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 
 type SenderState = {
@@ -29,18 +30,20 @@ export class WebhookSender extends DurableObject<Env> {
   private delivering: Promise<void> = Promise.resolve();
 
   async wake(input: Wake): Promise<void> {
-    const stored = await this.ctx.storage.get<SenderState>("state");
-    if (stored === undefined) {
-      await this.ctx.storage.put<SenderState>("state", {
+    let state = await this.ctx.storage.get<SenderState>("state");
+    if (state === undefined) {
+      state = {
         tenantId: input.tenantId,
         webhookEndpointId: input.webhookEndpointId,
         cursorEventId: input.cursorEventId,
         failures: 0,
         failingSince: null,
-      });
+      };
+      await this.ctx.storage.put("state", state);
     }
-    if ((await this.ctx.storage.getAlarm()) !== null) return;
-    await this.deliver();
+    if ((await this.ctx.storage.getAlarm()) !== null && state.failures > 0) return;
+    await this.ctx.storage.setAlarm(Date.now() + FIRST_RETRY_MS);
+    this.ctx.waitUntil(this.deliver());
   }
 
   async stop(): Promise<void> {
@@ -92,7 +95,11 @@ export class WebhookSender extends DurableObject<Env> {
         const body = JSON.stringify(event);
         const signature = await signWebhook(keyStoreOf(this.env), state.tenantId, body);
         const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-        const response = await fetch(endpoint.url, {
+        const endpointUrl = new URL(endpoint.url);
+        const target = this.env.WEBHOOK_STUB_ORIGIN
+          ? `${this.env.WEBHOOK_STUB_ORIGIN}${endpointUrl.pathname}${endpointUrl.search}`
+          : endpoint.url;
+        const response = await fetch(target, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -101,10 +108,14 @@ export class WebhookSender extends DurableObject<Env> {
           },
           body,
           signal,
-        }).catch(() => null);
-        if (response === null || response.status < 200 || response.status >= 300) {
+        }).catch((error: unknown) => (signal.aborted ? "The endpoint did not answer within 10 seconds" : error));
+        if (!(response instanceof Response) || response.status < 200 || response.status >= 300) {
           const detail =
-            response === null ? "The endpoint did not answer within 10 seconds" : `HTTP ${response.status}`;
+            response instanceof Response
+              ? `HTTP ${response.status}`
+              : response instanceof Error
+                ? response.message
+                : String(response);
           await this.failed(state, detail);
           return;
         }
@@ -134,6 +145,7 @@ export class WebhookSender extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.ctx.storage.setAlarm(Math.min(now + webhookRetryDelay(failures), failingSince + FAILING_AFTER_MS));
+    const delay = Math.min(FIRST_RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
+    await this.ctx.storage.setAlarm(Math.min(now + delay, failingSince + FAILING_AFTER_MS));
   }
 }

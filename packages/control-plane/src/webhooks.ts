@@ -14,6 +14,18 @@ const ENDPOINTS_PATH = "/v1/webhook-endpoints";
 const ENDPOINT_PATH = /^\/v1\/webhook-endpoints\/([^/]+)$/;
 const SIGNING_KEY_PATH = "/v1/webhook-signing-key";
 
+const writeRefused = (caller: Caller, operation: string): Response | null => {
+  if (caller.origin.kind === "Turn") {
+    return problem(403, {
+      code: "Forbidden",
+      title: "Only a person can do this",
+      detail: `${operation} refuses calls from inside a tumpel session; only a person installs or deletes a webhook endpoint`,
+      fix: "Ask an Owner of the tenant to do it",
+    });
+  }
+  return ownerRequired(caller, operation);
+};
+
 const notFound = (webhookEndpointId: string): Response =>
   problem(404, {
     code: "NotFound",
@@ -49,7 +61,7 @@ export const handleWebhooks = async (
     return json((await tenant.call("listWebhookEndpoints", { tenantId: caller.tenantId })).endpoints);
   }
   if (url.pathname === ENDPOINTS_PATH) {
-    const refused = ownerRequired(caller, "webhookEndpoints.create");
+    const refused = writeRefused(caller, "webhookEndpoints.create");
     if (refused !== null) return refused;
     const body = await parseBody(request, WebhookEndpointCreateSchema, "webhookEndpoints.create");
     if (!body.ok) return body.response;
@@ -75,7 +87,7 @@ export const handleWebhooks = async (
     const { endpoint } = await tenant.call("getWebhookEndpoint", { tenantId: caller.tenantId, webhookEndpointId });
     return endpoint === null ? notFound(webhookEndpointId) : json(endpoint);
   }
-  const refused = ownerRequired(caller, "webhookEndpoints.delete");
+  const refused = writeRefused(caller, "webhookEndpoints.delete");
   if (refused !== null) return refused;
   const { deleted } = await tenant.call("deleteWebhookEndpoint", { tenantId: caller.tenantId, webhookEndpointId });
   if (!deleted) return notFound(webhookEndpointId);

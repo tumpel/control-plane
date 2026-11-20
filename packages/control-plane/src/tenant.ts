@@ -195,17 +195,17 @@ export class Tenant extends TenantConnectors {
     );
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
-    this.wakeWebhooks();
+    await this.wakeWebhooks();
     this.drainObjects();
     return response;
   }
 
   override async alarm(): Promise<void> {
     this.expireSubscriptions(Date.now());
-    await this.armExpiry();
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
-    this.wakeWebhooks();
+    await this.wakeWebhooks();
+    await this.armExpiry();
     this.drainObjects();
   }
 
@@ -225,22 +225,25 @@ export class Tenant extends TenantConnectors {
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
   }
 
-  private wakeWebhooks(): void {
-    if (this.webhookPokes.size === 0) return;
+  private async wakeWebhooks(): Promise<void> {
     const tenantId = this.tenantName();
-    const pokes = [...this.webhookPokes];
-    this.webhookPokes.clear();
-    this.ctx.waitUntil(
-      Promise.all(
-        pokes.map(([webhookEndpointId, { startEventId, firstEventId }]) =>
-          this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, webhookEndpointId)).wake({
-            tenantId,
-            webhookEndpointId,
-            cursorEventId: Math.max(startEventId, firstEventId - 1),
-          }),
-        ),
-      ).then(() => undefined),
-    );
+    const wakes = this.ctx.storage.sql
+      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
+        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_wakes
+        JOIN webhook_endpoints AS w USING (webhook_endpoint_id) ORDER BY w.created_at, w.webhook_endpoint_id`,
+      )
+      .toArray();
+    if (wakes.length === 0) return;
+    await this.ctx.storage.setAlarm(Date.now());
+    for (const wake of wakes) {
+      await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id)).wake({
+        tenantId,
+        webhookEndpointId: wake.webhook_endpoint_id,
+        cursorEventId: wake.start_event_id,
+      });
+      this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+    }
+    await this.armExpiry();
   }
 
   private readonly operations: TenantHandlers = {
@@ -512,11 +515,13 @@ export class Tenant extends TenantConnectors {
     getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
     waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
-    listWebhookEndpoints: () => ({ endpoints: this.listWebhookEndpoints() }),
+    listWebhookEndpoints: ({ tenantId }) => ({ endpoints: this.listWebhookEndpoints(tenantId) }),
     createWebhookEndpoint: ({ tenantId, endpoint, now }) => ({
       endpoint: this.createWebhookEndpoint(tenantId, endpoint, now),
     }),
-    getWebhookEndpoint: ({ webhookEndpointId }) => ({ endpoint: this.getWebhookEndpoint(webhookEndpointId) }),
+    getWebhookEndpoint: ({ tenantId, webhookEndpointId }) => ({
+      endpoint: this.getWebhookEndpoint(tenantId, webhookEndpointId),
+    }),
     deleteWebhookEndpoint: ({ webhookEndpointId }) => ({
       deleted: this.deleteWebhookEndpoint(webhookEndpointId),
     }),
