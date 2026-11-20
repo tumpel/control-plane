@@ -436,16 +436,21 @@ test("a persona naming a connector the tenant lacks fails the plan, and a change
   assert.equal(planned.ok && planned.steps.some((step) => step.kind === "UpdatePersona"), true);
 });
 
-test("a persona's tumpel MCP setting changes when explicit and stays when omitted", () => {
+test("a persona's tumpel MCP setting follows the config and defaults to false", () => {
   const live = steady({ personas: [{ ...livePersona("p1", "Default", "ClaudeCode", "s1"), tumpelMcp: true }] });
-  const kept = planOf(desired(moved), live);
+  const kept = planOf(
+    desired(
+      config({
+        personas: [{ ...persona("Default", "ClaudeCode", "ci"), tumpelMcp: true }],
+        secretSets: moved.secretSets,
+      }),
+    ),
+    live,
+  );
   assert.deepEqual(kept.ok && kept.steps.flatMap((step) => (step.kind === "UpdatePersona" ? [step.tumpelMcp] : [])), [
     true,
   ]);
-  const disabled = planOf(
-    desired(config({ personas: [{ ...persona("Default", "ClaudeCode", "prod"), tumpelMcp: false }] })),
-    live,
-  );
+  const disabled = planOf(desired(config()), live);
   assert.deepEqual(
     disabled.ok && disabled.steps.flatMap((step) => (step.kind === "UpdatePersona" ? [step.tumpelMcp] : [])),
     [false],

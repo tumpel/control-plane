@@ -367,7 +367,7 @@ const planPersonas = (
     const files = local.map((file) => ({ file, held: held.get(file.path) === file.digest }));
     const wanted = new Set(local.map((file) => file.path));
     const removed = [...held.keys()].filter((path) => !wanted.has(path)).sort();
-    const tumpelMcp = persona.tumpelMcp ?? current.tumpelMcp;
+    const tumpelMcp = persona.tumpelMcp ?? false;
     const unchanged =
       setIds.get(persona.secretSetName) === current.secretSetId &&
       persona.connectorNames.map((name) => connectorIds.get(name)).join() === current.connectorIds.join() &&
