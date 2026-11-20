@@ -41,7 +41,7 @@ CREATE TABLE subscription_pause_messages (
 
 CREATE TABLE subscription_pause_turns (
   subscription_id TEXT PRIMARY KEY REFERENCES subscription_pauses (subscription_id) ON DELETE CASCADE,
-  turn_id TEXT NOT NULL
+  turn_id TEXT NOT NULL REFERENCES turns (turn_id) ON DELETE CASCADE
 );
 
 CREATE TABLE subscription_ends (

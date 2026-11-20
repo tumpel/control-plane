@@ -89,7 +89,14 @@ export interface ResolvedSet {
 
 export type Step =
   | { kind: "CreatePersona"; persona: ConfigPersona; files: PlannedFile[] }
-  | { kind: "UpdatePersona"; personaId: string; persona: ConfigPersona; files: PlannedFile[]; removed: string[] }
+  | {
+      kind: "UpdatePersona";
+      personaId: string;
+      persona: ConfigPersona;
+      tumpelMcp: boolean;
+      files: PlannedFile[];
+      removed: string[];
+    }
   | { kind: "DeletePersona"; personaId: string; name: string }
   | { kind: "CreateSecretSet"; secretSet: ResolvedSet }
   | { kind: "UpdateSecretSet"; secretSetId: string; secretSet: ResolvedSet }
@@ -335,7 +342,14 @@ const planPersonas = (
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {
-      steps.push({ kind: "UpdatePersona", personaId: current.personaId, persona, files, removed });
+      steps.push({
+        kind: "UpdatePersona",
+        personaId: current.personaId,
+        persona,
+        tumpelMcp: current.tumpelMcp,
+        files,
+        removed,
+      });
     }
   }
 };

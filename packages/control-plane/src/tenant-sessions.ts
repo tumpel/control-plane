@@ -85,6 +85,7 @@ import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
+import { drainPersonaFileCleanups, recordPersonaFileCleanups } from "./persona-file-cleanups.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
@@ -97,7 +98,6 @@ import {
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
-import { SESSION_TABLES, TURN_TABLES } from "./session-tables.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
@@ -2236,6 +2236,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (merged === null) return null;
     const bytes = new Uint8Array(new TextEncoder().encode(merged));
     const digest = await sha256Hex(bytes);
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO turn_steer_inboxes (turn_id, created_at) VALUES (?, ?)",
+      turnId,
+      now,
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO turn_steer_settings (turn_id, digest) VALUES (?, ?)",
+      turnId,
+      digest,
+    );
     await this.env.STORE.put(personaFileKey(tenantId, digest), bytes);
     const signer = signerOf(
       this.env,
@@ -2250,11 +2260,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       downloadUrl: await signer.presign("GET", personaFileKey(tenantId, digest), seconds, new Date(now)),
       downloadExpiresAt: iso(now + seconds * 1000),
     };
-    this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO turn_steer_inboxes (turn_id, created_at) VALUES (?, ?)",
-      turnId,
-      now,
-    );
     const turn = encodeURIComponent(turnId);
     return {
       connector: {
@@ -2396,12 +2401,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray()
       .map((row) => row.storage_key);
     this.ctx.storage.transactionSync(() => {
-      for (const table of TURN_TABLES) {
-        sql.exec(`DELETE FROM ${table} WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?)`, sessionId);
-      }
-      for (const table of SESSION_TABLES) sql.exec(`DELETE FROM ${table} WHERE session_id = ?`, sessionId);
+      recordPersonaFileCleanups(
+        sql,
+        sql
+          .exec<{ digest: string }>(
+            "SELECT DISTINCT digest FROM turn_steer_settings WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?)",
+            sessionId,
+          )
+          .toArray()
+          .map((row) => row.digest),
+      );
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
+    await drainPersonaFileCleanups(sql, this.env.STORE, tenantId);
     for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
       await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
     }

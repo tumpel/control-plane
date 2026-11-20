@@ -241,6 +241,7 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
         kind: "UpdatePersona",
         personaId: "p1",
         persona: persona("Default", "ClaudeCode", "prod"),
+        tumpelMcp: false,
         files: [],
         removed: [],
       },
@@ -309,6 +310,7 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
         kind: "UpdatePersona",
         personaId: "p1",
         persona: persona("Default", "ClaudeCode", "ci"),
+        tumpelMcp: false,
         files: [],
         removed: [],
       },
@@ -402,6 +404,7 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
       kind: "UpdatePersona",
       personaId: "p1",
       persona: withFiles.personas[0] ?? persona("Default", "ClaudeCode", "prod"),
+      tumpelMcp: false,
       files: [
         { file: { path: ".claude/settings.json", ...sent("{}") }, held: true },
         { file: { path: ".claude/CLAUDE.md", ...sent("be thorough") }, held: false },
@@ -430,4 +433,13 @@ test("a persona naming a connector the tenant lacks fails the plan, and a change
     live,
   );
   assert.equal(planned.ok && planned.steps.some((step) => step.kind === "UpdatePersona"), true);
+});
+
+test("an update to a persona keeps the tumpel MCP setting the config cannot express", () => {
+  const live = steady({ personas: [{ ...livePersona("p1", "Default", "ClaudeCode", "s1"), tumpelMcp: true }] });
+  const planned = planOf(desired(moved), live);
+  assert.deepEqual(
+    planned.ok && planned.steps.flatMap((step) => (step.kind === "UpdatePersona" ? [step.tumpelMcp] : [])),
+    [true],
+  );
 });
