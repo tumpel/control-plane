@@ -51,7 +51,7 @@
   },
   "dependencies": {
     "@tumpel/openapi": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.19/tumpel-openapi-0.21.0-rc.19.tgz",
-    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.19/tumpel-schemas-0.21.0-rc.19.tgz",
+    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.20/tumpel-schemas-0.21.0-rc.20.tgz",
     "zod": "^4.6.7"
   }
 }
