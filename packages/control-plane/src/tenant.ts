@@ -383,6 +383,9 @@ export class Tenant extends TenantConnectors {
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),
+    cancelTurn: ({ tenantId, turnId, cancelledBy, now }) => ({
+      cancelled: this.cancelTurn(tenantId, turnId, cancelledBy, now),
+    }),
     archiveSession: async ({ tenantId, sessionId, now }) => ({
       archived: await this.archiveSession(tenantId, sessionId, now),
     }),

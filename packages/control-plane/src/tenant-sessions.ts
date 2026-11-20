@@ -175,6 +175,11 @@ export type Sent =
   | { kind: "Failed" }
   | { kind: "CredentialRefused"; personaId: string; refusal: CredentialRefusal };
 
+export type CancelTurn =
+  | { kind: "Cancelled"; turn: Turn }
+  | { kind: "NotFound" }
+  | { kind: "NotWaiting"; state: Turn["state"] };
+
 export type Stop =
   | { kind: "Stopping"; session: Session }
   | { kind: "NotFound" }
@@ -2057,6 +2062,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
       );
       return this.insertTurn(session.session_id, hostId, boxId, send, now);
+    });
+  }
+
+  protected cancelTurn(tenantId: string, turnId: string, cancelledBy: string, now: number): CancelTurn {
+    return this.ctx.storage.transactionSync(() => {
+      const turn = this.getTurn(tenantId, turnId);
+      if (turn === null) return { kind: "NotFound" };
+      if (!this.waitingTurns(turn.sessionId).includes(turnId)) return { kind: "NotWaiting", state: turn.state };
+      this.cancelWaiting(turn.sessionId, turnId, "Cancelled", `${cancelledBy} cancelled the turn while it waited`, now);
+      const cancelled = this.getTurn(tenantId, turnId);
+      if (cancelled === null) throw new Error(`turn ${turnId} vanished while it was cancelled`);
+      return { kind: "Cancelled", turn: cancelled };
     });
   }
 

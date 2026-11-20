@@ -43,18 +43,22 @@ test("a pinned supervisor whose window misses this commit's or the images' guest
   );
 });
 
-test("stage dev runs a supervisor release candidate, and every stage runs a stable supervisor", () => {
-  assert.deepEqual(checkedPins({ supervisor: "0.1.22-rc.3", cli: "0.4.0" }, "dev"), {
+test("stage dev runs a supervisor or CLI release candidate, and every stage runs a stable supervisor and CLI", () => {
+  assert.deepEqual(checkedPins({ supervisor: "0.1.22-rc.3", cli: "0.4.0-rc.2" }, "dev"), {
     supervisor: "0.1.22-rc.3",
-    cli: "0.4.0",
+    cli: "0.4.0-rc.2",
   });
   assert.deepEqual(checkedPins({ supervisor: "0.1.22", cli: "0.4.0" }, "prod"), { supervisor: "0.1.22", cli: "0.4.0" });
 });
 
-test("a supervisor release candidate pinned outside stage dev, or any other version, is refused", () => {
+test("a supervisor or CLI release candidate pinned outside stage dev, or any other version, is refused", () => {
   assert.throws(
     () => checkedPins({ supervisor: "0.1.22-rc.3", cli: "0.4.0" }, "prod"),
     /release candidate 0\.1\.22-rc\.3, and only stage dev runs release candidates; pin a stable X\.Y\.Z for prod/,
+  );
+  assert.throws(
+    () => checkedPins({ supervisor: "0.1.22", cli: "0.4.0-rc.2" }, "prod"),
+    /cli release candidate 0\.4\.0-rc\.2, and only stage dev runs release candidates; pin a stable X\.Y\.Z for prod/,
   );
   assert.throws(
     () => checkedPins({ supervisor: "0.1.22-main.1", cli: "0.4.0" }, "dev"),

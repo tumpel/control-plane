@@ -7,6 +7,7 @@ import {
   type BlobStore,
   checkFiles,
   type PersonaFileWrite,
+  patchFiles,
   personaFileKey,
   readPersona,
   storeFiles,
@@ -181,4 +182,36 @@ test("a read returns a file at the inline cap as an Inline write with its bytes,
       updatedAt: now,
     },
   ]);
+});
+
+test("an edit replaces the one occurrence of oldText and stores the result, and refuses text that occurs twice or a file that is not UTF-8", async () => {
+  const blobs = new MemoryBlobs();
+  const put = async (text: Uint8Array<ArrayBuffer>) => {
+    const digest = createHash("sha256").update(text).digest("hex");
+    await blobs.put(personaFileKey("t1", digest), text);
+    return { path: ".claude/CLAUDE.md", digest, sizeBytes: text.byteLength };
+  };
+  const file = await put(new Uint8Array(Buffer.from("use tabs; use $1 tabs")));
+  const edit = (oldText: string) => ({
+    kind: "Edit" as const,
+    path: ".claude/CLAUDE.md",
+    oldText,
+    newText: "$&spaces",
+  });
+
+  const edited = await patchFiles(blobs, "t1", [file], edit("use $1 tabs"), "test");
+  assert.ok(edited.ok);
+  const [write] = edited.files;
+  assert.ok(write?.source === "Stored");
+  const bytes = blobs.blobs.get(personaFileKey("t1", write.digest));
+  assert.equal(Buffer.from(bytes ?? []).toString(), "use tabs; $&spaces");
+
+  const twice = await patchFiles(blobs, "t1", [file], edit("tabs"), "test");
+  assert.ok(!twice.ok);
+  assert.equal(twice.problem.title, "Edit text not unique");
+
+  const binary = await put(new Uint8Array([0x61, 0xff, 0x62]));
+  const notText = await patchFiles(blobs, "t1", [binary], edit("a"), "test");
+  assert.ok(!notText.ok);
+  assert.equal(notText.problem.title, "Persona file is not text");
 });

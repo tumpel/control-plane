@@ -50,7 +50,7 @@
     "workerd@1.20261113.1": true
   },
   "dependencies": {
-    "@tumpel/openapi": "https://github.com/tumpel/protocol/releases/download/v0.19.0/tumpel-openapi-0.19.0.tgz",
+    "@tumpel/openapi": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.5/tumpel-openapi-0.21.0-rc.5.tgz",
     "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.5/tumpel-schemas-0.21.0-rc.5.tgz",
     "zod": "^4.6.7"
   }

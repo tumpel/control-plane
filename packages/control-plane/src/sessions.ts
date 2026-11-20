@@ -459,14 +459,6 @@ export const sendTurn = async (
       fix: `Wait until session ${sessionId} reads Stopped or Idle, then send again`,
     });
   }
-  if (sent.kind === "InFlight") {
-    return refuse(409, {
-      code: "TurnInFlight",
-      title: "A turn is running",
-      detail: `session ${sessionId} is still running turn ${sent.turnId}`,
-      fix: `Wait for turn ${sent.turnId} to finish, then send again`,
-    });
-  }
   if (sent.kind === "Failed") {
     return refuse(409, {
       code: "SessionFailed",
@@ -547,6 +539,24 @@ export const listTurns = async (env: Env, caller: Caller, sessionId: string): Pr
 export const getTurn = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<Turn>> => {
   const { turn } = await tenantOf(env, caller).call("getTurn", { tenantId: caller.tenantId, turnId });
   return turn === null ? turnNotFound(turnId) : ok(turn);
+};
+
+export const cancelTurn = async (env: Env, caller: Caller, turnId: string, now: number): Promise<Outcome<Turn>> => {
+  const cancelledBy = (await whoamiOf(env.DB, caller)).principal.email;
+  const { cancelled } = await tenantOf(env, caller).call("cancelTurn", {
+    tenantId: caller.tenantId,
+    turnId,
+    cancelledBy,
+    now,
+  });
+  if (cancelled.kind === "Cancelled") return ok(cancelled.turn);
+  if (cancelled.kind === "NotFound") return turnNotFound(turnId);
+  return refuse(409, {
+    code: "TurnNotWaiting",
+    title: "Turn not waiting",
+    detail: `turn ${turnId} is ${cancelled.state} and no longer waits behind another turn, so it cannot be cancelled`,
+    fix: "Cancel only a turn that waits Offered behind another turn of its session; stop the session with cancelTurn true to end a running turn",
+  });
 };
 
 export const waitTurns = async (
@@ -761,7 +771,7 @@ const SESSION_PATH =
 const SESSION_GETS = ["", "/turns", "/transcript", "/snapshots", "/credential-handovers", "/stop-failures"];
 const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
-const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure)?$/;
+const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel)?$/;
 const TURN_WAIT_PATH = "/v1/turns/wait";
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
@@ -817,7 +827,8 @@ export const handleSessions = async (
     (pathname === "/v1/sessions" && (posting || request.method === "GET")) ||
     (session !== null &&
       (posting ? SESSION_POSTS : request.method === "GET" ? SESSION_GETS : []).includes(session[2] ?? "")) ||
-    ((turn !== null || snapshot !== null) && request.method === "GET");
+    (turn !== null && (posting ? turn[2] === "/cancel" : request.method === "GET" && turn[2] !== "/cancel")) ||
+    (snapshot !== null && request.method === "GET");
   if (!routed) return null;
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
@@ -851,6 +862,7 @@ export const handleSessions = async (
     const raw = decodeURIComponent(turn[1]);
     const path = TurnPathSchema.safeParse({ turnId: raw });
     if (!path.success) return answer(turnNotFound(raw));
+    if (turn[2] === "/cancel") return answer(await cancelTurn(env, caller, path.data.turnId, Date.now()));
     if (turn[2] === "/failure") return answer(await getTurnFailure(env, caller, path.data.turnId));
     return answer(await getTurn(env, caller, path.data.turnId));
   }

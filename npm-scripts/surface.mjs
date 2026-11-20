@@ -83,6 +83,7 @@ const DISCOVERY = "OAuth and OpenID discovery document a client reads before it 
 const DEVICE_WIRE = "device-code wire the CLI signs in with before it holds a token";
 const RELEASE_DOWNLOAD = "release download the installer and the supervisor fetch without sign-in";
 const BUILD_JOB = "build job wire, signed by the provider's OIDC job token, never by a principal";
+const DELIVERY_CHANNEL = "delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19";
 
 const ALLOWLIST = {
   DeviceFlow_approve: BROWSER_ONLY,
@@ -114,6 +115,15 @@ const ALLOWLIST = {
   CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
   ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
   ConnectorTokens_fetch: "box wire of the guest forwarder, signed by the turn's connector token, never by a principal",
+  WebhookEndpoints_create: DELIVERY_CHANNEL,
+  WebhookEndpoints_delete: DELIVERY_CHANNEL,
+  WebhookEndpoints_get: DELIVERY_CHANNEL,
+  WebhookEndpoints_list: DELIVERY_CHANNEL,
+  WebhookSigningKeys_get: DELIVERY_CHANNEL,
+  PushKeys_get: DELIVERY_CHANNEL,
+  PushSubscriptions_create: DELIVERY_CHANNEL,
+  PushSubscriptions_delete: DELIVERY_CHANNEL,
+  PushSubscriptions_list: DELIVERY_CHANNEL,
 };
 
 const CLI_ONLY = {

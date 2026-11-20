@@ -2,6 +2,7 @@ import {
   InlinePersonaFileReadSchema,
   type PersonaCreateSchema,
   PersonaFileLimit,
+  type PersonaFilePatchSchema,
   type PersonaFileSchema,
   PersonaSchema,
 } from "@tumpel/schemas";
@@ -175,6 +176,85 @@ export const storeFiles = async (
     }
   }
   return { ok: true, files: files.map(({ path, digest, sizeBytes }) => ({ path, digest, sizeBytes })) };
+};
+
+export type PersonaFilePatch = z.infer<typeof PersonaFilePatchSchema>;
+
+export type Patched = { ok: true; files: PersonaFileWrite[] } | { ok: false; status: 404 | 422; problem: Problem };
+
+const editedBytes = async (
+  store: BlobStore,
+  tenantId: string,
+  file: StoredFile,
+  oldText: string,
+  newText: string,
+  operation: string,
+): Promise<{ ok: true; bytes: Uint8Array<ArrayBuffer> } | { ok: false; problem: Problem }> => {
+  const held = await store.get(personaFileKey(tenantId, file.digest));
+  if (held === null) throw new Error(`the store holds no bytes for ${file.path} under digest ${file.digest}`);
+  const bytes = new Uint8Array(await held.arrayBuffer());
+  const text = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(bytes);
+  if (encodeBase64(new TextEncoder().encode(text)) !== encodeBase64(bytes)) {
+    return {
+      ok: false,
+      problem: {
+        code: "InvalidRequest",
+        title: "Persona file is not text",
+        detail: `${operation} edits ${file.path}, whose bytes are not UTF-8 text`,
+        fix: "Replace the whole file with a Put patch instead",
+      },
+    };
+  }
+  const occurrences = text.split(oldText).length - 1;
+  if (occurrences !== 1) {
+    return {
+      ok: false,
+      problem: {
+        code: "InvalidRequest",
+        title: "Edit text not unique",
+        detail: `${operation} replaces oldText in ${file.path}, where it occurs ${occurrences} times instead of once`,
+        fix: "Read the persona and pass an oldText that occurs exactly once in the file, with enough surrounding text to make it unique",
+      },
+    };
+  }
+  return { ok: true, bytes: new Uint8Array(new TextEncoder().encode(text.replace(oldText, () => newText))) };
+};
+
+export const patchFiles = async (
+  store: BlobStore,
+  tenantId: string,
+  files: readonly StoredFile[],
+  patch: PersonaFilePatch,
+  operation: string,
+): Promise<Patched> => {
+  const kept = files.map(
+    ({ path, digest, sizeBytes }): PersonaFileWrite => ({ source: "Stored", path, digest, sizeBytes }),
+  );
+  if (patch.kind === "Put") {
+    const { file: put } = patch;
+    const replaces = kept.some((file) => file.path === put.path);
+    return { ok: true, files: replaces ? kept.map((file) => (file.path === put.path ? put : file)) : [...kept, put] };
+  }
+  const current = files.find((file) => file.path === patch.path);
+  if (current === undefined) {
+    return {
+      ok: false,
+      status: 404,
+      problem: {
+        code: "NotFound",
+        title: "No such persona file",
+        detail: `${operation} names ${patch.path}, which is no file of the persona`,
+        fix: "Read the persona and name one of its file paths, or add the file with a Put patch",
+      },
+    };
+  }
+  if (patch.kind === "Remove") return { ok: true, files: kept.filter((file) => file.path !== patch.path) };
+  const edited = await editedBytes(store, tenantId, current, patch.oldText, patch.newText, operation);
+  if (!edited.ok) return { ok: false, status: 422, problem: edited.problem };
+  const digest = await sha256Hex(edited.bytes);
+  await store.put(personaFileKey(tenantId, digest), edited.bytes);
+  const write: PersonaFileWrite = { source: "Stored", path: patch.path, digest, sizeBytes: edited.bytes.byteLength };
+  return { ok: true, files: kept.map((file) => (file.path === patch.path ? write : file)) };
 };
 
 const fileRead = async (

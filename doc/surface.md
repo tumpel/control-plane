@@ -90,6 +90,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Personas_delete`                        | `tumpel_persona_delete`                      | `tumpel persona delete`                      |
 | `Personas_get`                           | `tumpel_persona_get`                         | `tumpel persona get`                         |
 | `Personas_list`                          | `tumpel_persona_list`                        | `tumpel persona list`                        |
+| `Personas_patchFile`                     | `tumpel_persona_patch_file`                  | `tumpel persona patch-file`                  |
 | `Personas_update`                        | `tumpel_persona_update`                      | `tumpel persona update`                      |
 | `Personas_uploadFile`                    | `tumpel_persona_upload_file`                 | `tumpel persona upload-file`                 |
 | `Prebuilds_get`                          | `tumpel_prebuild_get`                        | `tumpel prebuild get`                        |
@@ -125,6 +126,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `TenantConfigs_apply`                    | `tumpel_config_apply`                        | `tumpel config apply`                        |
 | `TenantConfigs_plan`                     | `tumpel_config_plan`                         | `tumpel config plan`                         |
 | `Transcripts_read`                       | `tumpel_transcript_read`                     | `tumpel transcript read`                     |
+| `Turns_cancel`                           | `tumpel_turn_cancel`                         | `tumpel turn cancel`                         |
 | `Turns_get`                              | `tumpel_turn_get`                            | `tumpel turn get`                            |
 | `Turns_getFailure`                       | `tumpel_turn_failure`                        | `tumpel turn failure`                        |
 | `Turns_list`                             | `tumpel_turn_list`                           | `tumpel turn list`                           |
@@ -166,3 +168,12 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
 - `ConnectorTokens_fetch`: box wire of the guest forwarder, signed by the turn's connector token, never by a principal.
+- `WebhookEndpoints_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `WebhookEndpoints_delete`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `WebhookEndpoints_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `WebhookEndpoints_list`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `WebhookSigningKeys_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `PushKeys_get`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `PushSubscriptions_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `PushSubscriptions_delete`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
+- `PushSubscriptions_list`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.

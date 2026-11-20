@@ -2033,6 +2033,42 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await tool("tumpel_turn_get", { turnId: waiting.turnId }, TurnSchema)).state, "Offered");
   });
 
+  test("a cancel fails a waiting turn Cancelled and the turns behind it keep their order, and a running turn is refused", async () => {
+    const { email, host, refused, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "busy" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const first = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const second = await tool("tumpel_turn_send", { sessionId, prompt: "never mind" }, TurnSchema);
+    const third = await tool("tumpel_turn_send", { sessionId, prompt: "after it" }, TurnSchema);
+
+    const cancelled = await tool("tumpel_turn_cancel", { turnId: second.turnId }, TurnSchema);
+    assert.equal(cancelled.state, "Failed");
+    const failure = await tool("tumpel_turn_failure", { turnId: second.turnId }, TurnFailureSchema);
+    assert.deepEqual([failure.reason, failure.detail], ["Cancelled", `${email} cancelled the turn while it waited`]);
+    const running = await refused(`/v1/turns/${first.turnId}/cancel`);
+    assert.equal(running.code, "TurnNotWaiting");
+
+    host.send({
+      type: "TurnFailed",
+      turnId: first.turnId,
+      reason: "HarnessExited",
+      detail: "the harness exited",
+      failedAt: new Date().toISOString(),
+    });
+    assert.equal((await host.next("TurnOffer")).turnId, third.turnId);
+    assert.equal(host.holds("TurnOffer"), false);
+  });
+
   test("a stop with cancelTurn fails every waiting turn Cancelled before it starts, and a stop without it is refused while one waits", async () => {
     const { email, host, refused, tool, sessionStart } = await tenant();
     const started = await tool(

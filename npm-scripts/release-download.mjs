@@ -65,18 +65,19 @@ export const downloadRelease = async ({ endpoint, stage, release, kind, entries,
   );
 };
 
-export const checkedPins = (pins, stage) => {
-  if (!VERSION.test(String(pins.cli)))
-    throw new Error(`${PINS_PATH} names cli ${pins.cli}, not X.Y.Z; pin a released version of tumpel/cli`);
-  if (VERSION.test(String(pins.supervisor))) return { supervisor: pins.supervisor, cli: pins.cli };
-  if (!CANDIDATE.test(String(pins.supervisor)))
-    throw new Error(
-      `${PINS_PATH} names supervisor ${pins.supervisor}, not X.Y.Z or X.Y.Z-rc.N; pin a release of tumpel/supervisor`,
-    );
+const checkedPin = (name, version, stage) => {
+  if (VERSION.test(String(version))) return;
+  if (!CANDIDATE.test(String(version)))
+    throw new Error(`${PINS_PATH} names ${name} ${version}, not X.Y.Z or X.Y.Z-rc.N; pin a release of tumpel/${name}`);
   if (stage !== "dev")
     throw new Error(
-      `${PINS_PATH} names the supervisor release candidate ${pins.supervisor}, and only stage dev runs release candidates; pin a stable X.Y.Z for ${stage}`,
+      `${PINS_PATH} names the ${name} release candidate ${version}, and only stage dev runs release candidates; pin a stable X.Y.Z for ${stage}`,
     );
+};
+
+export const checkedPins = (pins, stage) => {
+  checkedPin("cli", pins.cli, stage);
+  checkedPin("supervisor", pins.supervisor, stage);
   return { supervisor: pins.supervisor, cli: pins.cli };
 };
 

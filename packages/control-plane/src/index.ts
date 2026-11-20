@@ -42,6 +42,7 @@ import {
   OAuthRevocationRequestSchema,
   OpenIdConfigurationSchema,
   PersonaCreateSchema,
+  PersonaFilePatchSchema,
   PersonaFileUploadRequestSchema,
   PersonaFileUploadSchema,
   PersonaPathSchema,
@@ -188,7 +189,7 @@ import {
   SIGN_UP_PATH,
   wantsHtml,
 } from "./pages";
-import { personaFileKey, readPersona, UPLOAD_TTL_SECONDS } from "./persona-files";
+import { patchFiles, personaFileKey, readPersona, type StoredPersona, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildTemplates } from "./prebuild-templates.ts";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
@@ -558,11 +559,39 @@ const handlePersonaCreate = async (request: Request, _url: URL, env: Env): Promi
   return json(await readPersona(env, written.value, Date.now()));
 };
 
-const PERSONA_PATH = /^\/v1\/personas\/([^/]+)$/;
+const PERSONA_PATH = /^\/v1\/personas\/([^/]+)(\/file-patches)?$/;
+
+const updatePersona = async (
+  env: Env,
+  caller: Caller,
+  current: StoredPersona,
+  body: z.infer<typeof PersonaUpdateSchema>,
+  operation: string,
+): Promise<Response> => {
+  const { personaId } = current;
+  const write = await personaWrite(
+    env,
+    caller,
+    { ...body, harness: current.harness },
+    operation,
+    body.secretSetId !== current.secretSetId,
+  );
+  if (!write.ok) return write.response;
+  const { harness: _fixed, ...change } = write.value;
+  const { written } = await tenantApi(env.TENANT, caller.tenantId).call("updatePersona", {
+    tenantId: caller.tenantId,
+    personaId,
+    persona: change,
+    now: Date.now(),
+  });
+  if (!written.ok) return conflict(operation, body.name, written.constraint);
+  return written.value === null ? personaNotFound(personaId) : json(await readPersona(env, written.value, Date.now()));
+};
 
 const handlePersona = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
-  const matched = PERSONA_PATH.exec(url.pathname)?.[1];
-  if (matched === undefined || !["GET", "PUT", "DELETE"].includes(request.method)) return null;
+  const [, matched, patching] = PERSONA_PATH.exec(url.pathname) ?? [];
+  const methods = patching === undefined ? ["GET", "PUT", "DELETE"] : ["POST"];
+  if (matched === undefined || !methods.includes(request.method)) return null;
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const raw = decodeURIComponent(matched);
@@ -582,30 +611,23 @@ const handlePersona = async (request: Request, url: URL, env: Env): Promise<Resp
       fix: "Archive those sessions, then delete the persona again",
     });
   }
+  if (request.method === "POST") {
+    const body = await parseBody(request, PersonaFilePatchSchema, "personas.patchFile");
+    if (!body.ok) return body.response;
+    const current = await read();
+    if (current === null) return personaNotFound(personaId);
+    const patched = await patchFiles(env.STORE, caller.tenantId, current.files, body.value, "personas.patchFile");
+    if (!patched.ok) return problem(patched.status, patched.problem);
+    const { name, secretSetId, connectorIds, boxMemoryMib, boxDiskMib, boxRetention } = current;
+    const change = { name, secretSetId, connectorIds, boxMemoryMib, boxDiskMib, boxRetention, files: patched.files };
+    return updatePersona(env, caller, current, change, "personas.patchFile");
+  }
   if (request.method === "PUT") {
     const body = await personaBody(request, PersonaUpdateSchema, "personas.update");
     if (!body.ok) return body.response;
     const current = await read();
     if (current === null) return personaNotFound(personaId);
-    const write = await personaWrite(
-      env,
-      caller,
-      { ...body.value, harness: current.harness },
-      "personas.update",
-      body.value.secretSetId !== current.secretSetId,
-    );
-    if (!write.ok) return write.response;
-    const { harness: _fixed, ...change } = write.value;
-    const { written } = await tenant.call("updatePersona", {
-      tenantId: caller.tenantId,
-      personaId,
-      persona: change,
-      now: Date.now(),
-    });
-    if (!written.ok) return conflict("personas.update", body.value.name, written.constraint);
-    return written.value === null
-      ? personaNotFound(personaId)
-      : json(await readPersona(env, written.value, Date.now()));
+    return updatePersona(env, caller, current, body.value, "personas.update");
   }
   const persona = await read();
   return persona === null ? personaNotFound(personaId) : json(await readPersona(env, persona, Date.now()));
