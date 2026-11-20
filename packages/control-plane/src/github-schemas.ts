@@ -211,6 +211,11 @@ export const GitHubCommitSchema = z.object({
   commit: z.object({ tree: z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) }) }),
 });
 
+export const GitHubTriggerEventSchema = z.object({
+  installation: z.object({ id: GitHubIdSchema }),
+  repository: z.object({ html_url: z.string().url() }),
+});
+
 export const GitHubWorkflowRunEventSchema = z.object({
   action: z.string(),
   installation: z.object({ id: GitHubIdSchema }),

@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
-import { createHmac, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
+import { createHmac, generateKeyPairSync, type KeyObject, randomUUID, sign } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DeviceAuthorizationSchema, DeviceTokenSchema, GitHubInstallationSchema, WhoamiSchema } from "@tumpel/schemas";
+import {
+  DeviceAuthorizationSchema,
+  DeviceTokenSchema,
+  EventPageSchema,
+  GitHubInstallationSchema,
+  PersonaSchema,
+  SecretSetSchema,
+  TriggerSchema,
+  WhoamiSchema,
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { generateDataKey, seal } from "../src/envelope.ts";
 import { linkInstallation } from "../src/github-store.ts";
@@ -144,7 +153,12 @@ const signedDelivery = async (event: string, payload: unknown) => {
   const signature = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex")}`;
   const response = await server.fetch(`${origin}/github/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-github-event": event, "x-hub-signature-256": signature },
+    headers: {
+      "content-type": "application/json",
+      "x-github-event": event,
+      "x-github-delivery": randomUUID(),
+      "x-hub-signature-256": signature,
+    },
     body,
   });
   assert.equal(response.status, 204, await response.text());
@@ -198,4 +212,65 @@ test("connecting another account from Tumpel adds its installation and keeps the
     ],
   );
   assert.equal((await linkInstallation(db, "another-tenant", tumpel, Date.now())).kind, "OtherTenant");
+});
+
+test("a trigger drops a delivery it does not match and records why a matched one started no session", async () => {
+  const secrets = [{ kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: "sk-ant-api03-trigger-test" }];
+  const secretSet = await send("POST", "/v1/secret-sets", { name: "reviewer secrets", secrets }, bearer);
+  assert.equal(secretSet.status, 200, await secretSet.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await secretSet.json());
+  const persona = await send(
+    "POST",
+    "/v1/personas",
+    { name: "Reviewer", harness: "ClaudeCode", secretSetId, connectorIds: [], files: [] },
+    bearer,
+  );
+  assert.equal(persona.status, 200, await persona.clone().text());
+  const { personaId } = PersonaSchema.parse(await persona.json());
+  const created = await send(
+    "POST",
+    "/v1/triggers",
+    {
+      name: "agent-review",
+      source: "GitHub",
+      event: "status",
+      conditions: [
+        { field: "context", values: ["agent-review"] },
+        { field: "state", values: ["pending"] },
+      ],
+      personaId,
+      model: "claude-sonnet-5-5",
+      prompt: "Review {{target_url}} at {{sha}}",
+    },
+    bearer,
+  );
+  assert.equal(created.status, 200, await created.clone().text());
+  const { triggerId } = TriggerSchema.parse(await created.json());
+  const status = (state: string, extra: Record<string, unknown> = {}) => ({
+    installation: { id: INSTALLATION_ID },
+    repository: { full_name: "acme/app", html_url: "https://github.com/acme/app" },
+    context: "agent-review",
+    state,
+    sha: "4f1c9e2",
+    ...extra,
+  });
+  await signedDelivery("status", status("success", { target_url: "https://github.com/acme/app/pull/1" }));
+  await signedDelivery("status", status("pending"));
+  await signedDelivery("status", status("pending", { target_url: "https://github.com/acme/app/pull/1" }));
+  const events = await send(
+    "GET",
+    "/v1/events?event=TriggerStartRefused&afterEventId=0&waitSeconds=0",
+    undefined,
+    bearer,
+  );
+  assert.equal(events.status, 200, await events.clone().text());
+  assert.deepEqual(
+    EventPageSchema.parse(await events.json()).events.map((event) =>
+      event.event === "TriggerStartRefused" ? [event.triggerId, event.refusal.code] : [],
+    ),
+    [
+      [triggerId, "TriggerFieldMissing"],
+      [triggerId, "NoHostAvailable"],
+    ],
+  );
 });

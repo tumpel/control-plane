@@ -211,6 +211,7 @@ import { handleSubscriptions } from "./subscriptions.ts";
 import type { PersonaWrite, Tenant } from "./tenant";
 import { tenantApi, tenantSkewed } from "./tenant-api.ts";
 import type { TenantMetrics } from "./tenant-metrics";
+import { handleTriggers } from "./triggers.ts";
 import { TURN_TOKEN_SIGNING_PURPOSE } from "./turn-token.ts";
 import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryTokenUser } from "./write-checks.ts";
 
@@ -1713,6 +1714,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const sessions =
     (await handleSessions(request, url, env, deviceCaller)) ??
     (await handleSubscriptions(request, url, env, deviceCaller)) ??
+    (await handleTriggers(request, url, env, deviceCaller)) ??
     (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;
   const uploads =

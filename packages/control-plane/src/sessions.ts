@@ -22,7 +22,13 @@ import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
 import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
-import { GOAL_FOLDS, GOAL_TURN_CAP, HARNESS_CATALOG, pinnedEntry } from "./harness-catalog.ts";
+import {
+  GOAL_FOLDS,
+  GOAL_TURN_CAP,
+  HARNESS_CATALOG,
+  type HarnessCatalogEntry,
+  pinnedEntry,
+} from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
@@ -229,38 +235,20 @@ const personaNotFound = (personaId: string): Refused =>
     fix: "List your personas and start with one of their ids",
   });
 
-const prepareStart = async (
+export type PreparedStart = Omit<NewSession, "startedBy">;
+
+export const startable = async (
   env: Env,
-  caller: Caller,
-  start: SessionStart,
-  endpoint: string,
+  tenantId: string,
+  personaId: string,
+  model: string,
+  operation: string,
   now: number,
-): Promise<Outcome<NewSession>> => {
-  const target = githubRepository(start.repository);
-  if (target === null) return refuse(422, notARepository(start.repository));
-  const { persona } = await tenantApi(env.TENANT, caller.tenantId).call("getPersona", {
-    tenantId: caller.tenantId,
-    personaId: start.personaId,
-  });
-  if (persona === null) return personaNotFound(start.personaId);
-  if (caller.origin.kind === "Turn") {
-    const { subscriptions } = await tenantApi(env.TENANT, caller.tenantId).call("listSubscriptions", {
-      tenantId: caller.tenantId,
-      filter: { sessionId: caller.origin.sessionId, state: "Active" },
-    });
-    const tags = [
-      ...new Set([...subscriptions.flatMap((subscription) => subscription.crewTags), ...(start.tags ?? [])]),
-    ];
-    if (tags.length > SESSION_TAG_LIMIT) {
-      return refuse(422, {
-        code: "InvalidRequest",
-        title: "Too many tags",
-        detail: `the crew session would carry ${tags.length} tags, its own and the crew tags of session ${caller.origin.sessionId}'s active subscriptions: ${tags.sort().join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
-        fix: `Start the session with ${tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
-      });
-    }
-  }
-  const entry = pinnedEntry((await tenantApi(env.TENANT, caller.tenantId).call("listPins", {})).pins, persona.harness);
+): Promise<Outcome<HarnessCatalogEntry>> => {
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const { persona } = await tenant.call("getPersona", { tenantId, personaId });
+  if (persona === null) return personaNotFound(personaId);
+  const entry = pinnedEntry((await tenant.call("listPins", {})).pins, persona.harness);
   if (entry === undefined) {
     return refuse(422, {
       code: "HarnessNotInCatalog",
@@ -269,16 +257,13 @@ const prepareStart = async (
       fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
     });
   }
-  const { read } = await tenantApi(env.TENANT, caller.tenantId).call("getSecretSet", {
-    tenantId: caller.tenantId,
-    secretSetId: persona.secretSetId,
-  });
+  const { read } = await tenant.call("getSecretSet", { tenantId, secretSetId: persona.secretSetId });
   if (read.kind === "NotFound") {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
-  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet("sessions.start", read));
+  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet(operation, read));
   const { secretSet } = read;
-  const credential = checkModelCredential(entry, secretSet.keys, start.model, now);
+  const credential = checkModelCredential(entry, secretSet.keys, model, now);
   if (credential.kind !== "Usable") {
     return credentialRefused(
       credential,
@@ -287,15 +272,60 @@ const prepareStart = async (
       "start again",
     );
   }
+  return ok(entry);
+};
+
+const tooManyTags = async (env: Env, caller: Caller, tags: string[] | undefined): Promise<Refused | null> => {
+  if (caller.origin.kind !== "Turn") return null;
+  const { subscriptions } = await tenantApi(env.TENANT, caller.tenantId).call("listSubscriptions", {
+    tenantId: caller.tenantId,
+    filter: { sessionId: caller.origin.sessionId, state: "Active" },
+  });
+  const all = [...new Set([...subscriptions.flatMap((subscription) => subscription.crewTags), ...(tags ?? [])])];
+  if (all.length <= SESSION_TAG_LIMIT) return null;
+  return refuse(422, {
+    code: "InvalidRequest",
+    title: "Too many tags",
+    detail: `the crew session would carry ${all.length} tags, its own and the crew tags of session ${caller.origin.sessionId}'s active subscriptions: ${all.sort().join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
+    fix: `Start the session with ${all.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+  });
+};
+
+export const prepareStart = async (
+  env: Env,
+  tenantId: string,
+  principalId: string,
+  start: SessionStart,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<PreparedStart>> => {
+  const target = githubRepository(start.repository);
+  if (target === null) return refuse(422, notARepository(start.repository));
+  const checked = await startable(env, tenantId, start.personaId, start.model, "sessions.start", now);
+  if (!checked.ok) return checked;
+  const entry = checked.value;
   return ok({
-    principalId: caller.principalId,
-    startedBy: caller.origin,
-    hosts: await listHosts(env.DB, caller.tenantId),
+    principalId,
+    hosts: await listHosts(env.DB, tenantId),
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
     start: { ...start, repository: repositoryUrl(target) },
   });
+};
+
+const prepareCallerStart = async (
+  env: Env,
+  caller: Caller,
+  start: SessionStart,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<NewSession>> => {
+  const tags = await tooManyTags(env, caller, start.tags);
+  if (tags !== null) return tags;
+  const prepared = await prepareStart(env, caller.tenantId, caller.principalId, start, endpoint, now);
+  if (!prepared.ok) return prepared;
+  return ok({ ...prepared.value, startedBy: caller.origin });
 };
 
 const connectorDisconnected = (names: string[]): Refused =>
@@ -321,7 +351,7 @@ export const startSession = async (
   endpoint: string,
   now: number,
 ): Promise<Outcome<StartedSession>> => {
-  const prepared = await prepareStart(env, caller, start, endpoint, now);
+  const prepared = await prepareCallerStart(env, caller, start, endpoint, now);
   if (!prepared.ok) return prepared;
   return placed(
     (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
@@ -399,7 +429,7 @@ export const startSessionFromIssue = async (
     issue: { number: issue.number, title: issue.title, body: issue.body ?? "", url: issue.html_url },
     branch,
   });
-  const prepared = await prepareStart(
+  const prepared = await prepareCallerStart(
     env,
     caller,
     { personaId: start.personaId, repository: repositoryUrl(target), model: start.model, prompt, tags: start.tags },
@@ -430,7 +460,10 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
-  return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
+  const { sessions } = await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter });
+  const { triggerId } = query;
+  if (triggerId === undefined) return ok(sessions);
+  return ok(sessions.filter(({ startedBy }) => startedBy.kind === "Trigger" && startedBy.triggerId === triggerId));
 };
 
 export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {

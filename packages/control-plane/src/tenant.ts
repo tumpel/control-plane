@@ -450,6 +450,16 @@ export class Tenant extends TenantConnectors {
       resumed: this.resumeSubscription(tenantId, subscriptionId, now),
     }),
     deleteSubscription: ({ subscriptionId, now }) => ({ deleted: this.deleteSubscription(subscriptionId, now) }),
+    createTrigger: ({ tenantId, trigger, principalId, now }) => ({
+      created: this.createTrigger(tenantId, trigger, principalId, now),
+    }),
+    listTriggers: ({ tenantId }) => ({ triggers: this.listTriggers(tenantId) }),
+    getTrigger: ({ tenantId, triggerId }) => ({ trigger: this.getTrigger(tenantId, triggerId) }),
+    updateTrigger: ({ tenantId, triggerId, patch, principalId, now }) => ({
+      updated: this.updateTrigger(tenantId, triggerId, patch, principalId, now),
+    }),
+    deleteTrigger: ({ triggerId }) => ({ deleted: this.deleteTrigger(triggerId) }),
+    triggerFired: async (input) => ({ fired: await this.triggerFired(input.tenantId, input) }),
     completeSubscription: ({ tenantId, subscriptionId, now }) => ({
       completed: this.completeSubscription(tenantId, subscriptionId, now),
     }),
@@ -1174,6 +1184,15 @@ export class Tenant extends TenantConnectors {
         return;
       case "Unpin":
         this.unpin(write.harness);
+        return;
+      case "CreateTrigger":
+        this.writeConfigTrigger(null, write.trigger, write.principalId, now);
+        return;
+      case "UpdateTrigger":
+        this.writeConfigTrigger(write.triggerId, write.trigger, write.principalId, now);
+        return;
+      case "DeleteTrigger":
+        this.deleteTrigger(write.triggerId);
         return;
     }
   }

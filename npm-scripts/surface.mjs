@@ -42,6 +42,7 @@ const NOUNS = {
   StaticConnectors: "connector",
   OAuthConnectors: "connector",
   Subscriptions: "subscription",
+  Triggers: "trigger",
 };
 const VERBS = {
   Identity_listTenants: "tenants",
