@@ -761,6 +761,11 @@ export class TenantPrebuilds extends TenantTriggers {
         now,
       );
     });
+    if (begun.kind === "TagsOverLimit") {
+      throw new Error(
+        `prebuild ${commit.prebuildId} started a session with ${begun.tags.length} tags, and a prebuild session carries none`,
+      );
+    }
     if (begun.kind !== "Started") return begun;
     return { kind: "Started", started: this.prebuildOf(tenantId, commit.prebuildId) };
   }

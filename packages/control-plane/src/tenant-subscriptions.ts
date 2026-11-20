@@ -12,7 +12,7 @@ import type { z } from "zod";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt } from "./delivery-prompt.ts";
 import { DELIVERY_GOAL_ROUNDS, GOAL_FOLDS } from "./harness-catalog.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import { SESSION_TAG_LIMIT, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
+import { type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];
@@ -238,13 +238,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected override startTags(startedBy: Session["startedBy"], tags: string[]): string[] {
     if (startedBy.kind !== "Turn") return tags;
-    const all = [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
-    if (all.length > SESSION_TAG_LIMIT) {
-      throw new Error(
-        `a session started by session ${startedBy.sessionId} would carry ${all.length} tags: ${all.join(", ")}`,
-      );
-    }
-    return all;
+    return [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
   }
 
   protected override tumpelMcp(sessionId: string): boolean {

@@ -26,6 +26,7 @@ import {
   storedKeys,
   type UnreadableSecretSet,
 } from "./secret-members.ts";
+import { checkStart } from "./sessions.ts";
 import {
   recordSupervisorUpdate,
   type SupervisorUpdateMessage,
@@ -459,7 +460,19 @@ export class Tenant extends TenantConnectors {
       updated: this.updateTrigger(tenantId, triggerId, patch, principalId, now),
     }),
     deleteTrigger: ({ triggerId }) => ({ deleted: this.deleteTrigger(triggerId) }),
-    triggerFired: async (input) => ({ fired: await this.triggerFired(input.tenantId, input) }),
+    triggerFired: async (input) => ({
+      fired: await this.triggerFired(input, (trigger) =>
+        checkStart({
+          personaId: trigger.personaId,
+          persona: this.getPersona(input.tenantId, trigger.personaId),
+          pins: this.listPins(),
+          secretSet: (persona) => this.getSecretSet(input.tenantId, persona.secretSetId),
+          model: trigger.model,
+          operation: "triggers.fire",
+          now: input.now,
+        }),
+      ),
+    }),
     completeSubscription: ({ tenantId, subscriptionId, now }) => ({
       completed: this.completeSubscription(tenantId, subscriptionId, now),
     }),

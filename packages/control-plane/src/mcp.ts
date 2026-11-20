@@ -951,7 +951,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/triggers",
     TriggerCreateSchema,
-    "Create a trigger that starts a fresh session whenever a GitHub event of one type arrives through the stage's GitHub App and every condition holds on its payload. event is pull_request, push, status or issues; each condition names a dotted field path into the webhook payload, such as pull_request.base.ref, label.name or sender.login, and the values it may equal, compared as JSON text, so true matches a boolean; a path through an array matches any element. The session runs on personaId with model, on the event's repository, with prompt as its first prompt, where each {{field}} placeholder is filled from the payload. Every session runs as you. Tumpel only listens: tell the session in the prompt how to report back, such as with a review or a commit status. Test it first with tumpel_trigger_test. Only an Owner, outside a tumpel box, creates one.",
+    "Create a trigger that starts a fresh session whenever a GitHub event of one type arrives through the stage's GitHub App and every condition holds on its payload. source is {kind: GitHub, event, conditions}: event is pull_request, push, status or issues; each condition names a dotted field path into the webhook payload, such as pull_request.base.ref, label.name or sender.login, and the values it may equal, compared as JSON text, so true matches a boolean; a path through an array matches any element. The session runs on personaId with model, on the event's repository, with prompt as its first prompt, where each {{field}} placeholder is filled from the payload. Every session runs as you. Tumpel only listens: tell the session in the prompt how to report back, such as with a review or a commit status. Test it first with tumpel_trigger_test. Only an Owner, outside a tumpel box, creates one.",
   ),
   rest("tumpel_trigger_list", "GET", "/v1/triggers", NO_ARGUMENTS, "List the tenant's triggers."),
   rest("tumpel_trigger_get", "GET", "/v1/triggers/{triggerId}", TriggerPathSchema, "Read one trigger."),
@@ -960,7 +960,7 @@ export const TOOLS: ToolDefinition[] = [
     "PATCH",
     "/v1/triggers/{triggerId}",
     TriggerPathSchema.extend(TriggerPatchSchema.shape),
-    "Change the fields of a trigger you name and keep the rest; conditions, when named, replace the whole list. Its sessions then run as you. Only an Owner, outside a tumpel box, changes one.",
+    "Change the fields of a trigger you name and keep the rest; a named source replaces the whole source, its event and conditions included. Its sessions then run as you. Only an Owner, outside a tumpel box, changes one.",
   ),
   rest(
     "tumpel_trigger_delete",

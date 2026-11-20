@@ -24,7 +24,7 @@ import {
   GitHubInstallStartSchema,
   GitHubIssueSchema,
   GitHubRepositorySchema,
-  TriggerEventSchema,
+  GitHubTriggerEventSchema,
   type WhoamiSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
@@ -74,7 +74,7 @@ import {
   GitHubManifestStateSchema,
   GitHubSetupActionSchema,
   GitHubSetupCallbackSchema,
-  GitHubTriggerEventSchema,
+  GitHubTriggerDeliverySchema,
   GitHubWorkflowRunEventSchema,
 } from "./github-schemas.ts";
 import {
@@ -865,14 +865,13 @@ const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Respons
 
 const handleTriggerEvent = async (
   env: Env,
-  url: URL,
   event: string,
   deliveryId: string | null,
   body: ArrayBuffer,
   noContent: Response,
 ): Promise<Response> => {
   const payload = parseJson(new TextDecoder().decode(body));
-  const delivery = GitHubTriggerEventSchema.safeParse(payload);
+  const delivery = GitHubTriggerDeliverySchema.safeParse(payload);
   if (!delivery.success || deliveryId === null) {
     return problem(400, {
       code: "InvalidRequest",
@@ -886,7 +885,7 @@ const handleTriggerEvent = async (
   const tenantId = await tenantOfInstallation(env.DB, delivery.data.installation.id);
   if (tenantId === null) return noContent;
   const repository = delivery.data.repository.html_url;
-  await fireTriggers(env, { tenantId, event, deliveryId, repository, payload, endpoint: url.origin });
+  await fireTriggers(env, { tenantId, event, deliveryId, repository, payload });
   return noContent;
 };
 
@@ -913,10 +912,10 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   const event = request.headers.get("x-github-event");
   if (event === "workflow_run") return handleWorkflowRun(env, body, noContent);
-  const triggered = TriggerEventSchema.safeParse(event);
+  const triggered = GitHubTriggerEventSchema.safeParse(event);
   if (triggered.success) {
     const deliveryId = request.headers.get("x-github-delivery");
-    return handleTriggerEvent(env, url, triggered.data, deliveryId, body, noContent);
+    return handleTriggerEvent(env, triggered.data, deliveryId, body, noContent);
   }
   if (event !== "installation") return noContent;
   const delivery = GitHubInstallationEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));

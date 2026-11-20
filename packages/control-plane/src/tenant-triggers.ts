@@ -10,7 +10,11 @@ import {
   type UpdateTriggerResultSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import type { HarnessCatalogEntry } from "./harness-catalog.ts";
+import { listHosts, type Outcome, type Refused } from "./hosts.ts";
 import { placed } from "./sessions.ts";
+import { apiOriginOf } from "./settings.ts";
+import type { NewSession } from "./tenant-sessions.ts";
 import { TenantSubscriptions } from "./tenant-subscriptions.ts";
 import { conditionRows, conditionsOf } from "./trigger-match.ts";
 
@@ -23,6 +27,12 @@ type TriggerStartRefusal = z.infer<typeof TriggerStartRefusalSchema>;
 type Created = z.infer<typeof CreateTriggerResultSchema>["created"];
 type Updated = z.infer<typeof UpdateTriggerResultSchema>["updated"];
 type Fired = z.infer<typeof TriggerFiredResultSchema>["fired"];
+type Origin = { kind: "Trigger"; triggerId: string; deliveryId: string };
+
+const refusalOf = ({ problem }: Refused): TriggerStartRefusal => ({
+  code: problem.code,
+  detail: `${problem.detail}. ${problem.fix}`,
+});
 
 type TriggerRow = {
   trigger_id: string;
@@ -49,9 +59,7 @@ const toTrigger = (tenantId: string, row: TriggerRow): Trigger =>
     triggerId: row.trigger_id,
     tenantId,
     name: row.name,
-    source: row.source,
-    event: row.event,
-    conditions: conditionsOf(JSON.parse(row.conditions)),
+    source: { kind: row.source, event: row.event, conditions: conditionsOf(JSON.parse(row.conditions)) },
     personaId: row.persona_id,
     model: row.model,
     prompt: row.prompt,
@@ -120,14 +128,31 @@ export abstract class TenantTriggers extends TenantSubscriptions {
     else this.replaceTrigger(triggerId, write, principalId, now);
   }
 
-  protected async triggerFired(tenantId: string, input: TriggerFired): Promise<Fired> {
-    const { origin, fired, now } = input;
-    if (this.getTrigger(tenantId, origin.triggerId) === null) return { kind: "NotFound" };
-    const repeated = this.startedFor(origin.triggerId, origin.deliveryId);
+  protected async triggerFired(
+    input: TriggerFired,
+    check: (trigger: Trigger) => Outcome<HarnessCatalogEntry>,
+  ): Promise<Fired> {
+    const { tenantId, triggerId, deliveryId, fired, now } = input;
+    const origin = { kind: "Trigger" as const, triggerId, deliveryId };
+    const trigger = this.getTrigger(tenantId, triggerId);
+    if (trigger === null) return { kind: "NotFound" };
+    const repeated = this.startedFor(triggerId, deliveryId);
     if (repeated !== null) return { kind: "Repeated", sessionId: repeated };
     if (fired.kind === "Refused") return this.refuseStart(origin, fired.refusal, now);
+    const checked = check(trigger);
+    if (!checked.ok) return this.refuseStart(origin, refusalOf(checked), now);
+    const entry = checked.value;
+    const session: NewSession = {
+      principalId: trigger.principalId,
+      startedBy: origin,
+      hosts: await listHosts(this.env.DB, tenantId),
+      harness: entry.harness,
+      harnessVersion: entry.harnessVersion,
+      endpoint: apiOriginOf(this.env),
+      start: { personaId: trigger.personaId, repository: fired.repository, model: trigger.model, prompt: fired.prompt },
+    };
     const started = placed(
-      await this.begin(tenantId, { ...fired.session, startedBy: origin }, now, (sessionId) => {
+      await this.begin(tenantId, session, now, (sessionId) => {
         this.ctx.storage.sql.exec(
           "INSERT INTO session_trigger_origins (session_id, trigger_id, delivery_id) VALUES (?, ?, ?)",
           sessionId,
@@ -137,11 +162,10 @@ export abstract class TenantTriggers extends TenantSubscriptions {
       }),
     );
     if (started.ok) return { kind: "Started", started: started.value };
-    const { code, detail, fix } = started.problem;
-    return this.refuseStart(origin, { code, detail: `${detail}. ${fix}` }, now);
+    return this.refuseStart(origin, refusalOf(started), now);
   }
 
-  private refuseStart(origin: TriggerFired["origin"], refusal: TriggerStartRefusal, now: number): Fired {
+  private refuseStart(origin: Origin, refusal: TriggerStartRefusal, now: number): Fired {
     this.appendEvent(
       { event: "TriggerStartRefused", triggerId: origin.triggerId, deliveryId: origin.deliveryId, refusal },
       now,
@@ -178,8 +202,8 @@ export abstract class TenantTriggers extends TenantSubscriptions {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       triggerId,
       trigger.name,
-      trigger.source,
-      trigger.event,
+      trigger.source.kind,
+      trigger.source.event,
       trigger.personaId,
       trigger.model,
       trigger.prompt,
@@ -187,7 +211,7 @@ export abstract class TenantTriggers extends TenantSubscriptions {
       now,
       now,
     );
-    this.writeConditions(triggerId, trigger.conditions);
+    this.writeConditions(triggerId, trigger.source.conditions);
   }
 
   private replaceTrigger(triggerId: string, trigger: TriggerCreate, principalId: string, now: number): void {
@@ -195,8 +219,8 @@ export abstract class TenantTriggers extends TenantSubscriptions {
       `UPDATE triggers SET name = ?, source = ?, event = ?, persona_id = ?, model = ?, prompt = ?, principal_id = ?, updated_at = ?
       WHERE trigger_id = ?`,
       trigger.name,
-      trigger.source,
-      trigger.event,
+      trigger.source.kind,
+      trigger.source.event,
       trigger.personaId,
       trigger.model,
       trigger.prompt,
@@ -205,10 +229,10 @@ export abstract class TenantTriggers extends TenantSubscriptions {
       triggerId,
     );
     this.ctx.storage.sql.exec("DELETE FROM trigger_conditions WHERE trigger_id = ?", triggerId);
-    this.writeConditions(triggerId, trigger.conditions);
+    this.writeConditions(triggerId, trigger.source.conditions);
   }
 
-  private writeConditions(triggerId: string, conditions: TriggerCreate["conditions"]): void {
+  private writeConditions(triggerId: string, conditions: TriggerCreate["source"]["conditions"]): void {
     for (const row of conditionRows(conditions)) {
       this.ctx.storage.sql.exec(
         "INSERT INTO trigger_conditions (trigger_id, position, field, value) VALUES (?, ?, ?, ?)",

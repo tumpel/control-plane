@@ -174,6 +174,8 @@ export type Started<T> =
   | { kind: "ConnectorDisconnected"; names: string[] }
   | ReleaseUnreadable;
 
+export type SessionStarted<T> = Started<T> | { kind: "TagsOverLimit"; tags: string[] };
+
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
 
 export type Sent =
@@ -1882,7 +1884,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  protected startSession(tenantId: string, input: NewSession, now: number): Promise<Started<StartedSession>> {
+  protected startSession(tenantId: string, input: NewSession, now: number): Promise<SessionStarted<StartedSession>> {
     return this.begin(tenantId, input, now, () => undefined);
   }
 
@@ -1891,7 +1893,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     input: NewSession,
     issue: IssueOfSession,
     now: number,
-  ): Promise<Started<StartedSessionFromIssue>> {
+  ): Promise<SessionStarted<StartedSessionFromIssue>> {
     const begun = await this.begin(tenantId, input, now, (sessionId) => {
       this.ctx.storage.sql.exec(
         "INSERT INTO session_issues (session_id, issue_number, title, html_url, branch) VALUES (?, ?, ?, ?, ?)",
@@ -1914,11 +1916,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     input: NewSession,
     now: number,
     record: (sessionId: string) => void,
-  ): Promise<Started<StartedSession>> {
+  ): Promise<SessionStarted<StartedSession>> {
     const { start } = input;
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
+    const tags = this.startTags(input.startedBy, start.tags ?? []);
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
     const uses = personaConnectorUses(this.ctx.storage.sql, start.personaId);
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
@@ -1983,7 +1987,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
         session.box_retention,
       );
-      this.writeTags(session.session_id, this.startTags(input.startedBy, start.tags ?? []));
+      this.writeTags(session.session_id, tags);
       if (input.startedBy.kind === "Turn") {
         this.ctx.storage.sql.exec(
           "INSERT INTO session_origins (session_id, origin_session_id, origin_turn_id) VALUES (?, ?, ?)",
@@ -2659,11 +2663,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
         AND NOT EXISTS (SELECT 1 FROM json_each(?4) AS wanted
           WHERE wanted.value NOT IN (SELECT tag FROM session_tags WHERE session_tags.session_id = s.session_id))
         AND NOT EXISTS (SELECT 1 FROM prebuild_sessions WHERE prebuild_sessions.session_id = s.session_id)
+        AND (?5 IS NULL OR g.trigger_id = ?5)
         ORDER BY s.created_at, s.session_id`,
         filter.state ?? null,
         filter.hostId ?? null,
         filter.lastTurnBefore ?? null,
         JSON.stringify(filter.tags ?? []),
+        filter.triggerId ?? null,
       )
       .toArray()
       .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));

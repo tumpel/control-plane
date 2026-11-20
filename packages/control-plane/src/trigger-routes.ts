@@ -36,8 +36,8 @@ export const syncRoutes = async (env: Env, tenantId: string): Promise<void> => {
     ...triggers.flatMap((trigger) => [
       db
         .prepare("INSERT INTO trigger_routes (trigger_id, tenant_id, source, event) VALUES (?, ?, ?, ?)")
-        .bind(trigger.triggerId, tenantId, trigger.source, trigger.event),
-      ...conditionRows(trigger.conditions).map((row) =>
+        .bind(trigger.triggerId, tenantId, trigger.source.kind, trigger.source.event),
+      ...conditionRows(trigger.source.conditions).map((row) =>
         db
           .prepare("INSERT INTO trigger_route_conditions (trigger_id, position, field, value) VALUES (?, ?, ?, ?)")
           .bind(trigger.triggerId, row.position, row.field, row.value),

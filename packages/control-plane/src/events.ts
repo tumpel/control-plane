@@ -20,6 +20,7 @@ const read = async (env: Env, caller: Caller, query: EventQuery, afterEventId: n
     afterEventId,
     events: query.event ?? [],
     sessionId: query.sessionId ?? null,
+    triggerId: query.triggerId ?? null,
     waitSeconds: 0,
   });
   if (listed.kind === "Read") return { kind: "Read", page: listed.page };
@@ -39,6 +40,7 @@ const subscriptionOf = (caller: Caller, query: EventQuery, cursor: number): Subs
   cursor,
   events: query.event ?? [],
   sessionId: query.sessionId ?? null,
+  triggerId: query.triggerId ?? null,
 });
 
 const openChannel = (env: Env, subscription: Subscription): Promise<Response> =>
@@ -123,6 +125,7 @@ export const handleEvents = async (
     afterEventId: number("afterEventId"),
     event: events.length > 0 ? events : undefined,
     sessionId: url.searchParams.get("sessionId") ?? undefined,
+    triggerId: url.searchParams.get("triggerId") ?? undefined,
     waitSeconds: number("waitSeconds"),
   });
   if (!query.success) {

@@ -245,14 +245,14 @@ export const changeOf = (step: Step): ConfigChange => {
         action: "Create",
         resource: "Trigger",
         name: step.trigger.name,
-        description: `create trigger ${step.trigger.name} on ${step.trigger.source} ${step.trigger.event} starting persona ${step.trigger.personaName}`,
+        description: `create trigger ${step.trigger.name} on ${step.trigger.source.kind} ${step.trigger.source.event} starting persona ${step.trigger.personaName}`,
       };
     case "UpdateTrigger":
       return {
         action: "Update",
         resource: "Trigger",
         name: step.trigger.name,
-        description: `update trigger ${step.trigger.name} (${step.triggerId}) on ${step.trigger.source} ${step.trigger.event} starting persona ${step.trigger.personaName}`,
+        description: `update trigger ${step.trigger.name} (${step.triggerId}) on ${step.trigger.source.kind} ${step.trigger.source.event} starting persona ${step.trigger.personaName}`,
       };
     case "DeleteTrigger":
       return {
@@ -450,12 +450,12 @@ const planHosts = (desired: ConfigHost[], live: HostRecord[], steps: Step[], pro
 
 const triggerShape = (trigger: ConfigTrigger): string =>
   JSON.stringify([
-    trigger.source,
-    trigger.event,
+    trigger.source.kind,
+    trigger.source.event,
     trigger.personaName,
     trigger.model,
     trigger.prompt,
-    conditionRows(trigger.conditions).sort(
+    conditionRows(trigger.source.conditions).sort(
       (left, right) => left.position - right.position || left.value.localeCompare(right.value),
     ),
   ]);

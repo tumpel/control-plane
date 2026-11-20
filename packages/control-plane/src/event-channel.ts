@@ -10,6 +10,7 @@ const SubscriptionSchema = z.object({
   cursor: z.int(),
   events: z.array(TenantEventTypeSchema),
   sessionId: z.string().nullable(),
+  triggerId: z.string().nullable().default(null),
 });
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 
@@ -23,7 +24,8 @@ export const channelUrl = (subscription: Subscription): string => {
 
 export const matches = (subscription: Subscription, event: NewTenantEvent): boolean =>
   (subscription.events.length === 0 || subscription.events.includes(event.event)) &&
-  (subscription.sessionId === null || ("sessionId" in event && event.sessionId === subscription.sessionId));
+  (subscription.sessionId === null || ("sessionId" in event && event.sessionId === subscription.sessionId)) &&
+  (subscription.triggerId === null || ("triggerId" in event && event.triggerId === subscription.triggerId));
 
 export class EventChannel extends DurableObject<Env> {
   private delivering: Promise<void> = Promise.resolve();
@@ -72,6 +74,7 @@ export class EventChannel extends DurableObject<Env> {
         afterEventId: cursor,
         events: [],
         sessionId: null,
+        triggerId: null,
         waitSeconds: 0,
       });
       if (listed.kind === "CursorExpired") {

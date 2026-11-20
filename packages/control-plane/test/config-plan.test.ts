@@ -448,12 +448,14 @@ test("an update to a persona keeps the tumpel MCP setting the config cannot expr
 test("triggers plan by name: create, keep when only the condition rows reorder, update, delete, and stay when left out", () => {
   const review = {
     name: "review",
-    source: "GitHub" as const,
-    event: "status" as const,
-    conditions: [
-      { field: "state", values: ["pending", "error"] },
-      { field: "context", values: ["agent-review"] },
-    ],
+    source: {
+      kind: "GitHub" as const,
+      event: "status" as const,
+      conditions: [
+        { field: "state", values: ["pending", "error"] },
+        { field: "context", values: ["agent-review"] },
+      ],
+    },
     personaName: "Default",
     model: "claude-test",
     prompt: "Review {{sha}}",
@@ -462,12 +464,14 @@ test("triggers plan by name: create, keep when only the condition rows reorder, 
     triggerId: "g1",
     tenantId: "t1",
     name: "review",
-    source: "GitHub" as const,
-    event: "status" as const,
-    conditions: [
-      { field: "state", values: ["error", "pending"] },
-      { field: "context", values: ["agent-review"] },
-    ],
+    source: {
+      kind: "GitHub" as const,
+      event: "status" as const,
+      conditions: [
+        { field: "state", values: ["error", "pending"] },
+        { field: "context", values: ["agent-review"] },
+      ],
+    },
     personaId: "p1",
     model: "claude-test",
     prompt: "Review {{sha}}",

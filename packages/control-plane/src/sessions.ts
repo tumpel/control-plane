@@ -33,10 +33,12 @@ import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
+import type { StoredPersona } from "./persona-files.ts";
 import type { Unplaceable } from "./placement.ts";
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
+import type { SecretSetRead } from "./tenant.ts";
 import { tenantApi } from "./tenant-api.ts";
 import {
   type CredentialHandover,
@@ -45,8 +47,8 @@ import {
   type Session,
   type SessionFilter,
   type SessionStart,
+  type SessionStarted,
   type Snapshot,
-  type Started,
   type StartedSession,
   type StartedSessionFromIssue,
   type StopFailure,
@@ -235,7 +237,45 @@ const personaNotFound = (personaId: string): Refused =>
     fix: "List your personas and start with one of their ids",
   });
 
-export type PreparedStart = Omit<NewSession, "startedBy">;
+export interface StartCheck {
+  personaId: string;
+  persona: StoredPersona | null;
+  pins: readonly { harness: string; harnessVersion: string }[];
+  secretSet: (persona: StoredPersona) => SecretSetRead;
+  model: string;
+  operation: string;
+  now: number;
+}
+
+export const checkStart = (check: StartCheck): Outcome<HarnessCatalogEntry> => {
+  const { persona } = check;
+  if (persona === null) return personaNotFound(check.personaId);
+  const entry = pinnedEntry(check.pins, persona.harness);
+  if (entry === undefined) {
+    return refuse(422, {
+      code: "HarnessNotInCatalog",
+      title: "Harness not in the catalog",
+      detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
+      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
+    });
+  }
+  const read = check.secretSet(persona);
+  if (read.kind === "NotFound") {
+    throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
+  }
+  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet(check.operation, read));
+  const { secretSet } = read;
+  const credential = checkModelCredential(entry, secretSet.keys, check.model, check.now);
+  if (credential.kind !== "Usable") {
+    return credentialRefused(
+      credential,
+      `secret set ${secretSet.name} of persona ${persona.name}`,
+      persona.harness,
+      "start again",
+    );
+  }
+  return ok(entry);
+};
 
 export const startable = async (
   env: Env,
@@ -248,84 +288,37 @@ export const startable = async (
   const tenant = tenantApi(env.TENANT, tenantId);
   const { persona } = await tenant.call("getPersona", { tenantId, personaId });
   if (persona === null) return personaNotFound(personaId);
-  const entry = pinnedEntry((await tenant.call("listPins", {})).pins, persona.harness);
-  if (entry === undefined) {
-    return refuse(422, {
-      code: "HarnessNotInCatalog",
-      title: "Harness not in the catalog",
-      detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
-      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
-    });
-  }
+  const { pins } = await tenant.call("listPins", {});
   const { read } = await tenant.call("getSecretSet", { tenantId, secretSetId: persona.secretSetId });
-  if (read.kind === "NotFound") {
-    throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
-  }
-  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet(operation, read));
-  const { secretSet } = read;
-  const credential = checkModelCredential(entry, secretSet.keys, model, now);
-  if (credential.kind !== "Usable") {
-    return credentialRefused(
-      credential,
-      `secret set ${secretSet.name} of persona ${persona.name}`,
-      persona.harness,
-      "start again",
-    );
-  }
-  return ok(entry);
+  return checkStart({ personaId, persona, pins, secretSet: () => read, model, operation, now });
 };
 
-const tooManyTags = async (env: Env, caller: Caller, tags: string[] | undefined): Promise<Refused | null> => {
-  if (caller.origin.kind !== "Turn") return null;
-  const { subscriptions } = await tenantApi(env.TENANT, caller.tenantId).call("listSubscriptions", {
-    tenantId: caller.tenantId,
-    filter: { sessionId: caller.origin.sessionId, state: "Active" },
-  });
-  const all = [...new Set([...subscriptions.flatMap((subscription) => subscription.crewTags), ...(tags ?? [])])];
-  if (all.length <= SESSION_TAG_LIMIT) return null;
-  return refuse(422, {
-    code: "InvalidRequest",
-    title: "Too many tags",
-    detail: `the crew session would carry ${all.length} tags, its own and the crew tags of session ${caller.origin.sessionId}'s active subscriptions: ${all.sort().join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
-    fix: `Start the session with ${all.length - SESSION_TAG_LIMIT} fewer tags of its own`,
-  });
+export const startTarget = (repository: string): Outcome<string> => {
+  const target = githubRepository(repository);
+  return target === null ? refuse(422, notARepository(repository)) : ok(repositoryUrl(target));
 };
 
-export const prepareStart = async (
-  env: Env,
-  tenantId: string,
-  principalId: string,
-  start: SessionStart,
-  endpoint: string,
-  now: number,
-): Promise<Outcome<PreparedStart>> => {
-  const target = githubRepository(start.repository);
-  if (target === null) return refuse(422, notARepository(start.repository));
-  const checked = await startable(env, tenantId, start.personaId, start.model, "sessions.start", now);
-  if (!checked.ok) return checked;
-  const entry = checked.value;
-  return ok({
-    principalId,
-    hosts: await listHosts(env.DB, tenantId),
-    harness: entry.harness,
-    harnessVersion: entry.harnessVersion,
-    endpoint,
-    start: { ...start, repository: repositoryUrl(target) },
-  });
-};
-
-const prepareCallerStart = async (
+const prepareStart = async (
   env: Env,
   caller: Caller,
   start: SessionStart,
   endpoint: string,
   now: number,
 ): Promise<Outcome<NewSession>> => {
-  const tags = await tooManyTags(env, caller, start.tags);
-  if (tags !== null) return tags;
-  const prepared = await prepareStart(env, caller.tenantId, caller.principalId, start, endpoint, now);
-  if (!prepared.ok) return prepared;
-  return ok({ ...prepared.value, startedBy: caller.origin });
+  const repository = startTarget(start.repository);
+  if (!repository.ok) return repository;
+  const checked = await startable(env, caller.tenantId, start.personaId, start.model, "sessions.start", now);
+  if (!checked.ok) return checked;
+  const entry = checked.value;
+  return ok({
+    principalId: caller.principalId,
+    startedBy: caller.origin,
+    hosts: await listHosts(env.DB, caller.tenantId),
+    harness: entry.harness,
+    harnessVersion: entry.harnessVersion,
+    endpoint,
+    start: { ...start, repository: repository.value },
+  });
 };
 
 const connectorDisconnected = (names: string[]): Refused =>
@@ -336,11 +329,19 @@ const connectorDisconnected = (names: string[]): Refused =>
     fix: DISCONNECTED_FIX,
   });
 
-export const placed = <T>(started: Started<T>): Outcome<T> => {
+export const placed = <T>(started: SessionStarted<T>): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
   if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
   if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
+  if (started.kind === "TagsOverLimit") {
+    return refuse(422, {
+      code: "InvalidRequest",
+      title: "Too many tags",
+      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that started it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
+      fix: `Start the session with ${started.tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+    });
+  }
   return ok(started.started);
 };
 
@@ -351,7 +352,7 @@ export const startSession = async (
   endpoint: string,
   now: number,
 ): Promise<Outcome<StartedSession>> => {
-  const prepared = await prepareCallerStart(env, caller, start, endpoint, now);
+  const prepared = await prepareStart(env, caller, start, endpoint, now);
   if (!prepared.ok) return prepared;
   return placed(
     (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
@@ -429,7 +430,7 @@ export const startSessionFromIssue = async (
     issue: { number: issue.number, title: issue.title, body: issue.body ?? "", url: issue.html_url },
     branch,
   });
-  const prepared = await prepareCallerStart(
+  const prepared = await prepareStart(
     env,
     caller,
     { personaId: start.personaId, repository: repositoryUrl(target), model: start.model, prompt, tags: start.tags },
@@ -460,10 +461,8 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
-  const { sessions } = await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter });
-  const { triggerId } = query;
-  if (triggerId === undefined) return ok(sessions);
-  return ok(sessions.filter(({ startedBy }) => startedBy.kind === "Trigger" && startedBy.triggerId === triggerId));
+  if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
+  return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
 };
 
 export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
@@ -733,6 +732,7 @@ export const waitTurns = async (
   const { listed } = await tenant.call("listEvents", {
     tenantId,
     afterEventId: null,
+    triggerId: null,
     events: [],
     sessionId: null,
     waitSeconds: 0,
@@ -747,6 +747,7 @@ export const waitTurns = async (
     cursor: listed.page.lastEventId,
     events: ["TurnCompleted" as const, "TurnFailed" as const],
     sessionId: null,
+    triggerId: null,
   };
   await waitOnChannel(env, subscription, timeoutSeconds, (event) => turnIds.includes(String(event.turnId)));
   const next = (await read()).waited;

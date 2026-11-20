@@ -12,7 +12,7 @@ import { json, noContent, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
 import { ownerRequired } from "./members.ts";
-import { prepareStart, startable } from "./sessions.ts";
+import { startable, startTarget } from "./sessions.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { Trigger } from "./tenant-triggers.ts";
 import { fillPrompt, verdicts } from "./trigger-match.ts";
@@ -134,7 +134,7 @@ const remove = async (env: Env, caller: Caller, triggerId: string): Promise<Resp
 };
 
 const tryOn = (trigger: TriggerCreate, payload: unknown): TriggerTestResult => {
-  const conditions = verdicts(trigger.conditions, payload);
+  const conditions = verdicts(trigger.source.conditions, payload);
   return TriggerTestResultSchema.parse({
     matched: conditions.every((condition) => condition.holds),
     conditions,
@@ -195,34 +195,20 @@ const refusal = (refused: Refused): Fired => ({
   refusal: { code: refused.problem.code, detail: `${refused.problem.detail}. ${refused.problem.fix}` },
 });
 
-const startOf = async (
-  env: Env,
-  trigger: Trigger,
-  payload: unknown,
-  repository: string,
-  endpoint: string,
-  now: number,
-): Promise<Fired> => {
+const matchedOf = (trigger: Trigger, payload: unknown, repository: string): Fired => {
   const { prompt, missingFields } = fillPrompt(trigger.prompt, payload);
   if (missingFields.length > 0) {
     return {
       kind: "Refused",
       refusal: {
         code: "TriggerFieldMissing",
-        detail: `the ${trigger.event} event lacks ${missingFields.join(", ")}, which the prompt of trigger ${trigger.name} names. Test the trigger on a payload of the event and fix the placeholder`,
+        detail: `the ${trigger.source.event} event lacks ${missingFields.join(", ")}, which the prompt of trigger ${trigger.name} names. Test the trigger on a payload of the event and fix the placeholder`,
       },
     };
   }
-  const prepared = await prepareStart(
-    env,
-    trigger.tenantId,
-    trigger.principalId,
-    { personaId: trigger.personaId, repository, model: trigger.model, prompt },
-    endpoint,
-    now,
-  );
-  if (!prepared.ok) return refusal(prepared);
-  return { kind: "Start", session: prepared.value };
+  const target = startTarget(repository);
+  if (!target.ok) return refusal(target);
+  return { kind: "Matched", repository: target.value, prompt };
 };
 
 export interface Delivery {
@@ -231,7 +217,6 @@ export interface Delivery {
   deliveryId: string;
   repository: string;
   payload: unknown;
-  endpoint: string;
 }
 
 export const fireTriggers = async (env: Env, delivery: Delivery): Promise<void> => {
@@ -243,10 +228,8 @@ export const fireTriggers = async (env: Env, delivery: Delivery): Promise<void> 
       await syncRoutes(env, tenantId);
       continue;
     }
-    const now = Date.now();
-    const fired = await startOf(env, trigger, delivery.payload, delivery.repository, delivery.endpoint, now);
-    const origin = { kind: "Trigger" as const, triggerId, deliveryId };
-    const answer = await tenant.call("triggerFired", { tenantId, origin, fired, now });
+    const fired = matchedOf(trigger, delivery.payload, delivery.repository);
+    const answer = await tenant.call("triggerFired", { tenantId, triggerId, deliveryId, fired, now: Date.now() });
     if (answer.fired.kind === "NotFound") await syncRoutes(env, tenantId);
   }
 };
