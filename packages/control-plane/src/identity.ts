@@ -7,7 +7,7 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
-import { type LiveTurn, turnTokenLive, verifyTurnToken } from "./turn-token.ts";
+import { verifyTurnToken } from "./turn-token.ts";
 
 export type Whoami = z.infer<typeof WhoamiSchema>;
 export type Membership = z.infer<typeof MembershipSchema>;
@@ -159,11 +159,12 @@ export const callerForTurnToken = async (
   key: CryptoKey,
   token: string,
   now: number,
-  readTurn: (tenantId: string, turnId: string) => Promise<LiveTurn | null>,
+  readTurn: (tenantId: string, turnId: string) => Promise<{ sessionId: string; state: string } | null>,
 ): Promise<Caller | null> => {
   const claims = await verifyTurnToken(key, token, now);
   if (claims === null) return null;
-  if (!turnTokenLive(claims, await readTurn(claims.tenantId, claims.turnId))) return null;
+  const turn = await readTurn(claims.tenantId, claims.turnId);
+  if (turn?.state !== "Running" || turn.sessionId !== claims.sessionId) return null;
   const membership = await db
     .prepare("SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?")
     .bind(claims.tenantId, claims.principalId)

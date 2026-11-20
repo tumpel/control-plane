@@ -3,11 +3,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { SqlValue } from "../src/metrics-store.ts";
-import { drainPersonaFileCleanups, recordPersonaFileCleanups } from "../src/persona-file-cleanups.ts";
+import { drainObjectCleanups, recordObjectCleanups } from "../src/object-cleanups.ts";
 
 const MIGRATIONS = new URL("../migrations/tenant/", import.meta.url);
 
-test("a failed blob delete leaves its cleanup for the next drain, and a held digest is never deleted", async () => {
+test("a drain deletes every batch, keeps what a failed delete left for the next drain, and never deletes a held object", async () => {
   const db = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
   for (const name of readdirSync(MIGRATIONS).sort()) db.exec(readFileSync(new URL(name, MIGRATIONS), "utf8"));
   const sql = {
@@ -40,19 +40,26 @@ test("a failed blob delete leaves its cleanup for the next drain, and a held dig
       deleted.push(keys);
     },
   };
-  recordPersonaFileCleanups(sql, ["held", "steered", "gone"]);
-
-  await assert.rejects(drainPersonaFileCleanups(sql, store, "tnt"), /object storage is down/);
-  assert.deepEqual(
-    db
-      .prepare("SELECT digest FROM persona_file_cleanups")
-      .all()
-      .map((row) => row.digest),
-    ["gone"],
+  const transcripts = Array.from(
+    { length: 1001 },
+    (_, index) => `tnt/ses/transcript/${String(index).padStart(4, "0")}`,
   );
+  recordObjectCleanups(sql, [
+    "tnt/persona-files/held",
+    "tnt/persona-files/steered",
+    "tnt/persona-files/gone",
+    ...transcripts,
+  ]);
+
+  await assert.rejects(drainObjectCleanups(sql, store, "tnt"), /object storage is down/);
+  assert.equal(db.prepare("SELECT count(*) AS left FROM object_cleanups").get()?.left, 1002);
 
   failing = false;
-  await drainPersonaFileCleanups(sql, store, "tnt");
-  assert.deepEqual(deleted, [["tnt/persona-files/gone"]]);
-  assert.deepEqual(db.prepare("SELECT digest FROM persona_file_cleanups").all(), []);
+  await drainObjectCleanups(sql, store, "tnt");
+  assert.deepEqual(
+    deleted.map((keys) => keys.length),
+    [1000, 2],
+  );
+  assert.deepEqual(deleted.flat().sort(), ["tnt/persona-files/gone", ...transcripts].sort());
+  assert.deepEqual(db.prepare("SELECT storage_key FROM object_cleanups").all(), []);
 });

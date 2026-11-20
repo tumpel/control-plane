@@ -16,8 +16,8 @@ import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import { drainPersonaFileCleanups, recordPersonaFileCleanups } from "./persona-file-cleanups.ts";
-import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import { drainObjectCleanups, recordObjectCleanups } from "./object-cleanups.ts";
+import { personaFileKey, type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
   type MemberUpdate,
   memberWith,
@@ -193,6 +193,7 @@ export class Tenant extends TenantConnectors {
     );
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
+    this.drainObjects();
     return response;
   }
 
@@ -201,6 +202,11 @@ export class Tenant extends TenantConnectors {
     await this.armExpiry();
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
+    this.drainObjects();
+  }
+
+  private drainObjects(): void {
+    this.ctx.waitUntil(drainObjectCleanups(this.ctx.storage.sql, this.env.STORE, this.tenantName()));
   }
 
   private tenantName(): string {
@@ -762,14 +768,14 @@ export class Tenant extends TenantConnectors {
     return { ok: true, value: written.value ? this.getPersona(tenantId, personaId) : null };
   }
 
-  private personaDigests(personaIds: string[]): string[] {
+  private personaFileKeys(tenantId: string, personaIds: string[]): string[] {
     return this.ctx.storage.sql
       .exec<{ digest: string }>(
         "SELECT DISTINCT digest FROM persona_files WHERE persona_id IN (SELECT value FROM json_each(?))",
         JSON.stringify(personaIds),
       )
       .toArray()
-      .map((row) => row.digest);
+      .map((row) => personaFileKey(tenantId, row.digest));
   }
 
   protected async deletePersona(tenantId: string, personaId: string): Promise<PersonaDeleted> {
@@ -783,13 +789,12 @@ export class Tenant extends TenantConnectors {
       .map((row) => row.session_id);
     if (sessions.length > 0) return { kind: "InUse", sessions };
     const deleted = this.ctx.storage.transactionSync(() => {
-      recordPersonaFileCleanups(sql, this.personaDigests([personaId]));
+      recordObjectCleanups(sql, this.personaFileKeys(tenantId, [personaId]));
       return (
         sql.exec("DELETE FROM personas WHERE tenant_id = ? AND persona_id = ?", tenantId, personaId).rowsWritten > 0
       );
     });
     if (!deleted) return { kind: "NotFound" };
-    await drainPersonaFileCleanups(sql, this.env.STORE, tenantId);
     return { kind: "Deleted" };
   }
 
@@ -1198,15 +1203,17 @@ export class Tenant extends TenantConnectors {
     if (deleted !== null) return { kind: "Deleted", resource: deleted };
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
-        recordPersonaFileCleanups(
+        recordObjectCleanups(
           this.ctx.storage.sql,
-          this.personaDigests(writes.flatMap((write) => (write.kind === "DeletePersona" ? [write.personaId] : []))),
+          this.personaFileKeys(
+            tenantId,
+            writes.flatMap((write) => (write.kind === "DeletePersona" ? [write.personaId] : [])),
+          ),
         );
         for (const write of writes) this.writeConfig(tenantId, write, sealed, now);
       }),
     );
     if (!written.ok) return { kind: "Conflict", constraint: written.constraint };
-    await drainPersonaFileCleanups(this.ctx.storage.sql, this.env.STORE, tenantId);
     return { kind: "Applied" };
   }
 

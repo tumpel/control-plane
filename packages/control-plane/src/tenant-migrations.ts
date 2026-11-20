@@ -76,7 +76,7 @@ import tenant0075 from "../migrations/tenant/0075_steers.sql";
 import tenant0076 from "../migrations/tenant/0076_session_tags.sql";
 import tenant0077 from "../migrations/tenant/0077_session_origins.sql";
 import tenant0078 from "../migrations/tenant/0078_subscriptions.sql";
-import tenant0079 from "../migrations/tenant/0079_persona_file_cleanups.sql";
+import tenant0079 from "../migrations/tenant/0079_object_cleanups.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -158,5 +158,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0076_session_tags", sql: tenant0076 },
   { name: "0077_session_origins", sql: tenant0077 },
   { name: "0078_subscriptions", sql: tenant0078 },
-  { name: "0079_persona_file_cleanups", sql: tenant0079 },
+  { name: "0079_object_cleanups", sql: tenant0079 },
 ];

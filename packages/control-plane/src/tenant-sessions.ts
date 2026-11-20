@@ -85,7 +85,7 @@ import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
-import { drainPersonaFileCleanups, recordPersonaFileCleanups } from "./persona-file-cleanups.ts";
+import { recordObjectCleanups } from "./object-cleanups.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
@@ -2404,27 +2404,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
-    const keys = sql
-      .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
-      .toArray()
-      .map((row) => row.storage_key);
     this.ctx.storage.transactionSync(() => {
-      recordPersonaFileCleanups(
-        sql,
-        sql
+      recordObjectCleanups(sql, [
+        ...sql
+          .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
+          .toArray()
+          .map((row) => row.storage_key),
+        ...sql
           .exec<{ digest: string }>(
             "SELECT DISTINCT digest FROM turn_steer_settings WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?)",
             sessionId,
           )
           .toArray()
-          .map((row) => row.digest),
-      );
+          .map((row) => personaFileKey(tenantId, row.digest)),
+      ]);
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
-    await drainPersonaFileCleanups(sql, this.env.STORE, tenantId);
-    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
-      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
-    }
     return { kind: "Deleted" };
   }
 

@@ -36,6 +36,7 @@ import {
   StartedSessionFromIssueSchema,
   StartedSessionSchema,
   StopFailureSchema,
+  SubscriptionSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
   TurnFailureSchema,
@@ -1894,6 +1895,143 @@ suite("sessions", { concurrency: 8 }, () => {
       ProblemSchema.parse(await codex.json()).detail,
       /runs Codex, which takes no goal; ClaudeCode takes one$/,
     );
+  });
+
+  test("a foreman subscribed to its crew gets each crew turn as a delivery turn until its goal is met, and a turn token dies with its turn", async () => {
+    const { bearer, host, getJson, tool, storedSnapshot, sessionStart } = await tenant();
+    const [defaults] = await getJson("/v1/personas", PersonaSchema.array());
+    const created = await postJson(
+      "/v1/personas",
+      { name: "Foreman", harness: "ClaudeCode", secretSetId: defaults?.secretSetId, connectorIds: [], tumpelMcp: true },
+      bearer,
+    );
+    assert.equal(created.status, 200, await created.clone().text());
+    const start = await sessionStart("Foreman");
+    const asTurn = async (token: string, name: string, args: Record<string, unknown>) => {
+      mcpId += 1;
+      const response = await postJson(
+        "/mcp",
+        { jsonrpc: "2.0", id: mcpId, method: "tools/call", params: { name, arguments: args } },
+        { authorization: `Bearer ${token}` },
+      );
+      return { status: response.status, text: await response.text() };
+    };
+    const turnToken = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<string> => {
+      const connector = offer.credential.connectors.find((each) => each.connectorId === "tumpel");
+      assert.ok(connector, `turn ${offer.turnId} carries no tumpel connector`);
+      const served = await call(new URL(connector.tokenUrl).pathname, {
+        method: "POST",
+        headers: { authorization: `Bearer ${connector.tokenCredential}` },
+      });
+      assert.equal(served.status, 200, await served.clone().text());
+      return z.object({ accessToken: z.string() }).parse(await served.json()).accessToken;
+    };
+    const finish = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<void> => {
+      const result = '{"type":"result","subtype":"success","is_error":false}';
+      host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: offer.lastLineSeq + 1, text: result });
+      host.send({
+        type: "TurnComplete",
+        turnId: offer.turnId,
+        lastLineSeq: offer.lastLineSeq + 1,
+        completedAt: new Date().toISOString(),
+      });
+      await storedSnapshot(offer.sessionId);
+      await until(
+        `turn ${offer.turnId} reading Completed`,
+        () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
+        (turn) => turn.state === "Completed",
+      );
+    };
+
+    const foreman = await tool(
+      "tumpel_session_start",
+      { ...start, prompt: "work through the open issues" },
+      StartedSessionSchema,
+    );
+    const foremanId = foreman.session.sessionId;
+    const subscription = await tool(
+      "tumpel_subscription_create",
+      {
+        sessionId: foremanId,
+        prompt: "start a crew session per open issue and review what it did",
+        goal: "every open issue has a merged pull request",
+        events: ["TurnCompleted"],
+        crewTags: ["crew:issues"],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      SubscriptionSchema,
+    );
+    assert.equal(subscription.state, "Active");
+
+    const foremanTurn = await host.next("TurnOffer");
+    assert.equal(foremanTurn.sessionId, foremanId);
+    host.send({ type: "TurnClaim", turnId: foremanTurn.turnId, boxId: foremanTurn.boxId });
+    await until(
+      "the foreman turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: foremanTurn.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const foremanToken = await turnToken(foremanTurn);
+    const crewStart = await asTurn(foremanToken, "tumpel_session_start", {
+      ...start,
+      prompt: "fix issue 12",
+      tags: ["issue-12"],
+    });
+    const crew = StartedSessionSchema.parse(
+      JSON.parse(
+        z
+          .object({ result: z.object({ content: z.array(z.object({ text: z.string() })) }) })
+          .parse(JSON.parse(crewStart.text)).result.content[0]?.text ?? "",
+      ),
+    );
+    assert.deepEqual(crew.session.tags, ["crew:issues", "issue-12"]);
+    assert.deepEqual(crew.session.startedBy, { kind: "Turn", sessionId: foremanId, turnId: foremanTurn.turnId });
+    await finish(foremanTurn);
+    const afterTurn = await asTurn(foremanToken, "tumpel_whoami", {});
+    assert.equal(afterTurn.status, 401, `a token of a completed turn still answered ${afterTurn.text}`);
+
+    const crewTurn = await host.next("TurnOffer");
+    assert.equal(crewTurn.sessionId, crew.session.sessionId);
+    host.send({ type: "TurnClaim", turnId: crewTurn.turnId, boxId: crewTurn.boxId });
+    await until(
+      "the crew turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: crewTurn.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const crewToken = await turnToken(crewTurn);
+    const refused = await asTurn(crewToken, "tumpel_subscription_resume", {
+      subscriptionId: subscription.subscriptionId,
+    });
+    assert.match(refused.text, /only a person creates or resumes a subscription/);
+    await finish(crewTurn);
+
+    const delivery = await host.next("TurnOffer");
+    assert.equal(delivery.sessionId, foremanId);
+    assert.ok(delivery.credential.connectors.some((connector) => connector.connectorId === "tumpel"));
+    assert.match(delivery.prompt, /^\/goal start a crew session per open issue and review what it did\n\n/);
+    const events = delivery.prompt
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => TenantEventSchema.parse(JSON.parse(line)));
+    assert.deepEqual(
+      events.map((event) => [event.event, "sessionId" in event ? event.sessionId : null]),
+      [["TurnCompleted", crew.session.sessionId]],
+    );
+    host.send({ type: "TurnClaim", turnId: delivery.turnId, boxId: delivery.boxId });
+    await finish(delivery);
+    const delivered = await tool(
+      "tumpel_subscription_get",
+      { subscriptionId: subscription.subscriptionId },
+      SubscriptionSchema,
+    );
+    assert.equal(delivered.cursorEventId, events[0]?.eventId);
+
+    const completed = await tool(
+      "tumpel_subscription_complete",
+      { subscriptionId: subscription.subscriptionId },
+      SubscriptionSchema,
+    );
+    assert.equal(completed.state === "Ended" ? completed.reason : completed.state, "GoalMet");
   });
 
   test("a stop with cancelTurn fails the running turn Cancelled, snapshots and frees its box, and the next send boots a fresh box", async () => {
