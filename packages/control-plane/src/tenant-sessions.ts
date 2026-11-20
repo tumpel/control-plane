@@ -1921,8 +1921,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
     if (image.kind === "ReleaseUnreadable") return image;
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    const tags = this.startTags(input.startedBy, start.tags ?? []);
-    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
     const uses = personaConnectorUses(this.ctx.storage.sql, start.personaId);
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
@@ -1937,6 +1935,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.heldBoxes(),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    const tags = this.startTags(input.startedBy, start.tags ?? []);
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,

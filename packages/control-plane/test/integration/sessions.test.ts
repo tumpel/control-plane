@@ -1972,6 +1972,12 @@ suite("sessions", { concurrency: 8 }, () => {
       (turn) => turn.state === "Running",
     );
     const foremanToken = await turnToken(foremanTurn);
+    const overLimit = await asTurn(foremanToken, "tumpel_session_start", {
+      ...start,
+      prompt: "too many tags",
+      tags: Array.from({ length: 16 }, (_, index) => `own-${index}`),
+    });
+    assert.match(overLimit.text, /would carry 17 tags, its own and the crew tags it inherits/);
     const crewStart = await asTurn(foremanToken, "tumpel_session_start", {
       ...start,
       prompt: "fix issue 12",

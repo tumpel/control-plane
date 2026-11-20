@@ -332,16 +332,16 @@ const connectorDisconnected = (names: string[]): Refused =>
 export const placed = <T>(started: SessionStarted<T>): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
-  if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
-  if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
   if (started.kind === "TagsOverLimit") {
     return refuse(422, {
       code: "InvalidRequest",
       title: "Too many tags",
-      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that started it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
+      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that starts it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
       fix: `Start the session with ${started.tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
     });
   }
+  if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
+  if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
   return ok(started.started);
 };
 
