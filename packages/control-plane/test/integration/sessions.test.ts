@@ -2328,7 +2328,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(host.holds("TurnOffer"), false);
   });
 
-  test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
+  test("a stop whose teardown the host refuses returns to Idle and becomes evictable after its recovery snapshot", async () => {
     const { tenantId, host, getJson, tool, sessionStart } = await tenant();
     const started = await tool(
       "tumpel_session_start",
