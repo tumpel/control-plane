@@ -2703,11 +2703,11 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await tenantSql(tenantId, "SELECT digest FROM chunks WHERE digest = ?", one), []);
   });
 
-  test("a snapshot whose manifest lists 80000 chunks is stored and records every chunk", async () => {
+  test("a snapshot whose manifest lists 140000 chunks, too many for one bound SQLite value, is stored and records every chunk", async () => {
     const { host, tool, completedTurn } = await tenant();
     const { offer } = await completedTurn("snapshot a large tree");
     const request = await host.next("SnapshotRequest");
-    const digests = Array.from({ length: 80_000 }, (_, index) =>
+    const digests = Array.from({ length: 140_000 }, (_, index) =>
       createHash("sha256").update(String(index)).digest("hex"),
     );
     await storeRoot(request.storageKey, digests);
@@ -2724,7 +2724,7 @@ suite("sessions", { concurrency: 8 }, () => {
         "SELECT count(*) AS recorded FROM snapshot_manifest_chunks WHERE snapshot_id = ?",
         request.snapshotId,
       ),
-      [{ recorded: 80_001 }],
+      [{ recorded: 140_001 }],
     );
     host.assertOpen("after the large snapshot");
   });
@@ -2741,6 +2741,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
     const refused = await host.refusal();
     assert.equal(refused.seq, host.carried().sent);
+    assert.ok((await storedTimers(request.sessionId))?.deadlines.SnapshotAnswer);
     assert.match(
       refused.reason,
       new RegExp(`failed to handle SnapshotDone: pack ${lost} .* is gone from object storage`),

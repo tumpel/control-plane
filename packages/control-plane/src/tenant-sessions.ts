@@ -433,7 +433,7 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
-const MANIFEST_DIGEST_BATCH = 10_000;
+const MANIFEST_BATCH_BYTES = 1_000_000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
@@ -2460,13 +2460,26 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private recordManifest(snapshotId: string, digests: string[]): void {
-    for (let start = 0; start < digests.length; start += MANIFEST_DIGEST_BATCH) {
+    const insert = (batch: string[]): void => {
       this.ctx.storage.sql.exec(
         "INSERT OR IGNORE INTO snapshot_manifest_chunks (snapshot_id, digest) SELECT ?1, value FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM snapshots WHERE snapshot_id = ?1)",
         snapshotId,
-        JSON.stringify(digests.slice(start, start + MANIFEST_DIGEST_BATCH)),
+        JSON.stringify(batch),
       );
+    };
+    let batch: string[] = [];
+    let bytes = 2;
+    for (const digest of digests) {
+      const size = JSON.stringify(digest).length + 1;
+      if (batch.length > 0 && bytes + size > MANIFEST_BATCH_BYTES) {
+        insert(batch);
+        batch = [];
+        bytes = 2;
+      }
+      batch.push(digest);
+      bytes += size;
     }
+    if (batch.length > 0) insert(batch);
   }
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
@@ -4085,8 +4098,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} answered snapshot ${message.snapshotId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
-    await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
     if (message.type === "SnapshotFailed") {
+      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
       await this.prebuildUnstored(tenantId, session, detail);
@@ -4099,6 +4112,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return null;
     }
     if ((await this.env.STORE.head(request.storage_key)) === null) {
+      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
       this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
       await this.prebuildUnstored(tenantId, session, detail);
@@ -4142,6 +4156,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       releaseConnectorCredentials(sql);
       return this.takeNextWaiting(request.session_id, now);
     });
+    await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
     await this.prebuildStored(tenantId, request, message.uploadedBytes, now);
     const completed = this.sessionRow(session.session_id);
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
