@@ -12,8 +12,16 @@ export class Tenant extends BaseTenant {
 }
 
 export class TenantMetrics extends BaseTenantMetrics {
-  series(): Record<string, SqlStorageValue>[] {
-    return this.ctx.storage.sql.exec("SELECT metric, dimensions FROM series").toArray();
+  private readonly written: AnalyticsEngineDataPoint[] = [];
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    const written: AnalyticsEngineDataPoint[] = [];
+    super(ctx, { ...env, METRICS: { writeDataPoint: (point) => written.push(point ?? {}) } });
+    this.written = written;
+  }
+
+  series(): { metric: unknown; dimensions: unknown }[] {
+    return this.written.map(({ blobs }) => ({ metric: blobs?.[0], dimensions: blobs?.[1] }));
   }
 }
 

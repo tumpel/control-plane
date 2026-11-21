@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { test } from "node:test";
 import type { MetricBatch } from "../../src/metrics-store.ts";
-import { R2Bucket, Runtime } from "./harness/runtime.ts";
+import { Runtime } from "./harness/runtime.ts";
 
 register("./harness/hooks.mjs", import.meta.url);
 
@@ -13,10 +13,8 @@ const { TenantMetrics } = (await import(new URL("../../src/tenant-metrics.ts", i
 const START = Date.parse("2026-11-21T19:00:00Z");
 const HEARTBEAT_MS = 10_000;
 const TURN_EVERY_HEARTBEATS = 6;
-const BUCKET_MS = 5 * 60_000;
 const HOUR_MS = 60 * 60_000;
 const BOXES = 9;
-const ROWS_PER_BUCKET_BOUND = 12;
 
 const HOST_METRICS = [
   "host.cpu.busy",
@@ -67,35 +65,37 @@ const heartbeat = (box: number, tick: number, at: number): MetricBatch => {
         : [],
   };
 };
-
-test(`an hour of nine boxes' heartbeats and turns writes a flat number of tenant metrics rows per 5 minutes, at most ${ROWS_PER_BUCKET_BOUND}`, async (t) => {
+test("an hour of nine boxes' heartbeats and turns writes every point to Analytics Engine and no Durable Object row per batch", async (t) => {
   const runtime = new Runtime(START);
   t.after(() => runtime.close());
-  const store = new R2Bucket();
-  const tenants = runtime.namespace(TenantMetrics, () => ({ STORE: store }));
+  const written: unknown[] = [];
+  const tenants = runtime.namespace(TenantMetrics, () => ({
+    METRICS: { writeDataPoint: (point: unknown) => written.push(point) },
+    METRICS_DATASET: "tumpel_metrics",
+  }));
   const metrics = tenants.getByName("tenant-1");
   const sql = tenants.instance("tenant-1").ctx.storage.sql;
 
-  await metrics.record(heartbeat(0, 0, START));
-  await runtime.advance(BUCKET_MS);
-  const buckets: number[] = [];
-  let bucketStart = sql.totalRowsWritten();
+  const first = heartbeat(0, 0, START);
+  await metrics.record(first);
+  const rowsPerBatch = new Set<number>();
+  let points = first.samples.length + first.turns.length;
+  let largestCall = 0;
   for (let elapsed = 0, tick = 1; elapsed < HOUR_MS; elapsed += HEARTBEAT_MS, tick++) {
-    for (let box = 0; box < BOXES; box++) await metrics.record(heartbeat(box, tick, Date.now()));
+    for (let box = 0; box < BOXES; box++) {
+      const batch = heartbeat(box, tick, Date.now());
+      const rowsBefore = sql.totalRowsWritten();
+      const pointsBefore = written.length;
+      await metrics.record(batch);
+      rowsPerBatch.add(sql.totalRowsWritten() - rowsBefore);
+      largestCall = Math.max(largestCall, written.length - pointsBefore);
+      points += batch.samples.length + batch.turns.length;
+    }
     await runtime.advance(HEARTBEAT_MS);
-    if ((elapsed + HEARTBEAT_MS) % BUCKET_MS !== 0) continue;
-    buckets.push(sql.totalRowsWritten() - bucketStart);
-    bucketStart = sql.totalRowsWritten();
   }
 
-  assert.equal(buckets.length, 12);
-  assert.ok(
-    buckets.every((rows) => rows <= ROWS_PER_BUCKET_BOUND),
-    `rows written per 5 minutes ${buckets.join(", ")} pass ${ROWS_PER_BUCKET_BOUND}`,
-  );
-  const steady = buckets.slice(1);
-  assert.ok(
-    Math.max(...steady) - Math.min(...steady) <= 1,
-    `rows written per 5 minutes ${buckets.join(", ")} are not flat`,
-  );
+  assert.deepEqual([...rowsPerBatch], [0]);
+  assert.equal(written.length, points);
+  assert.ok(points > (HOUR_MS / HEARTBEAT_MS) * BOXES * HOST_METRICS.length);
+  assert.ok(largestCall <= 250);
 });

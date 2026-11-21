@@ -17,12 +17,14 @@
     { "binding": "STORE", "bucket_name": "tumpel-sessions" },
     { "binding": "RELEASES", "bucket_name": "tumpel-releases" }
   ],
+  "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics" }],
   "queues": {
     "consumers": [{ "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 }]
   },
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
     "RELEASES_BUCKET_NAME": "tumpel-releases",
+    "METRICS_DATASET": "tumpel_metrics",
     "GITHUB_API_ORIGIN": "https://api.github.com",
     "GITHUB_WEB_ORIGIN": "https://github.com",
     "CIRCLECI_API_ORIGIN": "https://circleci.com",
@@ -102,12 +104,14 @@
         { "binding": "STORE", "bucket_name": "tumpel-sessions-dev" },
         { "binding": "RELEASES", "bucket_name": "tumpel-releases-dev" }
       ],
+      "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics_dev" }],
       "queues": {
         "consumers": [{ "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 }]
       },
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
         "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
+        "METRICS_DATASET": "tumpel_metrics_dev",
         "GITHUB_API_ORIGIN": "https://api.github.com",
         "GITHUB_WEB_ORIGIN": "https://github.com",
         "CIRCLECI_API_ORIGIN": "https://circleci.com",

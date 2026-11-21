@@ -17,6 +17,7 @@ import { HOST_MIGRATIONS } from "./host-migrations.ts";
 import { problem } from "./http";
 import type { Env } from "./index";
 import { limitsOf } from "./limits.ts";
+import { METRICS_LIMITS, metricBatches } from "./metrics-store.ts";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
@@ -480,13 +481,15 @@ export class HostChannel extends DurableObject<Env> {
       turnIds.length === 0
         ? {}
         : (await tenantApi(this.env.TENANT, tenantId).call("turnMetricDimensions", { turnIds })).dimensions;
-    await this.env.TENANT_METRICS.getByName(tenantId)
-      .record({ instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) })
-      .catch((error: unknown) => {
+    const metrics = this.env.TENANT_METRICS.getByName(tenantId);
+    const batch = { instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) };
+    for (const part of metricBatches(batch, METRICS_LIMITS)) {
+      await metrics.record(part).catch((error: unknown) => {
         console.error(
           `TelemetryRejected: host ${hostId} sent a telemetry batch the metrics store refused: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
+    }
   }
 
   private host(): HostRow | null {

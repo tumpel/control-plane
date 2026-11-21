@@ -1,46 +1,46 @@
-import { z } from "zod";
-
 export const HISTOGRAM_MAX_BUCKETS = 160;
 export const HISTOGRAM_START_SCALE = 3;
 
-const BucketsSchema = z.object({
-  offset: z.number().int(),
-  bucketCounts: z.array(z.number().int().nonnegative()),
-});
+interface Buckets {
+  offset: number;
+  bucketCounts: number[];
+}
 
-export const ExponentialHistogramSchema = z.object({
-  scale: z.number().int(),
-  zeroCount: z.number().int().nonnegative(),
-  positive: BucketsSchema,
-  negative: BucketsSchema,
-});
+export interface ExponentialHistogram {
+  scale: number;
+  zeroCount: number;
+  positive: Buckets;
+  negative: Buckets;
+}
 
-type Buckets = z.infer<typeof BucketsSchema>;
-export type ExponentialHistogram = z.infer<typeof ExponentialHistogramSchema>;
+export interface HistogramBin {
+  side: number;
+  index: number;
+  count: number;
+}
 
 const bucketIndex = (magnitude: number, scale: number): number => Math.ceil(Math.log2(magnitude) * 2 ** scale) - 1;
 
 const shifted = (index: number, change: number): number => Math.floor(index / 2 ** change);
+
+export const binOf = (value: number): { side: number; index: number } => {
+  if (value === 0) return { side: 0, index: 0 };
+  return { side: value > 0 ? 1 : -1, index: bucketIndex(Math.abs(value), HISTOGRAM_START_SCALE) };
+};
 
 interface IndexRange {
   low: number;
   high: number;
 }
 
-const rangeOf = (indexes: readonly number[]): IndexRange | undefined =>
-  indexes.length === 0 ? undefined : { low: Math.min(...indexes), high: Math.max(...indexes) };
-
-const bucketsRange = (buckets: Buckets): IndexRange | undefined =>
-  buckets.bucketCounts.length === 0
-    ? undefined
-    : { low: buckets.offset, high: buckets.offset + buckets.bucketCounts.length - 1 };
-
-const union = (ranges: readonly (IndexRange | undefined)[]): IndexRange | undefined =>
-  ranges.reduce<IndexRange | undefined>((joined, range) => {
-    if (range === undefined) return joined;
-    if (joined === undefined) return range;
-    return { low: Math.min(joined.low, range.low), high: Math.max(joined.high, range.high) };
-  }, undefined);
+const rangeOf = (bins: readonly HistogramBin[]): IndexRange | undefined =>
+  bins.reduce<IndexRange | undefined>(
+    (range, { index }) =>
+      range === undefined
+        ? { low: index, high: index }
+        : { low: Math.min(range.low, index), high: Math.max(range.high, index) },
+    undefined,
+  );
 
 const changeToFit = (range: IndexRange | undefined): number => {
   if (range === undefined) return 0;
@@ -49,74 +49,32 @@ const changeToFit = (range: IndexRange | undefined): number => {
   return change;
 };
 
-const added = (into: Map<number, number>, buckets: Buckets, change: number): void => {
-  buckets.bucketCounts.forEach((count, position) => {
-    const index = shifted(buckets.offset + position, change);
-    into.set(index, (into.get(index) ?? 0) + count);
-  });
-};
-
-const bucketsOf = (counts: Map<number, number>): Buckets => {
-  const range = rangeOf([...counts.keys()]);
-  if (range === undefined) return { offset: 0, bucketCounts: [] };
-  const bucketCounts = Array.from({ length: range.high - range.low + 1 }, (_, position) => {
-    return counts.get(range.low + position) ?? 0;
-  });
-  return { offset: range.low, bucketCounts };
-};
-
-const countedAt = (indexes: readonly number[], change: number): Buckets => {
+const bucketsOf = (bins: readonly HistogramBin[], change: number): Buckets => {
   const counts = new Map<number, number>();
-  for (const index of indexes) {
+  for (const { index, count } of bins) {
     const at = shifted(index, change);
-    counts.set(at, (counts.get(at) ?? 0) + 1);
+    counts.set(at, (counts.get(at) ?? 0) + count);
   }
-  return bucketsOf(counts);
-};
-
-export const histogramOf = (values: readonly number[]): ExponentialHistogram => {
-  const positive = values.filter((value) => value > 0).map((value) => bucketIndex(value, HISTOGRAM_START_SCALE));
-  const negative = values.filter((value) => value < 0).map((value) => bucketIndex(-value, HISTOGRAM_START_SCALE));
-  const change = Math.max(changeToFit(rangeOf(positive)), changeToFit(rangeOf(negative)));
+  const range = rangeOf(bins.map((bin) => ({ ...bin, index: shifted(bin.index, change) })));
+  if (range === undefined) return { offset: 0, bucketCounts: [] };
   return {
-    scale: HISTOGRAM_START_SCALE - change,
-    zeroCount: values.length - positive.length - negative.length,
-    positive: countedAt(positive, change),
-    negative: countedAt(negative, change),
+    offset: range.low,
+    bucketCounts: Array.from(
+      { length: range.high - range.low + 1 },
+      (_, position) => counts.get(range.low + position) ?? 0,
+    ),
   };
 };
 
-const mergedSide = (
-  left: Buckets,
-  leftChange: number,
-  right: Buckets,
-  rightChange: number,
-  change: number,
-): Buckets => {
-  const counts = new Map<number, number>();
-  added(counts, left, leftChange + change);
-  added(counts, right, rightChange + change);
-  return bucketsOf(counts);
-};
-
-const rescaledRange = (buckets: Buckets, change: number): IndexRange | undefined => {
-  const range = bucketsRange(buckets);
-  return range === undefined ? undefined : { low: shifted(range.low, change), high: shifted(range.high, change) };
-};
-
-export const mergeHistograms = (left: ExponentialHistogram, right: ExponentialHistogram): ExponentialHistogram => {
-  const scale = Math.min(left.scale, right.scale);
-  const leftChange = left.scale - scale;
-  const rightChange = right.scale - scale;
-  const change = Math.max(
-    changeToFit(union([rescaledRange(left.positive, leftChange), rescaledRange(right.positive, rightChange)])),
-    changeToFit(union([rescaledRange(left.negative, leftChange), rescaledRange(right.negative, rightChange)])),
-  );
+export const histogramOfBins = (bins: readonly HistogramBin[]): ExponentialHistogram => {
+  const positive = bins.filter((bin) => bin.side > 0);
+  const negative = bins.filter((bin) => bin.side < 0);
+  const change = Math.max(changeToFit(rangeOf(positive)), changeToFit(rangeOf(negative)));
   return {
-    scale: scale - change,
-    zeroCount: left.zeroCount + right.zeroCount,
-    positive: mergedSide(left.positive, leftChange, right.positive, rightChange, change),
-    negative: mergedSide(left.negative, leftChange, right.negative, rightChange, change),
+    scale: HISTOGRAM_START_SCALE - change,
+    zeroCount: bins.filter((bin) => bin.side === 0).reduce((sum, bin) => sum + bin.count, 0),
+    positive: bucketsOf(positive, change),
+    negative: bucketsOf(negative, change),
   };
 };
 
