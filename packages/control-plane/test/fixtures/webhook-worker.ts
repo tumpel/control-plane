@@ -60,10 +60,6 @@ export class Tenant extends BaseTenant {
     });
   }
 
-  runAlarm(): Promise<void> {
-    return super.alarm();
-  }
-
   pushWakes(): Record<string, SqlStorageValue>[] {
     return this.ctx.storage.sql
       .exec("SELECT push_subscription_id, failures, next_attempt_at FROM push_wakes ORDER BY push_subscription_id")
@@ -159,11 +155,6 @@ export default {
           input: { tenantId, principalId: "principal" },
         }),
       );
-    }
-    if (url.pathname === "/__fixture/push/alarm") {
-      const { tenantId } = await requestBody<{ tenantId: string }>(request);
-      await tenant(env, tenantId).runAlarm();
-      return new Response(null, { status: 204 });
     }
     if (url.pathname === "/__fixture/push/wakes") {
       const { tenantId } = await requestBody<{ tenantId: string }>(request);

@@ -41,6 +41,7 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
     WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events
   FROM push_subscriptions AS p`;
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
+const PUSH_BATCH_SIZE = 20;
 const PUSH_TTL_SECONDS = 86_400;
 const PUSH_TTL_MS = PUSH_TTL_SECONDS * 1000;
 
@@ -158,8 +159,10 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
           WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
             WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)
             AND w.next_attempt_at <= ?
-          ORDER BY w.event_id, p.push_subscription_id`,
+          ORDER BY w.event_id, p.push_subscription_id
+          LIMIT ?`,
         now,
+        PUSH_BATCH_SIZE,
       )
       .toArray();
     if (rows.length === 0) return;
@@ -267,6 +270,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         row.push_subscription_id,
       );
     }
+    if (rows.length === PUSH_BATCH_SIZE) await this.ctx.storage.setAlarm(now);
   }
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
