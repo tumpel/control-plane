@@ -11,7 +11,7 @@ import {
 import type { z } from "zod";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import { type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
+import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];
@@ -260,7 +260,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return eventId;
   }
 
-  protected override offeredPrompt(harness: string, turn: TurnRow): string {
+  protected override offeredPrompt(harness: string, turn: TurnRow): OfferedPrompt {
     const [delivery] = this.ctx.storage.sql
       .exec<{ subscription_id: string; last_event_id: number | null }>(
         `SELECT st.subscription_id, b.last_event_id FROM subscription_turns AS st
@@ -269,13 +269,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
       )
       .toArray();
     if (delivery === undefined) return super.offeredPrompt(harness, turn);
-    if (delivery.last_event_id !== null) return turn.prompt;
+    if (delivery.last_event_id !== null) return { kind: "Composed", prompt: turn.prompt };
     const row = this.subscriptionRow(delivery.subscription_id);
     if (row === null) throw new Error(`delivery turn ${turn.turn_id} lost its subscription`);
     return this.compose(row, turn);
   }
 
-  private compose(row: SubscriptionRow, turn: TurnRow): string {
+  private compose(row: SubscriptionRow, turn: TurnRow): OfferedPrompt {
     const sql = this.ctx.storage.sql;
     const subscriptionId = row.subscription_id;
     const events = sql
@@ -291,6 +291,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (tenantId === undefined) throw new Error("the tenant Durable Object composes a delivery turn but has no name");
     const plan = subscriptionPrompt(row.prompt, row.goal);
     const batch = deliveryPrompt(plan, tenantId, events);
+    if (batch?.kind === "Malformed") return { kind: "Uncomposable", cause: batch.cause };
     const prompt = batch?.prompt ?? plan;
     const lastEventId = batch?.lastEventId ?? row.cursor_event_id;
     sql.exec("UPDATE turns SET prompt = ? WHERE turn_id = ?", prompt, turn.turn_id);
@@ -298,7 +299,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (row.state === "Active" && this.undeliveredAfter(subscriptionId, lastEventId)) {
       this.ensureDelivery(subscriptionId, Date.now());
     }
-    return prompt;
+    return { kind: "Composed", prompt };
   }
 
   private subscriptionRow(subscriptionId: string): SubscriptionRow | null {

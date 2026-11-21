@@ -1,4 +1,5 @@
 import { TenantEventSchema } from "@tumpel/schemas";
+import { z } from "zod";
 import { storedEvent } from "./bounded-detail.ts";
 
 export const DELIVERY_BATCH = 100;
@@ -6,6 +7,10 @@ export const DELIVERY_PROMPT_LIMIT = 4000;
 const SESSION_ID_MAX = 64;
 
 export type DeliveryEvent = { event_id: number; payload: string; created_at: number };
+
+export type DeliveryBatch =
+  | { kind: "Batch"; prompt: string; lastEventId: number }
+  | { kind: "Malformed"; cause: string };
 
 export const eventReference = (eventId: number, event: string, sessionId: string): string =>
   JSON.stringify({
@@ -25,22 +30,27 @@ export const widestReference = (events: string[]): string =>
 export const subscriptionPrompt = (plan: string, goal: string): string =>
   `${plan}\n\nSubscription goal: ${goal}\nCall tumpel_subscription_complete when the goal holds. End this event turn after dispatching or handling the event; crew work continues in later event turns.`;
 
-export const deliveryPrompt = (
-  plan: string,
-  tenantId: string,
-  events: DeliveryEvent[],
-): { prompt: string; lastEventId: number } | null => {
-  const parsed = events.map((row) =>
-    TenantEventSchema.parse({
+export const deliveryPrompt = (plan: string, tenantId: string, events: DeliveryEvent[]): DeliveryBatch | null => {
+  const parsed: z.infer<typeof TenantEventSchema>[] = [];
+  for (const row of events) {
+    const event = TenantEventSchema.safeParse({
       ...storedEvent(row.payload),
       eventId: row.event_id,
       tenantId,
       createdAt: row.created_at,
-    }),
-  );
+    });
+    if (!event.success) {
+      return {
+        kind: "Malformed",
+        cause: `stored event ${row.event_id} does not match the event schema: ${z.prettifyError(event.error)}`,
+      };
+    }
+    parsed.push(event.data);
+  }
   const lines = parsed.map((event) => JSON.stringify(event));
   const batch = parsed
     .map((event, index) => ({
+      kind: "Batch" as const,
       prompt: `${plan}\n\n${lines.slice(0, index + 1).join("\n")}`,
       lastEventId: event.eventId,
     }))
@@ -53,5 +63,5 @@ export const deliveryPrompt = (
   if (prompt.length > DELIVERY_PROMPT_LIMIT) {
     throw new Error(`event ${first.eventId} does not fit even by reference after a plan the create check admitted`);
   }
-  return { prompt, lastEventId: first.eventId };
+  return { kind: "Batch", prompt, lastEventId: first.eventId };
 };
