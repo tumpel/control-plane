@@ -18,7 +18,7 @@ import type { z } from "zod";
 import type { GitHubUser } from "./github.ts";
 import type { HostRecord } from "./host-record.ts";
 import { problem } from "./http.ts";
-import type { StoredFile, StoredPersona } from "./persona-files.ts";
+import type { StoredPersona } from "./persona-files.ts";
 import { conditionRows } from "./trigger-match.ts";
 
 export type PlanRequest = z.infer<typeof TenantConfigPlanRequestSchema>;
