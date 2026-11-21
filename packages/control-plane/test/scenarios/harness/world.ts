@@ -16,6 +16,7 @@ import { TEST_SETTINGS } from "../../timing.ts";
 import {
   D1Database,
   type DurableObjectState,
+  ioClock,
   migratedDatabase,
   type Namespace,
   R2Bucket,
@@ -258,7 +259,8 @@ export class World {
       SESSION_TIMER: null,
       HOST: this.runtime.stubs((hostId) => this.host(hostId)),
       EVENTS: ignored(),
-      WEBHOOKS: options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env) : unreachable(),
+      WEBHOOKS:
+        options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env, true) : unreachable(),
       TENANT_METRICS: ignored(),
       TUMPEL_SETTINGS: SETTINGS,
       SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
@@ -283,7 +285,7 @@ export class World {
       TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
       WEBHOOK_RATE: new RateLimiter(600),
     };
-    this.timers = this.runtime.namespace(SessionTimer, () => env);
+    this.timers = this.runtime.namespace(SessionTimer, () => env, true);
     env.SESSION_TIMER = this.timers;
     this.tenants = this.runtime.namespace(Tenant, () => env);
     env.TENANT = this.tenants;
@@ -389,6 +391,17 @@ export class World {
     const result = await this.api.call(operation, input);
     await this.runtime.settle();
     return result;
+  }
+
+  async computeMs(operation: string, input: unknown): Promise<number> {
+    const spent = ioClock.spentMs;
+    const started = performance.now();
+    await this.api.call(operation, input).catch((error: unknown) => {
+      if (error instanceof Error && /as invalid:/.test(error.message)) throw error;
+    });
+    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    await this.runtime.settle();
+    return elapsed;
   }
 
   async hostOnline(name: string): Promise<Host> {
