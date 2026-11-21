@@ -4,6 +4,30 @@ import { mock } from "node:test";
 
 type Row = Record<string, unknown>;
 
+export const ioClock = { spentMs: 0, depth: 0 };
+
+const spendingOnIo = <T>(work: () => T): T => {
+  const started = performance.now();
+  ioClock.depth += 1;
+  try {
+    return work();
+  } finally {
+    ioClock.depth -= 1;
+    if (ioClock.depth === 0) ioClock.spentMs += performance.now() - started;
+  }
+};
+
+const awaitingIo = async <T>(work: () => Promise<T>): Promise<T> => {
+  const started = performance.now();
+  ioClock.depth += 1;
+  try {
+    return await work();
+  } finally {
+    ioClock.depth -= 1;
+    if (ioClock.depth === 0) ioClock.spentMs += performance.now() - started;
+  }
+};
+
 class Cursor {
   private readonly rows: Row[];
   readonly rowsWritten: number;
@@ -188,21 +212,25 @@ export class Namespace<T extends object> {
   readonly instances = new Map<string, { object: T; ctx: DurableObjectState }>();
   private readonly runtime: Runtime;
   private readonly create: (ctx: DurableObjectState) => T;
+  private readonly io: boolean;
 
-  constructor(runtime: Runtime, create: (ctx: DurableObjectState) => T) {
+  constructor(runtime: Runtime, create: (ctx: DurableObjectState) => T, io = false) {
     this.runtime = runtime;
     this.create = create;
+    this.io = io;
   }
 
   getByName(name: string): T {
     const { object, ctx } = this.instance(name);
+    const io = this.io;
     return new Proxy(object, {
       get(target, property, receiver) {
         const value: unknown = Reflect.get(target, property, receiver);
         if (typeof value !== "function") return value;
         return async (...args: unknown[]) => {
           await ctx.unblocked();
-          return value.apply(target, args);
+          if (!io) return value.apply(target, args);
+          return awaitingIo(async () => value.apply(target, args));
         };
       },
     });
@@ -241,12 +269,12 @@ export class Runtime {
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: start });
   }
 
-  namespace<T extends object>(Class: DurableObjectClass<T>, env: () => unknown): Namespace<T> {
-    return new Namespace(this, (ctx) => new Class(ctx as never, env() as never));
+  namespace<T extends object>(Class: DurableObjectClass<T>, env: () => unknown, io = false): Namespace<T> {
+    return new Namespace(this, (ctx) => new Class(ctx as never, env() as never), io);
   }
 
   stubs<T extends object>(create: (name: string) => T): Namespace<T> {
-    return new Namespace(this, (ctx) => create(ctx.id.name));
+    return new Namespace(this, (ctx) => create(ctx.id.name), true);
   }
 
   track(held: { object: object; ctx: DurableObjectState }): void {
@@ -309,8 +337,12 @@ class D1Statement {
   }
 
   run(): Promise<{ results: Row[]; success: true; meta: { changes: number } }> {
-    const cursor = this.sql.exec(this.query, ...this.params);
-    return Promise.resolve({ results: cursor.toArray(), success: true, meta: { changes: cursor.rowsWritten } });
+    return Promise.resolve(
+      spendingOnIo(() => {
+        const cursor = this.sql.exec(this.query, ...this.params);
+        return { results: cursor.toArray(), success: true as const, meta: { changes: cursor.rowsWritten } };
+      }),
+    );
   }
 
   all(): Promise<{ results: Row[]; success: true; meta: { changes: number } }> {
@@ -340,7 +372,7 @@ export class D1Database {
   }
 
   batch(statements: D1Statement[]): Promise<unknown[]> {
-    return this.sql.inTransaction(() => Promise.all(statements.map((statement) => statement.run())));
+    return awaitingIo(() => this.sql.inTransaction(() => Promise.all(statements.map((statement) => statement.run()))));
   }
 }
 
@@ -409,22 +441,30 @@ export class R2Bucket {
   gets = 0;
   failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
 
-  async put(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
+  put(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
+    return awaitingIo(() => this.store(key, value));
+  }
+
+  private async store(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
     const uploaded = new Date(Date.now());
     this.objects.set(key, { body, uploaded });
     return new R2Object(key, body, uploaded);
   }
 
-  async get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2Object | null> {
-    this.gets += 1;
-    this.fails("get", key);
-    return this.read(key, options?.range);
+  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2Object | null> {
+    return awaitingIo(async () => {
+      this.gets += 1;
+      this.fails("get", key);
+      return this.read(key, options?.range);
+    });
   }
 
-  async head(key: string): Promise<R2Object | null> {
-    this.fails("head", key);
-    return this.read(key, undefined);
+  head(key: string): Promise<R2Object | null> {
+    return awaitingIo(async () => {
+      this.fails("head", key);
+      return this.read(key, undefined);
+    });
   }
 
   private read(key: string, range: { offset: number; length: number } | undefined): R2Object | null {
@@ -438,16 +478,26 @@ export class R2Bucket {
     if (this.failure?.operation === operation && key.startsWith(this.failure.prefix)) throw this.failure.error;
   }
 
-  async delete(keys: string | string[]): Promise<void> {
-    for (const key of Array.isArray(keys) ? keys : [keys]) this.fails("delete", key);
-    for (const key of Array.isArray(keys) ? keys : [keys]) this.objects.delete(key);
+  delete(keys: string | string[]): Promise<void> {
+    return awaitingIo(async () => {
+      for (const key of Array.isArray(keys) ? keys : [keys]) this.fails("delete", key);
+      for (const key of Array.isArray(keys) ? keys : [keys]) this.objects.delete(key);
+    });
   }
 
-  async list(options?: {
+  list(options?: {
     prefix?: string;
     cursor?: string;
     limit?: number;
   }): Promise<{ objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false }> {
+    return awaitingIo(async () => this.listed(options));
+  }
+
+  private listed(options?: {
+    prefix?: string;
+    cursor?: string;
+    limit?: number;
+  }): { objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false } {
     const prefix = options?.prefix ?? "";
     const after = options?.cursor ?? "";
     const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && key > after).sort();
