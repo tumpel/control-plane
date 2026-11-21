@@ -7,6 +7,7 @@ Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architec
 - When writing TypeScript, follow `rules/typescript.md`.
 - When a change needs a new or changed type, follow `rules/typespec.md`.
 - When changing a table, a migration or a stored record, follow `rules/data-modeling.md`.
+- When storing data, adding a retry or adding an endpoint, follow `rules/storage.md`.
 - When adding or changing an operation, an MCP tool, a CLI command or the host channel, follow `rules/api.md`.
 - When writing or changing a test, follow `rules/tests.md`.
 - When committing or opening a pull request, follow `rules/commits-and-prs.md`.

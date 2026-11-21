@@ -123,6 +123,8 @@ import {
   GitHubActionsConnectionResultSchema,
   HeldPrebuildInputSchema,
   HeldPrebuildResultSchema,
+  HostHealthInputSchema,
+  HostHealthResultSchema,
   HostHelloInputSchema,
   HostHelloResultSchema,
   HostMessageInputSchema,
@@ -201,6 +203,8 @@ import {
   PrepareClaudeSetupResultSchema,
   PrepareOfferInputSchema,
   PrepareOfferResultSchema,
+  ReadUsageInputSchema,
+  ReadUsageResultSchema,
   ReconcileHeldBoxesInputSchema,
   ReconcileHeldBoxesResultSchema,
   RecordPrebuildBuildingInputSchema,
@@ -465,10 +469,12 @@ export const TENANT_OPERATIONS = {
   forgetHostUsage: { input: ForgetHostUsageInputSchema, result: ForgetHostUsageResultSchema },
   runningTurnsByHost: { input: RunningTurnsByHostInputSchema, result: RunningTurnsByHostResultSchema },
   listHostUsage: { input: ListHostUsageInputSchema, result: ListHostUsageResultSchema },
+  readUsage: { input: ReadUsageInputSchema, result: ReadUsageResultSchema },
   deferredOffers: { input: DeferredOffersInputSchema, result: DeferredOffersResultSchema },
   turnMetricDimensions: { input: TurnMetricDimensionsInputSchema, result: TurnMetricDimensionsResultSchema },
   prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
   hostPresence: { input: HostPresenceInputSchema, result: HostPresenceResultSchema },
+  hostHealth: { input: HostHealthInputSchema, result: HostHealthResultSchema },
   hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
   deadlineReached: { input: DeadlineReachedInputSchema, result: DeadlineReachedResultSchema },
 } as const;
@@ -493,6 +499,14 @@ const invalid = (operation: string, error: z.ZodError): TenantRefusal => ({
   operation,
   issues: error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`),
 });
+
+const DEADLINE_RETRIES_VERSION = 10;
+
+const upgrade = (tenantApiVersion: number, operation: TenantOperation, input: unknown): unknown => {
+  if (tenantApiVersion >= DEADLINE_RETRIES_VERSION) return input;
+  if (operation !== "deadlineReached" && operation !== "prebuildDeadlineReached") return input;
+  return typeof input === "object" && input !== null ? { retries: 0, ...input } : input;
+};
 
 const run = <O extends TenantOperation>(handlers: TenantHandlers, operation: O, input: unknown) => {
   const parsed = TENANT_OPERATIONS[operation].input.safeParse(input);
@@ -519,12 +533,13 @@ export const serveTenantRequest = async (
     };
   }
   if (!known(operation)) return { refusal: "TenantOperationUnknown", operation };
-  return run(handlers, operation, input);
+  return run(handlers, operation, upgrade(tenantApiVersion, operation, input));
 };
 
 type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };
 
 const refused = (tenantId: string, operation: string, refusal: TenantRefusal): Error => {
+  if (refusal.refusal === "TenantLimitReached") return new TenantLimited(tenantId, refusal);
   if (refusal.refusal === "TenantRequestInvalid")
     return new TenantSkew(`tenant ${tenantId} refused ${operation} as invalid: ${refusal.issues.join("; ")}`);
   if (refusal.refusal === "TenantOperationUnknown")
@@ -551,6 +566,19 @@ export const tenantApi = (namespace: { getByName(name: string): TenantStub }, te
 });
 
 export class TenantSkew extends Error {}
+
+export type TenantLimitRefusal = Extract<TenantRefusal, { refusal: "TenantLimitReached" }>;
+
+export class TenantLimited extends Error {
+  readonly refusal: TenantLimitRefusal;
+
+  constructor(tenantId: string, refusal: TenantLimitRefusal) {
+    super(
+      `tenant ${tenantId} on the ${refusal.tier} tier spent its limit of ${refusal.limit} ${refusal.measure} per ${refusal.window.toLowerCase()} (${refusal.used} used); it resets at ${refusal.resetsAt}`,
+    );
+    this.refusal = refusal;
+  }
+}
 
 export const tenantSkewed = (error: unknown): Response => {
   if (!(error instanceof TenantSkew)) throw error;

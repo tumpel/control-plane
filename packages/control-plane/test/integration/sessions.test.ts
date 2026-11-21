@@ -200,8 +200,13 @@ const objects = (bucket: "STORE" | "RELEASES"): Objects => {
 
 const store = objects("STORE");
 
-const storeRoot = async (storageKey: string, digests: string[] = []): Promise<string> => {
-  const chunks = digests.map((digest) => ({ digest, packDigest: digest, offset: 0, length: 1 }));
+const storeRoot = async (storageKey: string, digests: string[] = []): Promise<string> =>
+  storePlacedRoot(
+    storageKey,
+    digests.map((digest) => ({ digest, packDigest: digest, offset: 0, length: 1 })),
+  );
+
+const storePlacedRoot = async (storageKey: string, chunks: Placement[]): Promise<string> => {
   const manifest = JSON.stringify({
     entries: [
       {
@@ -768,7 +773,7 @@ const tenant = async () => {
       assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(upload.packDigest, "hex").toString("base64"));
       await store.put(url.pathname.replace("/tumpel-sessions/", ""), "pack bytes");
     }
-    await storeRoot(request.storageKey, digests);
+    await storePlacedRoot(request.storageKey, [...answer.held, ...chunks]);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
     await until(
       "a stored snapshot",
@@ -1909,16 +1914,28 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("a foreman subscribed to its crew gets each crew turn as a delivery turn until its goal is met, and a turn token dies with its turn", async () => {
-    const { bearer, host, getJson, tool, storedSnapshot, sessionStart } = await tenant();
-    const [defaults] = await getJson("/v1/personas", PersonaSchema.array());
+  test("a stopped Codex foreman dispatches crew, ends its event turn while the subscription goal is unmet, and gets the next crew turn on a fresh box from its snapshot", async () => {
+    const { bearer, host, github, tool, storedSnapshot, sessionStart } = await tenant();
+    const secrets = await postJson(
+      "/v1/secret-sets",
+      {
+        name: "Foreman secrets",
+        secrets: [
+          { kind: "ApiKey", name: "OPENAI", provider: "OpenAi", value: "sk-proj-foreman-test" },
+          { kind: "Variable", name: "GITHUB_TOKEN", value: github },
+        ],
+      },
+      bearer,
+    );
+    assert.equal(secrets.status, 200, await secrets.clone().text());
+    const { secretSetId } = SecretSetSchema.parse(await secrets.json());
     const created = await postJson(
       "/v1/personas",
-      { name: "Foreman", harness: "ClaudeCode", secretSetId: defaults?.secretSetId, connectorIds: [], tumpelMcp: true },
+      { name: "Foreman", harness: "Codex", secretSetId, connectorIds: [], tumpelMcp: true },
       bearer,
     );
     assert.equal(created.status, 200, await created.clone().text());
-    const start = await sessionStart("Foreman");
+    const start = { ...(await sessionStart("Foreman")), model: "gpt-5.6-sol" };
     const asTurn = async (token: string, name: string, args: Record<string, unknown>) => {
       mcpId += 1;
       const response = await postJson(
@@ -1939,7 +1956,7 @@ suite("sessions", { concurrency: 8 }, () => {
       return z.object({ accessToken: z.string() }).parse(await served.json()).accessToken;
     };
     const finish = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<void> => {
-      const result = '{"type":"result","subtype":"success","is_error":false}';
+      const result = '{"type":"turn.completed"}';
       host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: offer.lastLineSeq + 1, text: result });
       host.send({
         type: "TurnComplete",
@@ -2007,6 +2024,15 @@ suite("sessions", { concurrency: 8 }, () => {
     await finish(foremanTurn);
     const afterTurn = await asTurn(foremanToken, "tumpel_whoami", {});
     assert.equal(afterTurn.status, 401, `a token of a completed turn still answered ${afterTurn.text}`);
+    assert.equal((await tool("tumpel_session_stop", { sessionId: foremanId }, SessionSchema)).state, "Stopping");
+    const teardown = await host.next("BoxTeardown");
+    assert.deepEqual(teardown, { type: "BoxTeardown", sessionId: foremanId, boxId: foremanTurn.boxId });
+    host.send({ type: "BoxGone", sessionId: foremanId, boxId: teardown.boxId });
+    await until(
+      "the foreman reading Stopped",
+      () => tool("tumpel_session_get", { sessionId: foremanId }, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
 
     const crewTurn = await host.next("TurnOffer");
     assert.equal(crewTurn.sessionId, crew.session.sessionId);
@@ -2025,8 +2051,16 @@ suite("sessions", { concurrency: 8 }, () => {
 
     const delivery = await host.next("TurnOffer");
     assert.equal(delivery.sessionId, foremanId);
+    assert.equal(delivery.harness, "Codex");
+    assert.notEqual(delivery.boxId, foremanTurn.boxId);
+    assert.ok(delivery.snapshots.length > 0, "the delivery restores the foreman snapshot");
     assert.ok(delivery.credential.connectors.some((connector) => connector.connectorId === "tumpel"));
-    assert.match(delivery.prompt, /^\/goal start a crew session per open issue and review what it did\n\n/);
+    assert.match(delivery.prompt, /^start a crew session per open issue and review what it did\n\n/);
+    assert.match(delivery.prompt, /every open issue has a merged pull request/);
+    assert.match(delivery.prompt, /Call tumpel_subscription_complete when the goal holds\./);
+    const deliveryTurn = await tool("tumpel_turn_get", { turnId: delivery.turnId }, TurnSchema);
+    assert.equal(deliveryTurn.goal, undefined);
+    assert.equal(deliveryTurn.prompt, delivery.prompt);
     const events = delivery.prompt
       .split("\n")
       .filter((line) => line.startsWith("{"))
@@ -2043,6 +2077,7 @@ suite("sessions", { concurrency: 8 }, () => {
       SubscriptionSchema,
     );
     assert.equal(delivered.cursorEventId, events[0]?.eventId);
+    assert.equal(delivered.state, "Active");
 
     const completed = await tool(
       "tumpel_subscription_complete",
@@ -2050,31 +2085,6 @@ suite("sessions", { concurrency: 8 }, () => {
       SubscriptionSchema,
     );
     assert.equal(completed.state === "Ended" ? completed.reason : completed.state, "GoalMet");
-  });
-
-  test("a subscription with crew tags is refused while its session runs a persona without tumpelMcp", async () => {
-    const { getJson, tool, toolRefusal, sessionStart } = await tenant();
-    const started = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "lead the crew" },
-      StartedSessionSchema,
-    );
-    const create = {
-      sessionId: started.session.sessionId,
-      prompt: "start a crew session per open issue",
-      goal: "every open issue has a merged pull request",
-      events: ["TurnCompleted"],
-      crewTags: ["crew:issues"],
-      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-    };
-    assert.match(
-      await toolRefusal("tumpel_subscription_create", create),
-      /runs persona Default, which has no tumpelMcp, so it cannot start the crew that crewTags names/,
-    );
-
-    const [persona] = await getJson("/v1/personas", PersonaSchema.array());
-    await tool("tumpel_persona_patch", { personaId: persona?.personaId, tumpelMcp: true }, PersonaSchema);
-    assert.equal((await tool("tumpel_subscription_create", create, SubscriptionSchema)).state, "Active");
   });
 
   test("a stop with cancelTurn fails the running turn Cancelled, snapshots and frees its box, and the next send boots a fresh box", async () => {
@@ -2572,7 +2582,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.match(failure.detail, /cancelled the turn/);
   });
 
-  test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive keeps every pack", async () => {
+  test("a snapshot uploads only the packs object storage lacks, a restore gets only the packs of its snapshot, and an archive deletes the packs no snapshot holds", async () => {
     const { host, getJson, tool, completedTurn, storedChunks } = await tenant();
     const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
     const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
@@ -2586,8 +2596,11 @@ suite("sessions", { concurrency: 8 }, () => {
     const tenantId = request.storageKey.split("/")[0] ?? "";
 
     const second = await completedTurn("chunk the second");
-    const shared = await storedChunks(second.session.sessionId, [two, three, three], { [packThree]: [three] });
-    assert.deepEqual(shared.held, [{ digest: two, packDigest: packTwo, offset: 0, length: CHUNK_BYTES }]);
+    const shared = await storedChunks(second.session.sessionId, [two, three, three], {
+      [packTwo]: [two],
+      [packThree]: [three],
+    });
+    assert.deepEqual(shared.held, []);
     assert.deepEqual(shared.uploaded, [packThree]);
 
     await tool("tumpel_turn_send", { sessionId: first.session.sessionId, prompt: "restore me" }, TurnSchema);
@@ -2690,17 +2703,14 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Stopped",
     );
     await tool("tumpel_session_archive", { sessionId: first.session.sessionId }, SessionSchema);
-    assert.notEqual(await store.text(`${tenantId}/packs/${packOne}`), null);
+    assert.equal(await store.text(`${tenantId}/packs/${packOne}`), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packTwo}`), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packThree}`), null);
 
     const third = await completedTurn("chunk the third");
-    const again = await storedChunks(third.session.sessionId, [one, two], {});
-    assert.deepEqual(
-      again.held.map((placement) => placement.digest),
-      [one, two],
-    );
-    assert.deepEqual(again.uploaded, []);
+    const again = await storedChunks(third.session.sessionId, [one, two], { [packOne]: [one], [packTwo]: [two] });
+    assert.deepEqual(again.held, []);
+    assert.deepEqual(again.uploaded, [packOne]);
   });
 
   test("a stored snapshot deletes the session's older root and keeps the packs its chunks lie in", async () => {
@@ -2728,7 +2738,8 @@ suite("sessions", { concurrency: 8 }, () => {
       lastLineSeq: lineSeq,
       completedAt: new Date().toISOString(),
     });
-    const newer = await storedChunks(sessionId, [two], { [packTwo]: [two] });
+    const newer = await storedChunks(sessionId, [one, two], { [packTwo]: [two] });
+    assert.deepEqual(newer.held, [{ digest: one, packDigest: packOne, offset: 0, length: CHUNK_BYTES }]);
     await until(
       "the older snapshot gone",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -4019,99 +4030,6 @@ suite("sessions", { concurrency: 8 }, () => {
     side.send({ type: "BoxGone", sessionId: kept.session.sessionId, boxId: kept.offer.boxId });
     assert.equal((await side.next("TurnOffer")).turnId, next.turn.turnId);
     assert.equal((await getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema)).state, "Stopped");
-    side.close();
-  });
-
-  test("an evicted session keeps its subscription, and the next delivery boots it a fresh box from its snapshot", async () => {
-    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const tight = await enrol("tight");
-    const side = await connect(tight.id, tight.key, 1);
-    await hostState(tight.id, "Online");
-    const foreman = await idleTurn(side, { ...(await sessionStart()), prompt: "lead the crew" }, bearer);
-    const foremanId = foreman.session.sessionId;
-    const snapshot = await side.next("SnapshotRequest");
-    await storeRoot(snapshot.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the foreman reading Idle",
-      () => getJson(`/v1/sessions/${foremanId}`, SessionSchema),
-      (session) => session.state === "Idle",
-    );
-    const [defaultPersona] = await getJson("/v1/personas", PersonaSchema.array());
-    await tool("tumpel_persona_patch", { personaId: defaultPersona?.personaId, tumpelMcp: true }, PersonaSchema);
-    const subscription = await tool(
-      "tumpel_subscription_create",
-      {
-        sessionId: foremanId,
-        prompt: "review what the crew did",
-        goal: "every crew turn is reviewed",
-        events: ["TurnCompleted"],
-        crewTags: ["crew:review"],
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-      },
-      SubscriptionSchema,
-    );
-
-    const response = await postJson(
-      "/v1/sessions",
-      { ...(await sessionStart()), prompt: "review a pull request", tags: ["crew:review"] },
-      bearer,
-    );
-    assert.equal(response.status, 200, await response.clone().text());
-    const crew = StartedSessionSchema.parse(await response.json());
-    assert.deepEqual(await side.next("BoxTeardown"), {
-      type: "BoxTeardown",
-      sessionId: foremanId,
-      boxId: foreman.offer.boxId,
-    });
-    side.send({ type: "BoxGone", sessionId: foremanId, boxId: foreman.offer.boxId });
-    const crewOffer = await side.next("TurnOffer");
-    assert.equal(crewOffer.turnId, crew.turn.turnId);
-    assert.equal((await getJson(`/v1/sessions/${foremanId}`, SessionSchema)).state, "Stopped");
-
-    side.send({ type: "TurnClaim", turnId: crewOffer.turnId, boxId: crewOffer.boxId });
-    side.send({
-      type: "TurnLine",
-      turnId: crewOffer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    side.send({
-      type: "TurnComplete",
-      turnId: crewOffer.turnId,
-      lastLineSeq: 1,
-      completedAt: new Date().toISOString(),
-    });
-    const crewSnapshot = await side.next("SnapshotRequest");
-    await storeRoot(crewSnapshot.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: crewSnapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the crew turn reading Completed",
-      () => getJson(`/v1/turns/${crewOffer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Completed",
-    );
-    assert.deepEqual(await side.next("BoxTeardown"), {
-      type: "BoxTeardown",
-      sessionId: crew.session.sessionId,
-      boxId: crewOffer.boxId,
-    });
-    side.send({ type: "BoxGone", sessionId: crew.session.sessionId, boxId: crewOffer.boxId });
-
-    const delivery = await side.next("TurnOffer");
-    assert.equal(delivery.sessionId, foremanId);
-    assert.notEqual(delivery.boxId, foreman.offer.boxId);
-    assert.deepEqual(
-      delivery.snapshots.map((each) => each.snapshotId),
-      [snapshot.snapshotId],
-    );
-    const kept = await tool(
-      "tumpel_subscription_get",
-      { subscriptionId: subscription.subscriptionId },
-      SubscriptionSchema,
-    );
-    assert.equal(kept.state, "Active");
     side.close();
   });
 

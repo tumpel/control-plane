@@ -9,7 +9,8 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "biome check .",
+    "lint": "biome check . && node npm-scripts/sql-check.mjs",
+    "sql:update": "node npm-scripts/sql-check.mjs --update && biome format --write npm-scripts/sql-allowlist.json",
     "fix": "biome check --write .",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
@@ -50,8 +51,8 @@
     "workerd@1.20261113.1": true
   },
   "dependencies": {
-    "@tumpel/openapi": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.26/tumpel-openapi-0.21.0-rc.26.tgz",
-    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.26/tumpel-schemas-0.21.0-rc.26.tgz",
+    "@tumpel/openapi": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.34/tumpel-openapi-0.21.0-rc.34.tgz",
+    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.34/tumpel-schemas-0.21.0-rc.34.tgz",
     "zod": "^4.6.7"
   }
 }

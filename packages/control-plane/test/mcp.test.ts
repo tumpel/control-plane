@@ -14,13 +14,13 @@ import {
   HarnessCatalogEntrySchema,
   HarnessPinSchema,
   HostSchema,
-  MetricCatalogSchema,
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
+  TenantMetricCatalogSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -272,13 +272,13 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const windowQuery = new URLSearchParams({ ...window });
   windowQuery.append("filter", "harness:Pi");
   windowQuery.append("filter", "harness:Codex");
-  assert.deepEqual(
-    await toolJson(MetricCatalogSchema, "tumpel_metrics_catalog", {
-      ...window,
-      filter: ["harness:Pi", "harness:Codex"],
-    }),
-    await rest(MetricCatalogSchema, "GET", `/v1/metrics?${windowQuery}`),
-  );
+  const catalogByTool = await toolJson(TenantMetricCatalogSchema, "tumpel_metrics_catalog", {
+    ...window,
+    filter: ["harness:Pi", "harness:Codex"],
+  });
+  const catalogByRest = await rest(TenantMetricCatalogSchema, "GET", `/v1/metrics?${windowQuery}`);
+  assert.deepEqual(catalogByTool.metrics, catalogByRest.metrics);
+  assert.equal(catalogByRest.usage.tier, "Configured");
   const unknownMetric = await call(`/v1/metrics/turn.nope/series?${windowQuery}&bucket=Hour`, { headers: bearer });
   assert.equal(unknownMetric.status, 404);
   assert.equal(ProblemSchema.parse(await unknownMetric.json()).code, "MetricNotFound");

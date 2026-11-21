@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deliveryPrompt } from "../src/delivery-prompt.ts";
+import { DELIVERY_PROMPT_LIMIT, deliveryPrompt } from "../src/delivery-prompt.ts";
 
 const idle = (eventId: number) => ({
   event_id: eventId,
@@ -20,10 +20,8 @@ const failed = (eventId: number, detail: string) => ({
   created_at: 1_000,
 });
 
-const fold = (prompt: string, goal: string) => `/goal ${prompt}\n\nDone when: ${goal}. Or stop after 5 turns.`;
-
 test("a delivery prompt holds the plan, then one JSON line per event in order", () => {
-  const batch = deliveryPrompt("Work the issues.", "all closed", "t1", [idle(4), idle(7)], fold, 4000);
+  const batch = deliveryPrompt("Work the issues.", "t1", [idle(4), idle(7)]);
   assert.deepEqual(batch, {
     prompt: [
       "Work the issues.",
@@ -35,16 +33,18 @@ test("a delivery prompt holds the plan, then one JSON line per event in order", 
   });
 });
 
-test("a delivery prompt drops the latest events until the folded message fits the limit", () => {
+test("a delivery prompt drops the latest events until the message fits the limit", () => {
   const events = [idle(1), idle(2), idle(3)];
-  const two = deliveryPrompt("Plan.", "done", "t1", events.slice(0, 2), fold, 4000);
+  const two = deliveryPrompt("Plan.", "t1", events.slice(0, 2));
   assert.ok(two !== null);
-  const batch = deliveryPrompt("Plan.", "done", "t1", events, fold, fold(two.prompt, "done").length);
-  assert.deepEqual(batch, two);
+  const plan = "p".repeat(DELIVERY_PROMPT_LIMIT - two.prompt.length + "Plan.".length);
+  const batch = deliveryPrompt(plan, "t1", events);
+  assert.equal(batch?.lastEventId, 2);
+  assert.equal(batch.prompt.length, DELIVERY_PROMPT_LIMIT);
 });
 
 test("a delivery prompt delivers by reference an event too long to fit on its own", () => {
-  const batch = deliveryPrompt("Plan.", "done", "t1", [failed(41, "x".repeat(5000)), idle(42)], fold, 4000);
+  const batch = deliveryPrompt("Plan.", "t1", [failed(41, "x".repeat(5000)), idle(42)]);
   assert.deepEqual(batch, {
     prompt: `Plan.\n\n${JSON.stringify({
       eventId: 41,
@@ -55,5 +55,5 @@ test("a delivery prompt delivers by reference an event too long to fit on its ow
     })}`,
     lastEventId: 41,
   });
-  assert.ok(fold(batch.prompt, "done").length <= 4000);
+  assert.ok(batch.prompt.length <= DELIVERY_PROMPT_LIMIT);
 });

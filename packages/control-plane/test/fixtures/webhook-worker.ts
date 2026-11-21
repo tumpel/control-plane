@@ -1,4 +1,5 @@
 import { TenantApiProtocol } from "@tumpel/schemas";
+import { RETRY_LIMIT } from "../../src/backoff.ts";
 import worker, { Tenant as BaseTenant, WebhookSender as BaseWebhookSender, type Env } from "../../src/index.ts";
 import type { NewTenantEvent } from "../../src/tenant-events.ts";
 import { webhookSenderName } from "../../src/webhook-sender.ts";
@@ -88,10 +89,10 @@ export class WebhookSender extends BaseWebhookSender {
     return this.ctx.storage.getAlarm();
   }
 
-  async failSince(at: number): Promise<void> {
+  async exhaustRetries(): Promise<void> {
     const failure = await this.ctx.storage.get<Record<string, unknown>>("failure");
     if (failure === undefined) throw new Error("the webhook sender has no failure");
-    await this.ctx.storage.put("failure", { ...failure, failingSince: at });
+    await this.ctx.storage.put("failure", { ...failure, failures: RETRY_LIMIT });
   }
 
   runAlarm(): Promise<void> {
@@ -113,6 +114,15 @@ export default {
   ...worker,
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/__fixture/") && request.headers.get("content-type") === "application/json") {
+      const { tenantId } = await request.clone().json<{ tenantId?: string }>();
+      if (tenantId !== undefined)
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, 0, 0)",
+        )
+          .bind(tenantId, tenantId)
+          .run();
+    }
     if (url.pathname === "/__fixture/create") {
       const { tenantId, endpoint, now } = await requestBody<{
         tenantId: string;
@@ -180,13 +190,13 @@ export default {
       await tenant(env, tenantId).createFixtureSubscription(sessionId, now);
       return new Response(null, { status: 204 });
     }
-    const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/fail-since|\/alarm)?$/.exec(url.pathname);
+    const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/exhaust-retries|\/alarm)?$/.exec(url.pathname);
     if (senderMatch !== null) {
       const tenantId = decodeURIComponent(senderMatch[1] ?? "");
       const endpointId = decodeURIComponent(senderMatch[2] ?? "");
       const stub = sender(env, tenantId, endpointId);
-      if (senderMatch[3] === "/fail-since") {
-        await stub.failSince((await requestBody<{ at: number }>(request)).at);
+      if (senderMatch[3] === "/exhaust-retries") {
+        await stub.exhaustRetries();
         return new Response(null, { status: 204 });
       }
       if (senderMatch[3] === "/alarm") {

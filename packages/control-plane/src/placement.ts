@@ -14,6 +14,7 @@ export interface ImageAvailability {
 
 export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
+  | { kind: "Unplaceable"; host: Host; reason: "NotHealthy" }
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
   | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
   | { kind: "Unplaceable"; host: Host; reason: "MemoryFull"; usage: ReportedHostUsage; boxMemoryMib: number }
@@ -93,6 +94,8 @@ const assess = (
   connectors: boolean,
 ): Candidate | Unplaceable => {
   if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
+  if (host.health !== "Healthy" || host.reportedHealth !== "Healthy")
+    return { kind: "Unplaceable", host, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
   const usage = usages.get(host.hostId);
   if (usage === undefined) {
@@ -134,7 +137,8 @@ const SHORT_OF_ROOM: readonly Unplaceable["reason"][] = ["Full", "MemoryFull", "
 
 const capacityHost = (hosts: readonly Unplaceable[]): Host | undefined =>
   hosts.find(({ reason }) => SHORT_OF_ROOM.includes(reason))?.host ??
-  hosts.find(({ reason, host }) => reason === "NotOnline" && host.state === "Offline")?.host;
+  hosts.find(({ reason, host }) => reason === "NotOnline" && host.state === "Offline")?.host ??
+  hosts.find(({ reason, host }) => reason === "NotHealthy" && host.health !== "Unhealthy")?.host;
 
 export const waitForCapacity = (placement: Placement): StartPlacement => {
   if (placement.kind !== "Refused") return placement;

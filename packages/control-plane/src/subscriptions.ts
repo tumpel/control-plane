@@ -4,12 +4,10 @@ import {
   SubscriptionPathSchema,
   SubscriptionPauseSchema,
 } from "@tumpel/schemas";
-import { widestReference } from "./delivery-prompt.ts";
-import { DELIVERY_GOAL_ROUNDS, GOAL_FOLDS } from "./harness-catalog.ts";
+import { DELIVERY_PROMPT_LIMIT, subscriptionPrompt, widestReference } from "./delivery-prompt.ts";
 import { issues, json, type Problem, type ProblemStatus, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
-import { refusedGoal } from "./sessions.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { Subscription } from "./tenant-subscriptions.ts";
 
@@ -76,11 +74,12 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
     );
   }
   const tenant = tenantApi(env.TENANT, caller.tenantId);
-  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId: subscription.sessionId });
-  if (session === null) return sessionNotFound(subscription.sessionId);
-  const goal = refusedGoal(session, { prompt: subscription.prompt, goal: subscription.goal });
-  if (goal !== null) return refused(goal.status, goal.problem);
   if (subscription.crewTags.length > 0) {
+    const { session } = await tenant.call("getSession", {
+      tenantId: caller.tenantId,
+      sessionId: subscription.sessionId,
+    });
+    if (session === null) return sessionNotFound(subscription.sessionId);
     const { persona } = await tenant.call("getPersona", { tenantId: caller.tenantId, personaId: session.personaId });
     if (persona?.tumpelMcp !== true) {
       const name = persona?.name ?? session.personaId;
@@ -91,15 +90,13 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
       );
     }
   }
-  const goalFold = GOAL_FOLDS.get(session.harness);
-  if (goalFold === undefined) throw new Error(`${session.harness} passed the goal check and has no goal fold`);
   const leanest = `${subscription.prompt}\n\n${widestReference(subscription.events)}`;
-  const length = goalFold.fold(leanest, subscription.goal, DELIVERY_GOAL_ROUNDS).length;
-  if (length > goalFold.limit) {
+  const length = subscriptionPrompt(leanest, subscription.goal).length;
+  if (length > DELIVERY_PROMPT_LIMIT) {
     return invalid(
       "Plan and goal too long",
-      `the plan and goal leave no room for an event: each turn needs ${length} characters with one event delivered by reference, and ${session.harness} takes at most ${goalFold.limit}`,
-      `Shorten the plan or the goal by ${length - goalFold.limit} characters, then create it again`,
+      `the plan and goal leave no room for an event: each turn needs ${length} characters with one event delivered by reference, and delivery prompts take at most ${DELIVERY_PROMPT_LIMIT}`,
+      `Shorten the plan or the goal by ${length - DELIVERY_PROMPT_LIMIT} characters, then create it again`,
     );
   }
   const { created } = await tenant.call("createSubscription", { tenantId: caller.tenantId, subscription, now });

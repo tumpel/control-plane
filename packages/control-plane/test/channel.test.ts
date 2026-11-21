@@ -5,8 +5,10 @@ import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../src/channel/control.ts";
 import { refusedOrResent } from "../src/channel/failure.ts";
 import {
+  accept,
   type ControlEnvelope,
   emptyLedger,
+  type Frame,
   HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
@@ -33,6 +35,12 @@ const memoryLedger = <M>(): LedgerStore<M> & { current: Ledger<M> } => {
     save: (ledger: Ledger<M>) => {
       store.current = structuredClone(ledger);
     },
+    heard: () => store.current.received,
+    skip: (frame: Frame<unknown>) => {
+      const outcome = accept(store.current, frame);
+      if (outcome.kind === "Accepted") store.current = structuredClone(outcome.ledger);
+    },
+    refused: () => new Set<number>(),
   };
   return store;
 };
@@ -131,12 +139,13 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
         }),
         messageVersions,
+        admitFrame: () => null,
         now: () => new Date("2026-11-14T10:00:00+00:00"),
       } satisfies control.ControlContext,
       deliver: async (envelope: HostEnvelope) => {
         const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
         link.connection = received.connection;
-        if (received.event.kind === "Message") control.acknowledge(link.context, received.event.frame);
+        if (received.event.kind === "Message") control.acknowledge(link.context, [received.event.frame]);
         if (received.event.kind !== "None") link.events.push(received.event);
       },
       hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
@@ -205,11 +214,33 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.equal(link.closed, null);
 });
 
+test("Welcome acks the host frames an earlier connection delivered, so the host stops counting them as undelivered", async () => {
+  const channel = setup();
+  const first = channel.connect();
+  await first.hello();
+  await first.deliver(frame(1, 0, snapshotDone("snap-1")));
+  await first.deliver(frame(2, 0, snapshotDone("snap-2")));
+
+  const second = channel.connect();
+  await second.hello();
+  assert.deepEqual(second.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Version,
+    ack: 2,
+  });
+});
+
 test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () => {
   const link = setup().connect();
   await link.hello(undefined, ChannelProtocol.Oldest);
   assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Oldest });
+  assert.deepEqual(link.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Oldest,
+    ack: 0,
+  });
   assert.deepEqual(link.events.at(-1), {
     kind: "Welcomed",
     boxCapacity: 8,
@@ -225,7 +256,12 @@ test("a Hello on ChannelProtocol.Version is welcomed on that version", async () 
   const link = setup().connect();
   await link.hello(undefined, ChannelProtocol.Version);
   assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Version });
+  assert.deepEqual(link.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Version,
+    ack: 0,
+  });
 });
 
 test("a Hello one below ChannelProtocol.Oldest is refused as an unsupported version", async () => {
@@ -324,7 +360,7 @@ test("a frame whose handling fails retryably stays unrecorded for the host to re
     link.connection = received.connection;
     if (received.event.kind !== "Message") return received.event.kind;
     const reply = refusedOrResent(received.event.frame.message.type, error);
-    control.acknowledge(link.context, received.event.frame);
+    control.acknowledge(link.context, [received.event.frame]);
     control.refuseFrame(link.context.port, received.event.frame.seq, reply.reason);
     return reply.reason;
   };
@@ -480,7 +516,7 @@ test("a frame whose handling failed stays unacknowledged, so its resend is handl
   );
   assert.deepEqual(resent.event, { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
   assert.ok(resent.event.kind === "Message");
-  control.acknowledge(link.context, resent.event.frame);
+  control.acknowledge(link.context, [resent.event.frame]);
   assert.equal(channel.ledger.current.received, 1);
   assert.equal(link.closed, null);
 });
@@ -594,14 +630,19 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
   await first.deliver(beat(["session-1"]));
   await first.deliver(beat([]));
   assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: ["session-1"] },
-    { kind: "Heartbeat", usage: USAGE },
+    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"] },
+    { kind: "Heartbeat", usage: USAGE, health: "Healthy" },
   ]);
 
   const second = channel.connect();
   await second.hello();
   await second.deliver(beat([]));
-  assert.deepEqual(second.events.at(-1), { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: [] });
+  assert.deepEqual(second.events.at(-1), {
+    kind: "FirstHeartbeat",
+    usage: USAGE,
+    health: "Healthy",
+    heldSessionIds: [],
+  });
 });
 
 test("a heartbeat from a host before the held sessions version reports nothing", async () => {
@@ -609,6 +650,6 @@ test("a heartbeat from a host before the held sessions version reports nothing",
   await link.hello(undefined, HELD_SESSIONS_VERSION - 1);
   const heartbeat = { type: "Heartbeat", sentAt: "2026-11-18T10:00:00+01:00", usage: USAGE };
   const received = await control.receive(link.connection, JSON.stringify(heartbeat), link.context);
-  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE });
+  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE, health: "Healthy" });
   assert.equal(link.closed, null);
 });

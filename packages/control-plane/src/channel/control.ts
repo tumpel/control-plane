@@ -12,9 +12,11 @@ import {
   HostEnvelopeBeforeHeldSessionsSchema,
   HostEnvelopeSchema,
   type HostMessage,
+  type HostReportedHealth,
   type HostUsage,
   heartbeat,
   helloBytes,
+  type Ledger,
   type LedgerStore,
   type Port,
   type PreparedClaudeSetup,
@@ -37,6 +39,7 @@ export type ControlConnection =
 
 export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
+export const FRAME_RATE_LIMITED_VERSION = 32;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -97,7 +100,14 @@ export interface ControlContext {
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
   messageVersions: MessageVersions;
+  admitFrame(seq: number): FrameRateRefusal | null;
   now(): Date;
+}
+
+export interface FrameRateRefusal {
+  reason: string;
+  framesPerMinute: number;
+  retryAfter: Date;
 }
 
 export type ControlEvent =
@@ -111,10 +121,11 @@ export type ControlEvent =
       channelProtocolOldest: Hello["channelProtocolOldest"];
       guestProtocol: Hello["guestProtocol"];
     }
-  | { kind: "Heartbeat"; usage: HostUsage }
-  | { kind: "FirstHeartbeat"; usage: HostUsage; heldSessionIds: string[] }
+  | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
+  | { kind: "FirstHeartbeat"; usage: HostUsage; health: HostReportedHealth; heldSessionIds: string[] }
   | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
+  | { kind: "FrameRateLimited"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
 
 export type Welcomed = Extract<ControlEvent, { kind: "Welcomed" }>;
@@ -215,6 +226,14 @@ export const send = async (
 export const refuseFrame = (port: Port<ControlEnvelope>, seq: number, reason: string): void =>
   port.send({ type: "FrameRefused", seq, reason });
 
+const refuseOverRate = (
+  port: Port<ControlEnvelope>,
+  seq: number,
+  { reason, framesPerMinute, retryAfter }: FrameRateRefusal,
+): void => {
+  port.send({ type: "FrameRateLimited", seq, reason, framesPerMinute, retryAfter: retryAfter.toISOString() });
+};
+
 export const revoke = (context: ControlContext, reason: string): Received =>
   close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked: ${reason}`);
 
@@ -241,7 +260,12 @@ const hello = async (
     if (refused !== null) return refused;
   }
   const resent = await resend(ledger, (stored) => outbound(stored, envelope.protocolVersion, context));
-  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: envelope.protocolVersion });
+  context.port.send({
+    type: "Welcome",
+    hostId: context.host.hostId,
+    protocolVersion: envelope.protocolVersion,
+    ack: ledger.received,
+  });
   for (const frame of resent) context.port.send(frame);
   return {
     connection: { phase: "Open", protocolVersion: envelope.protocolVersion, heldReported: false },
@@ -257,6 +281,11 @@ const hello = async (
   };
 };
 
+const inbound = (context: ControlContext): Ledger<StoredControlMessage> => ({
+  ...context.ledger.load(),
+  received: context.ledger.heard(),
+});
+
 const spoken = (version: number): boolean => version >= ChannelProtocol.Oldest && version <= ChannelProtocol.Version;
 
 const refuse = async (
@@ -267,7 +296,7 @@ const refuse = async (
 ): Promise<Received> => {
   const stored = parseEnvelope(StoredHostFrameSchema, text);
   if (!stored.ok) return close(context.port, CloseCode.ProtocolError, reason);
-  const outcome = accept(context.ledger.load(), stored.value);
+  const outcome = accept(inbound(context), stored.value, context.ledger.refused());
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -276,7 +305,7 @@ const refuse = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  context.ledger.save(outcome.ledger);
+  context.ledger.skip(stored.value);
   refuseFrame(context.port, stored.value.seq, reason);
   return { connection, event: { kind: "FrameRefused", seq: stored.value.seq, reason } };
 };
@@ -320,12 +349,13 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") {
+    const health = envelope.health ?? "Healthy";
     if (connection.heldReported || !reportsHeldSessions(envelope)) {
-      return { connection, event: { kind: "Heartbeat", usage: envelope.usage } };
+      return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
     }
     return {
       connection: { ...connection, heldReported: true },
-      event: { kind: "FirstHeartbeat", usage: envelope.usage, heldSessionIds: envelope.heldSessionIds },
+      event: { kind: "FirstHeartbeat", usage: envelope.usage, health, heldSessionIds: envelope.heldSessionIds },
     };
   }
   const needed = HOST_MESSAGE_VERSIONS[envelope.message.type];
@@ -337,7 +367,7 @@ export const receive = async (
       context,
     );
   }
-  const outcome = accept(context.ledger.load(), envelope);
+  const outcome = accept(inbound(context), envelope, context.ledger.refused());
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -345,6 +375,19 @@ export const receive = async (
       CloseCode.ProtocolError,
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
+  }
+  const overRate = context.admitFrame(envelope.seq);
+  if (overRate !== null && connection.protocolVersion < FRAME_RATE_LIMITED_VERSION) {
+    return close(
+      context.port,
+      CloseCode.UnsupportedVersion,
+      `over ${overRate.framesPerMinute} frames a minute; protocol ${connection.protocolVersion} cannot slow down, update the supervisor`,
+    );
+  }
+  if (overRate !== null) {
+    context.ledger.skip(envelope);
+    refuseOverRate(context.port, envelope.seq, overRate);
+    return { connection, event: { kind: "FrameRateLimited", seq: envelope.seq, reason: overRate.reason } };
   }
   return {
     connection,
@@ -355,12 +398,17 @@ export const receive = async (
   };
 };
 
-export const acknowledge = (context: ControlContext, frame: Frame<HostMessage>): void => {
-  const outcome = accept(context.ledger.load(), frame);
-  if (outcome.kind !== "Accepted") {
-    throw new Error(`frame ${frame.seq} was handled but the ledger no longer takes it (${outcome.kind})`);
+export const acknowledge = (context: ControlContext, frames: Frame<unknown>[]): void => {
+  let ledger = context.ledger.load();
+  const refused = context.ledger.refused();
+  for (const frame of frames) {
+    const outcome = accept(ledger, frame, refused);
+    if (outcome.kind !== "Accepted") {
+      throw new Error(`frame ${frame.seq} was handled but the ledger no longer takes it (${outcome.kind})`);
+    }
+    ledger = outcome.ledger;
   }
-  context.ledger.save(outcome.ledger);
+  context.ledger.save(ledger);
 };
 
 export const beat = (context: ControlContext): void => context.port.send(heartbeat(context.now()));

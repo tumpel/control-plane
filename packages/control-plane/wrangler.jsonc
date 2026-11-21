@@ -17,18 +17,31 @@
     { "binding": "STORE", "bucket_name": "tumpel-sessions" },
     { "binding": "RELEASES", "bucket_name": "tumpel-releases" }
   ],
+  "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics" }],
   "queues": {
     "consumers": [{ "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 }]
   },
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
     "RELEASES_BUCKET_NAME": "tumpel-releases",
+    "METRICS_DATASET": "tumpel_metrics",
     "GITHUB_API_ORIGIN": "https://api.github.com",
     "GITHUB_WEB_ORIGIN": "https://github.com",
     "CIRCLECI_API_ORIGIN": "https://circleci.com",
     "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
     "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
     "OPENROUTER_ORIGIN": "https://openrouter.ai",
+    "TUMPEL_LIMITS": {
+      "defaultTier": "Configured",
+      "freeTenantsPerAccount": 1,
+      "configured": [
+        { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+        { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+      ],
+      "readsPerMinute": 600,
+      "writesPerMinute": 120,
+      "hostFramesPerMinute": 600
+    },
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -52,6 +65,11 @@
       "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
     }
   },
+  "ratelimits": [
+    { "name": "TENANT_READ_RATE", "namespace_id": "1001", "simple": { "limit": 600, "period": 60 } },
+    { "name": "TENANT_WRITE_RATE", "namespace_id": "1002", "simple": { "limit": 120, "period": 60 } },
+    { "name": "WEBHOOK_RATE", "namespace_id": "1004", "simple": { "limit": 600, "period": 60 } }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "TENANT", "class_name": "Tenant" },
@@ -85,18 +103,31 @@
         { "binding": "STORE", "bucket_name": "tumpel-sessions-dev" },
         { "binding": "RELEASES", "bucket_name": "tumpel-releases-dev" }
       ],
+      "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics_dev" }],
       "queues": {
         "consumers": [{ "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 }]
       },
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
         "RELEASES_BUCKET_NAME": "tumpel-releases-dev",
+        "METRICS_DATASET": "tumpel_metrics_dev",
         "GITHUB_API_ORIGIN": "https://api.github.com",
         "GITHUB_WEB_ORIGIN": "https://github.com",
         "CIRCLECI_API_ORIGIN": "https://circleci.com",
         "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
         "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
         "OPENROUTER_ORIGIN": "https://openrouter.ai",
+        "TUMPEL_LIMITS": {
+          "defaultTier": "Configured",
+          "freeTenantsPerAccount": 1,
+          "configured": [
+            { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+            { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+          ],
+          "readsPerMinute": 600,
+          "writesPerMinute": 120,
+          "hostFramesPerMinute": 600
+        },
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,
@@ -120,6 +151,11 @@
           "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
         }
       },
+      "ratelimits": [
+        { "name": "TENANT_READ_RATE", "namespace_id": "2001", "simple": { "limit": 600, "period": 60 } },
+        { "name": "TENANT_WRITE_RATE", "namespace_id": "2002", "simple": { "limit": 120, "period": 60 } },
+        { "name": "WEBHOOK_RATE", "namespace_id": "2004", "simple": { "limit": 600, "period": 60 } }
+      ],
       "durable_objects": {
         "bindings": [
           { "name": "TENANT", "class_name": "Tenant" },

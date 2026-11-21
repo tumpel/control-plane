@@ -10,12 +10,15 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
+import { limitsOf, type TenantTier, tierLimits } from "./limits.ts";
+import { meteredState } from "./metered-state.ts";
 import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
@@ -26,6 +29,7 @@ import {
   storedKeys,
   type UnreadableSecretSet,
 } from "./secret-members.ts";
+import type { DueDeadline } from "./session-timer.ts";
 import { checkStart } from "./sessions.ts";
 import {
   recordSupervisorUpdate,
@@ -35,9 +39,11 @@ import {
 } from "./supervisor-updates";
 import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
-import { listEvents } from "./tenant-events.ts";
+import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
+import { PUSH_WAKES_DUE } from "./tenant-push-subscriptions.ts";
 import { memberRows, sealContext } from "./tenant-sessions";
+import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
 export type PersonaWrite = Pick<
@@ -56,6 +62,15 @@ export type PersonaPatch = z.infer<typeof PersonaPatchChangeSchema>;
 export type SecretSetPatch = z.infer<typeof SecretSetPatchSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
+
+const ALARM_RETRY_KEY = "alarmRetry";
+const ALARM_FAILED_AT_KEY = "alarmFailedAt";
+const ALARM_FIRST_RETRY_MS = 2_000;
+const WEBHOOK_WAKE_FIRST_RETRY_MS = 2_000;
+const WEBHOOK_WAKE_RETRIES = `FROM webhook_wake_retries AS r
+  JOIN webhook_wakes USING (webhook_endpoint_id) JOIN webhook_endpoints USING (webhook_endpoint_id)`;
+
+type AlarmRetry = { retries: number; at: number };
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
@@ -179,39 +194,195 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
+const USAGE_KEY = "usage";
+const TIER_FIRST_RETRY_MS = 1_000;
+
+const tierOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<TenantTier> => {
+  const row = await db
+    .prepare("SELECT tier FROM tenants WHERE tenant_id = ?")
+    .bind(tenantId)
+    .first<{ tier: TenantTier }>();
+  return row?.tier ?? fallback;
+};
+
+type TierRead = { settled: boolean; retries: number; retryAt: number; reading: Promise<void> | null };
+
 export class Tenant extends TenantConnectors {
+  private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
+  private meter: UsageMeter | undefined;
+  private readonly tierRead: TierRead = { settled: false, retries: 0, retryAt: 0, reading: null };
+  private readonly opened: Promise<void>;
+
   constructor(ctx: DurableObjectState, env: Env) {
+    const cursors: { readonly rowsRead: number; readonly rowsWritten: number }[] = [];
     super(ctx, env);
-    void ctx.blockConcurrencyWhile(async () => {
-      migrateDurableObject(ctx.storage.sql, TENANT_MIGRATIONS);
+    this.ctx = meteredState(this.ctx, cursors);
+    this.cursors = cursors;
+    this.opened = this.ctx.blockConcurrencyWhile(async () => {
+      await migrateDurableObject(this.ctx.storage, TENANT_MIGRATIONS);
       await this.holdDataKey();
       await this.sealPlaintext();
+      await this.openMeter();
     });
   }
 
+  private async openMeter(): Promise<void> {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) return;
+    const tier = limitsOf(this.env).defaultTier;
+    const saved = (await this.ctx.storage.get<SavedCounter[]>(USAGE_KEY)) ?? [];
+    this.meter = new UsageMeter(tier, tierLimits(limitsOf(this.env), tier), saved, this.cursors, Date.now());
+  }
+
+  private async settleTier(now: number): Promise<void> {
+    const read = this.tierRead;
+    if (read.settled || read.retries > RETRY_LIMIT || now < read.retryAt) return;
+    read.reading ??= this.readTier().finally(() => {
+      read.reading = null;
+    });
+    await read.reading;
+  }
+
+  private async readTier(): Promise<void> {
+    const read = this.tierRead;
+    const tenantId = this.tenantName();
+    const { defaultTier } = limitsOf(this.env);
+    const outcome = await tierOf(this.env.DB, tenantId, defaultTier).then(
+      (tier) => ({ ok: true as const, tier }),
+      (error: unknown) => ({ ok: false as const, error: errorOf(error) }),
+    );
+    if (outcome.ok) {
+      read.settled = true;
+      this.usageMeter().retier(outcome.tier, tierLimits(limitsOf(this.env), outcome.tier), Date.now());
+      return;
+    }
+    read.retries += 1;
+    if (read.retries > RETRY_LIMIT) {
+      console.error(
+        `TenantTierUnread: tenant ${tenantId} stays on the default ${defaultTier} tier until the object restarts, because reading its tier from D1 failed ${RETRY_LIMIT + 1} times: ${outcome.error.message}`,
+      );
+      return;
+    }
+    read.retryAt = Date.now() + backoffMs(read.retries, TIER_FIRST_RETRY_MS);
+    console.error(
+      `TenantTierRetry: tenant ${tenantId} retry ${read.retries} of ${RETRY_LIMIT} reading its tier from D1, on the default ${defaultTier} tier meanwhile: ${outcome.error.message}`,
+    );
+  }
+
+  private usageMeter(): UsageMeter {
+    if (this.meter === undefined) throw new Error("the tenant Durable Object has no usage meter; it has no name");
+    return this.meter;
+  }
+
+  private async meterUsage(operation: string | null, requested: boolean): Promise<void> {
+    const meter = this.usageMeter();
+    const now = Date.now();
+    for (const signal of meter.count(operation, now, requested)) {
+      if (signal.event === "UsageLimitReached") {
+        console.error(
+          `UsageLimitReached: tenant ${this.tenantName()} on the ${signal.tier} tier spent its limit of ${signal.limit} ${signal.measure} per ${signal.window.toLowerCase()}; it is refused until ${signal.resetsAt}`,
+        );
+      }
+      appendEvent(this.ctx.storage.sql, signal, now);
+      this.eventsAppended = true;
+    }
+    const saved = meter.saveDue(now);
+    if (saved !== null) await this.ctx.storage.put(USAGE_KEY, saved);
+  }
+
   async handle(request: TenantRequest): Promise<TenantResponse> {
+    await this.opened;
+    await this.settleTier(Date.now());
+    return this.serve(request, null);
+  }
+
+  async handleForTenant(request: TenantRequest): Promise<TenantResponse> {
+    await this.opened;
+    const operation = typeof request.operation === "string" ? request.operation : "";
+    await this.settleTier(Date.now());
+    const spent = operation === "readUsage" ? null : this.usageMeter().spent(operation, Date.now());
+    if (spent !== null) return spent;
+    return this.serve(request, operation);
+  }
+
+  private async serve(request: TenantRequest, operation: string | null): Promise<TenantResponse> {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.ctx.storage.setAlarm(Date.now());
-    await this.startDeliveries(this.tenantName());
-    this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
+    await this.meterUsage(operation, true);
+    await this.followUp();
     await this.armAlarm();
     return response;
   }
 
   override async alarm(): Promise<void> {
+    await this.opened;
     const now = Date.now();
-    await this.ctx.storage.setAlarm(now);
-    await this.deliverPushes(this.tenantName(), now);
-    this.expireSubscriptions(now);
-    await this.startDeliveries(this.tenantName());
-    this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
+    await this.meterUsage(null, false);
+    const queued = await this.queuedAt();
+    if (queued === null || queued > now) return this.armAlarm();
+    const tenantId = this.tenantName();
+    const failed = [
+      await this.step("push delivery", () => this.deliverPushes(tenantId, now)),
+      await this.step("subscription expiry", () => this.expireSubscriptions(now)),
+      await this.step("subscription delivery retries", () => this.retryDeliveries(now)),
+      await this.followUp(),
+    ].includes(true);
+    await this.meterUsage(null, false);
+    if (!failed) {
+      await this.ctx.storage.delete([ALARM_RETRY_KEY, ALARM_FAILED_AT_KEY]);
+      return this.armAlarm();
+    }
+    const retry = ((await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY))?.retries ?? 0) + 1;
+    if (retry <= RETRY_LIMIT) {
+      const pending: AlarmRetry = { retries: retry, at: now + backoffMs(retry, ALARM_FIRST_RETRY_MS) };
+      await this.ctx.storage.put(ALARM_RETRY_KEY, pending);
+      console.error(`TenantAlarmRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} after a failed alarm step`);
+      return this.armAlarm();
+    }
+    await this.ctx.storage.delete(ALARM_RETRY_KEY);
+    await this.ctx.storage.put(ALARM_FAILED_AT_KEY, now);
+    console.error(
+      `TenantAlarmFailed: tenant ${tenantId} stopped retrying the alarm work overdue now after ${RETRY_LIMIT} retries; work that falls due later still runs`,
+    );
     await this.armAlarm();
+  }
+
+  private async followUp(): Promise<boolean> {
+    return [
+      await this.step("delivery start", () => this.startDeliveries(this.tenantName())),
+      await this.step("event wake", () => this.wakeEvents()),
+      await this.step("webhook wake", () => this.wakeWebhooks()),
+      await this.step("object cleanup", () => this.drainObjects()),
+    ].includes(true);
+  }
+
+  private step(name: string, work: () => unknown): Promise<boolean> {
+    return Promise.resolve()
+      .then(work)
+      .then(
+        () => false,
+        (error: unknown) => {
+          console.error(`TenantStepFailed: tenant ${this.tenantName()} ${name} failed: ${errorOf(error).message}`);
+          return true;
+        },
+      );
+  }
+
+  private async reachDeadline(
+    due: DueDeadline,
+    retries: number,
+    reach: () => Promise<void>,
+    abandon: (detail: string) => Promise<void>,
+  ): Promise<void> {
+    const failed = await reach().then(() => null, errorOf);
+    if (failed === null) return;
+    if (retries < RETRY_LIMIT) throw failed;
+    const detail = `the ${due.name} deadline still failed after ${RETRY_LIMIT} retries, so it was dropped: ${failed.message}`;
+    console.error(
+      `DeadlineDropped: tenant ${this.tenantName()} ${due.name} ${JSON.stringify(due.deadline)}: ${detail}`,
+    );
+    await abandon(detail);
   }
 
   private drainObjects(): void {
@@ -232,35 +403,70 @@ export class Tenant extends TenantConnectors {
 
   private async wakeWebhooks(): Promise<void> {
     const tenantId = this.tenantName();
-    const wakes = this.ctx.storage.sql
-      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
-        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_wakes
-        JOIN webhook_endpoints AS w USING (webhook_endpoint_id) ORDER BY w.created_at, w.webhook_endpoint_id`,
+    const sql = this.ctx.storage.sql;
+    const wakes = sql
+      .exec<{ webhook_endpoint_id: string; start_event_id: number; failures: number }>(
+        `SELECT w.webhook_endpoint_id, w.start_event_id, COALESCE(r.failures, 0) AS failures FROM webhook_wakes
+        JOIN webhook_endpoints AS w USING (webhook_endpoint_id)
+        LEFT JOIN webhook_wake_retries AS r USING (webhook_endpoint_id)
+        WHERE r.retry_at IS NULL OR r.retry_at <= ? ORDER BY w.created_at, w.webhook_endpoint_id`,
+        Date.now(),
       )
       .toArray();
-    if (wakes.length === 0) return;
     for (const wake of wakes) {
-      await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id)).wake({
-        tenantId,
-        webhookEndpointId: wake.webhook_endpoint_id,
-        cursorEventId: wake.start_event_id,
-      });
-      this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+      const failed = await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id))
+        .wake({ tenantId, webhookEndpointId: wake.webhook_endpoint_id, cursorEventId: wake.start_event_id })
+        .then(() => null, errorOf);
+      const retry = wake.failures + 1;
+      if (failed === null || retry > RETRY_LIMIT) {
+        sql.exec("DELETE FROM webhook_wake_retries WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+        sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+      }
+      if (failed === null) continue;
+      if (retry > RETRY_LIMIT) {
+        console.error(
+          `WebhookWakeFailed: tenant ${tenantId} dropped the wake of webhook endpoint ${wake.webhook_endpoint_id} after ${RETRY_LIMIT} retries; the next matching event wakes it again: ${failed.message}`,
+        );
+        continue;
+      }
+      sql.exec(
+        "INSERT OR REPLACE INTO webhook_wake_retries (webhook_endpoint_id, failures, retry_at) VALUES (?, ?, ?)",
+        wake.webhook_endpoint_id,
+        retry,
+        Date.now() + backoffMs(retry, WEBHOOK_WAKE_FIRST_RETRY_MS),
+      );
+      console.error(
+        `WebhookWakeRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} to wake webhook endpoint ${wake.webhook_endpoint_id}: ${failed.message}`,
+      );
     }
   }
 
-  private async armAlarm(): Promise<void> {
+  private async queuedAt(): Promise<number | null> {
+    const retry = await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY);
+    const failedAt = await this.ctx.storage.get<number>(ALARM_FAILED_AT_KEY);
     const [next] = this.ctx.storage.sql
-      .exec<{ at: number | null }>(`SELECT MIN(at) AS at FROM (
-        SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
+      .exec<{ at: number | null }>(
+        `SELECT MIN(at) AS at FROM (
+        SELECT s.expires_at_ms AS at FROM subscriptions AS s
           WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
         UNION ALL
-        SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
-          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id))`)
+        SELECT w.next_attempt_at AS at ${PUSH_WAKES_DUE}
+        UNION ALL
+        SELECT retry_at AS at FROM subscription_delivery_retries
+        UNION ALL
+        SELECT r.retry_at AS at ${WEBHOOK_WAKE_RETRIES}) WHERE at > ?`,
+        failedAt ?? Number.MIN_SAFE_INTEGER,
+      )
       .toArray();
-    if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(next.at);
+    return next?.at === null || next?.at === undefined ? null : Math.max(next.at, retry?.at ?? next.at);
+  }
+
+  private async armAlarm(): Promise<void> {
+    const flushAt = this.meter?.flushAt() ?? null;
+    const queued = await this.queuedAt();
+    const at = queued === null || flushAt === null ? (queued ?? flushAt) : Math.min(queued, flushAt);
+    if (at === null) return this.ctx.storage.deleteAlarm();
+    return this.ctx.storage.setAlarm(at);
   }
 
   private readonly operations: TenantHandlers = {
@@ -423,8 +629,13 @@ export class Tenant extends TenantConnectors {
       await this.workflowRunReported(tenantId, event, now);
       return {};
     },
-    prebuildDeadlineReached: async ({ tenantId, due }) => {
-      await this.prebuildDeadlineReached(tenantId, due);
+    prebuildDeadlineReached: async ({ tenantId, due, retries }) => {
+      await this.reachDeadline(
+        due,
+        retries,
+        () => this.prebuildDeadlineReached(tenantId, due),
+        (detail) => this.abandonPrebuildDeadline(tenantId, due, detail),
+      );
       return {};
     },
     startGitHubActionsPrebuild: async ({ tenantId, start, now }) => ({
@@ -595,8 +806,8 @@ export class Tenant extends TenantConnectors {
       this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
       return {};
     },
-    hostUsage: ({ hostId, usage, now }) => {
-      this.hostUsage(hostId, usage, now);
+    hostUsage: async ({ hostId, usage, now }) => {
+      await this.hostUsage(hostId, usage, now);
       return {};
     },
     reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, now }) => {
@@ -609,6 +820,7 @@ export class Tenant extends TenantConnectors {
     },
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
     listHostUsage: ({ tenantId }) => ({ usage: this.listHostUsage(tenantId) }),
+    readUsage: () => ({ usage: this.usageMeter().usage(Date.now()) }),
     deferredOffers: async ({ tenantId, hostId }) => ({ handoffs: await this.deferredOffers(tenantId, hostId) }),
     turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
@@ -618,11 +830,23 @@ export class Tenant extends TenantConnectors {
       await this.hostPresence(tenantId, hostId, presence, now);
       return {};
     },
+    hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
+      this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
+      if (health === "Healthy") return {};
+      await this.failHostWork(tenantId, hostId, detail, now);
+      await this.failHostClaudeSetups(tenantId, hostId, detail, now);
+      return {};
+    },
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),
-    deadlineReached: async ({ tenantId, due }) => {
-      await this.deadlineReached(tenantId, due);
+    deadlineReached: async ({ tenantId, due, retries }) => {
+      await this.reachDeadline(
+        due,
+        retries,
+        () => this.deadlineReached(tenantId, due),
+        (detail) => this.abandonDeadline(tenantId, due, detail),
+      );
       return {};
     },
   };
