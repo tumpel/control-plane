@@ -105,6 +105,10 @@ export class Host {
     this.world = world;
   }
 
+  lastReceivedAt(): number {
+    return Date.now();
+  }
+
   send(message: unknown): Promise<"Sent" | "Deferred"> {
     const parsed = ControlMessageSchema.parse(message);
     const [row] = this.world.db.sql.exec("SELECT health FROM hosts WHERE host_id = ?", this.hostId).toArray();
@@ -436,7 +440,10 @@ export class World {
   }
 
   async startPrebuild(): Promise<void> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHosts",
+    );
     const personaId = await this.defaultPersona();
     const prebuildId = randomUUID();
     const [base] = CLAUDE_CODE_AMD64_RELEASE.bases;
@@ -456,7 +463,7 @@ export class World {
       input: {
         principalId: PRINCIPAL_ID,
         startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
-        hosts: await listHosts(this.db, TENANT_ID),
+        hosts: await listHosts(this.env, TENANT_ID),
         harness: "ClaudeCode",
         harnessVersion: CLAUDE_CODE_VERSION,
         endpoint: "https://api.scenario.test",
@@ -480,7 +487,10 @@ export class World {
   }
 
   async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHosts",
+    );
     const personaId = await this.defaultPersona();
     return this.call("startSession", {
       tenantId: TENANT_ID,
@@ -488,7 +498,7 @@ export class World {
       input: {
         principalId: PRINCIPAL_ID,
         startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
-        hosts: await listHosts(this.db, TENANT_ID),
+        hosts: await listHosts(this.env, TENANT_ID),
         harness: "ClaudeCode",
         harnessVersion: CLAUDE_CODE_VERSION,
         endpoint: "https://api.scenario.test",
@@ -505,13 +515,16 @@ export class World {
   }
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHosts",
+    );
     z.object({ sent: z.object({ kind: z.literal("Sent") }) }).parse(
       await this.call("sendTurn", {
         tenantId: TENANT_ID,
         sessionId,
         send: { prompt },
-        hosts: await listHosts(this.db, TENANT_ID),
+        hosts: await listHosts(this.env, TENANT_ID),
         now: Date.now(),
       }),
     );
