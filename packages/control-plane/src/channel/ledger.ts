@@ -1,4 +1,5 @@
 import {
+  accept,
   emptyLedger,
   type Frame,
   type HostMessage,
@@ -57,7 +58,14 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
   }
 
   skip(frame: Frame<unknown>): void {
-    this.#held.push({ frame, message: null, forwarded: true, bytes: 0 });
+    if (this.#held.length > 0) {
+      this.#held.push({ frame, message: null, forwarded: true, bytes: 0 });
+      return;
+    }
+    const outcome = accept(this.load(), frame);
+    if (outcome.kind !== "Accepted")
+      throw new Error(`frame ${frame.seq} was skipped but the ledger no longer takes it`);
+    this.save(outcome.ledger);
   }
 
   hold(frame: Frame<HostMessage>, forwarded: boolean, bytes: number): void {
