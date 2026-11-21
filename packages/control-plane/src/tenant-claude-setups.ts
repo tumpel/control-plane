@@ -86,14 +86,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return row ?? null;
   }
 
-  private async currentClaudeSetupRow(
-    tenantId: string,
-    claudeSetupId: string,
-    now: number,
-  ): Promise<ClaudeSetupRow | null> {
+  private async currentClaudeSetupRow(claudeSetupId: string, now: number): Promise<ClaudeSetupRow | null> {
     const row = this.claudeSetupRow(claudeSetupId);
     if (row === null || !overdue(row, now)) return row;
-    await this.discardClaudeSetupBox(row, await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, now));
+    await this.discardClaudeSetupBox(row, await this.stepClaudeSetup(row, { kind: "Deadline" }, now));
     return this.claudeSetupRow(claudeSetupId);
   }
 
@@ -181,7 +177,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   }
 
   protected async getClaudeSetup(tenantId: string, claudeSetupId: string, now: number): Promise<ClaudeSetup | null> {
-    const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
+    const row = await this.currentClaudeSetupRow(claudeSetupId, now);
     return row === null ? null : toClaudeSetup(tenantId, row);
   }
 
@@ -199,7 +195,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const running = this.runningClaudeSetupRow(secretSetId);
     if (running === null) return [];
     if (!overdue(running, now)) return [toClaudeSetup(tenantId, running)];
-    await this.discardClaudeSetupBox(running, await this.stepClaudeSetup(tenantId, running, { kind: "Deadline" }, now));
+    await this.discardClaudeSetupBox(running, await this.stepClaudeSetup(running, { kind: "Deadline" }, now));
     return [];
   }
 
@@ -209,7 +205,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     code: string,
     now: number,
   ): Promise<ClaudeSetupCoded> {
-    const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
+    const row = await this.currentClaudeSetupRow(claudeSetupId, now);
     if (row === null) return { kind: "NotFound" };
     const step = advance(claudeSetupId, harnessOf(row), stateOf(row), { kind: "Code" }, settingsOf(this.env));
     if (step.kind === "Refuse") return { kind: "NotWaiting", detail: step.detail };
@@ -240,7 +236,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   ): Promise<ClaudeSetupStored> {
     if (this.claudeSetupRow(claudeSetupId) === null) return { kind: "NotFound" };
     if (!sameSecret(credential, await this.boxToken(tenantId, claudeSetupId))) return { kind: "Refused" };
-    const row = await this.currentClaudeSetupRow(tenantId, claudeSetupId, now);
+    const row = await this.currentClaudeSetupRow(claudeSetupId, now);
     if (row === null) return { kind: "NotFound" };
     const harness = harnessOf(row);
     const step = advance(claudeSetupId, harness, stateOf(row), { kind: "Stored" }, settingsOf(this.env));
@@ -255,7 +251,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const { member, provider, kind } = SETUP_CREDENTIALS[harness];
     if (harness === "Codex" && tokenExpiresAt === undefined) {
       const detail = `the box of Claude setup ${claudeSetupId} sent the Codex token without expiresAt; the token was discarded with the box. Update the host's supervisor, then start the Codex sign-in again`;
-      await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
+      await this.failClaudeSetup(row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
     const sealed = await seal(await this.dataKey(), token, sealContext(secretSetId, member));
@@ -300,14 +296,13 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (written.kind === "NotWaiting") return written;
     if (written.kind === "NotStored") {
       const detail = `${written.detail}; the minted token was discarded with the box. Fix the secret set, then start the ${SETUP_CREDENTIALS[harness].name} setup again`;
-      await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
+      await this.failClaudeSetup(row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
     return { kind: "Stored" };
   }
 
   protected async failHostClaudeSetups(
-    tenantId: string,
     hostId: string,
     reason: ClaudeSetupFailureReason,
     detail: string,
@@ -320,11 +315,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       )
       .toArray();
     for (const row of rows)
-      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(tenantId, row, reason, detail, now, true));
+      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(row, reason, detail, now, true));
   }
 
   private async failClaudeSetup(
-    tenantId: string,
     row: ClaudeSetupRow,
     reason: ClaudeSetupFailureReason,
     detail: string,
@@ -364,14 +358,13 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   }
 
   private async stepClaudeSetup(
-    tenantId: string,
     row: ClaudeSetupRow,
     event: ClaudeSetupEvent,
     now: number,
   ): Promise<ClaudeSetupDiscard | null> {
     const step = advance(row.claude_setup_id, harnessOf(row), stateOf(row), event, settingsOf(this.env));
     if (step.kind === "Fail") {
-      return this.failClaudeSetup(tenantId, row, step.reason, step.detail, now, event.kind !== "BoxFailed");
+      return this.failClaudeSetup(row, step.reason, step.detail, now, event.kind !== "BoxFailed");
     }
     if (step.kind !== "Advance" || event.kind !== "Url") return null;
     const dueAt = now + step.dueInSeconds * 1000;
@@ -404,7 +397,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       message.type === "ClaudeSetupBoxUrl"
         ? { kind: "Url", signInUrl: message.signInUrl, userCode: message.userCode ?? null }
         : { kind: "BoxFailed", reason: message.reason, detail: message.detail };
-    return this.stepClaudeSetup(tenantId, row, event, Date.now());
+    return this.stepClaudeSetup(row, event, Date.now());
   }
 
   private async claudeSetupImage(
@@ -476,7 +469,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     }
     const image = await this.claudeSetupImage(tenantId, row, hostId, now);
     if (typeof image === "string") {
-      await this.failClaudeSetup(tenantId, row, "SetupUrlMissing", image, now, false);
+      await this.failClaudeSetup(row, "SetupUrlMissing", image, now, false);
       return withdrawn;
     }
     const token = await this.boxToken(tenantId, row.claude_setup_id);

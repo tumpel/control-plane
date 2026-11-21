@@ -135,6 +135,12 @@ export type Turn = z.infer<typeof TurnSchema>;
 export type TurnSend = z.infer<typeof TurnSendSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
+type HostLoss = {
+  turn: "RateLimited" | "HostOffline";
+  snapshot: "RateLimited" | "NotAnswered";
+  turnDetail: string;
+  snapshotDetail: string;
+};
 type TurnImage = z.infer<typeof TurnImageSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
@@ -678,7 +684,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private async prebuildUnstored(tenantId: string, session: SessionRow, detail: string): Promise<void> {
+  private async prebuildUnstored(session: SessionRow, detail: string): Promise<void> {
     const prebuild = this.hostPrebuild(session.session_id);
     if (prebuild === null) return;
     const report = { phase: "Upload" as const, detail, fix: PREBUILD_FIX };
@@ -3131,12 +3137,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async failHostWork(tenantId: string, hostId: string, detail: string, now: number): Promise<void> {
+    await this.failHostTurns(
+      tenantId,
+      hostId,
+      { turn: "RateLimited", snapshot: "RateLimited", turnDetail: detail, snapshotDetail: detail },
+      now,
+    );
+  }
+
+  private async failHostTurns(tenantId: string, hostId: string, loss: HostLoss, now: number): Promise<void> {
     const running = this.ctx.storage.sql
       .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running'", hostId)
       .toArray();
     for (const { turn_id } of running) {
-      await this.failTurn(tenantId, turn_id, "RateLimited", detail, iso(now));
-      if (this.channelProtocol(hostId) >= TURN_CANCEL_VERSION)
+      await this.failTurn(tenantId, turn_id, loss.turn, loss.turnDetail, iso(now));
+      if (loss.turn === "RateLimited" && this.channelProtocol(hostId) >= TURN_CANCEL_VERSION)
         await this.host(hostId).send({ type: "TurnCancel", turnId: turn_id });
     }
     const requests = this.ctx.storage.sql
@@ -3147,10 +3162,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     for (const request of requests) {
-      this.recordSnapshotFailure(request, "RateLimited", detail, iso(now));
-      await this.snapshotNotStored(tenantId, request, detail);
-      if (this.sessionRow(request.session_id)?.state === "Stopping")
-        this.setSessionState(request.session_id, "Idle", Date.now());
+      this.recordSnapshotFailure(request, loss.snapshot, loss.snapshotDetail, iso(now));
+      await this.snapshotNotStored(tenantId, request, loss.snapshotDetail);
+      const session = this.sessionRow(request.session_id);
+      if (session === null) continue;
+      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
+      await this.prebuildUnstored(session, loss.snapshotDetail);
     }
   }
 
@@ -3167,13 +3184,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async failSilentHosts(tenantId: string, now: number): Promise<void> {
-    const hostIds = this.ctx.storage.sql
-      .exec<{ host_id: string }>(
-        `SELECT host_id FROM turns WHERE state = 'Running'
-        UNION SELECT s.host_id FROM snapshot_requests r JOIN sessions s ON s.session_id = r.session_id`,
-      )
-      .toArray()
-      .map((row) => row.host_id);
+    const hostIds = new Set(this.heldBoxes().map((held) => held.hostId));
     for (const hostId of hostIds) {
       if (!(await this.hostOffline(hostId))) continue;
       const host = await this.hostName(tenantId, hostId);
@@ -3183,35 +3194,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async failLostHost(tenantId: string, hostId: string, lost: string, now: number): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    const running = sql
-      .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running'", hostId)
-      .toArray();
-    for (const { turn_id } of running) {
-      await this.failTurn(
-        tenantId,
-        turn_id,
-        "HostOffline",
-        `${lost} during the turn; check that its supervisor runs, then send the turn again`,
-        iso(now),
-      );
-    }
-    const requests = sql
-      .exec<SnapshotRequestRow>(
-        `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
-        FROM snapshot_requests r JOIN sessions s ON s.session_id = r.session_id WHERE s.host_id = ?`,
-        hostId,
-      )
-      .toArray();
-    for (const request of requests) {
-      const detail = `${lost} before it answered the snapshot; check that its supervisor runs`;
-      this.recordSnapshotFailure(request, "NotAnswered", detail, iso(now));
-      await this.snapshotNotStored(tenantId, request, detail);
-      const session = this.sessionRow(request.session_id);
-      if (session === null) continue;
-      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
-      await this.prebuildUnstored(tenantId, session, detail);
-    }
+    await this.failHostTurns(
+      tenantId,
+      hostId,
+      {
+        turn: "HostOffline",
+        snapshot: "NotAnswered",
+        turnDetail: `${lost} during the turn; check that its supervisor runs, then send the turn again`,
+        snapshotDetail: `${lost} before it answered the snapshot; check that its supervisor runs`,
+      },
+      now,
+    );
   }
 
   private async hostName(tenantId: string, hostId: string): Promise<string> {
@@ -3962,7 +3955,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.uploadedPacks.delete(request.snapshot_id);
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
-      await this.prebuildUnstored(tenantId, session, detail);
+      await this.prebuildUnstored(session, detail);
       await this.snapshotNotStored(tenantId, request, detail);
       if (session.state === "Stopping" && message.reason === "BoxNotFound") {
         if (this.sessionRow(session.session_id)?.state === "Stopping") await this.teardown(session);
@@ -3976,7 +3969,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (outcome.kind === "Answered") return null;
     if (outcome.kind === "Rejected") {
       this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
-      await this.prebuildUnstored(tenantId, session, outcome.detail);
+      await this.prebuildUnstored(session, outcome.detail);
       await this.snapshotNotStored(tenantId, request, outcome.detail);
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;

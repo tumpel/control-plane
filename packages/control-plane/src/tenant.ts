@@ -448,7 +448,7 @@ export class Tenant extends TenantConnectors {
     getOpenRouterAuthorization: ({ tenantId, principalId, openRouterAuthorizationId }) => ({
       read: this.getOpenRouterAuthorization(tenantId, principalId, openRouterAuthorizationId),
     }),
-    openRouterCallback: async ({ tenantId, openRouterAuthorizationId, callback, now }) => ({
+    openRouterCallback: async ({ openRouterAuthorizationId, callback, now }) => ({
       settled: await this.openRouterCallback(openRouterAuthorizationId, callback, now),
     }),
     openRouterSecretSets: () => ({ names: this.openRouterSecretSets() }),
@@ -644,7 +644,6 @@ export class Tenant extends TenantConnectors {
       await this.hostPresence(tenantId, hostId, presence, now);
       if (presence === "Offline") {
         await this.failHostClaudeSetups(
-          tenantId,
           hostId,
           "NoHostOnline",
           `host ${hostId} went offline during the setup; check that its supervisor runs, then start the setup again`,
@@ -657,7 +656,7 @@ export class Tenant extends TenantConnectors {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};
       await this.failHostWork(tenantId, hostId, detail, now);
-      await this.failHostClaudeSetups(tenantId, hostId, "RateLimited", detail, now);
+      await this.failHostClaudeSetups(hostId, "RateLimited", detail, now);
       return {};
     },
     hostMessage: async ({ tenantId, hostId, message }) => ({
