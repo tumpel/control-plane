@@ -1246,7 +1246,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.offering.add(turn.turn_id);
     await this.armOffer(tenantId, session, turn)
       .then((offer) => this.host(session.host_id).send(offer))
-      .then(() => this.offerSent(turn.turn_id))
+      .then((sent) => {
+        if (sent === "Sent") return this.offerSent(turn.turn_id);
+        this.deferOffer(session, turn, Date.now());
+      })
       .catch((error: unknown) => {
         console.error(
           `OfferQueued: turn ${turn.turn_id} did not reach host ${session.host_id} and waits for its next heartbeat: ${error instanceof Error ? error.message : String(error)}`,
@@ -1449,8 +1452,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state === "Idle") {
       const handoff = await this.offerElsewhere(tenantId, move(session.host_id, session.box_id), turn);
       if (handoff === null) return;
-      await this.host(handoff.hostId).send(handoff.offer);
-      return this.offerSent(turnId);
+      if ((await this.host(handoff.hostId).send(handoff.offer)) === "Sent") this.offerSent(turnId);
+      return;
     }
     if (session.state !== "Stopped") return;
     const hosts = await listHosts(this.env.DB, tenantId);
@@ -2274,7 +2277,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (placement.kind === "Refused") return stay();
     if (placement.host.hostId === session.host_id) {
       if (placement.evict.length > 0) return this.evictFirst(tenantId, session, turn, placement.evict);
-      return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
+      const offer = await this.armOffer(tenantId, session, turn);
+      this.deferOffer(session, turn, now);
+      return { type: "TurnHandoff", hostId: session.host_id, offer };
     }
     const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;
@@ -2301,6 +2306,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const moved = { ...session, host_id: hostId, box_id: boxId };
     if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
     const offer = await this.armOffer(tenantId, moved, turn);
+    this.deferOffer(moved, turn, now);
     return { type: "TurnHandoff", hostId, offer };
   }
 
@@ -3502,6 +3508,31 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return snapshots;
   }
 
+  protected async failHostWork(tenantId: string, hostId: string, detail: string, now: number): Promise<void> {
+    const running = this.ctx.storage.sql
+      .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running'", hostId)
+      .toArray();
+    for (const { turn_id } of running) {
+      await this.failTurn(tenantId, turn_id, "RateLimited", detail, iso(now));
+      if (this.channelProtocol(hostId) >= TURN_CANCEL_VERSION)
+        await this.host(hostId).send({ type: "TurnCancel", turnId: turn_id });
+    }
+    const requests = this.ctx.storage.sql
+      .exec<SnapshotRequestRow>(
+        `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
+        FROM snapshot_requests r JOIN sessions s ON s.session_id = r.session_id WHERE s.host_id = ?`,
+        hostId,
+      )
+      .toArray();
+    for (const request of requests) {
+      this.recordSnapshotFailure(request, "RateLimited", detail, iso(now));
+      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
+      await this.snapshotNotStored(tenantId, request, detail);
+      if (this.sessionRow(request.session_id)?.state === "Stopping")
+        this.setSessionState(request.session_id, "Idle", Date.now());
+    }
+  }
+
   protected async hostPresence(
     tenantId: string,
     hostId: string,
@@ -3802,6 +3833,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async turnClaim(tenantId: string, hostId: string, message: TurnClaim): Promise<HostReply> {
+    const elsewhere = this.turnRow(message.turnId);
+    if (elsewhere !== null && elsewhere.host_id !== hostId) return { type: "TurnWithdrawn", turnId: elsewhere.turn_id };
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;

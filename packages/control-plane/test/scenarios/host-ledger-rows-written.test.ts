@@ -8,7 +8,7 @@ import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
 
 const HOST_MIGRATIONS = new URL("../../migrations/host/", import.meta.url);
 
-const channel = () => {
+const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = () => null) => {
   const sql = new SqlStorage(migratedDatabase(HOST_MIGRATIONS));
   const ledger = new HostLedger(sql as never);
   const closed: string[] = [];
@@ -19,7 +19,7 @@ const channel = () => {
     prepareOffer: () => Promise.reject(new Error("this channel offers no turns")),
     prepareClaudeSetup: () => Promise.reject(new Error("this channel offers no Claude setup")),
     messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-    admitFrame: async () => null,
+    admitFrame,
     now: () => new Date(),
   };
   let connection: control.ControlConnection = {
@@ -101,4 +101,45 @@ test("the channel counts failed checkpoints of the same first held frame up to t
   control.acknowledge(context, ledger.take());
   await line(3);
   assert.equal(ledger.stalled(), 1);
+});
+
+test("a frame refused over the rate with nothing held is stored, so a reconnect right after it opens no gap", async () => {
+  const refuseFirst = (seq: number) =>
+    seq === 1 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { ledger, closed, line } = channel(refuseFirst);
+  assert.equal(await line(1), "FrameRateLimited");
+  ledger.take();
+  assert.equal(await line(2), "Message");
+  assert.deepEqual(closed, []);
+});
+
+test("a frame refused over the rate mid-stream is stored with the frames held before it once they flush, so a reconnect right after it opens no gap", async () => {
+  const refuseThird = (seq: number) =>
+    seq === 3 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { ledger, context, closed, line } = channel(refuseThird);
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await line(3), "FrameRateLimited");
+  assert.ok(ledger.holding());
+  control.acknowledge(context, ledger.take());
+  ledger.take();
+  assert.equal(await line(4), "Message");
+  assert.deepEqual(closed, []);
+});
+
+test("held frames dropped after a refusal among them are resent without the refused one, and the refused seq is stepped over instead of opening a gap", async () => {
+  const refuseThird = (seq: number) =>
+    seq === 3 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { sql, ledger, context, closed, line } = channel(refuseThird);
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await line(3), "FrameRateLimited");
+  assert.equal(await line(4), "Message");
+  ledger.take();
+
+  const restarted = new HostLedger(sql as never);
+  assert.deepEqual([...restarted.refused()], [3]);
+  for (const seq of [1, 2, 4]) assert.equal(await line(seq), "Message");
+  control.acknowledge(context, ledger.take());
+  assert.equal(ledger.load().received, 4);
+  assert.deepEqual([...new HostLedger(sql as never).refused()], []);
+  assert.deepEqual(closed, []);
 });

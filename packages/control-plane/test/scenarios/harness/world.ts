@@ -91,7 +91,7 @@ export const LIMITS: ScenarioLimits = {
   configured: [{ measure: "RowsWritten", window: "Hour", limit: 1_000_000 }],
   readsPerMinute: 600,
   writesPerMinute: 120,
-  hostFramesPerMinute: 6000,
+  hostFramesPerMinute: 600,
 };
 
 export class Host {
@@ -105,9 +105,12 @@ export class Host {
     this.world = world;
   }
 
-  send(message: unknown): Promise<void> {
-    this.inbox.push(ControlMessageSchema.parse(message));
-    return Promise.resolve();
+  send(message: unknown): Promise<"Sent" | "Deferred"> {
+    const parsed = ControlMessageSchema.parse(message);
+    const [row] = this.world.db.sql.exec("SELECT health FROM hosts WHERE host_id = ?", this.hostId).toArray();
+    if (parsed.type === "TurnOffer" && row?.health !== "Healthy") return Promise.resolve("Deferred");
+    this.inbox.push(parsed);
+    return Promise.resolve("Sent");
   }
 
   received(type: string): ControlMessage[] {
@@ -260,7 +263,6 @@ export class World {
       TUMPEL_LIMITS: this.limits,
       TENANT_READ_RATE: new RateLimiter(this.limits.readsPerMinute),
       TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
-      HOST_FRAME_RATE: new RateLimiter(this.limits.hostFramesPerMinute),
       WEBHOOK_RATE: new RateLimiter(600),
     };
     this.timers = this.runtime.namespace(SessionTimer, () => env);
@@ -471,31 +473,35 @@ export class World {
   }
 
   async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
+    const answer = z
+      .object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) })
+      .parse(await this.tryStartSession(start));
+    return answer.started.started.session;
+  }
+
+  async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
     const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
     const personaId = await this.defaultPersona();
-    const answer = z.object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) }).parse(
-      await this.call("startSession", {
-        tenantId: TENANT_ID,
-        now: Date.now(),
-        input: {
-          principalId: PRINCIPAL_ID,
-          startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
-          hosts: await listHosts(this.db, TENANT_ID),
-          harness: "ClaudeCode",
-          harnessVersion: CLAUDE_CODE_VERSION,
-          endpoint: "https://api.scenario.test",
-          start: {
-            personaId,
-            repository: REPOSITORY,
-            model: "opus",
-            prompt: start.prompt,
-            boxRetention: "Auto",
-            tags: start.tags,
-          },
+    return this.call("startSession", {
+      tenantId: TENANT_ID,
+      now: Date.now(),
+      input: {
+        principalId: PRINCIPAL_ID,
+        startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
+        hosts: await listHosts(this.db, TENANT_ID),
+        harness: "ClaudeCode",
+        harnessVersion: CLAUDE_CODE_VERSION,
+        endpoint: "https://api.scenario.test",
+        start: {
+          personaId,
+          repository: REPOSITORY,
+          model: "opus",
+          prompt: start.prompt,
+          boxRetention: "Auto",
+          tags: start.tags,
         },
-      }),
-    );
-    return answer.started.started.session;
+      },
+    });
   }
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
