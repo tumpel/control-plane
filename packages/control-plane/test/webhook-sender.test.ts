@@ -358,7 +358,7 @@ test("push delivery drops subscriptions the push service no longer knows", async
     await until(
       `the push service's HTTP ${status} response`,
       async () => ({ received: received.length, subscriptions: await list() }),
-      (state) => state.received === receivedBefore + 1 && state.subscriptions === 0,
+      (state) => state.received >= receivedBefore + 1 && state.subscriptions === 0,
     );
     const delivery = received.at(-1);
     assert.equal(delivery?.contentEncoding, "aes128gcm");
@@ -394,11 +394,14 @@ test("a transient push failure leaves its wake without blocking another browser"
     },
     now: 21,
   });
-  await post("/__fixture/push/alarm", { tenantId });
-  assert.ok(received.length >= receivedBefore + 2);
-  const wakes = z
-    .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
-    .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+  const wakes = await until(
+    "both browser push attempts",
+    async () =>
+      z
+        .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+        .parse(await (await post("/__fixture/push/wakes", { tenantId })).json()),
+    (value) => received.length >= receivedBefore + 2 && value.length === 1 && value[0]?.failures === 1,
+  );
   assert.equal(wakes.length, 1);
   assert.ok((wakes[0]?.failures ?? 0) >= 1);
   assert.ok((wakes[0]?.next_attempt_at ?? 0) > 21);
@@ -474,7 +477,6 @@ test("a terminal response keeps the wake when browser keys changed in flight", a
     },
     now: 31,
   });
-  const alarm = post("/__fixture/push/alarm", { tenantId });
   await until(
     "the blocked push request",
     async () => received.length,
@@ -494,11 +496,13 @@ test("a terminal response keeps the wake when browser keys changed in flight", a
   });
   receiverStatus = 204;
   releaseReceiver();
-  await alarm;
-  await post("/__fixture/push/alarm", { tenantId });
-  assert.ok(received.length >= receivedBefore + 2);
-  const listed = z
-    .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
-    .parse(await (await post("/__fixture/push/list", { tenantId })).json());
+  const listed = await until(
+    "delivery with the replacement browser keys",
+    async () =>
+      z
+        .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+        .parse(await (await post("/__fixture/push/list", { tenantId })).json()),
+    (value) => received.length >= receivedBefore + 2 && value.result.subscriptions.length === 1,
+  );
   assert.equal(listed.result.subscriptions.length, 1);
 });

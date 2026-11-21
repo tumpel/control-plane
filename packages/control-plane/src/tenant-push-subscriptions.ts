@@ -91,6 +91,13 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     create: PushSubscriptionCreate,
     now: number,
   ): Promise<PushSubscription> {
+    await crypto.subtle.importKey(
+      "raw",
+      fromBase64(`${create.keys.p256dh.replaceAll("-", "+").replaceAll("_", "/")}=`),
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      [],
+    );
     const sql = this.ctx.storage.sql;
     const pushSubscriptionId = uuidV5(create.endpoint, PUSH_SUBSCRIPTION_NAMESPACE);
     const authSealed = await seal(await this.dataKey(), create.keys.auth, authContext(pushSubscriptionId));

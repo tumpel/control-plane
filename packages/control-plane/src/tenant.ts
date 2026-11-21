@@ -193,6 +193,7 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
+    await this.ctx.storage.setAlarm(Date.now());
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
