@@ -141,14 +141,15 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
           JOIN sessions AS s USING (session_id)
           WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
             WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)
+            AND w.next_attempt_at <= ?
           ORDER BY w.event_id, p.push_subscription_id`,
+        now,
       )
       .toArray();
     if (rows.length === 0) return;
     const dataKey = await this.dataKey();
     const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
     for (const row of rows) {
-      if (row.next_attempt_at > now) continue;
       const event = TenantEventSchema.parse({
         ...JSON.parse(row.payload),
         eventId: row.event_id,
