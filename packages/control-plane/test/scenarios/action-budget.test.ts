@@ -25,6 +25,7 @@ const STRINGS = [
   "a".repeat(87),
   ".github/workflows/ci.yml",
   "tenant_abc",
+  "a".repeat(22),
 ];
 
 const defOf = (schema: unknown): Def => (schema as { _zod: { def: Def } })._zod.def;
@@ -155,8 +156,8 @@ test("every Tenant API operation computes within the 30 ms budget", async (t) =>
     if (name === "hostMessage") continue;
     await settle(world, name, () => generate(operation.input, known, name), over, broken);
   }
-  assert.deepEqual(broken, [], `operations the test could not run:\n${broken.join("\n")}`);
   assert.deepEqual(over, [], `operations over ${BUDGET_MS} ms of compute:\n${report(over)}`);
+  assert.deepEqual(broken, [], `operations the test could not run:\n${broken.join("\n")}`);
 });
 
 test("every host channel frame computes within the 30 ms budget", async (t) => {
@@ -186,6 +187,6 @@ test("every host channel frame computes within the 30 ms budget", async (t) => {
       type,
     );
   }
-  assert.deepEqual(broken, [], `frames the test could not run:\n${broken.join("\n")}`);
   assert.deepEqual(over, [], `frames over ${BUDGET_MS} ms of compute:\n${report(over)}`);
+  assert.deepEqual(broken, [], `frames the test could not run:\n${broken.join("\n")}`);
 });
