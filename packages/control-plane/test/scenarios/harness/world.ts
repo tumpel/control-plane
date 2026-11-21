@@ -5,7 +5,7 @@ import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
-import { D1Database, migratedDatabase, type Namespace, R2Bucket, Runtime } from "./runtime.ts";
+import { D1Database, migratedDatabase, type Namespace, R2Bucket, Runtime, type SqlStorage } from "./runtime.ts";
 
 register("./hooks.mjs", import.meta.url);
 
@@ -135,7 +135,10 @@ export class Host {
   }
 }
 
-type TenantSteps = { expireSubscriptions(now: number): void };
+type TenantSteps = {
+  expireSubscriptions(now: number): void;
+  prebuildDeadlineReached(tenantId: string, due: unknown): Promise<void>;
+};
 
 export class World {
   readonly store = new R2Bucket();
@@ -320,6 +323,10 @@ export class World {
 
   tenantSteps(): TenantSteps {
     return this.tenants.instance(TENANT_ID).object as TenantSteps;
+  }
+
+  tenantSql(): SqlStorage {
+    return this.tenants.instance(TENANT_ID).ctx.storage.sql;
   }
 
   tenantAlarm(): Promise<number | null> {

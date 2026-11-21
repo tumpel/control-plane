@@ -10,7 +10,7 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { backoffMs, errorOf, forgetDeadlineFailures, RETRY_LIMIT } from "./backoff.ts";
+import { backoffMs, errorOf, forgetDeadlineFailures, RETRY_LIMIT, retriesElapsedMs } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
@@ -27,7 +27,7 @@ import {
   storedKeys,
   type UnreadableSecretSet,
 } from "./secret-members.ts";
-import type { DueDeadline } from "./session-timer.ts";
+import { type DueDeadline, SESSION_TIMER_FIRST_RETRY_MS } from "./session-timer.ts";
 import { checkStart } from "./sessions.ts";
 import {
   recordSupervisorUpdate,
@@ -280,9 +280,10 @@ export class Tenant extends TenantConnectors {
         due.deadline.at,
       )
       .one();
-    if (failures <= RETRY_LIMIT) throw failed;
+    const retried = Date.now() - due.deadline.at >= retriesElapsedMs(SESSION_TIMER_FIRST_RETRY_MS);
+    if (failures <= RETRY_LIMIT && !retried) throw failed;
     forgetDeadlineFailures(sql, timer, [due.name]);
-    const detail = `the ${due.name} deadline failed ${failures} times, so it was dropped: ${failed.message}`;
+    const detail = `the ${due.name} deadline still failed after ${RETRY_LIMIT} retries, so it was dropped: ${failed.message}`;
     console.error(`DeadlineDropped: tenant ${this.tenantName()} ${timer} ${due.name}: ${detail}`);
     await abandon(detail);
   }

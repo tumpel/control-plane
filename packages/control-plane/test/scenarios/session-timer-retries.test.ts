@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { z } from "zod";
 import { SETTINGS, TENANT_ID, World } from "./harness/world.ts";
 
 const SECOND = 1000;
+const MINUTE = 60 * SECOND;
 const DAY = 24 * 3_600_000;
+const IDLE_EVICTION = 15 * MINUTE;
 
 test("a deadline whose handler always throws is retried 10 times with growing gaps, a new deadline keeps the backoff, and the turn ends Failed", async (t) => {
   const world = await World.open();
@@ -40,7 +43,7 @@ test("a deadline whose handler always throws is retried 10 times with growing ga
   assert.equal(turn.state === "Failed" && turn.reason, "TurnTimedOut");
   assert.match(
     turn.state === "Failed" ? turn.detail : "",
-    /^the Total deadline failed 11 times, so it was dropped: host \S+ runs a session of tenant tenant-scenario, which does not list it$/,
+    /^the Total deadline still failed after 10 retries, so it was dropped: host \S+ runs a session of tenant tenant-scenario, which does not list it$/,
   );
   assert.equal((await world.session(session.sessionId)).state, "Idle");
 });
@@ -84,7 +87,7 @@ test("stale deadlines dropped during a D1 outage fail nothing while the turn is 
   }
 });
 
-test("deadlines the timer could not deliver to an unreachable tenant are reached on the tenant's next call", async (t) => {
+test("a timer whose tenant stays unreachable makes one final attempt, then drops the deadline loudly and arms nothing", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -100,16 +103,68 @@ test("deadlines the timer could not deliver to an unreachable tenant are reached
   });
 
   await world.passes(SETTINGS.turnTotalBudgetSeconds * SECOND + DAY);
-  assert.equal(unreachable.mock.callCount(), 11, "the first try and 10 retries");
+  assert.equal(unreachable.mock.callCount(), 12, "the first try, 10 retries and the final attempt");
   assert.equal(failed.length, 1);
-  assert.match(failed[0] ?? "", /^SessionTimerFailed: tenant tenant-scenario stopped retrying the deadlines Total /);
-  assert.equal((await world.turn(offer.turnId)).state, "Running");
+  assert.match(
+    failed[0] ?? "",
+    /^SessionTimerFailed: tenant tenant-scenario dropped the deadlines Total \S+ after 10 retries and a final attempt, because the tenant stayed unreachable/,
+  );
+  assert.equal(await world.sessionTimer(session.sessionId).alarm(), null);
+});
 
-  unreachable.mock.restore();
-  await world.call("hostPresence", { tenantId: TENANT_ID, hostId: host.hostId, presence: "Offline", now: Date.now() });
-  await world.passes(SECOND);
+test("a prebuild whose only deadline keeps failing ends Failed", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const prebuildId = "prebuild-scenario";
+  const now = Date.now();
+  world.tenantSql().exec(
+    `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
+      provider, config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
+      VALUES (?, 'persona-scenario', 'https://github.com/acme/app.git', 'main', 'inputs', 'guest', 'CircleCI',
+      'Default', 'abc123', 'rootfs', 'Building', ?, 'https://ci.scenario.test/run', ?, ?)`,
+    prebuildId,
+    new Date(now).toISOString(),
+    now,
+    now,
+  );
+  t.mock.method(console, "error", () => undefined);
+  const failing = t.mock.method(world.tenantSteps(), "prebuildDeadlineReached", async () => {
+    throw new Error("the prebuild store is unreadable");
+  });
+  await world.sessionTimer(prebuildId).timer.set(TENANT_ID, { PrebuildBuild: { prebuildId, at: now + MINUTE } });
 
-  const turn = await world.turn(offer.turnId);
-  assert.equal(turn.state, "Failed");
-  assert.equal(turn.state === "Failed" && turn.reason, "TurnTimedOut");
+  await world.passes(DAY);
+
+  assert.equal(failing.mock.callCount(), 11, "the first try and 10 retries");
+  const { prebuild } = z
+    .object({ prebuild: z.object({ state: z.string() }) })
+    .parse(await world.call("getPrebuild", { tenantId: TENANT_ID, prebuildId }));
+  assert.equal(prebuild.state, "Failed");
+  assert.equal(await world.sessionTimer(prebuildId).alarm(), null);
+});
+
+test("a teardown left unanswered during a D1 outage still returns the session to Idle", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const session = await world.startSession({ prompt: "fix the build", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.finishes(offer);
+  await world.passes(IDLE_EVICTION);
+  host.take("BoxTeardown");
+  assert.equal((await world.session(session.sessionId)).state, "Stopping");
+  world.db.sql.exec("DELETE FROM hosts WHERE host_id = ?", host.hostId);
+  const dropped: string[] = [];
+  t.mock.method(console, "error", (line: string) => {
+    if (line.startsWith("DeadlineDropped:")) dropped.push(line);
+  });
+
+  await world.passes(DAY);
+
+  assert.ok(
+    dropped.some((line) => line.includes(` ${session.sessionId} TeardownAnswer: `)),
+    "the unanswered teardown was dropped",
+  );
+  assert.equal((await world.session(session.sessionId)).state, "Idle");
 });

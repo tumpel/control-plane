@@ -3814,7 +3814,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return this.failTurn(tenantId, turn.turn_id, "Undelivered", detail, failedAt);
     }
     const session = this.sessionRow(turn.session_id);
-    if (due.name !== "TeardownAnswer" || session?.state !== "Stopping") return;
+    if (session === null) return;
+    if (due.name === "SnapshotAnswer") {
+      await this.snapshotUnanswered(tenantId, session, turn, session.host_id, failedAt);
+      return this.evictionSettled(tenantId, session.session_id);
+    }
+    if (due.name !== "Teardown" && due.name !== "TeardownAnswer") return;
+    if (session.state !== "Stopping") return;
     if (this.latestTurn(session.session_id, null)?.turn_id !== turn.turn_id) return;
     this.recordStopFailure(session.session_id, "NotAnswered", detail, failedAt);
     return this.returnToIdle(tenantId, session.session_id);

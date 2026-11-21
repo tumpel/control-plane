@@ -77,13 +77,11 @@ interface Timers {
 const TIMERS_KEY = "timers";
 const RETRIES_KEY = "retries";
 const RETRY_AT_KEY = "retryAt";
-const HELD_KEY = "held";
-const FIRST_RETRY_MS = 2_000;
+export const SESSION_TIMER_FIRST_RETRY_MS = 2_000;
 
 export class SessionTimer extends DurableObject<Env> {
   async set(tenantId: string, changes: DeadlineChanges): Promise<void> {
     const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, deadlines: {} };
-    timers.deadlines = { ...(await this.takeHeld()), ...timers.deadlines };
     Object.assign(timers.deadlines, changes);
     for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, { at: number } | null][]) {
       if (deadline === null) delete timers.deadlines[name];
@@ -118,37 +116,28 @@ export class SessionTimer extends DurableObject<Env> {
       if ((await this.ctx.storage.get<number>(RETRIES_KEY)) !== undefined) {
         await this.ctx.storage.delete([RETRIES_KEY, RETRY_AT_KEY]);
       }
-      const held = await this.takeHeld();
-      if (Object.keys(held).length > 0)
-        await this.restore(Object.entries(held).map(([name, deadline]) => ({ name, deadline }) as DueDeadline));
     }
-  }
-
-  private async takeHeld(): Promise<Deadlines> {
-    const held = (await this.ctx.storage.get<Deadlines>(HELD_KEY)) ?? {};
-    await this.ctx.storage.delete(HELD_KEY);
-    return held;
   }
 
   private async retry(tenantId: string, unreached: DueDeadline[], error: Error): Promise<void> {
     const retries = (await this.ctx.storage.get<number>(RETRIES_KEY)) ?? 0;
     const names = unreached.map(({ name, deadline }) => `${name} ${JSON.stringify(deadline)}`).join(", ");
-    if (retries >= RETRY_LIMIT) {
-      const held = (await this.ctx.storage.get<Deadlines>(HELD_KEY)) ?? {};
-      for (const { name, deadline } of unreached) held[name] = deadline as never;
+    if (retries > RETRY_LIMIT) {
       await this.ctx.storage.delete([RETRIES_KEY, RETRY_AT_KEY]);
-      await this.ctx.storage.put(HELD_KEY, held);
       console.error(
-        `SessionTimerFailed: tenant ${tenantId} stopped retrying the deadlines ${names} after ${RETRY_LIMIT} retries; the next call between the tenant and this timer reaches them: ${error.message}`,
+        `SessionTimerFailed: tenant ${tenantId} dropped the deadlines ${names} after ${RETRY_LIMIT} retries and a final attempt, because the tenant stayed unreachable; their targets keep their state: ${error.message}`,
       );
       return;
     }
     const retry = retries + 1;
-    await this.ctx.storage.put({ [RETRIES_KEY]: retry, [RETRY_AT_KEY]: Date.now() + backoffMs(retry, FIRST_RETRY_MS) });
+    const at = Date.now() + backoffMs(retry, SESSION_TIMER_FIRST_RETRY_MS);
+    await this.ctx.storage.put({ [RETRIES_KEY]: retry, [RETRY_AT_KEY]: at });
     await this.restore(unreached);
-    console.error(
-      `SessionTimerRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} for ${names}: ${error.message}`,
-    );
+    const attempt =
+      retry > RETRY_LIMIT
+        ? `final attempt after ${RETRY_LIMIT} retries, which the tenant answers by ending`
+        : `retry ${retry} of ${RETRY_LIMIT} for`;
+    console.error(`SessionTimerRetry: tenant ${tenantId} ${attempt} ${names}: ${error.message}`);
   }
 
   private async restore(unreached: DueDeadline[]): Promise<void> {

@@ -13,6 +13,8 @@ export const backoffMs = (retry: number, firstMs: number, random: () => number =
   return Math.round(ceiling / 2 + (random() * ceiling) / 2);
 };
 
+export const retriesElapsedMs = (firstMs: number): number => (firstMs * (2 ** RETRY_LIMIT - 1)) / 2;
+
 export const retryableStatus = (status: number): boolean => status === 408 || status === 429 || status >= 500;
 
 export const errorOf = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));

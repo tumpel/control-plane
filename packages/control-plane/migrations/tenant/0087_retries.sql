@@ -1,3 +1,8 @@
+DELETE FROM push_wakes
+WHERE NOT EXISTS (
+  SELECT 1 FROM event_sessions JOIN sessions USING (session_id) WHERE event_sessions.event_id = push_wakes.event_id
+);
+
 CREATE TABLE subscription_delivery_retries (
   subscription_id TEXT PRIMARY KEY REFERENCES subscription_actives (subscription_id) ON DELETE CASCADE,
   retry_at INTEGER NOT NULL
