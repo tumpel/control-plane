@@ -138,6 +138,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
         }),
         messageVersions,
+        admitFrame: async () => null,
         now: () => new Date("2026-11-14T10:00:00+00:00"),
       } satisfies control.ControlContext,
       deliver: async (envelope: HostEnvelope) => {

@@ -3,7 +3,7 @@ import { issues, problem } from "./http";
 import type { Env } from "./index";
 import { tenantApi } from "./tenant-api.ts";
 
-const EVENTS_PATH = /^\/v1\/circleci-events\/([^/]+)$/;
+export const EVENTS_PATH = /^\/v1\/circleci-events\/([^/]+)$/;
 
 const parseJson = (text: string): unknown => {
   try {

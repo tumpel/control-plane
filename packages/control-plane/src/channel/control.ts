@@ -38,6 +38,7 @@ export type ControlConnection =
 
 export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
+const RATE_LIMITED_MESSAGES: ReadonlySet<HostMessage["type"]> = new Set(["TelemetryBatch"]);
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -98,6 +99,7 @@ export interface ControlContext {
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
   messageVersions: MessageVersions;
+  admitFrame(): Promise<string | null>;
   now(): Date;
 }
 
@@ -356,6 +358,12 @@ export const receive = async (
       CloseCode.ProtocolError,
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
+  }
+  const overRate = RATE_LIMITED_MESSAGES.has(envelope.message.type) ? await context.admitFrame() : null;
+  if (overRate !== null) {
+    context.ledger.skip(envelope);
+    refuseFrame(context.port, envelope.seq, overRate);
+    return { connection, event: { kind: "FrameRefused", seq: envelope.seq, reason: overRate } };
   }
   return {
     connection,

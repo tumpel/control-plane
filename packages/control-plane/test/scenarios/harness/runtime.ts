@@ -7,10 +7,12 @@ type Row = Record<string, unknown>;
 class Cursor {
   private readonly rows: Row[];
   readonly rowsWritten: number;
+  readonly rowsRead: number;
 
   constructor(rows: Row[], rowsWritten: number) {
     this.rows = rows;
     this.rowsWritten = rowsWritten;
+    this.rowsRead = rows.length;
   }
 
   toArray(): Row[] {
@@ -42,6 +44,7 @@ const bindable = (value: unknown): SQLInputValue => {
 export class SqlStorage {
   private savepoint = 0;
   readonly db: DatabaseSync;
+  rowsWritten = 0;
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -54,7 +57,9 @@ export class SqlStorage {
     }
     const rows = this.db.prepare(query).all(...params.map(bindable)) as Row[];
     const { written } = this.db.prepare("SELECT changes() AS written").get() as { written: number };
-    return new Cursor(rows, written);
+    const counted = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query) ? written : 0;
+    this.rowsWritten += counted;
+    return new Cursor(rows, counted);
   }
 
   totalRowsWritten(): number {
@@ -330,6 +335,24 @@ export class D1Database {
 
   batch(statements: D1Statement[]): Promise<unknown[]> {
     return this.sql.inTransaction(() => Promise.all(statements.map((statement) => statement.run())));
+  }
+}
+
+export class RateLimiter {
+  private readonly perMinute: number;
+  private readonly windows = new Map<string, { start: number; used: number }>();
+
+  constructor(perMinute: number) {
+    this.perMinute = perMinute;
+  }
+
+  limit({ key }: { key: string }): Promise<{ success: boolean }> {
+    const start = Date.now() - (Date.now() % 60_000);
+    const held = this.windows.get(key);
+    const window = held?.start === start ? held : { start, used: 0 };
+    window.used += 1;
+    this.windows.set(key, window);
+    return Promise.resolve({ success: window.used <= this.perMinute });
   }
 }
 

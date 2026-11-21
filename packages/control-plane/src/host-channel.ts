@@ -16,6 +16,7 @@ import { migrateDurableObject } from "./durable-migrate";
 import { HOST_MIGRATIONS } from "./host-migrations.ts";
 import { problem } from "./http";
 import type { Env } from "./index";
+import { limitsOf } from "./limits.ts";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
@@ -545,6 +546,11 @@ export class HostChannel extends DurableObject<Env> {
         return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
+      admitFrame: async () => {
+        const { success } = await this.env.HOST_FRAME_RATE.limit({ key: host.host_id });
+        if (success) return null;
+        return `host ${host.host_id} sent more than ${limitsOf(this.env).hostFramesPerMinute} frames in a minute, so the control plane recorded nothing of this one; send fewer frames a minute`;
+      },
       now: () => new Date(),
     };
   }
