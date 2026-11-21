@@ -34,6 +34,7 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
+import { turnFailureDetail } from "./bounded-detail.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import { linesLost } from "./channel/failure.ts";
 import type {
@@ -574,7 +575,13 @@ const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null):
     ...(row.goal === null ? {} : { goal: row.goal }),
     state: row.state,
     lineCount: row.line_count,
-    ...(row.state === "Failed" ? { reason: row.reason, detail: row.detail, failedAt: row.failed_at } : {}),
+    ...(row.state === "Failed"
+      ? {
+          reason: row.reason,
+          detail: row.detail === null ? null : turnFailureDetail(row.detail),
+          failedAt: row.failed_at,
+        }
+      : {}),
     ...(row.state === "Completed" && row.warning !== null ? { warning: row.warning } : {}),
     image: image ?? undefined,
     createdAt: row.created_at,
@@ -1395,11 +1402,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     sessionId: string,
     turnId: string,
     reason: TurnFailureReason,
-    detail: string,
+    fullDetail: string,
     failedAt: string,
     now: number,
   ): void {
     const sql = this.ctx.storage.sql;
+    const detail = turnFailureDetail(fullDetail);
     sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
     this.appendEvent({ event: "TurnFailed", turnId, sessionId, reason, detail }, now);
     sql.exec(
@@ -3116,7 +3124,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       tenantId,
       sessionId: row.session_id,
       reason: row.reason,
-      detail: row.detail,
+      detail: turnFailureDetail(row.detail),
       failedAt: row.failed_at,
       createdAt: row.created_at,
     });
