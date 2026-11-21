@@ -180,7 +180,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
   }
 
   protected async failPrebuild(
-    tenantId: string,
     prebuildId: string,
     from: readonly string[],
     report: FailureReport,

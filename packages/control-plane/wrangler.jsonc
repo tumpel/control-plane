@@ -62,7 +62,7 @@
       "turnOfferTtlSeconds": 60,
       "turnImageFetchBudgetSeconds": 900,
       "turnFirstLineBudgetSeconds": 120,
-      "turnTotalBudgetSeconds": 3600,
+      "turnTotalBudgetSeconds": 14400,
       "transcriptChunkLines": 64,
       "prebuildUploadBudgetSeconds": 3600,
       "prebuildDispatchBudgetSeconds": 600,
@@ -87,7 +87,6 @@
     "bindings": [
       { "name": "TENANT", "class_name": "Tenant" },
       { "name": "HOST", "class_name": "HostChannel" },
-      { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
       { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
       { "name": "EVENTS", "class_name": "EventChannel" },
       { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -99,7 +98,8 @@
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
     { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+    { "tag": "v7", "deleted_classes": ["SessionTimer"] }
   ],
   "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
@@ -161,7 +161,7 @@
           "turnOfferTtlSeconds": 60,
           "turnImageFetchBudgetSeconds": 900,
           "turnFirstLineBudgetSeconds": 120,
-          "turnTotalBudgetSeconds": 3600,
+          "turnTotalBudgetSeconds": 14400,
           "transcriptChunkLines": 64,
           "prebuildUploadBudgetSeconds": 3600,
           "prebuildDispatchBudgetSeconds": 600,
@@ -186,7 +186,6 @@
         "bindings": [
           { "name": "TENANT", "class_name": "Tenant" },
           { "name": "HOST", "class_name": "HostChannel" },
-          { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
           { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
           { "name": "EVENTS", "class_name": "EventChannel" },
           { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -198,7 +197,8 @@
         { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
         { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
         { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+        { "tag": "v7", "deleted_classes": ["SessionTimer"] }
       ]
     }
   }

@@ -449,12 +449,8 @@ export class Tenant extends TenantConnectors {
       read: this.getOpenRouterAuthorization(tenantId, principalId, openRouterAuthorizationId),
     }),
     openRouterCallback: async ({ tenantId, openRouterAuthorizationId, callback, now }) => ({
-      settled: await this.openRouterCallback(tenantId, openRouterAuthorizationId, callback, now),
+      settled: await this.openRouterCallback(openRouterAuthorizationId, callback, now),
     }),
-    openRouterAuthorizationDeadlineReached: ({ deadline }) => {
-      this.openRouterAuthorizationDeadlineReached(deadline);
-      return {};
-    },
     openRouterSecretSets: () => ({ names: this.openRouterSecretSets() }),
     startClaudeSetup: async ({ tenantId, input, now }) => ({
       started: await this.startClaudeSetup(tenantId, input, now),
@@ -471,10 +467,6 @@ export class Tenant extends TenantConnectors {
     writeClaudeSetupToken: async ({ tenantId, claudeSetupId, credential, token, tokenExpiresAt, now }) => ({
       stored: await this.writeClaudeSetupToken(tenantId, claudeSetupId, credential, token, tokenExpiresAt, now),
     }),
-    claudeSetupDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.claudeSetupDeadlineReached(tenantId, deadline);
-      return {};
-    },
     prepareClaudeSetup: async ({ tenantId, stored, hostId, now }) => ({
       prepared: await this.prepareClaudeSetup(tenantId, stored, hostId, now),
     }),
@@ -558,11 +550,26 @@ export class Tenant extends TenantConnectors {
     deleteSession: async ({ tenantId, sessionId }) => ({
       deleted: await this.deleteSession(tenantId, sessionId, Date.now()),
     }),
-    getSession: ({ tenantId, sessionId }) => ({ session: this.getSession(tenantId, sessionId) }),
-    listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
-    listTurns: ({ tenantId, sessionId }) => ({ turns: this.listTurns(tenantId, sessionId) }),
-    getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
-    waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
+    getSession: async ({ tenantId, sessionId }) => {
+      await this.failSilentHosts(tenantId, Date.now());
+      return { session: this.getSession(tenantId, sessionId) };
+    },
+    listSessions: async ({ tenantId, filter }) => {
+      await this.failSilentHosts(tenantId, Date.now());
+      return { sessions: this.listSessions(tenantId, filter) };
+    },
+    listTurns: async ({ tenantId, sessionId }) => {
+      await this.failSilentHosts(tenantId, Date.now());
+      return { turns: this.listTurns(tenantId, sessionId) };
+    },
+    getTurn: async ({ tenantId, turnId }) => {
+      await this.failSilentHosts(tenantId, Date.now());
+      return { turn: this.getTurn(tenantId, turnId) };
+    },
+    waitTurns: async ({ tenantId, turnIds }) => {
+      await this.failSilentHosts(tenantId, Date.now());
+      return { waited: this.readTurns(tenantId, turnIds) };
+    },
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),
@@ -587,7 +594,10 @@ export class Tenant extends TenantConnectors {
       this.setWebhookEndpointStatus(webhookEndpointId, status);
       return {};
     },
-    getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
+    getTurnFailure: async ({ tenantId, turnId }) => {
+      await this.failSilentHosts(tenantId, Date.now());
+      return { failure: this.getTurnFailure(tenantId, turnId) };
+    },
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
     listCredentialHandovers: ({ tenantId, sessionId }) => ({
@@ -632,22 +642,27 @@ export class Tenant extends TenantConnectors {
     }),
     hostPresence: async ({ tenantId, hostId, presence, now }) => {
       await this.hostPresence(tenantId, hostId, presence, now);
+      if (presence === "Offline") {
+        await this.failHostClaudeSetups(
+          tenantId,
+          hostId,
+          "NoHostOnline",
+          `host ${hostId} went offline during the setup; check that its supervisor runs, then start the setup again`,
+          now,
+        );
+      }
       return {};
     },
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};
       await this.failHostWork(tenantId, hostId, detail, now);
-      await this.failHostClaudeSetups(tenantId, hostId, detail, now);
+      await this.failHostClaudeSetups(tenantId, hostId, "RateLimited", detail, now);
       return {};
     },
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),
-    deadlineReached: async ({ tenantId, due }) => {
-      await this.deadlineReached(tenantId, due);
-      return {};
-    },
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

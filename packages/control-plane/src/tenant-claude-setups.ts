@@ -28,7 +28,6 @@ import { keyStoreOf } from "./key-store.ts";
 import { placeSession, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, readRelease } from "./releases";
-import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
 import { type HostReply, sealContext, type TenantHostMessage } from "./tenant-sessions";
@@ -104,12 +103,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return toClaudeSetup(tenantId, row);
   }
 
-  private claudeSetupTimer(tenantId: string, claudeSetupId: string, at: number | null): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(claudeSetupId).set(tenantId, {
-      ClaudeSetup: at === null ? null : { claudeSetupId, at },
-    });
-  }
-
   private async boxToken(tenantId: string, claudeSetupId: string): Promise<string> {
     const key = await keyStoreOf(this.env).signingKey(BOX_TOKEN_PURPOSE);
     const signed = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${tenantId}/${claudeSetupId}`));
@@ -180,9 +173,8 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const row = this.claudeSetupRow(claudeSetupId);
     if (row === null) throw new Error(`Claude setup ${claudeSetupId} was created and then not found`);
     if (running !== null && superseded) {
-      await this.discardClaudeSetupBox(running, await this.endFailedClaudeSetup(tenantId, running, true));
+      await this.discardClaudeSetupBox(running, await this.endFailedClaudeSetup(running, true));
     }
-    await this.claudeSetupTimer(tenantId, claudeSetupId, dueAt);
     const offer: StoredClaudeSetupOffer = { type: "ClaudeSetupBoxOffer", claudeSetupId, boxId: row.box_id };
     await this.host(row.host_id).send(offer);
     return { kind: "Started", setup: toClaudeSetup(tenantId, row) };
@@ -233,7 +225,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       claudeSetupId,
     ).rowsWritten;
     if (moved === 0) return { kind: "NotWaiting", detail: `Claude setup ${claudeSetupId} already took a code` };
-    await this.claudeSetupTimer(tenantId, claudeSetupId, dueAt);
     const stored: StoredClaudeSetupCode = { type: "ClaudeSetupBoxCode", claudeSetupId, boxId: row.box_id };
     await this.host(row.host_id).send(stored);
     return { kind: "Coded", setup: this.presentClaudeSetup(tenantId, claudeSetupId) };
@@ -312,11 +303,16 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
-    await this.claudeSetupTimer(tenantId, claudeSetupId, null);
     return { kind: "Stored" };
   }
 
-  protected async failHostClaudeSetups(tenantId: string, hostId: string, detail: string, now: number): Promise<void> {
+  protected async failHostClaudeSetups(
+    tenantId: string,
+    hostId: string,
+    reason: ClaudeSetupFailureReason,
+    detail: string,
+    now: number,
+  ): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<ClaudeSetupRow>(
         `${CLAUDE_SETUP_SELECT} WHERE host_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
@@ -324,10 +320,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       )
       .toArray();
     for (const row of rows)
-      await this.discardClaudeSetupBox(
-        row,
-        await this.failClaudeSetup(tenantId, row, "RateLimited", detail, now, true),
-      );
+      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(tenantId, row, reason, detail, now, true));
   }
 
   private async failClaudeSetup(
@@ -339,7 +332,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     discard: boolean,
   ): Promise<ClaudeSetupDiscard | null> {
     if (!this.markClaudeSetupFailed(row, reason, detail, now)) return null;
-    return this.endFailedClaudeSetup(tenantId, row, discard);
+    return this.endFailedClaudeSetup(row, discard);
   }
 
   private markClaudeSetupFailed(
@@ -361,12 +354,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     );
   }
 
-  private async endFailedClaudeSetup(
-    tenantId: string,
-    row: ClaudeSetupRow,
-    discard: boolean,
-  ): Promise<ClaudeSetupDiscard | null> {
-    await this.claudeSetupTimer(tenantId, row.claude_setup_id, null);
+  private async endFailedClaudeSetup(row: ClaudeSetupRow, discard: boolean): Promise<ClaudeSetupDiscard | null> {
     if (!discard) return null;
     return { type: "ClaudeSetupBoxDiscard", claudeSetupId: row.claude_setup_id, boxId: row.box_id };
   }
@@ -396,7 +384,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       now,
       row.claude_setup_id,
     );
-    await this.claudeSetupTimer(tenantId, row.claude_setup_id, dueAt);
     return null;
   }
 
@@ -418,12 +405,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         ? { kind: "Url", signInUrl: message.signInUrl, userCode: message.userCode ?? null }
         : { kind: "BoxFailed", reason: message.reason, detail: message.detail };
     return this.stepClaudeSetup(tenantId, row, event, Date.now());
-  }
-
-  protected async claudeSetupDeadlineReached(tenantId: string, deadline: ClaudeSetupDeadline): Promise<void> {
-    const row = this.claudeSetupRow(deadline.claudeSetupId);
-    if (row === null || row.phase_due_at !== deadline.at) return;
-    await this.discardClaudeSetupBox(row, await this.stepClaudeSetup(tenantId, row, { kind: "Deadline" }, Date.now()));
   }
 
   private async claudeSetupImage(

@@ -118,7 +118,6 @@ export class SqlStorage {
 class Storage {
   readonly sql = new SqlStorage(new DatabaseSync(":memory:"));
   private readonly values = new Map<string, unknown>();
-  alarmAt: number | null = null;
 
   transactionSync<T>(run: () => T): T {
     return this.sql.inTransaction(run);
@@ -149,18 +148,6 @@ class Storage {
 
   async deleteAll(): Promise<void> {
     this.values.clear();
-  }
-
-  async setAlarm(at: number): Promise<void> {
-    this.alarmAt = at;
-  }
-
-  async deleteAlarm(): Promise<void> {
-    this.alarmAt = null;
-  }
-
-  async getAlarm(): Promise<number | null> {
-    return this.alarmAt;
   }
 }
 
@@ -205,7 +192,6 @@ export class DurableObjectState {
   }
 }
 
-type Alarmed = { alarm?: () => Promise<void> };
 type DurableObjectClass<T> = new (ctx: never, env: never) => T;
 
 export class Namespace<T extends object> {
@@ -263,7 +249,7 @@ export class Namespace<T extends object> {
 }
 
 export class Runtime {
-  private readonly objects: { object: Alarmed; ctx: DurableObjectState }[] = [];
+  private readonly objects: { object: object; ctx: DurableObjectState }[] = [];
 
   constructor(start: number) {
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: start });
@@ -290,19 +276,8 @@ export class Runtime {
   }
 
   async advance(ms: number): Promise<void> {
-    const until = Date.now() + ms;
-    for (;;) {
-      await this.settle();
-      const due = this.objects
-        .filter(({ ctx }) => ctx.storage.alarmAt !== null && (ctx.storage.alarmAt ?? Infinity) <= until)
-        .sort((a, b) => (a.ctx.storage.alarmAt ?? 0) - (b.ctx.storage.alarmAt ?? 0))[0];
-      if (due === undefined) break;
-      const at = due.ctx.storage.alarmAt ?? until;
-      if (at > Date.now()) mock.timers.setTime(at);
-      due.ctx.storage.alarmAt = null;
-      await due.object.alarm?.();
-    }
-    if (until > Date.now()) mock.timers.setTime(until);
+    await this.settle();
+    mock.timers.setTime(Date.now() + ms);
     await this.settle();
   }
 

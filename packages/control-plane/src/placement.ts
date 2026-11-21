@@ -131,6 +131,10 @@ const evicting = (
   return null;
 };
 
+export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
+  hosts.some(({ reason, host }) => reason === "NotHealthy" && host.health === "Degraded") &&
+  hosts.every(({ reason }) => reason === "NotOnline" || reason === "NotHealthy");
+
 export const placeSession = (
   hosts: readonly Host[],
   usages: readonly ReportedHostUsage[],

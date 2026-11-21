@@ -5,8 +5,6 @@ import {
   ArchiveSessionResultSchema,
   CancelTurnInputSchema,
   CancelTurnResultSchema,
-  ClaudeSetupDeadlineReachedInputSchema,
-  ClaudeSetupDeadlineReachedResultSchema,
   ClearConnectorCredentialInputSchema,
   ClearConnectorCredentialResultSchema,
   CompleteSubscriptionInputSchema,
@@ -29,8 +27,6 @@ import {
   CreateTriggerResultSchema,
   CreateWebhookEndpointInputSchema,
   CreateWebhookEndpointResultSchema,
-  DeadlineReachedInputSchema,
-  DeadlineReachedResultSchema,
   DeferredOffersInputSchema,
   DeferredOffersResultSchema,
   DeleteBuildConnectionInputSchema,
@@ -137,8 +133,6 @@ import {
   OfferSentResultSchema,
   OpenInputSchema,
   OpenResultSchema,
-  OpenRouterAuthorizationDeadlineReachedInputSchema,
-  OpenRouterAuthorizationDeadlineReachedResultSchema,
   OpenRouterCallbackInputSchema,
   OpenRouterCallbackResultSchema,
   OpenRouterSecretSetsInputSchema,
@@ -285,20 +279,12 @@ export const TENANT_OPERATIONS = {
     result: GetOpenRouterAuthorizationResultSchema,
   },
   openRouterCallback: { input: OpenRouterCallbackInputSchema, result: OpenRouterCallbackResultSchema },
-  openRouterAuthorizationDeadlineReached: {
-    input: OpenRouterAuthorizationDeadlineReachedInputSchema,
-    result: OpenRouterAuthorizationDeadlineReachedResultSchema,
-  },
   openRouterSecretSets: { input: OpenRouterSecretSetsInputSchema, result: OpenRouterSecretSetsResultSchema },
   startClaudeSetup: { input: StartClaudeSetupInputSchema, result: StartClaudeSetupResultSchema },
   getClaudeSetup: { input: GetClaudeSetupInputSchema, result: GetClaudeSetupResultSchema },
   listClaudeSetups: { input: ListClaudeSetupsInputSchema, result: ListClaudeSetupsResultSchema },
   submitClaudeSetupCode: { input: SubmitClaudeSetupCodeInputSchema, result: SubmitClaudeSetupCodeResultSchema },
   writeClaudeSetupToken: { input: WriteClaudeSetupTokenInputSchema, result: WriteClaudeSetupTokenResultSchema },
-  claudeSetupDeadlineReached: {
-    input: ClaudeSetupDeadlineReachedInputSchema,
-    result: ClaudeSetupDeadlineReachedResultSchema,
-  },
   prepareClaudeSetup: { input: PrepareClaudeSetupInputSchema, result: PrepareClaudeSetupResultSchema },
   listPrebuilds: { input: ListPrebuildsInputSchema, result: ListPrebuildsResultSchema },
   listLatestPrebuilds: { input: ListLatestPrebuildsInputSchema, result: ListLatestPrebuildsResultSchema },
@@ -374,7 +360,6 @@ export const TENANT_OPERATIONS = {
   hostPresence: { input: HostPresenceInputSchema, result: HostPresenceResultSchema },
   hostHealth: { input: HostHealthInputSchema, result: HostHealthResultSchema },
   hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
-  deadlineReached: { input: DeadlineReachedInputSchema, result: DeadlineReachedResultSchema },
 } as const;
 
 type Operations = typeof TENANT_OPERATIONS;
@@ -397,14 +382,6 @@ const invalid = (operation: string, error: z.ZodError): TenantRefusal => ({
   operation,
   issues: error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`),
 });
-
-const DEADLINE_RETRIES_VERSION = 10;
-
-const upgrade = (tenantApiVersion: number, operation: TenantOperation, input: unknown): unknown => {
-  if (tenantApiVersion >= DEADLINE_RETRIES_VERSION) return input;
-  if (operation !== "deadlineReached") return input;
-  return typeof input === "object" && input !== null ? { retries: 0, ...input } : input;
-};
 
 const run = <O extends TenantOperation>(handlers: TenantHandlers, operation: O, input: unknown) => {
   const parsed = TENANT_OPERATIONS[operation].input.safeParse(input);
@@ -431,7 +408,7 @@ export const serveTenantRequest = async (
     };
   }
   if (!known(operation)) return { refusal: "TenantOperationUnknown", operation };
-  return run(handlers, operation, upgrade(tenantApiVersion, operation, input));
+  return run(handlers, operation, input);
 };
 
 type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };

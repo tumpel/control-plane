@@ -22,9 +22,6 @@ import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
-type OpenRouterTenant = {
-  openRouterAuthorizationDeadlineReached(deadline: { openRouterAuthorizationId: string; at: number }): Promise<void>;
-};
 
 const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
@@ -238,24 +235,6 @@ test("Connect OpenRouter spends one code into the secret set, fails on its deadl
     undefined,
   );
   assert.equal(refusedState.status, 400);
-  assert.equal(keyExchanges.length, 1);
-
-  const late = await rest(OpenRouterAuthorizationSchema, "POST", authorize, { secretSetId: set.secretSetId });
-  assert.ok(late.status.state === "AwaitingCallback");
-  const tenant = (
-    await server.getWorker<{ TENANT: { getByName(name: string): OpenRouterTenant } }>().getEnv()
-  ).TENANT.getByName(set.tenantId);
-  await tenant.openRouterAuthorizationDeadlineReached({
-    openRouterAuthorizationId: late.openRouterAuthorizationId,
-    at: Date.parse(late.status.callbackDueAt),
-  });
-  const timedOut = await read(late.openRouterAuthorizationId);
-  assert.ok(timedOut.status.state === "Failed");
-  assert.equal(timedOut.status.reason, "AuthorizationTimedOut");
-  assert.equal(
-    (await send("GET", `${callbackOf(late.status.authorizeUrl)}?code=${OPENROUTER_CODE}`, undefined)).status,
-    303,
-  );
   assert.equal(keyExchanges.length, 1);
 
   const other = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {

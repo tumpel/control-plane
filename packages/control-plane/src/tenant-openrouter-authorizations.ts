@@ -21,7 +21,6 @@ import {
   STATE_PURPOSE,
   timedOutDetail,
 } from "./openrouter-oauth.ts";
-import type { OpenRouterAuthorizationDeadline } from "./session-timer";
 import { TenantClaudeSetups } from "./tenant-claude-setups";
 import { sealContext } from "./tenant-sessions";
 
@@ -161,12 +160,6 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
     });
   }
 
-  private openRouterTimer(tenantId: string, openRouterAuthorizationId: string, at: number | null): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(openRouterAuthorizationId).set(tenantId, {
-      OpenRouterAuthorization: at === null ? null : { openRouterAuthorizationId, at },
-    });
-  }
-
   private endPhase(openRouterAuthorizationId: string, from: LivePhaseTable, now: number): boolean {
     const sql = this.ctx.storage.sql;
     const ended = sql.exec(
@@ -262,7 +255,6 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
         dueAt,
       );
     });
-    await this.openRouterTimer(tenantId, openRouterAuthorizationId, dueAt);
     const row = this.openRouterRow(openRouterAuthorizationId);
     if (row === null) throw new Error(`OpenRouter authorization ${openRouterAuthorizationId} vanished once written`);
     return { kind: "Started", authorization: this.presentOpenRouterAuthorization(tenantId, row) };
@@ -275,11 +267,14 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
   ): OpenRouterAuthorizationRead {
     const row = this.openRouterRow(openRouterAuthorizationId);
     if (row === null || row.principal_id !== principalId) return { kind: "NotFound" };
-    return { kind: "Found", authorization: this.presentOpenRouterAuthorization(tenantId, row) };
+    this.expireOpenRouterAuthorization(row, Date.now());
+    const current = this.openRouterRow(openRouterAuthorizationId);
+    if (current === null)
+      throw new Error(`OpenRouter authorization ${openRouterAuthorizationId} vanished while it was read`);
+    return { kind: "Found", authorization: this.presentOpenRouterAuthorization(tenantId, current) };
   }
 
   protected async openRouterCallback(
-    tenantId: string,
     openRouterAuthorizationId: string,
     callback: Exclude<OpenRouterCallback, { kind: "Invalid" }>,
     now: number,
@@ -289,10 +284,8 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
     const returned = { kind: "Returned", secretSetId: row.secret_set_id } as const;
     const phase = this.openRouterPhase(openRouterAuthorizationId);
     if (phase.state !== "AwaitingCallback") return returned;
-    const fail = async (from: LivePhaseTable, reason: OpenRouterAuthorizationFailureReason, detail: string) => {
-      if (this.failOpenRouterAuthorization(openRouterAuthorizationId, from, reason, detail, Date.now())) {
-        await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
-      }
+    const fail = (from: LivePhaseTable, reason: OpenRouterAuthorizationFailureReason, detail: string) => {
+      this.failOpenRouterAuthorization(openRouterAuthorizationId, from, reason, detail, Date.now());
       return returned;
     };
     if (now >= phase.wait.callback_due_at) {
@@ -308,13 +301,11 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
         exchangeDueAt,
       );
     });
-    await this.openRouterTimer(tenantId, openRouterAuthorizationId, exchangeDueAt);
     const exchanged = await this.spendOpenRouterCode(row, phase.wait.verifier_sealed, callback.code);
     if (exchanged.kind === "Refused") return fail(EXCHANGES, "CodeRefused", exchanged.detail);
     if (exchanged.kind === "Failed") return fail(EXCHANGES, "ExchangeFailed", exchanged.detail);
     const stored = await this.storeOpenRouterKey(row, exchanged.key);
     if (stored.kind === "NotStored") return fail(EXCHANGES, "KeyNotStored", stored.detail);
-    await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
     return returned;
   }
 
@@ -382,16 +373,13 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
     });
   }
 
-  protected openRouterAuthorizationDeadlineReached(deadline: OpenRouterAuthorizationDeadline): void {
-    const id = deadline.openRouterAuthorizationId;
-    const row = this.openRouterRow(id);
-    if (row === null) return;
+  private expireOpenRouterAuthorization(row: AuthorizationRow, now: number): void {
+    const id = row.openrouter_authorization_id;
     const phase = this.openRouterPhase(id);
-    const now = Date.now();
-    if (phase.state === "AwaitingCallback" && phase.wait.callback_due_at === deadline.at) {
+    if (phase.state === "AwaitingCallback" && phase.wait.callback_due_at <= now) {
       this.failOpenRouterAuthorization(id, WAITS, "AuthorizationTimedOut", timedOutDetail(id), now);
     }
-    if (phase.state === "Exchanging" && phase.exchange.exchange_due_at === deadline.at) {
+    if (phase.state === "Exchanging" && phase.exchange.exchange_due_at <= now) {
       this.failOpenRouterAuthorization(id, EXCHANGES, "ExchangeFailed", exchangeStoppedDetail(id, row.key_label), now);
     }
   }

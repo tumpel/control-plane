@@ -34,7 +34,7 @@ import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
-import type { Unplaceable } from "./placement.ts";
+import { degradedOnly, type Unplaceable } from "./placement.ts";
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
@@ -134,6 +134,9 @@ export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NotHealthy") {
+    if (refused.host.health === "Degraded") {
+      return `${named} missed its heartbeat and counts as Degraded until it sends one or reconnects`;
+    }
     if (refused.host.health !== "Healthy") return `${named} is ${refused.host.health}`;
     return `${named} reports itself ${refused.host.reportedHealth}`;
   }
@@ -191,6 +194,14 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
     });
   }
   const detail = hosts.map(why).join(", ");
+  if (degradedOnly(hosts)) {
+    return refuse(409, {
+      code: "HostDegraded",
+      title: "No healthy host",
+      detail: `no host of your tenant is healthy: ${detail}`,
+      fix: `Check that tumpel-supervisor runs on a host and reaches the control plane, then ${retry}`,
+    });
+  }
   if (hosts.some(({ reason }) => reason === "MemoryFull")) {
     return refuse(409, {
       code: "PoolExhausted",

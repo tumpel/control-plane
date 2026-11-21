@@ -114,6 +114,7 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
+  withPresence,
 } from "./hosts";
 import {
   issues,
@@ -212,7 +213,6 @@ import { admitCaller, limitRefused, type RateLimit, rateLimited } from "./rate-l
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
 import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
-import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import { handleSubscriptions } from "./subscriptions.ts";
@@ -227,7 +227,6 @@ import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryToken
 
 export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
-export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 export { TenantMetrics } from "./tenant-metrics";
 export { WebhookSender } from "./webhook-sender.ts";
@@ -244,7 +243,6 @@ export interface Env extends SignerEnv {
   EVENTS: DurableObjectNamespace<EventChannel>;
   WEBHOOKS: DurableObjectNamespace<WebhookSender>;
   HOST: DurableObjectNamespace<HostChannel>;
-  SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
   METRICS: AnalyticsEngineDataset;
   METRICS_DATASET: string;
@@ -1273,7 +1271,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
   if (host === null) return refusal(hostNotFound(hostId));
-  const [withUpdates] = await hostReads(env, caller.tenantId, [host]);
+  const [withUpdates] = await hostReads(env, caller.tenantId, [await withPresence(env, host)]);
   return json(withUpdates);
 };
 

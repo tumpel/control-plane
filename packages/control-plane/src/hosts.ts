@@ -275,13 +275,14 @@ export const listHosts = async (
   const { results } = await env.DB.prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
     .all<HostRow>();
-  return Promise.all(
-    results.map(async (row) => {
-      const host = toHost(row);
-      return host.state === "Online" && (await hostSilent(env, host.hostId)) ? { ...host, state: "Offline" } : host;
-    }),
-  );
+  return Promise.all(results.map((row) => withPresence(env, toHost(row))));
 };
+
+export const withPresence = async (
+  env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">,
+  host: HostRecord,
+): Promise<HostRecord> =>
+  host.state === "Online" && (await hostSilent(env, host.hostId)) ? { ...host, health: "Degraded" } : host;
 
 export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostRecord | null> => {
   const row = await db
