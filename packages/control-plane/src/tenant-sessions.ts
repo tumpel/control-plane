@@ -3422,27 +3422,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     if (message.reason === "HostUpdating" && turn.state === "Offered")
       return this.offerElsewhere(tenantId, session, turn);
-    const stopped = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
-    if (stopped || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
-      const boxId = stopped ? crypto.randomUUID() : turn.box_id;
-      const sql = this.ctx.storage.sql;
-      this.ctx.storage.transactionSync(() => {
-        sql.exec(
-          "UPDATE turns SET state = 'Offered', box_id = ?, updated_at = ? WHERE turn_id = ?",
-          boxId,
-          now,
-          turn.turn_id,
-        );
-        if (stopped)
-          sql.exec(
-            "UPDATE sessions SET box_id = ?, updated_at = ? WHERE session_id = ?",
-            boxId,
-            now,
-            session.session_id,
-          );
-      });
-      const offeredAgain = { ...turn, state: "Offered" as const, box_id: boxId };
-      if (stopped) return this.offerElsewhere(tenantId, { ...session, box_id: boxId }, offeredAgain);
+    const handedOver = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
+    if (handedOver || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
+      this.ctx.storage.sql.exec(
+        "UPDATE turns SET state = 'Offered', updated_at = ? WHERE turn_id = ?",
+        now,
+        turn.turn_id,
+      );
+      const offeredAgain = { ...turn, state: "Offered" as const };
+      if (handedOver) return this.deferOffer(session, offeredAgain, now);
       return this.offerMessage(session, offeredAgain);
     }
     const detail =
