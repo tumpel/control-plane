@@ -1909,6 +1909,31 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
+  test("Codex, OpenCode and Pi sessions accept subscriptions with explicit completion", async () => {
+    const { tenantId, tool, sessionStart } = await tenant();
+    const { session } = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "lead the crew" },
+      StartedSessionSchema,
+    );
+    for (const harness of ["Codex", "OpenCode", "PiDev"]) {
+      await tenantSql(tenantId, "UPDATE sessions SET harness = ? WHERE session_id = ?", harness, session.sessionId);
+      const subscription = await tool(
+        "tumpel_subscription_create",
+        {
+          sessionId: session.sessionId,
+          prompt: "dispatch and review crew work",
+          goal: "all crew work is reviewed",
+          events: ["TurnCompleted"],
+          crewTags: ["crew:review"],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+        SubscriptionSchema,
+      );
+      assert.equal(subscription.state, "Active", harness);
+    }
+  });
+
   test("a foreman dispatches crew and ends its event turn while the subscription goal is unmet", async () => {
     const { bearer, host, getJson, tool, storedSnapshot, sessionStart } = await tenant();
     const [defaults] = await getJson("/v1/personas", PersonaSchema.array());
@@ -2027,9 +2052,10 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(delivery.sessionId, foremanId);
     assert.ok(delivery.credential.connectors.some((connector) => connector.connectorId === "tumpel"));
     assert.match(delivery.prompt, /^start a crew session per open issue and review what it did\n\n/);
-    assert.doesNotMatch(delivery.prompt, /^\/goal/);
     assert.match(delivery.prompt, /every open issue has a merged pull request/);
-    assert.equal((await tool("tumpel_turn_get", { turnId: delivery.turnId }, TurnSchema)).goal, undefined);
+    const deliveryTurn = await tool("tumpel_turn_get", { turnId: delivery.turnId }, TurnSchema);
+    assert.equal(deliveryTurn.goal, undefined);
+    assert.equal(deliveryTurn.prompt, delivery.prompt);
     const events = delivery.prompt
       .split("\n")
       .filter((line) => line.startsWith("{"))
