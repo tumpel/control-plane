@@ -180,7 +180,7 @@ export class HostChannel extends DurableObject<Env> {
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.flush(host.host_id, event.usage, now, attachment, context);
+      await this.flush(host.host_id, event.usage, now, context);
       await this.sendDeferredOffers(host.host_id, attachment, context);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
@@ -207,27 +207,33 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    if (frame.message.type === "TurnLine") {
-      if (!this.ledger.hold(frame, frame.message.text.length)) return;
-      return this.flush(hostId, usageOf(attachment), now, attachment, context);
+    if (frame.message.type !== "TurnLine" && this.ledger.holding())
+      await this.flush(hostId, usageOf(attachment), now, context);
+    const reply = await this.reply(hostId, frame).catch((error: unknown) => this.unstored(error, context));
+    if (frame.message.type !== "TurnLine") {
+      control.acknowledge(context, [frame]);
+      return this.answer(hostId, frame, reply, attachment, context);
     }
-    if (this.ledger.holding()) await this.flush(hostId, usageOf(attachment), now, attachment, context);
-    const reply = await this.reply(hostId, frame);
-    control.acknowledge(context, [frame]);
-    return this.answer(hostId, frame, reply, attachment, context);
+    await this.answer(hostId, frame, reply, attachment, context);
+    if (this.ledger.hold(frame, frame.message.text.length)) await this.flush(hostId, usageOf(attachment), now, context);
   }
 
-  private async flush(
-    hostId: string,
-    usage: HostUsage,
-    now: number,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): Promise<void> {
+  private async flush(hostId: string, usage: HostUsage, now: number, context: control.ControlContext): Promise<void> {
+    await this.report(hostId, usage, now).catch((error: unknown) => this.unstored(error, context));
     const held = this.ledger.take();
-    for (const frame of held) await this.answer(hostId, frame, await this.reply(hostId, frame), attachment, context);
-    await this.report(hostId, usage, now);
     if (held.length > 0) control.acknowledge(context, held);
+  }
+
+  private unstored(error: unknown, context: control.ControlContext): never {
+    const held = this.ledger.take();
+    const first = held[0];
+    if (first !== undefined)
+      control.close(
+        context.port,
+        CloseCode.ProtocolError,
+        `the control plane did not store frames ${first.seq} onward; reconnect and resend them`,
+      );
+    throw error;
   }
 
   private reply(hostId: string, frame: Frame<HostMessage>): Promise<HostReply | null> {

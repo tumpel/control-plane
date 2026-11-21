@@ -1,7 +1,12 @@
 import { TenantSkew } from "../tenant-api.ts";
 
+const LINES_LOST = "TranscriptLinesLost";
+
+export const linesLost = (detail: string): Error => new Error(`${LINES_LOST}: ${detail}`);
+
 const resendable = (error: unknown): boolean =>
   error instanceof TenantSkew ||
+  (error instanceof Error && error.message.includes(LINES_LOST)) ||
   (typeof error === "object" && error !== null && "retryable" in error && error.retryable === true);
 
 export const refusedOrResent = (messageType: string, error: unknown): { type: "Refused"; reason: string } => {

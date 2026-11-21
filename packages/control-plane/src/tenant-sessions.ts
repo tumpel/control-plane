@@ -35,6 +35,7 @@ import {
 import type { z } from "zod";
 import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
+import { linesLost } from "./channel/failure.ts";
 import type {
   BootImage,
   DispatchConnector,
@@ -653,6 +654,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
   protected eventsAppended = false;
   private readonly offering = new Set<string>();
   private readonly heldLines = new Map<string, HeldLines>();
+  private readonly resentTurns = new Set<string>();
+  private readonly heardHosts = new Set<string>();
   private readonly reportedUsage = new Map<string, ReportedUsage>();
 
   protected abstract failPrebuild(
@@ -1645,6 +1648,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
     this.hostReported(hostId, usage, now);
     this.reportedUsage.set(hostId, { usage, now, persisted: usage, persistedAt: now });
+    this.heardHosts.add(hostId);
     clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 
@@ -1715,7 +1719,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.reportedUsage.set(hostId, { usage, now, persisted: usage, persistedAt: now });
   }
 
+  private runsTurns(hostId: string): boolean {
+    const [row] = this.ctx.storage.sql
+      .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = ? LIMIT 1", hostId, "Running")
+      .toArray();
+    return row !== undefined;
+  }
+
   private async flushHeldLines(hostId: string): Promise<void> {
+    if (!this.heardHosts.has(hostId)) {
+      this.heardHosts.add(hostId);
+      if (this.runsTurns(hostId))
+        throw linesLost(
+          `host ${hostId} runs a turn, and this tenant restarted since it last heard from the host, so lines it held for that turn may be gone; the host resends them`,
+        );
+    }
     const held = [...this.heldLines].filter(([, lines]) => lines.hostId === hostId);
     for (const [turnId, lines] of held) await this.chunks.write(lines.tenantId, lines.sessionId, turnId, 1);
   }
@@ -4105,6 +4123,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const held = this.heldLines.get(turn.turn_id);
     const last = held?.lines.at(-1)?.lineSeq ?? this.sessionRow(session.session_id)?.last_line_seq ?? 0;
     if (lineSeq <= last) return;
+    if (lineSeq > last + 1 && held === undefined && !this.resentTurns.has(turn.turn_id)) {
+      this.resentTurns.add(turn.turn_id);
+      throw linesLost(
+        `turn ${turn.turn_id} sent lineSeq ${lineSeq}, but this tenant holds lines up to ${last}; it restarted before it stored the lines in between, so the host resends them`,
+      );
+    }
     if (lineSeq > last + 1) {
       return this.failTurn(
         tenantId,

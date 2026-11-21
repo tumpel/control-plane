@@ -205,6 +205,13 @@ export class Namespace<T extends object> {
     return this.getByName(id);
   }
 
+  restart(name: string): void {
+    const { ctx } = this.instance(name);
+    const restarted = { object: this.create(ctx), ctx };
+    this.instances.set(name, restarted);
+    this.runtime.track(restarted);
+  }
+
   instance(name: string): { object: T; ctx: DurableObjectState } {
     const held = this.instances.get(name);
     if (held !== undefined) return held;
