@@ -3424,27 +3424,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     if (message.reason === "HostUpdating" && turn.state === "Offered")
       return this.offerElsewhere(tenantId, session, turn);
-    const stopped = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
-    if (stopped || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
-      const boxId = stopped ? crypto.randomUUID() : turn.box_id;
-      const sql = this.ctx.storage.sql;
-      this.ctx.storage.transactionSync(() => {
-        sql.exec(
-          "UPDATE turns SET state = 'Offered', box_id = ?, updated_at = ? WHERE turn_id = ?",
-          boxId,
-          now,
-          turn.turn_id,
-        );
-        if (stopped)
-          sql.exec(
-            "UPDATE sessions SET box_id = ?, updated_at = ? WHERE session_id = ?",
-            boxId,
-            now,
-            session.session_id,
-          );
-      });
-      const offeredAgain = { ...turn, state: "Offered" as const, box_id: boxId };
-      if (stopped) return this.offerElsewhere(tenantId, { ...session, box_id: boxId }, offeredAgain);
+    const handedOver = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
+    if (handedOver || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
+      this.ctx.storage.sql.exec(
+        "UPDATE turns SET state = 'Offered', updated_at = ? WHERE turn_id = ?",
+        now,
+        turn.turn_id,
+      );
+      const offeredAgain = { ...turn, state: "Offered" as const };
+      if (handedOver) return this.deferOffer(session, offeredAgain, now);
       return this.offerMessage(session, offeredAgain);
     }
     const detail =
@@ -3469,7 +3457,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
-    if (turn.state !== "Offered") return { type: "TurnWithdrawn", turnId: turn.turn_id };
+    if (turn.state !== "Offered") {
+      if (session.state === "Stopped" && session.box_id === turn.box_id) {
+        await this.host(hostId).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: turn.box_id });
+      }
+      return { type: "TurnWithdrawn", turnId: turn.turn_id };
+    }
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
@@ -3820,13 +3813,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     await this.endTurn(tenantId, turn, now, () => {
       this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, now);
-      sql.exec(
-        "UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?",
-        sessionState,
-        now,
-        turn.session_id,
-      );
-      this.sessionEntered(turn.session_id, sessionState, now);
+      const unborn = sessionState === "Idle" && turn.state === "Offered" && this.boxUnborn(turn);
+      const entered = unborn ? "Stopped" : sessionState;
+      if (unborn) sql.exec("DELETE FROM unreported_box_offers WHERE box_id = ?", turn.box_id);
+      sql.exec("UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?", entered, now, turn.session_id);
+      this.sessionEntered(turn.session_id, entered, now);
     });
     const prebuild = this.hostPrebuild(turn.session_id);
     if (prebuild === null) return;
@@ -3837,6 +3828,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
       fix: PREBUILD_FIX,
     } as const;
     await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
+  }
+
+  private boxUnborn(turn: TurnRow): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `SELECT 1 FROM sessions WHERE session_id = ?1 AND box_id = ?2
+          AND NOT EXISTS (SELECT 1 FROM turns WHERE session_id = ?1 AND box_id = ?2 AND turn_id != ?3 AND state != 'Offered')`,
+          turn.session_id,
+          turn.box_id,
+          turn.turn_id,
+        )
+        .toArray().length > 0
+    );
   }
 
   private async requestSnapshot(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {

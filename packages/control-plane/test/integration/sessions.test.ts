@@ -2823,6 +2823,33 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(session.lastTurn, read);
   });
 
+  test("a first turn that fails before its box exists leaves the session Stopped, and the next turn gets a new box", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
+    assert.equal(response.status, 200);
+    const started = StartedSessionSchema.parse(await response.json());
+    const offer = await host.next("TurnOffer");
+    const { sessionId, tenantId } = started.session;
+    const at = Date.now() + 500;
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
+
+    await until(
+      "the turn reading Failed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Stopped");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnWithdrawn")).turnId, offer.turnId);
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
+
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const again = await host.next("TurnOffer");
+    assert.equal(again.sessionId, sessionId);
+    assert.notEqual(again.boxId, offer.boxId);
+  });
+
   test("a turn whose harness exits without a successful result fails HarnessExitedWithoutResult on every read, and a snapshot of its box follows", async () => {
     const { bearer, host, getJson, tool, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "stops mid-work" }, bearer);
@@ -3496,7 +3523,7 @@ suite("sessions", { concurrency: 8 }, () => {
     swapped.close();
   });
 
-  test("a claimed turn whose box a handover stops is offered to another host in a new box, before the new binary's first heartbeat can call it lost", async () => {
+  test("a claimed turn whose box a handover keeps warm is offered again to the same host in the same box, not to another host", async () => {
     const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("handover-1");
     const second = await enrol("handover-2");
@@ -3510,7 +3537,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(response.status, 200, await response.clone().text());
     const started = StartedSessionSchema.parse(await response.json());
     const handing = started.session.hostId;
-    const taking = handing === first.id ? second.id : first.id;
     const before = sides.get(handing);
     assert.ok(before);
     const offer = await before.next("TurnOffer");
@@ -3525,28 +3551,27 @@ suite("sessions", { concurrency: 8 }, () => {
       handing,
       handing === first.id ? first.key : second.key,
       32,
-      { ...before.carried(), held: [] },
+      { ...before.carried(), held: [started.session.sessionId] },
       [
         {
           type: "TurnFailed",
           turnId: offer.turnId,
           reason: "HostUpdating",
-          detail: `HandoverTimedOut: the box of turn ${offer.turnId} did not reach a point it could be handed to the new supervisor binary within 60 s, so it was stopped; the control plane offers the turn to another host`,
+          detail: `this host started handing its boxes to a new supervisor binary before the control plane answered the claim of turn ${offer.turnId}, so its harness never started and its box stays warm; the control plane offers the turn again`,
           failedAt: new Date().toISOString(),
         },
       ],
     );
-    const moved = await sides.get(taking)?.next("TurnOffer");
-    assert.equal(moved?.turnId, offer.turnId);
-    assert.notEqual(moved?.boxId, offer.boxId);
+    const again = await after.next("TurnOffer");
+    assert.deepEqual({ turnId: again.turnId, boxId: again.boxId }, { turnId: offer.turnId, boxId: offer.boxId });
     const session = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
-    assert.deepEqual({ hostId: session.hostId, boxId: session.boxId }, { hostId: taking, boxId: moved?.boxId });
+    assert.deepEqual({ hostId: session.hostId, boxId: session.boxId }, { hostId: handing, boxId: offer.boxId });
     assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Offered");
     after.close();
     for (const side of sides.values()) side.close();
   });
 
-  test("a claimed turn whose box a handover stops on the only host is offered again in a new box on the new binary's first heartbeat, which does not call it lost", async () => {
+  test("a claimed turn whose box a handover keeps warm on the only host is offered again in the same box on the new binary's first heartbeat, which does not call it lost", async () => {
     const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
     host.close();
     await hostState(hostId, "Offline");
@@ -3555,7 +3580,7 @@ suite("sessions", { concurrency: 8 }, () => {
     await hostState(only.id, "Online");
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a handover" }, bearer);
     assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
+    const { session, turn } = StartedSessionSchema.parse(await response.json());
     const offer = await before.next("TurnOffer");
     before.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     await until(
@@ -3564,18 +3589,17 @@ suite("sessions", { concurrency: 8 }, () => {
       (read) => read.state === "Running",
     );
     before.close();
-    const after = await connect(only.id, only.key, 32, { ...before.carried(), held: [] }, [
+    const after = await connect(only.id, only.key, 32, { ...before.carried(), held: [session.sessionId] }, [
       {
         type: "TurnFailed",
         turnId: turn.turnId,
         reason: "HostUpdating",
-        detail: `HandoverTimedOut: the box of turn ${turn.turnId} did not reach a point it could be handed to the new supervisor binary within 60 s, so it was stopped; the control plane offers the turn to another host`,
+        detail: `this host started handing its boxes to a new supervisor binary before the control plane answered the claim of turn ${turn.turnId}, so its harness never started and its box stays warm; the control plane offers the turn again`,
         failedAt: new Date().toISOString(),
       },
     ]);
     const again = await after.next("TurnOffer");
-    assert.equal(again.turnId, turn.turnId);
-    assert.notEqual(again.boxId, offer.boxId);
+    assert.deepEqual({ turnId: again.turnId, boxId: again.boxId }, { turnId: turn.turnId, boxId: offer.boxId });
     after.send({ type: "TurnClaim", turnId: again.turnId, boxId: again.boxId });
     assert.equal((await after.next("TurnClaimed")).turnId, turn.turnId);
     assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
