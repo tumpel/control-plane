@@ -17,6 +17,7 @@ const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_PADDING = 120 * 1024 * 1024;
+const OVER_CAP_ROOT_PLACEMENTS = 700_000;
 const COLLECTION_RUNS = 10;
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
@@ -107,7 +108,7 @@ const storesRoot = (
   storageKey: string,
   chunks: Placement[],
   unknownEntries: object[] = [],
-): Promise<string> => putsRoot(world.store, storageKey, chunks, unknownEntries, 0);
+): Promise<Placement> => putsRoot(world.store, storageKey, chunks, unknownEntries, 0);
 
 const putsRoot = async (
   store: R2Bucket,
@@ -115,7 +116,7 @@ const putsRoot = async (
   chunks: Placement[],
   unknownEntries: object[],
   padding: number,
-): Promise<string> => {
+): Promise<Placement> => {
   const json = JSON.stringify({
     entries: [
       ...unknownEntries,
@@ -136,11 +137,9 @@ const putsRoot = async (
   manifest.write(json, padding);
   const digest = createHash("sha256").update(manifest).digest("hex");
   await store.put(`${TENANT_ID}/packs/${digest}`, manifest);
-  await store.put(
-    storageKey,
-    JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.byteLength }] }),
-  );
-  return digest;
+  const root = { digest, packDigest: digest, offset: 0, length: manifest.byteLength };
+  await store.put(storageKey, JSON.stringify({ manifest: [root] }));
+  return root;
 };
 
 const insertsSnapshot = (
@@ -174,12 +173,17 @@ const failsSnapshot = async (host: Host, snapshotId: string): Promise<void> => {
   });
 };
 
-const storesSnapshot = async (world: World, host: Host, sessionId: string, chunks: Placement[]): Promise<string> => {
+const storesSnapshot = async (
+  world: World,
+  host: Host,
+  sessionId: string,
+  chunks: Placement[],
+): Promise<{ storageKey: string; root: Placement }> => {
   const request = snapshotAsked(host, sessionId);
   await uploadsChunks(world, host, request.snapshotId, chunks);
-  await storesRoot(world, request.storageKey, chunks);
+  const root = await storesRoot(world, request.storageKey, chunks);
   await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: chunks.length * CHUNK_BYTES });
-  return request.storageKey;
+  return { storageKey: request.storageKey, root };
 };
 
 const inWorld = async <T>(run: (world: World, host: Host) => Promise<T>): Promise<T> => {
@@ -217,11 +221,11 @@ const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
     await host.claims(offer);
     await host.completes(offer);
     const before = world.tenantRowsWritten();
-    const root = await storesSnapshot(world, host, session.sessionId, chunks);
+    const { storageKey } = await storesSnapshot(world, host, session.sessionId, chunks);
     const written = world.tenantRowsWritten() - before;
 
     await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: session.sessionId, now: Date.now() });
-    assert.equal(await world.store.get(root), null, "the archive frees the root");
+    assert.equal(await world.store.get(storageKey), null, "the archive frees the root");
     const packs = new Set(chunks.map((chunk) => chunk.packDigest));
     for (const packDigest of packs) {
       assert.equal(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, "no snapshot holds the pack");
@@ -252,9 +256,10 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
     const { prepared } = parsed.data;
     assert.deepEqual(
       prepared.snapshots.map((snapshot) => snapshot.storageKey),
-      [layer],
+      [layer.storageKey],
     );
-    for (const [at, part] of parts(chunks).entries()) {
+    const restored = [[layer.root], ...parts(chunks)];
+    for (const [at, part] of restored.entries()) {
       const downloads = RestoreDownloadsSchema.parse(
         await host.says({ type: "RestoreChunks", turnId: offer.turnId, part: at + 1, chunks: part }),
       );
@@ -344,7 +349,7 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     await host.completes(offer);
     const request = snapshotAsked(host, session.sessionId);
     const storedBefore = `${TENANT_ID}/${session.sessionId}/snapshots/stored-before`;
-    const manifestPack = await storesRoot(world, storedBefore, chunks, [unknownEntry]);
+    const manifestPack = (await storesRoot(world, storedBefore, chunks, [unknownEntry])).packDigest;
     for (const packDigest of new Set(chunks.map((chunk) => chunk.packDigest))) {
       await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
     }
@@ -482,6 +487,31 @@ test("a manifest of 500000 chunks loads into an index within the memory the cont
   }
 });
 
+test("a snapshot root whose own placements would pass the index cap is rejected at SnapshotDone", async () => {
+  await inWorld(async (world, host) => {
+    const session = await world.startSession({ prompt: "build a root of one-byte chunks", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    const request = snapshotAsked(host, session.sessionId);
+    const packDigest = sha256("one-byte pack");
+    const manifest = Array.from({ length: OVER_CAP_ROOT_PLACEMENTS }, (_, at) => ({
+      digest: sha256("one-byte chunk"),
+      packDigest,
+      offset: at,
+      length: 1,
+    }));
+    await world.store.put(request.storageKey, JSON.stringify({ manifest }));
+    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: OVER_CAP_ROOT_PLACEMENTS });
+
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+    );
+    assert.equal(snapshots[0]?.outcome.state, "Failed");
+    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take/);
+  });
+});
+
 test("a stored snapshot whose index would pass the cap keeps its packs without stopping retention", async () => {
   await inWorld(async (world, host) => {
     const old = tree(DIGESTS_PER_PART, "over the cap");
@@ -491,7 +521,7 @@ test("a stored snapshot whose index would pass the cap keeps its packs without s
     await host.completes(firstOffer);
     const firstRequest = snapshotAsked(host, first.sessionId);
     const storageKey = `${TENANT_ID}/${first.sessionId}/snapshots/over-the-cap`;
-    const manifestPack = await putsRoot(world.store, storageKey, old, [], OVER_CAP_PADDING);
+    const manifestPack = (await putsRoot(world.store, storageKey, old, [], OVER_CAP_PADDING)).packDigest;
     for (const packDigest of new Set(old.map((chunk) => chunk.packDigest))) {
       await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
     }
@@ -574,8 +604,8 @@ test("an object storage error while the live pack names are rebuilt leaves nothi
     const kept = tree(DIGESTS_PER_PART, "kept");
     const releasedKey = `${TENANT_ID}/${first.sessionId}/snapshots/released`;
     const keptKey = `${TENANT_ID}/z-another-session/snapshots/kept`;
-    const releasedManifest = await storesRoot(world, releasedKey, released);
-    const keptManifest = await storesRoot(world, keptKey, kept);
+    const releasedManifest = (await storesRoot(world, releasedKey, released)).packDigest;
+    const keptManifest = (await storesRoot(world, keptKey, kept)).packDigest;
     for (const packDigest of new Set([...released, ...kept].map((chunk) => chunk.packDigest))) {
       await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
     }
