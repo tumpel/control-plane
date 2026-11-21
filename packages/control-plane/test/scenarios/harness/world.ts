@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { register } from "node:module";
-import { ChannelProtocol, SessionSchema, StartedSessionSchema, SubscriptionSchema } from "@tumpel/schemas";
+import { ChannelProtocol, SessionSchema, StartedSessionSchema, SubscriptionSchema, TurnSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
@@ -31,6 +31,7 @@ const StoredTurnOfferSchema = z.object({
 export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
+type Turn = z.infer<typeof TurnSchema>;
 
 const ControlMessageSchema = z.looseObject({ type: z.string() });
 type ControlMessage = z.infer<typeof ControlMessageSchema>;
@@ -262,6 +263,10 @@ export class World {
         }),
       );
     return created.created.subscription;
+  }
+
+  async turn(turnId: string): Promise<Turn> {
+    return z.object({ turn: TurnSchema }).parse(await this.call("getTurn", { tenantId: TENANT_ID, turnId })).turn;
   }
 
   async subscription(subscriptionId: string): Promise<Subscription> {
