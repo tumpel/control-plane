@@ -36,7 +36,10 @@ test("a deadline whose handler always throws is retried 10 times with growing ga
     if (index > 0) assert.ok(gap >= (gaps[index - 1] ?? 0), `gap ${index + 1} (${gap}) shrank`);
   }
   assert.equal(dropped.length, 1);
-  assert.match(dropped[0] ?? "", new RegExp(`^DeadlineDropped: tenant ${TENANT_ID} ${session.sessionId} Total: `));
+  assert.match(
+    dropped[0] ?? "",
+    new RegExp(`^DeadlineDropped: tenant ${TENANT_ID} Total \\{"turnId":"${offer.turnId}"`),
+  );
 
   const turn = await world.turn(offer.turnId);
   assert.equal(turn.state, "Failed");
@@ -77,7 +80,7 @@ test("stale deadlines dropped during a D1 outage fail nothing while the turn is 
   await world.passes(SETTINGS.turnTotalBudgetSeconds * SECOND - 10 * SECOND);
 
   assert.deepEqual(
-    dropped.map((line) => line.split(":")[1]?.split(" ").at(-1)).sort(),
+    dropped.map((line) => line.split(" ")[3]).sort(),
     ["FirstLine", "HostOffline"],
     "both stale deadlines were dropped",
   );
@@ -165,7 +168,7 @@ test("a teardown left unanswered during a D1 outage still returns the session to
   await world.passes(DAY);
 
   assert.ok(
-    dropped.some((line) => line.includes(` ${session.sessionId} TeardownAnswer: `)),
+    dropped.some((line) => line.startsWith(`DeadlineDropped: tenant ${TENANT_ID} TeardownAnswer `)),
     "the unanswered teardown was dropped",
   );
   assert.equal((await world.session(session.sessionId)).state, "Idle");
