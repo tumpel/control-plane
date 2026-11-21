@@ -165,11 +165,6 @@
       "UPDATE oauth_tokens SET spent = 1 WHERE token_sha256 = ? AND kind = 'refresh' AND spent = 0 RETURNING grant_id, client_id, tenant_id, principal_id, expires_at",
       "expr: insert"
     ],
-    "packages/control-plane/src/object-cleanups.ts": [
-      "DELETE FROM object_cleanups WHERE storage_key IN (SELECT value FROM json_each(?))",
-      "INSERT OR IGNORE INTO object_cleanups (storage_key) VALUES (?)",
-      "SELECT storage_key FROM object_cleanups ORDER BY storage_key LIMIT ?"
-    ],
     "packages/control-plane/src/prebuild-uploads.ts": ["SELECT 1 FROM tenants WHERE tenant_id = ?"],
     "packages/control-plane/src/release-notices.ts": ["SELECT host_id FROM hosts WHERE state = 'Online'"],
     "packages/control-plane/src/supervisor-updates.ts": [
@@ -328,16 +323,10 @@
       "DELETE FROM push_subscriptions WHERE principal_id = ? AND push_subscription_id = ?",
       "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ?",
       "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
-      "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
-      "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ? AND EXISTS (SELECT 1 FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?)",
       "INSERT INTO push_subscription_events (push_subscription_id, event) VALUES (?, ?)",
       "INSERT INTO push_subscriptions (push_subscription_id, principal_id, endpoint, p256dh, auth_sealed, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (endpoint) DO UPDATE SET principal_id = excluded.principal_id, p256dh = excluded.p256dh, auth_sealed = excluded.auth_sealed, created_at = excluded.created_at",
-      "INSERT OR IGNORE INTO push_wakes (event_id, push_subscription_id, failures, next_attempt_at) SELECT ?, push_subscription_id, 0, ? FROM push_subscription_events WHERE event = ?",
-      "SELECT p.push_subscription_id, p.principal_id, p.endpoint, p.created_at, (SELECT json_group_array(event) FROM (SELECT event FROM push_subscription_events WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events FROM push_subscriptions AS p",
-      "SELECT w.event_id, w.failures, w.next_attempt_at, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed, e.payload, e.created_at AS event_created_at, s.repository FROM push_wakes AS w JOIN push_subscriptions AS p USING (push_subscription_id) JOIN events AS e USING (event_id) JOIN event_sessions AS es USING (event_id) JOIN sessions AS s USING (session_id) WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id) AND w.next_attempt_at <= ? ORDER BY w.event_id, p.push_subscription_id LIMIT ?",
-      "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-      "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-      "UPDATE push_wakes SET failures = failures + 1, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?"
+      "SELECT e.event_id, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed, e.payload, e.created_at AS event_created_at, s.repository FROM events AS e JOIN event_sessions AS es USING (event_id) JOIN sessions AS s USING (session_id) JOIN push_subscription_events AS pe ON pe.event = json_extract(e.payload, '$.event') JOIN push_subscriptions AS p USING (push_subscription_id) WHERE e.event_id IN (SELECT value FROM json_each(?)) ORDER BY e.event_id, p.push_subscription_id",
+      "SELECT p.push_subscription_id, p.principal_id, p.endpoint, p.created_at, (SELECT json_group_array(event) FROM (SELECT event FROM push_subscription_events WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events FROM push_subscriptions AS p"
     ],
     "packages/control-plane/src/tenant-sessions.ts": [
       "DELETE FROM ${table} WHERE secret_set_id = ? AND name = ?",
@@ -594,18 +583,16 @@
       "UPDATE triggers SET name = ?, source = ?, event = ?, persona_id = ?, model = ?, prompt = ?, principal_id = ?, updated_at = MAX(?, updated_at + 1) WHERE trigger_id = ?"
     ],
     "packages/control-plane/src/tenant-webhooks.ts": [
-      "DELETE FROM webhook_deliverings WHERE webhook_endpoint_id = ?",
       "DELETE FROM webhook_endpoints WHERE webhook_endpoint_id = ?",
       "DELETE FROM webhook_failings WHERE webhook_endpoint_id = ?",
-      "INSERT INTO webhook_deliverings (webhook_endpoint_id) VALUES (?)",
-      "INSERT INTO webhook_deliverings (webhook_endpoint_id) VALUES (?)",
       "INSERT INTO webhook_endpoint_events (webhook_endpoint_id, event) VALUES (?, ?)",
       "INSERT INTO webhook_endpoints (webhook_endpoint_id, url, start_event_id, created_at) VALUES (?, ?, ?, ?)",
       "INSERT INTO webhook_failings (webhook_endpoint_id, detail, failing_since) VALUES (?, ?, ?)",
-      "INSERT OR IGNORE INTO webhook_wakes (webhook_endpoint_id) SELECT w.webhook_endpoint_id FROM webhook_endpoints AS w JOIN webhook_deliverings AS d USING (webhook_endpoint_id) JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ?",
       "SELECT 1 FROM webhook_endpoints WHERE webhook_endpoint_id = ?",
       "SELECT event FROM webhook_endpoint_events WHERE webhook_endpoint_id = ? ORDER BY event",
-      "SELECT w.webhook_endpoint_id, w.url, w.start_event_id, w.created_at, CASE WHEN d.webhook_endpoint_id IS NOT NULL THEN json_object('delivery', 'Delivering') ELSE json_object('delivery', 'Failing', 'detail', f.detail, 'failingSince', f.failing_since) END AS status FROM webhook_endpoints AS w LEFT JOIN webhook_deliverings AS d USING (webhook_endpoint_id) LEFT JOIN webhook_failings AS f USING (webhook_endpoint_id)"
+      "SELECT w.webhook_endpoint_id FROM webhook_endpoints AS w JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ? AND NOT EXISTS (SELECT 1 FROM webhook_failings AS f WHERE f.webhook_endpoint_id = w.webhook_endpoint_id)",
+      "SELECT w.webhook_endpoint_id, w.url, w.start_event_id, w.created_at, CASE WHEN f.webhook_endpoint_id IS NULL THEN json_object('delivery', 'Delivering') ELSE json_object('delivery', 'Failing', 'detail', f.detail, 'failingSince', f.failing_since) END AS status FROM webhook_endpoints AS w LEFT JOIN webhook_failings AS f USING (webhook_endpoint_id)",
+      "SELECT webhook_endpoint_id, start_event_id FROM webhook_endpoints WHERE webhook_endpoint_id IN (SELECT value FROM json_each(?)) ORDER BY created_at, webhook_endpoint_id"
     ],
     "packages/control-plane/src/tenant.ts": [
       "DELETE FROM harness_pins WHERE harness = ?",
@@ -621,7 +608,6 @@
       "DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?",
       "DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?",
       "DELETE FROM secret_values WHERE secret_set_id = ? AND name = ?",
-      "DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?",
       "DROP TABLE secret_values_plaintext",
       "DROP TABLE secret_values_plaintext",
       "INSERT INTO harness_pins (harness, harness_version, updated_at) VALUES (?, ?, ?) ON CONFLICT (harness) DO UPDATE SET harness_version = excluded.harness_version, updated_at = excluded.updated_at",
@@ -639,7 +625,6 @@
       "INSERT INTO secret_sets (secret_set_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
       "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
       "INSERT INTO secret_values (secret_set_id, name, kind, sealed, updated_at) VALUES (?, ?, ?, ?, ?)",
-      "SELECT MIN(at) AS at FROM ( SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id) UNION ALL SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id))",
       "SELECT connector_id FROM persona_connectors WHERE persona_id = ? ORDER BY rowid",
       "SELECT harness, harness_version, updated_at FROM harness_pins ORDER BY harness",
       "SELECT name FROM personas WHERE secret_set_id = ? ORDER BY name",
@@ -652,7 +637,6 @@
       "SELECT secret_set_id, name, provider, value, updated_at FROM secret_values_plaintext ORDER BY secret_set_id, name",
       "SELECT session_id FROM sessions WHERE persona_id = ? AND state NOT IN ('Failed', 'Archived') ORDER BY created_at, session_id",
       "SELECT tier FROM tenants WHERE tenant_id = ?",
-      "SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_wakes JOIN webhook_endpoints AS w USING (webhook_endpoint_id) ORDER BY w.created_at, w.webhook_endpoint_id",
       "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
       "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
       "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",

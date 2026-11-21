@@ -4,9 +4,9 @@ import { SessionTimer as BaseSessionTimer } from "../../src/session-timer";
 export { EventChannel, HostChannel, TenantMetrics, WebhookSender } from "../../src/index";
 
 export class SessionTimer extends BaseSessionTimer {
-  async store(timers: unknown, at: number): Promise<void> {
+  async store(timers: { tenantId: string }): Promise<void> {
     await this.ctx.storage.put("timers", timers);
-    await this.ctx.storage.setAlarm(at);
+    await this.set(timers.tenantId, {});
   }
 
   async stored(): Promise<unknown> {
@@ -49,8 +49,8 @@ const objects = async (request: Request, env: Env, path: string): Promise<Respon
 const timers = async (request: Request, env: Env, sessionId: string): Promise<Response> => {
   const timer = (env.SESSION_TIMER as unknown as DurableObjectNamespace<SessionTimer>).getByName(sessionId);
   if (request.method === "PUT") {
-    const { timers, at } = await request.json<{ timers: unknown; at: number }>();
-    await timer.store(timers, at);
+    const { timers } = await request.json<{ timers: { tenantId: string } }>();
+    await timer.store(timers);
     return new Response(null, { status: 204 });
   }
   return Response.json((await timer.stored()) ?? null);

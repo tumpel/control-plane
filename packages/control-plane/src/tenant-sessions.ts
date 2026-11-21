@@ -88,7 +88,6 @@ import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
 import { type HostRecord, hostOf, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
-import { drainObjectCleanups, recordObjectCleanups } from "./object-cleanups.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
@@ -2636,17 +2635,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray()
       .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
-    this.ctx.storage.transactionSync(() => {
-      recordObjectCleanups(sql, [...keys, ...this.releaseSnapshots(stored)]);
+    const released = this.ctx.storage.transactionSync(() => {
+      const objects = this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
+      return objects;
     });
     await this.live.release(
       this.env.STORE,
       tenantId,
       stored.map((snapshot) => snapshot.storage_key),
     );
-    await this.drainCleanups(tenantId);
+    await this.deleteObjects([...keys, ...released]);
     await this.collectChunks(tenantId);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
@@ -2657,16 +2657,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
-    this.ctx.storage.transactionSync(() => {
-      recordObjectCleanups(
-        sql,
-        sql
-          .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
-          .toArray()
-          .map((row) => row.storage_key),
-      );
+    const transcriptKeys = this.ctx.storage.transactionSync(() => {
+      const keys = sql
+        .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
+        .toArray()
+        .map((row) => row.storage_key);
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
+      return keys;
     });
+    await this.deleteObjects(transcriptKeys);
     return { kind: "Deleted" };
   }
 
@@ -2685,24 +2684,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
       stored.session_id,
       stored.snapshot_seq,
     );
-    this.ctx.storage.transactionSync(() => recordObjectCleanups(sql, this.releaseSnapshots(older)));
+    const released = this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
     await this.live.release(
       this.env.STORE,
       tenantId,
       older.map((snapshot) => snapshot.storage_key),
     );
-    await this.drainCleanups(tenantId);
-    await this.deleteObjects(failed);
+    await this.deleteObjects([...released, ...failed]);
     await this.collectChunks(tenantId);
     await this.archiveSupersededPrebuilds(tenantId, now);
-  }
-
-  private drainCleanups(tenantId: string): Promise<void> {
-    return drainObjectCleanups(this.ctx.storage.sql, this.env.STORE).catch((error: unknown) =>
-      console.error(
-        `tenant ${tenantId} could not delete released snapshot objects now, so the object cleanup step deletes them later: ${errorOf(error).message}`,
-      ),
-    );
   }
 
   private releaseSnapshots(snapshots: { snapshot_id: string; storage_key: string }[]): string[] {

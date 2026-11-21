@@ -54,5 +54,11 @@
     "parser": {
       "tailwindDirectives": true
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["**", "!packages/control-plane/src/session-timer.ts"],
+      "plugins": ["./biome-plugins/no-alarm.grit"]
+    }
+  ]
 }

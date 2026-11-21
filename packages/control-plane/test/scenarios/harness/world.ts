@@ -569,10 +569,6 @@ export class World {
     return this.tenants.instance(TENANT_ID).ctx.storage.sql;
   }
 
-  tenantAlarm(): Promise<number | null> {
-    return this.tenants.instance(TENANT_ID).ctx.storage.getAlarm();
-  }
-
   async passes(ms: number): Promise<void> {
     await this.runtime.advance(ms);
   }

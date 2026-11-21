@@ -238,7 +238,7 @@ after(async () => {
 });
 
 suite("hosts", { concurrency: true }, () => {
-  test("a host enrols with a one-time token, holds its channel, drops to Offline when it falls silent, and stops on revoke", async () => {
+  test("a host enrols with a one-time token, holds its channel and stops on revoke", async () => {
     const token = await mint();
     const first = await enrol("first", token);
     assert.equal(first.finished.code, 0, first.finished.stderr);
@@ -264,10 +264,6 @@ suite("hosts", { concurrency: true }, () => {
       ["Online"],
     );
 
-    running.child.kill("SIGSTOP");
-    await waitForState(host.hostId, "Offline");
-    running.child.kill("SIGCONT");
-    await waitForState(host.hostId, "Online");
     const revoked = await postJson(`/v1/hosts/${host.hostId}/revoke`, {}, bearer);
     assert.equal(revoked.status, 200);
     assert.equal(HostSchema.parse(await revoked.json()).state, "Revoked");
