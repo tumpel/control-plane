@@ -72,7 +72,6 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
       events: ["TurnFailed"],
       sessionId: crew.sessionId,
       triggerId: null,
-      waitSeconds: 0,
     }),
   );
   assert.equal(listed.kind, "Read");
@@ -115,7 +114,6 @@ test("a turn failed by a snapshot failure stores a detail within the event bound
       events: ["TurnFailed"],
       sessionId: offer.sessionId,
       triggerId: null,
-      waitSeconds: 0,
     }),
   );
   assert.equal(listed.kind, "Read");

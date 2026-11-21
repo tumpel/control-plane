@@ -55,7 +55,6 @@ export class Tenant extends BaseTenant {
         events: [],
         sessionId: null,
         triggerId: null,
-        waitSeconds: 0,
       },
     });
   }
