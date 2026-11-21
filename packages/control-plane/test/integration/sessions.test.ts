@@ -4116,6 +4116,112 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
+  test("a delivery to an evicted session waits while every box runs or releases, and another host places it once it has room", async () => {
+    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const tight = await enrol("tight");
+    const side = await connect(tight.id, tight.key, 2);
+    await hostState(tight.id, "Online");
+    side.quiet();
+    const foreman = await idleTurn(side, { ...(await sessionStart()), prompt: "lead the crew" }, bearer);
+    const foremanId = foreman.session.sessionId;
+    const snapshot = await side.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    side.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "the foreman reading Idle",
+      () => getJson(`/v1/sessions/${foremanId}`, SessionSchema),
+      (session) => session.state === "Idle",
+    );
+    const subscription = await tool(
+      "tumpel_subscription_create",
+      {
+        sessionId: foremanId,
+        prompt: "review what the crew did",
+        goal: "every crew turn is reviewed",
+        events: ["TurnCompleted"],
+        crewTags: ["crew:review"],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      SubscriptionSchema,
+    );
+
+    const crewStart = await postJson(
+      "/v1/sessions",
+      { ...(await sessionStart()), prompt: "review a pull request", tags: ["crew:review"], boxRetention: "Off" },
+      bearer,
+    );
+    assert.equal(crewStart.status, 200, await crewStart.clone().text());
+    const crew = StartedSessionSchema.parse(await crewStart.json());
+    const crewOffer = await side.next("TurnOffer");
+    assert.equal(crewOffer.turnId, crew.turn.turnId);
+    side.send({ type: "TurnClaim", turnId: crewOffer.turnId, boxId: crewOffer.boxId });
+
+    const busyStart = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "keep running" }, bearer);
+    assert.equal(busyStart.status, 200, await busyStart.clone().text());
+    const busy = StartedSessionSchema.parse(await busyStart.json());
+    assert.deepEqual(await side.next("BoxTeardown"), {
+      type: "BoxTeardown",
+      sessionId: foremanId,
+      boxId: foreman.offer.boxId,
+    });
+    side.send({ type: "BoxGone", sessionId: foremanId, boxId: foreman.offer.boxId });
+    const busyOffer = await side.next("TurnOffer");
+    assert.equal(busyOffer.turnId, busy.turn.turnId);
+    side.send({ type: "TurnClaim", turnId: busyOffer.turnId, boxId: busyOffer.boxId });
+
+    side.send({
+      type: "TurnLine",
+      turnId: crewOffer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    side.send({
+      type: "TurnComplete",
+      turnId: crewOffer.turnId,
+      lastLineSeq: 1,
+      completedAt: new Date().toISOString(),
+    });
+    const crewSnapshot = await side.next("SnapshotRequest");
+    await storeRoot(crewSnapshot.storageKey);
+    side.send({ type: "SnapshotDone", snapshotId: crewSnapshot.snapshotId, uploadedBytes: 14 });
+    assert.deepEqual(await side.next("BoxTeardown"), {
+      type: "BoxTeardown",
+      sessionId: crew.session.sessionId,
+      boxId: crewOffer.boxId,
+    });
+    const [, delivery] = await until(
+      "the foreman's delivery turn",
+      () => getJson(`/v1/sessions/${foremanId}/turns`, TurnSchema.array()),
+      (turns) => turns.length === 2,
+    );
+    assert.equal(delivery?.state, "Offered");
+    const waiting = await tool(
+      "tumpel_subscription_get",
+      { subscriptionId: subscription.subscriptionId },
+      SubscriptionSchema,
+    );
+    assert.deepEqual([waiting.state, waiting.deliveryFailuresInARow], ["Active", 0]);
+    assert.equal(side.holds("TurnOffer"), false, "the delivery waits while both boxes are taken");
+
+    const roomy = await enrol("roomy");
+    const other = await connect(roomy.id, roomy.key, 1);
+    await hostState(roomy.id, "Online");
+    other.quiet();
+    other.report(USAGE);
+    const offer = await other.next("TurnOffer");
+    assert.equal(offer.turnId, delivery?.turnId);
+    assert.notEqual(offer.boxId, foreman.offer.boxId);
+    assert.deepEqual(
+      offer.snapshots.map((each) => each.snapshotId),
+      [snapshot.snapshotId],
+    );
+    assert.equal(side.holds("TurnOffer"), false, "the full host never gets the delivery");
+    other.close();
+    side.close();
+  });
+
   test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
