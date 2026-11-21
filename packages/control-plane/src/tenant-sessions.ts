@@ -3455,7 +3455,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
-    if (turn.state !== "Offered") return { type: "TurnWithdrawn", turnId: turn.turn_id };
+    if (turn.state !== "Offered") {
+      if (session.state === "Stopped" && session.box_id === turn.box_id) {
+        await this.host(hostId).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: turn.box_id });
+      }
+      return { type: "TurnWithdrawn", turnId: turn.turn_id };
+    }
     const now = Date.now();
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {

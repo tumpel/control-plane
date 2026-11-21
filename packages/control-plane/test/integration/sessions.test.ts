@@ -2821,13 +2821,15 @@ suite("sessions", { concurrency: 8 }, () => {
       (turn) => turn.state === "Failed",
     );
     assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Stopped");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnWithdrawn")).turnId, offer.turnId);
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
 
     const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
     assert.equal(sent.status, 200, await sent.clone().text());
     const again = await host.next("TurnOffer");
     assert.equal(again.sessionId, sessionId);
     assert.notEqual(again.boxId, offer.boxId);
-    assert.equal(host.holds("BoxDiscard"), false);
   });
 
   test("a turn whose harness exits without a successful result fails HarnessExitedWithoutResult on every read, and a snapshot of its box follows", async () => {
