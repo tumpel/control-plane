@@ -139,9 +139,9 @@ test("a prebuild whose only deadline keeps failing ends Failed", async (t) => {
 
   assert.equal(failing.mock.callCount(), 11, "the first try and 10 retries");
   const { prebuild } = z
-    .object({ prebuild: z.object({ state: z.string() }) })
+    .object({ prebuild: z.object({ status: z.object({ state: z.string() }) }) })
     .parse(await world.call("getPrebuild", { tenantId: TENANT_ID, prebuildId }));
-  assert.equal(prebuild.state, "Failed");
+  assert.equal(prebuild.status.state, "Failed");
   assert.equal(await world.sessionTimer(prebuildId).alarm(), null);
 });
 
