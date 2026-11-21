@@ -6,6 +6,32 @@ import { webhookSenderName } from "../../src/webhook-sender.ts";
 export { EventChannel, HostChannel, SessionTimer, TenantMetrics } from "../../src/index.ts";
 
 export class Tenant extends BaseTenant {
+  createFixtureSubscription(sessionId: string, now: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO sessions
+        (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version,
+          model, state, last_line_seq, endpoint, created_at, updated_at)
+      VALUES (?, 'principal', 'host', 'box', 'persona', 'https://github.com/tumpel/control-plane.git',
+        'codex', '1', 'model', 'Idle', 0, '', ?, ?)`,
+      sessionId,
+      now,
+      now,
+    );
+    const created = this.createSubscription(
+      this.ctx.id.name ?? "",
+      {
+        sessionId,
+        prompt: "Handle matching events.",
+        goal: "Finish handling the events.",
+        expiresAt: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+        events: ["SessionIdle"],
+        crewTags: [],
+      },
+      now,
+    );
+    if (created.kind !== "Created") throw new Error(`fixture subscription was ${created.kind}`);
+  }
+
   async emit(event: NewTenantEvent, now: number): Promise<void> {
     if ("sessionId" in event) {
       this.ctx.storage.sql.exec(
@@ -146,6 +172,13 @@ export default {
     if (url.pathname === "/__fixture/push/alarm-at") {
       const { tenantId } = await requestBody<{ tenantId: string }>(request);
       return Response.json({ alarmAt: await tenant(env, tenantId).alarmAt() });
+    }
+    if (url.pathname === "/__fixture/subscription/create") {
+      const { tenantId, sessionId, now } = await requestBody<{ tenantId: string; sessionId: string; now: number }>(
+        request,
+      );
+      await tenant(env, tenantId).createFixtureSubscription(sessionId, now);
+      return new Response(null, { status: 204 });
     }
     const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/fail-since|\/alarm)?$/.exec(url.pathname);
     if (senderMatch !== null) {

@@ -446,12 +446,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
       reason,
       iso(now),
     );
-    if (reason === "Expired" || reason === "GoalMet") {
-      this.appendEvent(
-        { event: "SubscriptionEnded", subscriptionId: row.subscription_id, sessionId: row.session_id, reason },
-        now,
-      );
-    }
+    this.appendEvent(
+      { event: "SubscriptionEnded", subscriptionId: row.subscription_id, sessionId: row.session_id, reason },
+      now,
+    );
   }
 
   private deliveryEnded(event: { event: "TurnCompleted" | "TurnFailed"; turnId: string }, now: number): void {

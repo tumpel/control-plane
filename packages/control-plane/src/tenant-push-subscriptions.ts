@@ -1,10 +1,14 @@
 import { buildPushPayload } from "@block65/webcrypto-web-push";
-import { type CreatePushSubscriptionInputSchema, PushSubscriptionSchema, TenantEventSchema } from "@tumpel/schemas";
+import {
+  type CreatePushSubscriptionInputSchema,
+  PushNotificationSchema,
+  PushSubscriptionSchema,
+  TenantEventSchema,
+} from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
 import { fromBase64, seal, unseal } from "./envelope.ts";
 import { githubRepository } from "./github.ts";
-import { pushNotification } from "./push-notification.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
 import { TenantTriggers } from "./tenant-triggers.ts";
 
@@ -37,8 +41,19 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
     WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events
   FROM push_subscriptions AS p`;
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
+const PUSH_TTL_SECONDS = 86_400;
+const PUSH_TTL_MS = PUSH_TTL_SECONDS * 1000;
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
+
+export const importP256dh = (p256dh: string): Promise<CryptoKey> =>
+  crypto.subtle.importKey(
+    "raw",
+    fromBase64(`${p256dh.replaceAll("-", "+").replaceAll("_", "/")}=`),
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    [],
+  );
 
 let loadedVapidPrivateKey: { pem: string; key: string } | undefined;
 
@@ -91,13 +106,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     create: PushSubscriptionCreate,
     now: number,
   ): Promise<PushSubscription> {
-    await crypto.subtle.importKey(
-      "raw",
-      fromBase64(`${create.keys.p256dh.replaceAll("-", "+").replaceAll("_", "/")}=`),
-      { name: "ECDH", namedCurve: "P-256" },
-      false,
-      [],
-    );
+    await importP256dh(create.keys.p256dh);
     const sql = this.ctx.storage.sql;
     const pushSubscriptionId = uuidV5(create.endpoint, PUSH_SUBSCRIPTION_NAMESPACE);
     const authSealed = await seal(await this.dataKey(), create.keys.auth, authContext(pushSubscriptionId));
@@ -157,6 +166,15 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     const dataKey = await this.dataKey();
     const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
     for (const row of rows) {
+      const expiresAt = row.event_created_at + PUSH_TTL_MS;
+      if (now >= expiresAt) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
+          row.event_id,
+          row.push_subscription_id,
+        );
+        continue;
+      }
       const event = TenantEventSchema.parse({
         ...JSON.parse(row.payload),
         eventId: row.event_id,
@@ -168,8 +186,31 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
       }
       const repository = githubRepository(row.repository);
       if (repository === null) throw new Error(`session repository ${row.repository} is not a GitHub repository`);
+      const path = `/t/${encodeURIComponent(event.tenantId)}/sessions/${encodeURIComponent(event.sessionId)}`;
+      const data =
+        event.event === "SubscriptionPaused"
+          ? {
+              title: `Subscription paused in ${repository.name}`,
+              body:
+                event.reason.kind === "ByRequest"
+                  ? event.reason.message
+                  : event.reason.kind === "DeliveryFailed"
+                    ? "A delivery turn failed. Open the session to decide what to do next."
+                    : "Several crew turns failed. Open the session to decide what to do next.",
+              path,
+            }
+          : {
+              title: `Subscription ended in ${repository.name}`,
+              body: {
+                SessionArchived: "The session was archived.",
+                SessionFailed: "The session failed.",
+                Expired: "The subscription expired.",
+                GoalMet: "The subscription reached its goal.",
+              }[event.reason],
+              path,
+            };
       const payload = await buildPushPayload(
-        { data: pushNotification(event, repository.name), options: { ttl: 86_400 } },
+        { data: PushNotificationSchema.parse(data), options: { ttl: PUSH_TTL_SECONDS } },
         {
           endpoint: row.endpoint,
           expirationTime: null,
@@ -214,7 +255,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         const delay = Math.min(60_000 * 2 ** Math.min(row.failures, 6), 60 * 60 * 1000);
         this.ctx.storage.sql.exec(
           "UPDATE push_wakes SET failures = failures + 1, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-          now + delay,
+          Math.min(now + delay, expiresAt),
           row.event_id,
           row.push_subscription_id,
         );
