@@ -120,9 +120,11 @@ test("a prebuild whose only deadline keeps failing ends Failed", async (t) => {
   world.tenantSql().exec(
     `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
       provider, config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
-      VALUES (?, 'persona-scenario', 'https://github.com/acme/app.git', 'main', 'inputs', 'guest', 'CircleCI',
+      VALUES (?, 'persona-scenario', 'https://github.com/acme/app.git', 'main', ?, ?, 'CircleCI',
       'Default', 'abc123', 'rootfs', 'Building', ?, 'https://ci.scenario.test/run', ?, ?)`,
     prebuildId,
+    "a".repeat(64),
+    "b".repeat(64),
     new Date(now).toISOString(),
     now,
     now,
