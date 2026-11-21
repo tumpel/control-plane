@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { register } from "node:module";
 import { ChannelProtocol, SessionSchema, StartedSessionSchema, SubscriptionSchema, TurnSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
-import { D1Database, migratedDatabase, R2Bucket, Runtime } from "./runtime.ts";
+import { D1Database, migratedDatabase, type Namespace, R2Bucket, Runtime, type SqlStorage } from "./runtime.ts";
 
 register("./hooks.mjs", import.meta.url);
 
@@ -37,8 +37,21 @@ const ControlMessageSchema = z.looseObject({ type: z.string() });
 type ControlMessage = z.infer<typeof ControlMessageSchema>;
 
 const START = Date.parse("2026-11-21T11:00:00Z");
-const TENANT_ID = "tenant-scenario";
-const PRINCIPAL_ID = "principal-scenario";
+export const TENANT_ID = "tenant-scenario";
+export const PRINCIPAL_ID = "principal-scenario";
+
+export type WorldOptions = { webhookSenders: "Running" | "Unreachable"; vapidKey: "Valid" | "Unreadable" };
+
+const VAPID = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const VAPID_JWK = VAPID.privateKey.export({ format: "jwk" });
+const VAPID_PUBLIC_KEY = Buffer.concat([
+  Buffer.from([4]),
+  Buffer.from(VAPID_JWK.x ?? "", "base64url"),
+  Buffer.from(VAPID_JWK.y ?? "", "base64url"),
+]).toString("base64url");
+
+type SessionTimer = { set(tenantId: string, changes: Record<string, unknown>): Promise<void> };
+type TenantOperations = Record<string, (input: never) => unknown>;
 
 export const SETTINGS = TEST_SETTINGS;
 
@@ -122,27 +135,42 @@ export class Host {
   }
 }
 
+type TenantSteps = {
+  expireSubscriptions(now: number): void;
+  prebuildDeadlineReached(tenantId: string, due: unknown): Promise<void>;
+};
+
 export class World {
   readonly store = new R2Bucket();
   readonly releases = new R2Bucket();
   readonly db = new D1Database(migratedDatabase(MIGRATIONS));
   private readonly hosts = new Map<string, Host>();
   private api!: TenantApi;
+  private tenants!: Namespace<object>;
+  private timers!: Namespace<SessionTimer>;
   readonly runtime: Runtime;
 
   private constructor(runtime: Runtime) {
     this.runtime = runtime;
   }
 
-  static async open(): Promise<World> {
+  static async open(options: Partial<WorldOptions> = {}): Promise<World> {
     const world = new World(new Runtime(START));
-    await world.boot();
+    await world.boot({ webhookSenders: "Running", vapidKey: "Valid", ...options });
     return world;
   }
 
-  private async boot(): Promise<void> {
+  private async boot(options: WorldOptions): Promise<void> {
     const Tenant = await imported<DurableObjectClass>("tenant.ts", "Tenant");
-    const SessionTimer = await imported<DurableObjectClass>("session-timer.ts", "SessionTimer");
+    const SessionTimer = await imported<new (ctx: never, env: never) => SessionTimer>(
+      "session-timer.ts",
+      "SessionTimer",
+    );
+    const WebhookSender = await imported<DurableObjectClass>("webhook-sender.ts", "WebhookSender");
+    const unreachable = () =>
+      this.runtime.stubs(() => ({
+        wake: () => Promise.reject(new Error("the webhook sender Durable Object is unreachable")),
+      }));
     const tenantApi = await imported<(namespace: unknown, tenantId: string) => TenantApi>("tenant-api.ts", "tenantApi");
     const ignored = () =>
       this.runtime.stubs(() => new Proxy({}, { get: () => () => Promise.resolve(undefined) }) as object);
@@ -150,10 +178,10 @@ export class World {
       DB: this.db,
       STORE: this.store,
       RELEASES: this.releases,
-      SESSION_TIMER: this.runtime.namespace(SessionTimer, () => env),
+      SESSION_TIMER: null,
       HOST: this.runtime.stubs((hostId) => this.host(hostId)),
       EVENTS: ignored(),
-      WEBHOOKS: ignored(),
+      WEBHOOKS: options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env) : unreachable(),
       TENANT_METRICS: ignored(),
       TUMPEL_SETTINGS: SETTINGS,
       SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
@@ -164,8 +192,17 @@ export class World {
       RELEASES_BUCKET_NAME: "releases",
       API_ORIGIN: "https://api.scenario.test",
       GITHUB_API_ORIGIN: "https://github.scenario.test",
+      VAPID_PRIVATE_KEY:
+        options.vapidKey === "Valid"
+          ? VAPID.privateKey.export({ format: "pem", type: "pkcs8" }).toString()
+          : "unreadable",
+      VAPID_PUBLIC_KEY,
+      VAPID_SUBJECT: "mailto:notifications@scenario.test",
     };
-    env.TENANT = this.runtime.namespace(Tenant, () => env);
+    this.timers = this.runtime.namespace(SessionTimer, () => env);
+    env.SESSION_TIMER = this.timers;
+    this.tenants = this.runtime.namespace(Tenant, () => env);
+    env.TENANT = this.tenants;
     this.api = tenantApi(env.TENANT, TENANT_ID);
     await this.releases.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
     await this.call("open", { tenantId: TENANT_ID, now: Date.now() });
@@ -273,6 +310,27 @@ export class World {
     return z
       .object({ subscription: SubscriptionSchema })
       .parse(await this.call("getSubscription", { tenantId: TENANT_ID, subscriptionId })).subscription;
+  }
+
+  sessionTimer(name: string): { timer: SessionTimer; alarm(): Promise<number | null> } {
+    const { object, ctx } = this.timers.instance(name);
+    return { timer: object, alarm: () => ctx.storage.getAlarm() };
+  }
+
+  tenantOperations(): TenantOperations {
+    return (this.tenants.instance(TENANT_ID).object as { operations: TenantOperations }).operations;
+  }
+
+  tenantSteps(): TenantSteps {
+    return this.tenants.instance(TENANT_ID).object as TenantSteps;
+  }
+
+  tenantSql(): SqlStorage {
+    return this.tenants.instance(TENANT_ID).ctx.storage.sql;
+  }
+
+  tenantAlarm(): Promise<number | null> {
+    return this.tenants.instance(TENANT_ID).ctx.storage.getAlarm();
   }
 
   async passes(ms: number): Promise<void> {

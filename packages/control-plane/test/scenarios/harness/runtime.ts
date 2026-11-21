@@ -93,12 +93,14 @@ class Storage {
     return value === undefined ? undefined : (structuredClone(value) as T);
   }
 
-  async put(key: string, value: unknown): Promise<void> {
-    this.values.set(key, structuredClone(value));
+  async put(key: string | Record<string, unknown>, value?: unknown): Promise<void> {
+    const entries = typeof key === "string" ? [[key, value] as const] : Object.entries(key);
+    for (const [name, held] of entries) this.values.set(name, structuredClone(held));
   }
 
-  async delete(key: string): Promise<boolean> {
-    return this.values.delete(key);
+  async delete(keys: string | string[]): Promise<boolean | number> {
+    if (typeof keys === "string") return this.values.delete(keys);
+    return keys.filter((key) => this.values.delete(key)).length;
   }
 
   async deleteAll(): Promise<void> {
