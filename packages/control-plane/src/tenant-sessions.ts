@@ -93,6 +93,7 @@ import {
   placeSession,
   type ReportedHostUsage,
   type Unplaceable,
+  waitForCapacity,
 } from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
@@ -155,6 +156,7 @@ type SetTags = z.infer<typeof SetSessionTagsResultSchema>["tagged"];
 type PatchTags = z.infer<typeof PatchSessionTagsResultSchema>["tagged"];
 
 export const SESSION_TAG_LIMIT = 16;
+export const CAPACITY_WAIT_LIMIT = 32;
 
 export type ReleaseUnreadable = { kind: "ReleaseUnreadable"; detail: string };
 
@@ -1446,9 +1448,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected offerSent(turnId: string): void {
     this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
+    this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turnId);
   }
 
   private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
+    if (this.waitsForCapacity(turn.turn_id)) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
+        this.deferOffer(session, turn, Date.now());
+      });
+    }
     await this.timers(tenantId, session.session_id, {
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
@@ -1717,7 +1726,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec<{ host_id: string; running: number }>(
         `SELECT t.host_id, COUNT(DISTINCT t.session_id) AS running FROM turns t JOIN sessions s ON s.session_id = t.session_id
-        WHERE t.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND s.state != 'Stopped' GROUP BY t.host_id`,
+        WHERE t.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND s.state != 'Stopped'
+        AND t.turn_id NOT IN (SELECT turn_id FROM turn_capacity_waits) GROUP BY t.host_id`,
         ...IN_FLIGHT,
       )
       .toArray()
@@ -1927,7 +1937,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     const persona = this.boxSize(start.personaId);
     const { boxMemoryMib, boxDiskMib } = persona;
-    const placement = placeSession(
+    const placed = placeSession(
       input.hosts,
       this.listHostUsage(tenantId),
       image.image,
@@ -1935,7 +1945,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       uses.length > 0 || persona.tumpelMcp,
       this.heldBoxes(),
     );
+    const placement = input.startedBy.kind === "Trigger" ? waitForCapacity(placed) : placed;
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    if (placement.kind === "Waiting" && placed.kind === "Refused" && this.capacityWaitCount() >= CAPACITY_WAIT_LIMIT) {
+      return { kind: "Unplaced", hosts: placed.hosts };
+    }
     const tags = this.startTags(input.startedBy, start.tags ?? []);
     if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
     const session: SessionRow = {
@@ -1998,9 +2012,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
         );
       }
       record(session.session_id);
-      return this.insertTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
+      const first = this.insertTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
+      if (placement.kind === "Waiting") {
+        this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", first.turn_id);
+        this.ctx.storage.sql.exec(
+          "INSERT INTO turn_capacity_waits (turn_id, created_at) VALUES (?, ?)",
+          first.turn_id,
+          now,
+        );
+      }
+      return first;
     });
-    await this.offerAfter(tenantId, session, turn, placement.evict);
+    if (placement.kind === "Placed") await this.offerAfter(tenantId, session, turn, placement.evict);
+    if (placement.kind === "Waiting") {
+      await this.timers(tenantId, session.session_id, {
+        Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      });
+    }
     return {
       kind: "Started",
       started: { session: this.presentSession(tenantId, session.session_id), turn: toTurn(tenantId, turn) },
@@ -2069,8 +2097,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
 
-  private offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
-    return this.placeOffered(tenantId, session, turn, false);
+  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
+    return this.placeOffered(tenantId, session, turn, false, await listHosts(this.env.DB, tenantId));
   }
 
   private async placeOffered(
@@ -2078,12 +2106,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     session: SessionRow,
     turn: TurnRow,
     staying: boolean,
+    listed: readonly HostRecord[],
   ): Promise<TurnHandoff | null> {
     const now = Date.now();
-    const stay = (): null => this.deferOffer(session, turn, now);
+    const waiting = this.waitsForCapacity(turn.turn_id);
+    const stay = (): null => (waiting ? null : this.deferOffer(session, turn, now));
     const movable = this.unsnapshottedTurns(session.session_id).length === 0;
     const prebuild = this.hostPrebuild(session.session_id) !== null;
-    const hosts = (await listHosts(this.env.DB, tenantId)).filter(
+    const hosts = listed.filter(
       (host) =>
         (host.hostId === session.host_id ? staying : movable) &&
         (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
@@ -2091,7 +2121,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (image.kind === "ReleaseUnreadable") return stay();
     const usages = this.listHostUsage(tenantId).map((usage) =>
-      usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
+      !waiting && usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
     );
     const placement = placeSession(
       hosts,
@@ -2140,6 +2170,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return null;
   }
 
+  private waitsForCapacity(turnId: string): boolean {
+    return (
+      this.ctx.storage.sql.exec("SELECT 1 FROM turn_capacity_waits WHERE turn_id = ?", turnId).toArray().length > 0
+    );
+  }
+
+  private capacityWaitCount(): number {
+    return this.ctx.storage.sql.exec<{ waits: number }>("SELECT COUNT(*) AS waits FROM turn_capacity_waits").one()
+      .waits;
+  }
+
   private deferOffer(session: SessionRow, turn: TurnRow, now: number): null {
     this.ctx.storage.sql.exec(
       "INSERT INTO deferred_offers (turn_id, host_id, created_at) VALUES (?, ?, ?) ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id",
@@ -2152,23 +2193,46 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async deferredOffers(tenantId: string, hostId: string): Promise<TurnHandoff[]> {
     const sql = this.ctx.storage.sql;
-    const turnIds = sql
-      .exec<{ turn_id: string }>("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId)
-      .toArray()
-      .map((row) => row.turn_id)
-      .filter((turnId) => !this.offering.has(turnId));
+    const pending = (query: string, ...bindings: string[]): string[] =>
+      sql
+        .exec<{ turn_id: string }>(query, ...bindings)
+        .toArray()
+        .map((row) => row.turn_id);
+    const deferred = pending("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId);
+    const waits = pending("SELECT turn_id FROM turn_capacity_waits ORDER BY created_at");
+    if (deferred.length === 0 && waits.length === 0) return [];
+    const hosts = await listHosts(this.env.DB, tenantId);
     const handoffs: TurnHandoff[] = [];
-    for (const turnId of turnIds) {
-      const turn = this.turnRow(turnId);
-      const session = turn === null ? null : this.sessionRow(turn.session_id);
-      if (turn === null || session === null || turn.state !== "Offered") {
-        this.offerSent(turnId);
-        continue;
-      }
-      const handoff = await this.placeOffered(tenantId, session, turn, true);
+    for (const turnId of deferred) {
+      const handoff = await this.offerDeferred(tenantId, turnId, hosts);
       if (handoff !== null) handoffs.push(handoff);
     }
+    for (const turnId of waits) {
+      const handoff = await this.offerDeferred(tenantId, turnId, hosts);
+      if (handoff !== null) handoffs.push(handoff);
+      if (handoff === null && this.waitsForCapacity(turnId)) break;
+    }
     return handoffs;
+  }
+
+  private async offerDeferred(
+    tenantId: string,
+    turnId: string,
+    hosts: readonly HostRecord[],
+  ): Promise<TurnHandoff | null> {
+    if (this.offering.has(turnId)) return null;
+    const turn = this.turnRow(turnId);
+    const session = turn === null ? null : this.sessionRow(turn.session_id);
+    if (turn === null || session === null || turn.state !== "Offered") {
+      this.offerSent(turnId);
+      return null;
+    }
+    this.offering.add(turnId);
+    try {
+      return await this.placeOffered(tenantId, session, turn, true, hosts);
+    } finally {
+      this.offering.delete(turnId);
+    }
   }
 
   private runTurn(session: SessionRow, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
@@ -3672,6 +3736,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       record();
       this.ctx.storage.sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", turn.turn_id);
       this.ctx.storage.sql.exec("DELETE FROM turn_claims WHERE turn_id = ?", turn.turn_id);
+      this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
       releaseConnectorCredentials(this.ctx.storage.sql);
       return this.takeNextWaiting(turn.session_id, now);
     });
@@ -3739,6 +3804,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
         turnId,
         "NoFirstOutput",
         `the harness wrote no line for the turn within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready; check the box on host ${host}, then send the turn again`,
+        failedAt,
+      );
+    }
+    if (name === "Total" && turn.state === "Offered" && this.waitsForCapacity(turnId)) {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "Undelivered",
+        `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
         failedAt,
       );
     }
