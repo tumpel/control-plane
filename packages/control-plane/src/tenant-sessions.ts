@@ -122,7 +122,16 @@ import {
   type SupervisorUpdateMessage,
 } from "./supervisor-updates";
 import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
-import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
+import {
+  ChunkWriter,
+  chunksAfter,
+  deleteTranscript,
+  firstChunkAfter,
+  linesWithin,
+  type Range,
+  type TranscriptLine,
+  transcriptPrefix,
+} from "./transcript";
 import { type Dimensions, offeredDimensions, type TimingMetric, timingBatch } from "./turn-metrics.ts";
 import { mintTurnToken, TUMPEL_CONNECTOR_ID, TURN_TOKEN_SIGNING_PURPOSE } from "./turn-token.ts";
 
@@ -354,11 +363,21 @@ type LiveHost = {
   updatedAt: number;
 };
 
-type ChunkRow = {
-  storage_key: string;
-  line_seqs: string;
-  offsets: string;
-};
+type TurnSpan = { first: number; last: number };
+
+type RunningTail = { span: TurnSpan | null; last: number };
+
+type EndedTranscript = { lineCount: number; lastLineSeq: number };
+
+const withChunk = (tail: RunningTail, first: number, last: number): RunningTail => ({
+  span:
+    tail.span === null
+      ? { first, last }
+      : { first: Math.min(tail.span.first, first), last: Math.max(tail.span.last, last) },
+  last: Math.max(tail.last, last),
+});
+
+const linesIn = (tail: RunningTail): number => (tail.span === null ? 0 : tail.span.last - tail.span.first + 1);
 
 type SnapshotRow = {
   snapshot_id: string;
@@ -632,6 +651,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   protected eventsAppended = false;
   private readonly offering = new Set<string>();
   private readonly heldLines = new Map<string, HeldLines>();
+  private readonly runningTails = new Map<string, Promise<RunningTail>>();
   private readonly resentTurns = new Set<string>();
   private readonly heardHosts = new Set<string>();
   private readonly liveHosts = new Map<string, LiveHost>();
@@ -795,56 +815,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private readonly chunks = new ChunkWriter(
     {
-      pending: (tenantId, sessionId, turnId) => [
-        ...this.ctx.storage.sql
-          .exec<PendingRow>(
-            "SELECT session_id, line_seq, turn_id, text, created_at FROM transcript_pending WHERE session_id = ? AND turn_id = ? ORDER BY line_seq",
-            sessionId,
-            turnId,
-          )
-          .toArray()
-          .map((row) => toLine(tenantId, row)),
-        ...(this.heldLines.get(turnId)?.lines ?? []),
-      ],
-      record: (sessionId, turnId, storageKey, chunk) => {
+      pending: (_tenantId, _sessionId, turnId) => this.heldLines.get(turnId)?.lines ?? [],
+      record: (_sessionId, turnId, storageKey, chunk) => {
         const first = chunk.lineSeqs[0];
         const last = chunk.lineSeqs.at(-1);
         if (first === undefined || last === undefined) throw new Error(`transcript chunk ${storageKey} holds no lines`);
-        const sql = this.ctx.storage.sql;
+        const known = this.runningTails.get(turnId);
+        if (known !== undefined)
+          this.rememberTail(
+            turnId,
+            known.then((tail) => withChunk(tail, first, last)),
+          );
         const held = this.heldLines.get(turnId);
-        const written = held?.lines.filter((line) => line.lineSeq <= last).length ?? 0;
-        const now = Date.now();
-        this.ctx.storage.transactionSync(() => {
-          sql.exec(
-            "INSERT INTO transcript_chunks (session_id, first_line_seq, last_line_seq, turn_id, storage_key, line_seqs, offsets) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            sessionId,
-            first,
-            last,
-            turnId,
-            storageKey,
-            JSON.stringify(chunk.lineSeqs),
-            JSON.stringify(chunk.offsets),
-          );
-          sql.exec(
-            "DELETE FROM transcript_pending WHERE session_id = ? AND turn_id = ? AND line_seq <= ?",
-            sessionId,
-            turnId,
-            last,
-          );
-          if (written === 0) return;
-          sql.exec(
-            "UPDATE turns SET line_count = line_count + ?, updated_at = ? WHERE turn_id = ?",
-            written,
-            now,
-            turnId,
-          );
-          sql.exec(
-            "UPDATE sessions SET last_line_seq = MAX(last_line_seq, ?), updated_at = ? WHERE session_id = ?",
-            last,
-            now,
-            sessionId,
-          );
-        });
         if (held === undefined) return;
         held.lines = held.lines.filter((line) => line.lineSeq > last);
         if (held.lines.length === 0) this.heldLines.delete(turnId);
@@ -856,6 +838,57 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
     return row ?? null;
+  }
+
+  private rememberTail(turnId: string, tail: Promise<RunningTail>): Promise<RunningTail> {
+    this.runningTails.set(turnId, tail);
+    const forget = (): void => {
+      if (this.runningTails.get(turnId) === tail) this.runningTails.delete(turnId);
+    };
+    tail.then(undefined, forget);
+    return tail;
+  }
+
+  private runningTail(tenantId: string, turn: TurnRow): Promise<RunningTail> {
+    return this.runningTails.get(turn.turn_id) ?? this.rememberTail(turn.turn_id, this.listRunningTail(tenantId, turn));
+  }
+
+  private async listRunningTail(tenantId: string, turn: TurnRow): Promise<RunningTail> {
+    const session = this.sessionRow(turn.session_id);
+    if (session === null) throw new Error(`turn ${turn.turn_id} runs in session ${turn.session_id}, which is gone`);
+    const chunks = await chunksAfter(
+      this.env.STORE,
+      transcriptPrefix(tenantId, turn.session_id),
+      session.last_line_seq,
+    );
+    let tail: RunningTail = { span: null, last: session.last_line_seq };
+    for (const chunk of chunks) {
+      tail =
+        chunk.turnId === turn.turn_id
+          ? withChunk(tail, chunk.firstLineSeq, chunk.lastLineSeq)
+          : { span: tail.span, last: Math.max(tail.last, chunk.lastLineSeq) };
+    }
+    return tail;
+  }
+
+  private async lineCount(tenantId: string, turn: TurnRow): Promise<number> {
+    if (turn.state !== "Running") return turn.line_count;
+    return linesIn(await this.runningTail(tenantId, turn));
+  }
+
+  private async lastLineSeq(tenantId: string, session: SessionRow, turn: TurnRow): Promise<number> {
+    if (turn.state !== "Running") return session.last_line_seq;
+    return (await this.runningTail(tenantId, turn)).last;
+  }
+
+  private async endedTranscript(tenantId: string, turn: TurnRow): Promise<EndedTranscript> {
+    if (turn.state !== "Running") {
+      const session = this.sessionRow(turn.session_id);
+      if (session === null) throw new Error(`turn ${turn.turn_id} ends in session ${turn.session_id}, which is gone`);
+      return { lineCount: turn.line_count, lastLineSeq: session.last_line_seq };
+    }
+    const tail = await this.runningTail(tenantId, turn);
+    return { lineCount: linesIn(tail), lastLineSeq: tail.last };
   }
 
   private presentSession(tenantId: string, sessionId: string): Session {
@@ -1302,7 +1335,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     detail: string,
     now: number,
   ): void {
-    this.recordTurnFailure(sessionId, turnId, reason, detail, iso(now), now);
+    this.recordTurnFailure(sessionId, turnId, reason, detail, iso(now), 0, now);
   }
 
   private recordTurnFailure(
@@ -1311,11 +1344,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     reason: TurnFailureReason,
     fullDetail: string,
     failedAt: string,
+    lineCount: number,
     now: number,
   ): void {
     const sql = this.ctx.storage.sql;
     const detail = turnFailureDetail(fullDetail);
-    sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
+    sql.exec(
+      "UPDATE turns SET state = 'Failed', line_count = ?, updated_at = ? WHERE turn_id = ?",
+      lineCount,
+      now,
+      turnId,
+    );
     this.appendEvent({ event: "TurnFailed", turnId, sessionId, reason, detail }, now);
     sql.exec(
       "INSERT INTO turn_failures (turn_id, session_id, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2414,11 +2453,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
-    const transcriptKeys = sql
-      .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
-      .toArray()
-      .map((row) => row.storage_key);
-    await this.deleteObjects(transcriptKeys);
+    await deleteTranscript(this.env.STORE, transcriptPrefix(tenantId, sessionId));
     sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     return { kind: "Deleted" };
   }
@@ -2701,10 +2736,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected listTurns(tenantId: string, sessionId: string): Turn[] | null {
     if (this.sessionRow(sessionId) === null) return null;
+    return this.turnRows(sessionId).map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id)));
+  }
+
+  private turnRows(sessionId: string): TurnRow[] {
     return this.ctx.storage.sql
       .exec<TurnRow>(`${TURN_SELECT} WHERE session_id = ? ORDER BY created_at, turn_id`, sessionId)
-      .toArray()
-      .map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id)));
+      .toArray();
   }
 
   protected getTurn(tenantId: string, turnId: string): Turn | null {
@@ -2874,66 +2912,40 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row === undefined ? null : toSnapshot(tenantId, row);
   }
 
-  protected transcriptCursor(
+  protected async transcriptCursor(
     tenantId: string,
     sessionId: string,
     after: number,
     turnId: string | null,
     limit: number,
     maxBytes: number | null,
-  ): TranscriptCursor | null {
+  ): Promise<TranscriptCursor | null> {
     const session = this.sessionRow(sessionId);
     if (session === null) return null;
-    const sql = this.ctx.storage.sql;
-    const [tail] = sql
-      .exec<{ last_line_seq: number; in_flight: number }>(
-        `SELECT MAX(
-          COALESCE((SELECT MAX(last_line_seq) FROM transcript_chunks WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2)), 0),
-          COALESCE((SELECT MAX(line_seq) FROM transcript_pending WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2)), 0)
-        ) AS last_line_seq,
-        EXISTS (SELECT 1 FROM turns WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2) AND state IN (${IN_FLIGHT.map((_, index) => `?${index + 3}`).join(", ")})) AS in_flight`,
-        sessionId,
-        turnId,
-        ...IN_FLIGHT,
-      )
-      .toArray();
+    const turns = this.turnRows(sessionId);
+    const index = turnId === null ? -1 : turns.findIndex((turn) => turn.turn_id === turnId);
+    const read = turnId === null ? turns : turns.slice(index, index + 1);
+    const running = read.find((turn) => turn.state === "Running");
+    const tail = running === undefined ? null : await this.runningTail(tenantId, running);
+    const before = turns.slice(0, Math.max(index, 0)).reduce((lines, turn) => lines + turn.line_count, 0);
+    const ended = turnId === null ? session.last_line_seq : before + (read[0]?.line_count ?? 0);
     const held = [...this.heldLines]
       .filter(([heldTurnId, lines]) => lines.sessionId === sessionId && (turnId === null || heldTurnId === turnId))
       .flatMap(([, lines]) => lines.lines);
     const known = {
       sessionState: SessionSchema.shape.state.parse(session.state),
       harness: SessionSchema.shape.harness.parse(session.harness),
-      lastLineSeq: Math.max(tail?.last_line_seq ?? 0, held.at(-1)?.lineSeq ?? 0),
-      inFlight: tail?.in_flight === 1,
+      lastLineSeq: Math.max(held.at(-1)?.lineSeq ?? 0, tail?.last ?? ended),
+      inFlight: read.some((turn) => IN_FLIGHT.includes(turn.state)),
     };
-    const [chunk] = sql
-      .exec<ChunkRow>(
-        `SELECT storage_key, line_seqs, offsets FROM transcript_chunks
-        WHERE session_id = ?1 AND last_line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3)
-        ORDER BY last_line_seq LIMIT 1`,
-        sessionId,
-        after,
-        turnId,
-      )
-      .toArray();
-    if (chunk !== undefined) {
-      const range = rangeAfter(JSON.parse(chunk.line_seqs), JSON.parse(chunk.offsets), after, limit, maxBytes);
-      if (range === null) throw new Error(`transcript chunk ${chunk.storage_key} holds no line after ${after}`);
-      return { ...known, kind: "Chunk", storageKey: chunk.storage_key, range };
-    }
-    const lines = sql
-      .exec<PendingRow>(
-        `SELECT session_id, line_seq, turn_id, text, created_at FROM transcript_pending
-        WHERE session_id = ?1 AND line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3)
-        ORDER BY line_seq LIMIT ?4`,
-        sessionId,
-        after,
-        turnId,
-        limit,
-      )
-      .toArray()
-      .map((row) => toLine(tenantId, row));
-    const page = [...lines, ...held.filter((line) => line.lineSeq > after)].slice(0, limit);
+    const start = Math.max(after, before);
+    const chunk =
+      read.length === 0 || start >= known.lastLineSeq
+        ? null
+        : await firstChunkAfter(this.env.STORE, transcriptPrefix(tenantId, sessionId), start);
+    if (chunk !== null && (turnId === null || chunk.turnId === turnId))
+      return { ...known, kind: "Chunk", storageKey: chunk.storageKey, range: { offset: 0, length: chunk.size } };
+    const page = held.filter((line) => line.lineSeq > after).slice(0, limit);
     return { ...known, kind: "Lines", lines: linesWithin(page, maxBytes) };
   }
 
@@ -3494,7 +3506,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     if (message.reason === "HostUpdating" && turn.state === "Offered")
       return this.offerElsewhere(tenantId, session, turn);
-    const handedOver = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
+    const handedOver =
+      message.reason === "HostUpdating" && turn.state === "Running" && (await this.lineCount(tenantId, turn)) === 0;
     if (handedOver || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
       this.ctx.storage.sql.exec(
         "UPDATE turns SET state = 'Offered', offer_sent = 0, updated_at = ? WHERE turn_id = ?",
@@ -3601,7 +3614,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return;
     }
     if (message.type === "TurnRepositoryReady") {
-      if (turn.state !== "Running" || turn.line_count > 0) return;
+      if (turn.state !== "Running" || (await this.lineCount(tenantId, turn)) > 0) return;
       const settings = settingsOf(this.env);
       return this.timers(tenantId, session.session_id, {
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
@@ -3610,13 +3623,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (turn.state !== "Running") return;
     if (message.type === "TurnLine") {
       const claimedAt =
-        turn.line_count === 0 && !this.heldLines.has(turn.turn_id) ? this.claims.get(turn.turn_id) : undefined;
+        !this.heldLines.has(turn.turn_id) && (await this.lineCount(tenantId, turn)) === 0
+          ? this.claims.get(turn.turn_id)
+          : undefined;
       this.claims.delete(turn.turn_id);
       await this.appendLine(tenantId, session, turn, message.lineSeq, message.text, now);
       if (claimedAt === undefined) return;
       return this.recordTiming(tenantId, "turn.first_output.duration", turn, session, claimedAt, now);
     }
-    const held = this.sessionRow(session.session_id)?.last_line_seq ?? 0;
+    const held = await this.lastLineSeq(tenantId, session, turn);
     if (message.lastLineSeq !== held) {
       return this.failTurn(
         tenantId,
@@ -3677,15 +3692,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row?.result_printed === 1;
   }
 
-  private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
+  private async endTurn(
+    tenantId: string,
+    turn: TurnRow,
+    now: number,
+    record: (ended: EndedTranscript) => void,
+  ): Promise<void> {
     await this.writeLines(tenantId, turn.session_id, turn.turn_id, 1);
+    const ended = await this.endedTranscript(tenantId, turn);
     const next = this.ctx.storage.transactionSync(() => {
-      record();
+      record(ended);
       this.imageFetches.delete(turn.turn_id);
       this.claims.delete(turn.turn_id);
       releaseConnectorCredentials(this.ctx.storage.sql);
       return this.takeNextWaiting(turn.session_id, now);
     });
+    this.runningTails.delete(turn.turn_id);
     const session = this.sessionRow(turn.session_id);
     const release = session?.state === "Idle" && session.box_retention === "Off";
     if (release) this.setSessionState(session.session_id, "Stopping", now);
@@ -3744,7 +3766,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (name === "FirstLine" && turn.state === "Running" && turn.line_count === 0) {
+    if (name === "FirstLine" && turn.state === "Running" && (await this.lineCount(tenantId, turn)) === 0) {
       return this.failTurn(
         tenantId,
         turnId,
@@ -3808,7 +3830,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     now: number,
   ): Promise<void> {
     const held = this.heldLines.get(turn.turn_id);
-    const last = held?.lines.at(-1)?.lineSeq ?? this.sessionRow(session.session_id)?.last_line_seq ?? 0;
+    const last = held?.lines.at(-1)?.lineSeq ?? (await this.lastLineSeq(tenantId, session, turn));
     if (lineSeq <= last) return;
     if (lineSeq > last + 1 && held === undefined && !this.resentTurns.has(turn.turn_id)) {
       this.resentTurns.add(turn.turn_id);
@@ -3850,7 +3872,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         hostId: turn.host_id,
         lines: [line],
       });
-    if (holding === undefined && turn.line_count === 0)
+    if (holding === undefined && (await this.lineCount(tenantId, turn)) === 0)
       await this.timers(tenantId, session.session_id, { FirstLine: null });
     if ((this.heldLines.get(turn.turn_id)?.lines.length ?? 0) >= chunkLines)
       await this.storeLines(tenantId, session.session_id, turn.turn_id, chunkLines);
@@ -3875,12 +3897,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
       : { reason, detail };
     const now = Date.now();
     const sql = this.ctx.storage.sql;
-    await this.endTurn(tenantId, turn, now, () => {
-      this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, now);
+    await this.endTurn(tenantId, turn, now, (ended) => {
+      this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, ended.lineCount, now);
       const unborn = sessionState === "Idle" && turn.state === "Offered" && this.boxUnborn(turn);
       const entered = unborn ? "Stopped" : sessionState;
       if (unborn) this.unreportedBoxes.delete(turn.box_id);
-      sql.exec("UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?", entered, now, turn.session_id);
+      sql.exec(
+        "UPDATE sessions SET state = ?, last_line_seq = ?, updated_at = ? WHERE session_id = ?",
+        entered,
+        ended.lastLineSeq,
+        now,
+        turn.session_id,
+      );
       this.sessionEntered(turn.session_id, entered, now);
     });
     const prebuild = this.hostPrebuild(turn.session_id);
@@ -4042,6 +4070,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
       (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
     );
     if (checked.kind === "Rejected") return checked;
+    const turn = this.turnRow(request.turn_id);
+    const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
     const uploaded = this.uploadedPacks.get(request.snapshot_id) ?? new Set<string>();
     const reused = new Set(
       [...checked.packs].filter((packDigest) => !uploaded.has(packDigest) && !checked.rootPacks.has(packDigest)),
@@ -4064,7 +4094,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.live.release(this.env.STORE, tenantId, [request.storage_key]);
       return { kind: "Answered" };
     }
-    return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes) };
+    return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes, ended) };
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -4152,6 +4182,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private storeSnapshot(
     request: SnapshotRequestRow,
     uploadedBytes: number,
+    ended: EndedTranscript | null,
   ): { now: number; completes: boolean; next: string | null } {
     const sql = this.ctx.storage.sql;
     const now = Date.now();
@@ -4171,9 +4202,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         now,
       );
-      if (!completes) return null;
-      sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, request.turn_id);
-      sql.exec("UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?", state, now, request.session_id);
+      if (!completes || ended === null) return null;
+      sql.exec(
+        "UPDATE turns SET state = 'Completed', line_count = ?, updated_at = ? WHERE turn_id = ?",
+        ended.lineCount,
+        now,
+        request.turn_id,
+      );
+      sql.exec(
+        "UPDATE sessions SET state = ?, last_line_seq = ?, updated_at = ? WHERE session_id = ?",
+        state,
+        ended.lastLineSeq,
+        now,
+        request.session_id,
+      );
       this.appendEvent({ event: "TurnCompleted", turnId: request.turn_id, sessionId: request.session_id }, now);
       this.sessionEntered(request.session_id, state, now);
       this.imageFetches.delete(request.turn_id);
@@ -4181,6 +4223,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       releaseConnectorCredentials(sql);
       return this.takeNextWaiting(request.session_id, now);
     });
+    if (completes) this.runningTails.delete(request.turn_id);
     return { now, completes, next };
   }
 }

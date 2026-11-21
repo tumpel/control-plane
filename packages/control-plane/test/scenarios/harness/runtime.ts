@@ -488,6 +488,7 @@ export class R2Bucket {
   list(options?: {
     prefix?: string;
     cursor?: string;
+    startAfter?: string;
     limit?: number;
   }): Promise<{ objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false }> {
     return awaitingIo(async () => this.listed(options));
@@ -496,10 +497,11 @@ export class R2Bucket {
   private listed(options?: {
     prefix?: string;
     cursor?: string;
+    startAfter?: string;
     limit?: number;
   }): { objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false } {
     const prefix = options?.prefix ?? "";
-    const after = options?.cursor ?? "";
+    const after = options?.cursor ?? options?.startAfter ?? "";
     const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && key > after).sort();
     const page = keys.slice(0, options?.limit ?? 1000);
     const objects = page.flatMap((key) => this.read(key, undefined) ?? []);

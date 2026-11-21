@@ -609,6 +609,31 @@ export class World {
     return this.tenants.instance(TENANT_ID).ctx.storage.sql;
   }
 
+  async transcript(
+    sessionId: string,
+    query: { after?: number; turnId?: string; limit?: number },
+  ): Promise<{ lines: { lineSeq: number; turnId: string }[]; cursor: number; finished: boolean }> {
+    const readTranscript = await imported<
+      (env: unknown, caller: unknown, sessionId: string, query: unknown) => Promise<unknown>
+    >("sessions.ts", "readTranscript");
+    const outcome = await readTranscript(
+      this.env,
+      { tenantId: TENANT_ID, principalId: PRINCIPAL_ID },
+      sessionId,
+      query,
+    );
+    return z
+      .object({
+        ok: z.literal(true),
+        value: z.object({
+          lines: z.array(z.object({ lineSeq: z.number(), turnId: z.string() })),
+          cursor: z.number(),
+          finished: z.boolean(),
+        }),
+      })
+      .parse(outcome).value;
+  }
+
   async passes(ms: number): Promise<void> {
     await this.runtime.advance(ms);
   }
