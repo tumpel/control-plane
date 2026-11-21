@@ -4,7 +4,7 @@ Status: accepted
 
 These tenets bind every decision in `doc/adr`, `doc/RFC` and `doc/EDD`, next to the tenets of [RFC: Tumpel](../RFC/RFC-TUM-Tumpel.md#tenets).
 
-1. Fail fast. A failed operation fails once, loudly, with a reason that names what failed. The backend never retries, never catches and continues, and never falls back. It signals with an HTTP status code: 429 or 503 with `Retry-After` marks a retryable failure, and any other 4xx means never retry. Only clients retry, and a client decides from that status code alone. A client retry backs off exponentially and fails hard after 10 retries. Work that must survive a failure goes on a queue whose config retries it up to 3 times, then moves it to a dead-letter queue. Lint enforces this tenet.
+1. Fail fast. A failed operation fails once, loudly, with a reason that names what failed. Clients may retry a retryable status code (429, or 503 with `Retry-After`). The backend never retries a failing downstream resource unless a written plan says how that failure is handled, and such a plan is rare. Lint enforces this tenet.
 2. No logic in the supervisor. The supervisor and the guest pass input through, and the control plane owns harness-specific behaviour. They run on hosts Tumpel does not own and update on their own schedule, so a feature that appears to need a supervisor change looks for a control-plane design first.
 3. Tumpel relies on the harness's own features. It never reads or judges a harness transcript, for example to detect an early stop. The harness runs the agent loop, and Tumpel runs the harness.
 4. No automatic triggers and no auto-detection. A prebuild runs only when a person or an external trigger starts it, and the user picks its template. The user decides what runs and when.
