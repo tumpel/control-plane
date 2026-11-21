@@ -114,6 +114,15 @@ export default {
   ...worker,
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/__fixture/") && request.headers.get("content-type") === "application/json") {
+      const { tenantId } = await request.clone().json<{ tenantId?: string }>();
+      if (tenantId !== undefined)
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, 0, 0)",
+        )
+          .bind(tenantId, tenantId)
+          .run();
+    }
     if (url.pathname === "/__fixture/create") {
       const { tenantId, endpoint, now } = await requestBody<{
         tenantId: string;

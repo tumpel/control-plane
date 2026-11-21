@@ -1101,7 +1101,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/metrics",
     MetricWindowSchema,
-    "List every metric with series seen between from and to (ISO 8601 with an offset), each with its unit, kind and its dimensions with their values and series counts. filter takes dimension:value entries; one dimension repeated is OR, different dimensions AND. Returns {metrics: [{metric, unit, kind, description, facets}]}.",
+    "List every metric with series seen between from and to (ISO 8601 with an offset), each with its unit, kind and its dimensions with their values and series counts. filter takes dimension:value entries; one dimension repeated is OR, different dimensions AND. Returns {metrics: [{metric, unit, kind, description, facets}], usage: {tier, counters: [{measure, window, used, limit, resetsAt}]}}, where usage is the tenant's use of each of its limits in the current windows.",
   ),
   rest(
     "tumpel_metrics_query",

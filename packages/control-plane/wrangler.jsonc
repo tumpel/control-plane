@@ -29,6 +29,17 @@
     "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
     "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
     "OPENROUTER_ORIGIN": "https://openrouter.ai",
+    "TUMPEL_LIMITS": {
+      "defaultTier": "Configured",
+      "freeTenantsPerAccount": 1,
+      "configured": [
+        { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+        { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+      ],
+      "readsPerMinute": 600,
+      "writesPerMinute": 120,
+      "hostFramesPerMinute": 6000
+    },
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
       "snapshotDelaySeconds": 30,
@@ -52,6 +63,11 @@
       "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
     }
   },
+  "ratelimits": [
+    { "name": "TENANT_READ_RATE", "namespace_id": "1001", "simple": { "limit": 600, "period": 60 } },
+    { "name": "TENANT_WRITE_RATE", "namespace_id": "1002", "simple": { "limit": 120, "period": 60 } },
+    { "name": "HOST_FRAME_RATE", "namespace_id": "1003", "simple": { "limit": 6000, "period": 60 } }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "TENANT", "class_name": "Tenant" },
@@ -97,6 +113,17 @@
         "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
         "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
         "OPENROUTER_ORIGIN": "https://openrouter.ai",
+        "TUMPEL_LIMITS": {
+          "defaultTier": "Configured",
+          "freeTenantsPerAccount": 1,
+          "configured": [
+            { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+            { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+          ],
+          "readsPerMinute": 600,
+          "writesPerMinute": 120,
+          "hostFramesPerMinute": 6000
+        },
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
           "snapshotDelaySeconds": 30,
@@ -120,6 +147,11 @@
           "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
         }
       },
+      "ratelimits": [
+        { "name": "TENANT_READ_RATE", "namespace_id": "2001", "simple": { "limit": 600, "period": 60 } },
+        { "name": "TENANT_WRITE_RATE", "namespace_id": "2002", "simple": { "limit": 120, "period": 60 } },
+        { "name": "HOST_FRAME_RATE", "namespace_id": "2003", "simple": { "limit": 6000, "period": 60 } }
+      ],
       "durable_objects": {
         "bindings": [
           { "name": "TENANT", "class_name": "Tenant" },

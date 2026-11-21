@@ -201,6 +201,8 @@ import {
   PrepareClaudeSetupResultSchema,
   PrepareOfferInputSchema,
   PrepareOfferResultSchema,
+  ReadUsageInputSchema,
+  ReadUsageResultSchema,
   ReconcileHeldBoxesInputSchema,
   ReconcileHeldBoxesResultSchema,
   RecordPrebuildBuildingInputSchema,
@@ -465,6 +467,7 @@ export const TENANT_OPERATIONS = {
   forgetHostUsage: { input: ForgetHostUsageInputSchema, result: ForgetHostUsageResultSchema },
   runningTurnsByHost: { input: RunningTurnsByHostInputSchema, result: RunningTurnsByHostResultSchema },
   listHostUsage: { input: ListHostUsageInputSchema, result: ListHostUsageResultSchema },
+  readUsage: { input: ReadUsageInputSchema, result: ReadUsageResultSchema },
   deferredOffers: { input: DeferredOffersInputSchema, result: DeferredOffersResultSchema },
   turnMetricDimensions: { input: TurnMetricDimensionsInputSchema, result: TurnMetricDimensionsResultSchema },
   prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
@@ -533,6 +536,7 @@ export const serveTenantRequest = async (
 type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };
 
 const refused = (tenantId: string, operation: string, refusal: TenantRefusal): Error => {
+  if (refusal.refusal === "TenantLimitReached") return new TenantLimited(tenantId, refusal);
   if (refusal.refusal === "TenantRequestInvalid")
     return new TenantSkew(`tenant ${tenantId} refused ${operation} as invalid: ${refusal.issues.join("; ")}`);
   if (refusal.refusal === "TenantOperationUnknown")
@@ -559,6 +563,19 @@ export const tenantApi = (namespace: { getByName(name: string): TenantStub }, te
 });
 
 export class TenantSkew extends Error {}
+
+export type TenantLimitRefusal = Extract<TenantRefusal, { refusal: "TenantLimitReached" }>;
+
+export class TenantLimited extends Error {
+  readonly refusal: TenantLimitRefusal;
+
+  constructor(tenantId: string, refusal: TenantLimitRefusal) {
+    super(
+      `tenant ${tenantId} on the ${refusal.tier} tier spent its limit of ${refusal.limit} ${refusal.measure} per ${refusal.window.toLowerCase()} (${refusal.used} used); it resets at ${refusal.resetsAt}`,
+    );
+    this.refusal = refusal;
+  }
+}
 
 export const tenantSkewed = (error: unknown): Response => {
   if (!(error instanceof TenantSkew)) throw error;

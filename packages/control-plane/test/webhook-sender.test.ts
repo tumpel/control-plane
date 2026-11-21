@@ -184,6 +184,7 @@ before(async () => {
     ],
   });
   origin = (await server.listen()).url.origin;
+  await server.getWorker().applyD1Migrations("DB");
 });
 
 after(async () => {

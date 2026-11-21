@@ -1,6 +1,13 @@
-import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { register } from "node:module";
-import { ChannelProtocol, SessionSchema, StartedSessionSchema, SubscriptionSchema, TurnSchema } from "@tumpel/schemas";
+import {
+  ChannelProtocol,
+  SessionSchema,
+  StartedSessionSchema,
+  SubscriptionSchema,
+  TenantUsageSchema,
+  TurnSchema,
+} from "@tumpel/schemas";
 import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
@@ -11,6 +18,7 @@ import {
   migratedDatabase,
   type Namespace,
   R2Bucket,
+  RateLimiter,
   Runtime,
   type SqlStorage,
 } from "./runtime.ts";
@@ -23,6 +31,18 @@ const MIGRATIONS = new URL("../../../migrations/", import.meta.url);
 type DurableObjectClass = new (ctx: never, env: never) => object;
 type TenantApi = { call(operation: string, input: unknown): Promise<unknown> };
 type HostRecord = { hostId: string };
+type Worker = { fetch(request: Request, env: unknown): Promise<Response> };
+type Tier = "Free" | "Configured";
+type Limit = { measure: string; window: string; limit: number };
+export type ScenarioLimits = {
+  defaultTier: Tier;
+  freeTenantsPerAccount: number;
+  configured: Limit[];
+  readsPerMinute: number;
+  writesPerMinute: number;
+  hostFramesPerMinute: number;
+};
+export type Member = { tenantId: string; token: string };
 
 const imported = async <T>(path: string, name: string): Promise<T> => {
   const module: Record<string, unknown> = await import(new URL(path, SOURCE).href);
@@ -40,6 +60,7 @@ export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
 type Turn = z.infer<typeof TurnSchema>;
+export type TenantUsage = z.infer<typeof TenantUsageSchema>;
 
 const ControlMessageSchema = z.looseObject({ type: z.string() });
 type ControlMessage = z.infer<typeof ControlMessageSchema>;
@@ -63,6 +84,15 @@ type TenantOperations = Record<string, (input: never) => unknown>;
 const REPOSITORY = "https://github.com/acme/app";
 
 export const SETTINGS = TEST_SETTINGS;
+
+export const LIMITS: ScenarioLimits = {
+  defaultTier: "Configured",
+  freeTenantsPerAccount: 1,
+  configured: [{ measure: "RowsWritten", window: "Hour", limit: 1_000_000 }],
+  readsPerMinute: 600,
+  writesPerMinute: 120,
+  hostFramesPerMinute: 6000,
+};
 
 export class Host {
   private readonly inbox: ControlMessage[] = [];
@@ -161,15 +191,27 @@ export class World {
   private api!: TenantApi;
   private tenants!: Namespace<object>;
   private timers!: Namespace<SessionTimer>;
+  private tenantApi!: (namespace: unknown, tenantId: string) => TenantApi;
+  private worker!: Worker;
+  private env: Record<string, unknown> = {};
   readonly runtime: Runtime;
+  readonly limits: ScenarioLimits;
+  readonly tier: Tier;
+  owner!: Member;
 
-  private constructor(runtime: Runtime) {
+  private constructor(runtime: Runtime, limits: ScenarioLimits, tier: Tier) {
     this.runtime = runtime;
+    this.limits = limits;
+    this.tier = tier;
   }
 
-  static async open(options: Partial<WorldOptions> = {}): Promise<World> {
-    const world = new World(new Runtime(START));
-    await world.boot({ webhookSenders: "Running", vapidKey: "Valid", ...options });
+  static async open(options: Partial<WorldOptions> & { limits?: ScenarioLimits; tier?: Tier } = {}): Promise<World> {
+    const { limits, tier, ...rest } = options;
+    const world = new World(new Runtime(START), limits ?? LIMITS, tier ?? "Configured");
+    await world.boot({ webhookSenders: "Running", vapidKey: "Valid", ...rest }).catch((error: unknown) => {
+      world.close();
+      throw error;
+    });
     return world;
   }
 
@@ -184,7 +226,8 @@ export class World {
       this.runtime.stubs(() => ({
         wake: () => Promise.reject(new Error("the webhook sender Durable Object is unreachable")),
       }));
-    const tenantApi = await imported<(namespace: unknown, tenantId: string) => TenantApi>("tenant-api.ts", "tenantApi");
+    this.tenantApi = await imported<(namespace: unknown, tenantId: string) => TenantApi>("tenant-api.ts", "tenantApi");
+    this.worker = await imported<Worker>("index.ts", "default");
     const ignored = () =>
       this.runtime.stubs(() => new Proxy({}, { get: () => () => Promise.resolve(undefined) }) as object);
     const env: Record<string, unknown> = {
@@ -213,14 +256,99 @@ export class World {
           : "unreadable",
       VAPID_PUBLIC_KEY,
       VAPID_SUBJECT: "mailto:notifications@scenario.test",
+      DASHBOARD_ORIGIN: "https://app.scenario.test",
+      TUMPEL_LIMITS: this.limits,
+      TENANT_READ_RATE: new RateLimiter(this.limits.readsPerMinute),
+      TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
+      HOST_FRAME_RATE: new RateLimiter(this.limits.hostFramesPerMinute),
     };
     this.timers = this.runtime.namespace(SessionTimer, () => env);
     env.SESSION_TIMER = this.timers;
     this.tenants = this.runtime.namespace(Tenant, () => env);
     env.TENANT = this.tenants;
-    this.api = tenantApi(env.TENANT, TENANT_ID);
+    this.env = env;
+    this.api = this.tenantApi(env.TENANT, TENANT_ID);
     await this.releases.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
+    this.owner = await this.member(TENANT_ID, PRINCIPAL_ID, this.tier);
     await this.call("open", { tenantId: TENANT_ID, now: Date.now() });
+  }
+
+  private async member(tenantId: string, principalId: string, tier: Tier): Promise<Member> {
+    const now = Date.now();
+    const token = randomBytes(32).toString("base64url");
+    this.db.sql.exec(
+      "INSERT INTO tenants (tenant_id, name, tier, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      tenantId,
+      tenantId,
+      tier,
+      now,
+      now,
+    );
+    this.db.sql.exec(
+      "INSERT INTO principals (principal_id, email, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      principalId,
+      `${principalId}@scenario.test`,
+      now,
+      now,
+    );
+    this.db.sql.exec(
+      "INSERT INTO memberships (tenant_id, principal_id, role, created_at) VALUES (?, ?, 'Owner', ?)",
+      tenantId,
+      principalId,
+      now,
+    );
+    this.db.sql.exec(
+      "INSERT INTO devices (device_id, token_sha256, tenant_id, principal_id, name, created_at, last_used_at) VALUES (?, ?, ?, ?, 'scenario', ?, ?)",
+      randomUUID(),
+      createHash("sha256").update(token).digest("hex"),
+      tenantId,
+      principalId,
+      now,
+      now,
+    );
+    return { tenantId, token };
+  }
+
+  async tenant(name: string, tier: Tier): Promise<Member> {
+    const member = await this.member(`tenant-${name}`, `principal-${name}`, tier);
+    await this.tenantApi(this.env.TENANT, member.tenantId).call("open", { tenantId: member.tenantId, now: Date.now() });
+    await this.runtime.settle();
+    return member;
+  }
+
+  async fetch(member: Member, method: string, path: string, body?: string): Promise<Response> {
+    const request = new Request(`https://api.scenario.test${path}`, {
+      method,
+      headers: { authorization: `Bearer ${member.token}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body }),
+    });
+    const response = await this.worker.fetch(request, this.env);
+    await this.runtime.settle();
+    return response;
+  }
+
+  private storageOf(member: Member) {
+    const held = (this.env.TENANT as Namespace<object>).instances.get(member.tenantId);
+    if (held === undefined) throw new Error(`tenant ${member.tenantId} has no Durable Object yet`);
+    return held.ctx.storage;
+  }
+
+  rowsWritten(member: Member): number {
+    return this.storageOf(member).sql.rowsWritten;
+  }
+
+  events(member: Member): string[] {
+    return this.storageOf(member)
+      .sql.db.prepare("SELECT payload FROM events ORDER BY event_id")
+      .all()
+      .map((row) => z.object({ event: z.string() }).parse(JSON.parse(String(row.payload))).event);
+  }
+
+  async usage(member: Member): Promise<TenantUsage> {
+    const read = await this.tenantApi(this.env.TENANT, member.tenantId).call("readUsage", {
+      tenantId: member.tenantId,
+    });
+    return z.object({ usage: TenantUsageSchema }).parse(read).usage;
   }
 
   host(hostId: string): Host {

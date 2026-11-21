@@ -17,6 +17,7 @@ import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
+import { limitsOf, type TenantTier, tierLimits } from "./limits.ts";
 import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
@@ -37,10 +38,11 @@ import {
 } from "./supervisor-updates";
 import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
-import { listEvents } from "./tenant-events.ts";
+import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { PUSH_WAKES_DUE } from "./tenant-push-subscriptions.ts";
 import { memberRows, sealContext } from "./tenant-sessions";
+import { meteredState, type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
 export type PersonaWrite = Pick<
@@ -191,27 +193,82 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
+const USAGE_KEY = "usage";
+
+const tierOf = async (db: D1Database, tenantId: string): Promise<TenantTier> => {
+  const row = await db
+    .prepare("SELECT tier FROM tenants WHERE tenant_id = ?")
+    .bind(tenantId)
+    .first<{ tier: TenantTier }>();
+  if (row === null) throw new Error(`tenant ${tenantId} has no row in the central tenants table, so it has no tier`);
+  return row.tier;
+};
+
 export class Tenant extends TenantConnectors {
+  private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
+  private meter: UsageMeter | undefined;
+  private readonly opened: Promise<void>;
+
   constructor(ctx: DurableObjectState, env: Env) {
+    const cursors: { readonly rowsRead: number; readonly rowsWritten: number }[] = [];
     super(ctx, env);
-    void ctx.blockConcurrencyWhile(async () => {
-      await migrateDurableObject(ctx.storage, TENANT_MIGRATIONS);
+    this.ctx = meteredState(this.ctx, cursors);
+    this.cursors = cursors;
+    this.opened = this.ctx.blockConcurrencyWhile(async () => {
+      await migrateDurableObject(this.ctx.storage, TENANT_MIGRATIONS);
       await this.holdDataKey();
       await this.sealPlaintext();
+      await this.openMeter();
     });
   }
 
+  private async openMeter(): Promise<void> {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) return;
+    const tier = await tierOf(this.env.DB, tenantId);
+    const saved = (await this.ctx.storage.get<SavedCounter[]>(USAGE_KEY)) ?? [];
+    this.meter = new UsageMeter(tier, tierLimits(limitsOf(this.env), tier), saved, this.cursors, Date.now());
+  }
+
+  private usageMeter(): UsageMeter {
+    if (this.meter === undefined) throw new Error("the tenant Durable Object has no usage meter; it has no name");
+    return this.meter;
+  }
+
+  private async meterUsage(operation: string | null): Promise<void> {
+    const meter = this.usageMeter();
+    const now = Date.now();
+    for (const signal of meter.count(operation, now)) {
+      if (signal.event === "UsageLimitReached") {
+        console.error(
+          `UsageLimitReached: tenant ${this.tenantName()} on the ${signal.tier} tier spent its limit of ${signal.limit} ${signal.measure} per ${signal.window.toLowerCase()}; it is refused until ${signal.resetsAt}`,
+        );
+      }
+      appendEvent(this.ctx.storage.sql, signal, now);
+      this.eventsAppended = true;
+    }
+    const saved = meter.rolledOver(now);
+    if (saved !== null) await this.ctx.storage.put(USAGE_KEY, saved);
+  }
+
   async handle(request: TenantRequest): Promise<TenantResponse> {
+    await this.opened;
+    const operation = typeof request.operation === "string" ? request.operation : "";
+    const spent = operation === "readUsage" ? null : this.usageMeter().spent(operation, Date.now());
+    if (spent !== null) return spent;
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
+    await this.meterUsage(operation);
     await this.followUp();
     await this.armAlarm();
     return response;
   }
 
   override async alarm(): Promise<void> {
+    await this.opened;
     const now = Date.now();
+    await this.meterUsage(null);
     const tenantId = this.tenantName();
     const failed = [
       await this.step("push delivery", () => this.deliverPushes(tenantId, now)),
@@ -703,6 +760,7 @@ export class Tenant extends TenantConnectors {
     },
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
     listHostUsage: ({ tenantId }) => ({ usage: this.listHostUsage(tenantId) }),
+    readUsage: () => ({ usage: this.usageMeter().usage(Date.now()) }),
     deferredOffers: async ({ tenantId, hostId }) => ({ handoffs: await this.deferredOffers(tenantId, hostId) }),
     turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
