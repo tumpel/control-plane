@@ -107,7 +107,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
       .map((row) => toSubscription(tenantId, row));
   }
 
-  protected async createSubscription(tenantId: string, create: SubscriptionCreate, now: number): Promise<Created> {
+  protected createSubscription(tenantId: string, create: SubscriptionCreate, now: number): Created {
     const sql = this.ctx.storage.sql;
     const [session] = sql
       .exec<{ state: string }>("SELECT state FROM sessions WHERE session_id = ?", create.sessionId)
@@ -139,7 +139,6 @@ export abstract class TenantSubscriptions extends TenantSessions {
         sql.exec("INSERT INTO subscription_crew_tags (subscription_id, tag) VALUES (?, ?)", subscriptionId, tag);
       }
     });
-    await this.armExpiry();
     return { kind: "Created", subscription: this.presentSubscription(tenantId, subscriptionId) };
   }
 
@@ -201,15 +200,6 @@ export abstract class TenantSubscriptions extends TenantSessions {
       .exec<SubscriptionRow>(`${SUBSCRIPTION_SELECT} WHERE st.state != 'Ended' AND s.expires_at_ms <= ?`, now)
       .toArray();
     for (const row of due) this.ctx.storage.transactionSync(() => this.end(row, "Expired", now));
-  }
-
-  protected async armExpiry(): Promise<void> {
-    const [next] = this.ctx.storage.sql
-      .exec<{ at: number | null }>(`SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
-        WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)`)
-      .toArray();
-    if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(next.at);
   }
 
   protected crewTagsOf(sessionId: string): string[] {
@@ -456,12 +446,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
       reason,
       iso(now),
     );
-    if (reason === "Expired" || reason === "GoalMet") {
-      this.appendEvent(
-        { event: "SubscriptionEnded", subscriptionId: row.subscription_id, sessionId: row.session_id, reason },
-        now,
-      );
-    }
+    this.appendEvent(
+      { event: "SubscriptionEnded", subscriptionId: row.subscription_id, sessionId: row.session_id, reason },
+      now,
+    );
   }
 
   private deliveryEnded(event: { event: "TurnCompleted" | "TurnFailed"; turnId: string }, now: number): void {

@@ -193,20 +193,25 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
+    await this.ctx.storage.setAlarm(Date.now());
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
     this.drainObjects();
+    await this.armAlarm();
     return response;
   }
 
   override async alarm(): Promise<void> {
-    this.expireSubscriptions(Date.now());
+    const now = Date.now();
+    await this.ctx.storage.setAlarm(now);
+    await this.deliverPushes(this.tenantName(), now);
+    this.expireSubscriptions(now);
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
-    await this.armExpiry();
     this.drainObjects();
+    await this.armAlarm();
   }
 
   private drainObjects(): void {
@@ -234,7 +239,6 @@ export class Tenant extends TenantConnectors {
       )
       .toArray();
     if (wakes.length === 0) return;
-    await this.ctx.storage.setAlarm(Date.now());
     for (const wake of wakes) {
       await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id)).wake({
         tenantId,
@@ -243,7 +247,20 @@ export class Tenant extends TenantConnectors {
       });
       this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
     }
-    await this.armExpiry();
+  }
+
+  private async armAlarm(): Promise<void> {
+    const [next] = this.ctx.storage.sql
+      .exec<{ at: number | null }>(`SELECT MIN(at) AS at FROM (
+        SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
+          WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
+        UNION ALL
+        SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
+          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
+            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id))`)
+      .toArray();
+    if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
+    return this.ctx.storage.setAlarm(next.at);
   }
 
   private readonly operations: TenantHandlers = {
@@ -461,8 +478,8 @@ export class Tenant extends TenantConnectors {
     archiveSession: async ({ tenantId, sessionId, now }) => ({
       archived: await this.archiveSession(tenantId, sessionId, now),
     }),
-    createSubscription: async ({ tenantId, subscription, now }) => ({
-      created: await this.createSubscription(tenantId, subscription, now),
+    createSubscription: ({ tenantId, subscription, now }) => ({
+      created: this.createSubscription(tenantId, subscription, now),
     }),
     listSubscriptions: ({ tenantId, filter }) => ({ subscriptions: this.listSubscriptions(tenantId, filter) }),
     getSubscription: ({ tenantId, subscriptionId }) => ({

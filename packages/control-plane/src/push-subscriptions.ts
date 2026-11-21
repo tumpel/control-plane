@@ -4,6 +4,7 @@ import { json, noContent, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
 import { tenantApi } from "./tenant-api.ts";
+import { importP256dh } from "./tenant-push-subscriptions.ts";
 
 const PUSH_SUBSCRIPTIONS_PATH = "/v1/push-subscriptions";
 const PUSH_SUBSCRIPTION_PATH = /^\/v1\/push-subscriptions\/([^/]+)$/;
@@ -47,6 +48,15 @@ const list = async (env: Env, caller: Caller): Promise<Response> => {
 const create = async (request: Request, env: Env, caller: Caller): Promise<Response> => {
   const body = await parseBody(request, PushSubscriptionCreateSchema, "pushSubscriptions.create");
   if (!body.ok) return body.response;
+  const key = await importP256dh(body.value.keys.p256dh).catch(() => null);
+  if (key === null) {
+    return problem(422, {
+      code: "InvalidRequest",
+      title: "Invalid push key",
+      detail: "pushSubscriptions.create refused keys.p256dh because it is not a P-256 public key",
+      fix: "Subscribe again in the browser and send the p256dh key returned by PushManager",
+    });
+  }
   const { subscription } = await tenantApi(env.TENANT, caller.tenantId).call("createPushSubscription", {
     tenantId: caller.tenantId,
     principalId: caller.principalId,

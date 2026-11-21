@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
-import { createPrivateKey } from "node:crypto";
+import { createPrivateKey, hkdfSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { createServer, type Server } from "node:https";
 import { after, before, test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { TenantEventSchema, WebhookEndpointSchema } from "@tumpel/schemas";
+import {
+  PushNotificationSchema,
+  PushSubscriptionSchema,
+  TenantEventSchema,
+  WebhookEndpointSchema,
+} from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
 import { workersSecretKeyStore } from "../src/key-store.ts";
@@ -44,6 +49,12 @@ EwEB/wQFMAMBAf8wDwYDVR0RBAgwBocEfwAAATAKBggqhkjOPQQDAgNJADBGAiEA
 icmobc7N6CfhV5Zoy5g7X1GcKv/IABtcO7f9330MS94CIQCmwmmPGX5nxtw6e7Yc
 ZskS6IATrUKTfTeyDuTha9kNZQ==
 -----END CERTIFICATE-----`;
+const VAPID_JWK = createPrivateKey(RECEIVER_KEY).export({ format: "jwk" });
+const VAPID_PUBLIC_KEY = Buffer.concat([
+  Buffer.from([4]),
+  Buffer.from(VAPID_JWK.x ?? "", "base64url"),
+  Buffer.from(VAPID_JWK.y ?? "", "base64url"),
+]).toString("base64url");
 const SenderStateSchema = z.object({
   tenantId: z.string(),
   webhookEndpointId: z.string(),
@@ -62,8 +73,15 @@ let receiverServer: Server | undefined;
 let receiverOrigin: string;
 let receiverStatus = 204;
 let holdReceiver = false;
-const blockedResponses: ServerResponse[] = [];
-const received: { body: string; eventId: string | undefined; signature: string | undefined }[] = [];
+const blockedResponses: { response: ServerResponse; status: number }[] = [];
+const received: {
+  body: string;
+  eventId: string | undefined;
+  signature: string | undefined;
+  authorization: string | undefined;
+  contentEncoding: string | undefined;
+  ttl: string | undefined;
+}[] = [];
 
 const post = (path: string, body: unknown): ReturnType<TestHarness["fetch"]> =>
   server.fetch(`${origin}${path}`, {
@@ -77,36 +95,67 @@ const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> => {
   return Uint8Array.from(atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4)), (char) => char.charCodeAt(0));
 };
 
-const finishReceiver = (response: ServerResponse): void => {
-  response.writeHead(receiverStatus);
+const decryptPush = async (body: string, pair: CryptoKeyPair, auth: string) => {
+  const encoded = Buffer.from(body, "base64");
+  const salt = encoded.subarray(0, 16);
+  const serverPublicBytes = encoded.subarray(21, 86);
+  const serverPublic = await crypto.subtle.importKey(
+    "raw",
+    serverPublicBytes,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    [],
+  );
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: serverPublic }, pair.privateKey, 256);
+  const clientPublic = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey));
+  const keyInfo = Buffer.concat([Buffer.from("WebPush: info\0"), clientPublic, serverPublicBytes]);
+  const ikm = hkdfSync("sha256", Buffer.from(shared), Buffer.from(auth, "base64url"), keyInfo, 32);
+  const cek = hkdfSync("sha256", Buffer.from(ikm), salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = hkdfSync("sha256", Buffer.from(ikm), salt, Buffer.from("Content-Encoding: nonce\0"), 12);
+  const key = await crypto.subtle.importKey("raw", cek, { name: "AES-GCM" }, false, ["decrypt"]);
+  const padded = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, key, encoded.subarray(86)));
+  const delimiter = padded.indexOf(2);
+  if (delimiter === -1) throw new Error("the decrypted push payload has no final-record delimiter");
+  return PushNotificationSchema.parse(JSON.parse(new TextDecoder().decode(padded.subarray(0, delimiter))));
+};
+
+const finishReceiver = (response: ServerResponse, status: number): void => {
+  response.writeHead(status);
   response.end();
 };
 
 const releaseReceiver = (): void => {
   holdReceiver = false;
-  for (const response of blockedResponses.splice(0)) finishReceiver(response);
+  for (const blocked of blockedResponses.splice(0)) finishReceiver(blocked.response, blocked.status);
 };
 
 before(async () => {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   const localReceiver = createServer({ key: RECEIVER_KEY, cert: RECEIVER_CERT }, (request, response) => {
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => {
-      body += chunk;
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
     });
     request.on("end", () => {
+      const status = request.url === "/push/retry" ? 500 : receiverStatus;
+      const contentEncoding = Array.isArray(request.headers["content-encoding"])
+        ? request.headers["content-encoding"][0]
+        : request.headers["content-encoding"];
+      const bytes = Buffer.concat(chunks);
       received.push({
-        body,
+        body: contentEncoding === "aes128gcm" ? bytes.toString("base64") : bytes.toString("utf8"),
         eventId: Array.isArray(request.headers["tumpel-event-id"])
           ? request.headers["tumpel-event-id"][0]
           : request.headers["tumpel-event-id"],
         signature: Array.isArray(request.headers["tumpel-signature"])
           ? request.headers["tumpel-signature"][0]
           : request.headers["tumpel-signature"],
+        authorization: request.headers.authorization,
+        contentEncoding,
+        ttl: Array.isArray(request.headers.ttl) ? request.headers.ttl[0] : request.headers.ttl,
       });
-      if (holdReceiver) blockedResponses.push(response);
-      else finishReceiver(response);
+      if (holdReceiver) blockedResponses.push({ response, status });
+      else finishReceiver(response, status);
     });
   });
   receiverServer = localReceiver;
@@ -123,7 +172,13 @@ before(async () => {
         config: {
           ...config,
           main: "./test/fixtures/webhook-worker.ts",
-          vars: { ...config.vars, SECRETS_KEK: KEK },
+          vars: {
+            ...config.vars,
+            SECRETS_KEK: KEK,
+            VAPID_PRIVATE_KEY: RECEIVER_KEY.toString(),
+            VAPID_PUBLIC_KEY,
+            VAPID_SUBJECT: "mailto:notifications@example.test",
+          },
         },
       },
     ],
@@ -286,4 +341,337 @@ test("the sender signs ordered events, retries its cursor, fails after three day
   });
   await wait(100);
   assert.equal(received.length, 4);
+});
+
+test("push delivery drops subscriptions the push service no longer knows", async () => {
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  const endpoint = `${receiverOrigin}/push/subscription`;
+  const list = async (): Promise<number> => {
+    const response = await post("/__fixture/push/list", { tenantId: TENANT_ID });
+    return z
+      .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+      .parse(await response.json()).result.subscriptions.length;
+  };
+
+  for (const status of [404, 410]) {
+    const now = Date.now();
+    const created = await post("/__fixture/push/create", {
+      tenantId: TENANT_ID,
+      subscription: {
+        endpoint,
+        keys: { p256dh, auth },
+        events: ["SubscriptionPaused", "SubscriptionEnded"],
+      },
+      now,
+    });
+    assert.equal(created.status, 200);
+    assert.equal(await list(), 1);
+    receiverStatus = status;
+    const receivedBefore = received.length;
+    await post("/__fixture/emit", {
+      tenantId: TENANT_ID,
+      event:
+        status === 404
+          ? {
+              event: "SubscriptionPaused",
+              subscriptionId: "subscription-4",
+              sessionId: "session-4",
+              reason: { kind: "ByRequest", message: "Choose a release." },
+            }
+          : {
+              event: "SubscriptionEnded",
+              subscriptionId: "subscription-4",
+              sessionId: "session-4",
+              reason: "GoalMet",
+            },
+      now,
+    });
+    await until(
+      `the push service's HTTP ${status} response`,
+      async () => ({ received: received.length, subscriptions: await list() }),
+      (state) => state.received >= receivedBefore + 1 && state.subscriptions === 0,
+    );
+    const delivery = received.at(-1);
+    assert.equal(delivery?.contentEncoding, "aes128gcm");
+    assert.match(delivery?.authorization ?? "", /^vapid t=.+, k=.+$/);
+    assert.deepEqual(await decryptPush(delivery?.body ?? "", pair, auth), {
+      title: `${status === 404 ? "Subscription paused" : "Subscription ended"} in control-plane`,
+      body: status === 404 ? "Choose a release." : "The subscription reached its goal.",
+      path: `/t/${TENANT_ID}/sessions/session-4`,
+    });
+  }
+  receiverStatus = 204;
+});
+
+test("a transient push failure leaves its wake without blocking another browser", async () => {
+  const tenantId = crypto.randomUUID();
+  const now = Date.now();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  for (const path of ["retry", "success"]) {
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint: `${receiverOrigin}/push/${path}`,
+        keys: { p256dh, auth },
+        events: ["SubscriptionPaused"],
+      },
+      now,
+    });
+  }
+  const receivedBefore = received.length;
+  await post("/__fixture/emit", {
+    tenantId,
+    event: {
+      event: "SubscriptionPaused",
+      subscriptionId: "subscription-5",
+      sessionId: "session-5",
+      reason: { kind: "ByRequest", message: "Choose a release." },
+    },
+    now,
+  });
+  const wakes = await until(
+    "both browser push attempts",
+    async () =>
+      z
+        .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+        .parse(await (await post("/__fixture/push/wakes", { tenantId })).json()),
+    (value) => received.length >= receivedBefore + 2 && value.length === 1 && value[0]?.failures === 1,
+  );
+  assert.equal(wakes.length, 1);
+  assert.ok((wakes[0]?.failures ?? 0) >= 1);
+  assert.ok((wakes[0]?.next_attempt_at ?? 0) > now);
+});
+
+test("a legacy malformed browser key is dropped without blocking another browser", async () => {
+  const tenantId = crypto.randomUUID();
+  const now = Date.now();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  const invalidEndpoint = `${receiverOrigin}/push/invalid-key`;
+  for (const endpoint of [invalidEndpoint, `${receiverOrigin}/push/valid-key`]) {
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint,
+        keys: { p256dh, auth },
+        events: ["SubscriptionPaused"],
+      },
+      now,
+    });
+  }
+  await post("/__fixture/push/corrupt-key", { tenantId, endpoint: invalidEndpoint });
+  const receivedBefore = received.length;
+  await post("/__fixture/emit", {
+    tenantId,
+    event: {
+      event: "SubscriptionPaused",
+      subscriptionId: "subscription-invalid-key",
+      sessionId: "session-invalid-key",
+      reason: { kind: "ByRequest", message: "Choose a release." },
+    },
+    now,
+  });
+  const state = await until(
+    "the valid browser delivery",
+    async () => {
+      const listed = z
+        .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+        .parse(await (await post("/__fixture/push/list", { tenantId })).json());
+      const wakes = z
+        .array(z.object({ push_subscription_id: z.string() }))
+        .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+      return { subscriptions: listed.result.subscriptions.length, wakes: wakes.length };
+    },
+    (value) => received.length >= receivedBefore + 1 && value.subscriptions === 1 && value.wakes === 0,
+  );
+  assert.deepEqual(state, { subscriptions: 1, wakes: 0 });
+  assert.equal(received.length, receivedBefore + 1);
+});
+
+test("a later event does not bypass a subscription wake in backoff", async () => {
+  const tenantId = crypto.randomUUID();
+  const now = Date.now();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint: `${receiverOrigin}/push/retry`,
+      keys: { p256dh, auth },
+      events: ["SubscriptionPaused"],
+    },
+    now,
+  });
+  const readWakes = async () =>
+    z
+      .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+      .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+  const emit = (now: number) =>
+    post("/__fixture/emit", {
+      tenantId,
+      event: {
+        event: "SubscriptionPaused",
+        subscriptionId: "subscription-7",
+        sessionId: "session-7",
+        reason: { kind: "ByRequest", message: "Choose a release." },
+      },
+      now,
+    });
+  await emit(now);
+  await until("the first push attempt", readWakes, (wakes) => wakes.some((wake) => wake.failures === 1));
+  await emit(now + 1);
+  const wakes = await until("the later push wake", readWakes, (value) => value.length === 2);
+  assert.equal(wakes.length, 2);
+  const firstAttempt = wakes.find((wake) => wake.failures === 1)?.next_attempt_at;
+  assert.ok(firstAttempt !== undefined);
+  const alarm = z
+    .object({ alarmAt: z.number() })
+    .parse(await (await post("/__fixture/push/alarm-at", { tenantId })).json());
+  assert.equal(alarm.alarmAt, firstAttempt);
+});
+
+test("an expired push wake advances to the next event", async () => {
+  const tenantId = crypto.randomUUID();
+  const now = Date.now();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint: `${receiverOrigin}/push/retry`,
+      keys: { p256dh, auth },
+      events: ["SubscriptionPaused"],
+    },
+    now,
+  });
+  const emit = (at: number) =>
+    post("/__fixture/emit", {
+      tenantId,
+      event: {
+        event: "SubscriptionPaused",
+        subscriptionId: "subscription-expiry",
+        sessionId: "session-expiry",
+        reason: { kind: "ByRequest", message: "Choose a release." },
+      },
+      now: at,
+    });
+  const receivedBefore = received.length;
+  await emit(now - 86_400_001);
+  await emit(now - 3_600_000);
+  const wakes = await until(
+    "the fresh push attempt",
+    async () =>
+      z
+        .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+        .parse(await (await post("/__fixture/push/wakes", { tenantId })).json()),
+    (value) => value.length === 1 && value[0]?.failures === 1,
+  );
+  assert.equal(wakes.length, 1);
+  assert.equal(received.length, receivedBefore + 1);
+  const ttl = Number(received.at(-1)?.ttl);
+  assert.ok(ttl >= 82_799 && ttl <= 82_800, `received TTL ${ttl}`);
+});
+
+test("archiving or failing a session ends its subscription and sends the ended event", async () => {
+  for (const [event, body] of [
+    ["SessionArchived", "The session was archived."],
+    ["SessionFailed", "The session failed."],
+  ] as const) {
+    const tenantId = crypto.randomUUID();
+    const sessionId = `session-${event}`;
+    const now = Date.now();
+    const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+    const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+    await post("/__fixture/subscription/create", { tenantId, sessionId, now });
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint: `${receiverOrigin}/push/ended`,
+        keys: { p256dh, auth },
+        events: ["SubscriptionEnded"],
+      },
+      now,
+    });
+    const receivedBefore = received.length;
+    await post("/__fixture/emit", { tenantId, event: { event, sessionId }, now });
+    await until(
+      `the ${event} subscription push`,
+      async () => received.length,
+      (length) => length >= receivedBefore + 1,
+    );
+    assert.deepEqual(await decryptPush(received.at(-1)?.body ?? "", pair, auth), {
+      title: "Subscription ended in control-plane",
+      body,
+      path: `/t/${tenantId}/sessions/${sessionId}`,
+    });
+  }
+});
+
+test("a response keeps the wake when browser keys changed in flight", async () => {
+  for (const firstStatus of [204, 410]) {
+    const tenantId = crypto.randomUUID();
+    const now = Date.now();
+    const firstPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const firstP256dh = Buffer.from(await crypto.subtle.exportKey("raw", firstPair.publicKey)).toString("base64url");
+    const firstAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+    const endpoint = `${receiverOrigin}/push/replaced`;
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint,
+        keys: { p256dh: firstP256dh, auth: firstAuth },
+        events: ["SubscriptionEnded"],
+      },
+      now,
+    });
+    receiverStatus = firstStatus;
+    holdReceiver = true;
+    const receivedBefore = received.length;
+    await post("/__fixture/emit", {
+      tenantId,
+      event: {
+        event: "SubscriptionEnded",
+        subscriptionId: "subscription-6",
+        sessionId: "session-6",
+        reason: "GoalMet",
+      },
+      now,
+    });
+    await until(
+      "the blocked push request",
+      async () => received.length,
+      (length) => length > receivedBefore,
+    );
+    const secondPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const secondP256dh = Buffer.from(await crypto.subtle.exportKey("raw", secondPair.publicKey)).toString("base64url");
+    const secondAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint,
+        keys: { p256dh: secondP256dh, auth: secondAuth },
+        events: ["SubscriptionEnded"],
+      },
+      now: now + 1,
+    });
+    receiverStatus = 204;
+    releaseReceiver();
+    const listed = await until(
+      "delivery with the replacement browser keys",
+      async () =>
+        z
+          .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+          .parse(await (await post("/__fixture/push/list", { tenantId })).json()),
+      (value) => received.length >= receivedBefore + 2 && value.result.subscriptions.length === 1,
+    );
+    assert.equal(listed.result.subscriptions.length, 1);
+  }
 });
