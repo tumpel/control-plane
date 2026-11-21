@@ -6,13 +6,6 @@
     "packages/control-plane/migrations/tenant": "0088_chunk_lists_in_object_storage.sql"
   },
   "sites": {
-    "packages/control-plane/src/channel/ledger.ts": [
-      "DELETE FROM refused_frames WHERE seq <= ?",
-      "INSERT INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?) ON CONFLICT (ledger_id) DO UPDATE SET received = excluded.received, sent = excluded.sent, unacked = excluded.unacked WHERE ledger.received IS NOT excluded.received OR ledger.sent IS NOT excluded.sent OR ledger.unacked IS NOT excluded.unacked",
-      "INSERT INTO refused_frames (seq) VALUES (?) ON CONFLICT (seq) DO NOTHING",
-      "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
-      "SELECT seq FROM refused_frames"
-    ],
     "packages/control-plane/src/circleci-events.ts": ["SELECT 1 FROM tenants WHERE tenant_id = ?"],
     "packages/control-plane/src/claude-setups.ts": ["SELECT 1 FROM tenants WHERE tenant_id = ?"],
     "packages/control-plane/src/connector-rows.ts": [
@@ -120,12 +113,6 @@
       "SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?",
       "SELECT t.tenant_id, t.name, t.tier, t.created_at AS tenant_created_at, t.updated_at AS tenant_updated_at, p.principal_id, p.email, m.role, p.created_at AS principal_created_at, p.updated_at AS principal_updated_at, m.created_at AS joined_at FROM memberships m JOIN principals p ON p.principal_id = m.principal_id JOIN tenants t ON t.tenant_id = m.tenant_id",
       "UPDATE devices SET last_used_at = ? WHERE device_id = ?"
-    ],
-    "packages/control-plane/src/issuer.ts": [
-      "INSERT INTO issuer_keys (key_slot, kid, public_jwk, wrapped_data_key, private_key_sealed) VALUES (1, ?, ?, ?, ?) ON CONFLICT (key_slot) DO NOTHING",
-      "SELECT kid, wrapped_data_key, private_key_sealed FROM issuer_keys WHERE key_slot = 1",
-      "SELECT public_jwk FROM issuer_keys",
-      "expr: INSERT_KEY"
     ],
     "packages/control-plane/src/members.ts": [
       "DELETE FROM invitations WHERE tenant_id = ? AND invitation_id = ? RETURNING invitation_id",

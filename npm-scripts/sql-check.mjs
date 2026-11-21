@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { baseAllowlist, baseRef, risen } from "./sql-ceiling.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ALLOWLIST = "npm-scripts/sql-allowlist.json";
@@ -165,7 +166,16 @@ const found = Object.fromEntries(
 const migrations = listFiles(["packages/*/migrations/**.sql"]);
 const previous = existsSync(`${ROOT}${ALLOWLIST}`) ? JSON.parse(readFileSync(`${ROOT}${ALLOWLIST}`, "utf8")) : {};
 
+const base = baseAllowlist(ROOT, ALLOWLIST, process.env);
+
 if (update) {
+  const ceiling = risen(found, base);
+  if (ceiling.length > 0) {
+    console.error(
+      `sql update refused: the allowlist only shrinks.\n  ${ceiling.map(({ file, now, before }) => `${file}  ${before} on origin/${baseRef(process.env)}, ${now} now`).join("\n  ")}`,
+    );
+    process.exit(1);
+  }
   const migrationBaseline =
     previous.migrationBaseline ?? Object.fromEntries([...migrationDirectories(migrations)].sort());
   const allowed = Object.fromEntries(
@@ -197,6 +207,8 @@ for (const file of new Set([...Object.keys(found), ...Object.keys(allowed)])) {
   }
 }
 
+const raised = risen(allowed, base);
+
 const unreviewed = migrations.filter((file) => {
   const slash = file.lastIndexOf("/");
   const after = baseline[file.slice(0, slash)];
@@ -207,13 +219,17 @@ const unreviewed = migrations.filter((file) => {
 
 if (unlisted.length > 0) {
   console.error(`sql check failed: new hand-written SQL is not on the allowlist.\n  ${unlisted.join("\n  ")}`);
-  console.error(
-    `Fix: follow ${RULES}. If the SQL must stay, run \`node npm-scripts/sql-check.mjs --update\` and give the reason in the PR body.`,
-  );
+  console.error(`Fix: follow ${RULES}. Write the query with Drizzle; the allowlist takes no new entries.`);
 }
 if (stale.length > 0) {
   console.error(`sql check failed: allowlisted SQL no longer exists.\n  ${stale.join("\n  ")}`);
-  console.error(`Fix: remove it from the allowlist with \`node npm-scripts/sql-check.mjs --update\`.`);
+  console.error(`Fix: remove it from the allowlist with \`npm run sql:update\`.`);
+}
+if (raised.length > 0) {
+  console.error(
+    `sql check failed: the allowlist grew against origin/${baseRef(process.env)}.\n  ${raised.map(({ file, now, before }) => `${file}  ${before} -> ${now}`).join("\n  ")}`,
+  );
+  console.error(`Fix: write the query with Drizzle (${RULES}). The allowlist only shrinks.`);
 }
 if (unreviewed.length > 0) {
   console.error(`sql check failed: a new migration adds a TEXT or BLOB column.\n  ${unreviewed.join("\n  ")}`);
@@ -221,6 +237,6 @@ if (unreviewed.length > 0) {
     `Fix: follow ${RULES}. Bulk data belongs in R2. If the column holds metadata, add \`-- bulk-data-reviewed: <reason>\` to the migration.`,
   );
 }
-if (unlisted.length + stale.length + unreviewed.length > 0) process.exit(1);
+if (unlisted.length + stale.length + unreviewed.length + raised.length > 0) process.exit(1);
 const total = Object.values(found).reduce((sum, sites) => sum + sites.length, 0);
 console.log(`sql: ${total} hand-written SQL sites match the allowlist`);

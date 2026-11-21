@@ -9,8 +9,10 @@
 5. Every endpoint has a limit. Every write endpoint caps what one request writes.
 6. Cost is a signal (tenet 9). A rising bill is a design fault to fix.
 
-## Hand-written SQL
+## Queries
 
-`npm run lint` runs `npm-scripts/sql-check.mjs`. It finds every hand-written SQL site under `packages/*/src` and fails on one that is not in `npm-scripts/sql-allowlist.json`, and on an allowlisted site that no longer exists. `npm run sql:update` rewrites the allowlist. The list only shrinks: a PR that adds an entry gives the reason in its body.
+Drizzle is the only query route. `npm run db:schema` derives `src/db/*-schema.ts` from the migrations, and `npm run lint` fails when a migration changes and its schema file does not. Build a handle with `centralDb(env.DB)` or `durableDb(storage, schema)` from `src/db/client.ts`.
+
+`npm run lint` runs `npm-scripts/sql-check.mjs`. It finds every remaining hand-written SQL site under `packages/*/src` and fails on one that is not in `npm-scripts/sql-allowlist.json`, and on an allowlisted site that no longer exists. It also fails when any file holds more sites than on the base branch (`origin/main`, or `origin/$GITHUB_BASE_REF` in CI). `npm run sql:update` only removes entries. The allowlist only shrinks.
 
 A new migration that adds a TEXT or BLOB column carries a `-- bulk-data-reviewed: <reason>` comment, or the check fails.

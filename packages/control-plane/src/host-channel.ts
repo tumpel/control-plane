@@ -15,6 +15,8 @@ import type {
   StoredControlMessage,
   TelemetryBatch,
 } from "./channel/protocol.ts";
+import { durableDb } from "./db/client.ts";
+import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { HOST_MIGRATIONS } from "./host-migrations.ts";
 import { problem } from "./http";
@@ -74,7 +76,7 @@ export class HostChannel extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.ledger = new HostLedger(ctx.storage.sql);
+    this.ledger = new HostLedger(durableDb(ctx.storage, hostSchema));
     void ctx.blockConcurrencyWhile(async () => {
       await migrateDurableObject(ctx.storage, HOST_MIGRATIONS);
     });

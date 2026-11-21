@@ -25,8 +25,14 @@ class Cursor {
     return row;
   }
 
-  raw(): unknown[][] {
-    return this.rows.map((row) => Object.values(row));
+  raw(): { toArray(): unknown[][] } {
+    const values = this.rows.map((row) => Object.values(row));
+    return { toArray: () => values };
+  }
+
+  next(): IteratorResult<Row> {
+    const [value] = this.rows;
+    return value === undefined ? { done: true, value: undefined } : { done: false, value };
   }
 
   [Symbol.iterator](): Iterator<Row> {
