@@ -1,6 +1,7 @@
 import JSONParser from "@streamparser/json/jsonparser.js";
 import { ChunkPlacementSchema, SnapshotManifestSchema, SnapshotRootSchema } from "@tumpel/schemas";
 import { z } from "zod";
+import { errorOf } from "./backoff.ts";
 
 export type Placement = z.infer<typeof ChunkPlacementSchema>;
 
@@ -395,13 +396,33 @@ export class SnapshotManifests {
 
 export type LiveNames = { has(packDigest: string): boolean; unreadable: string | undefined };
 
+type LiveState = { counts: Map<string, number>; members: Set<string>; unreadable: Map<string, string> };
+
+const LivePacksSchema = z.object({
+  members: z.array(z.string()),
+  counts: z.array(z.tuple([z.string(), z.number().int().min(1)])),
+});
+
+export const livePacksKey = (tenantId: string): string => `${tenantId}/live-packs.json`;
+
+const counted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): void => {
+  state.members.add(storageKey);
+  for (const packDigest of packs) state.counts.set(packDigest, (state.counts.get(packDigest) ?? 0) + 1);
+};
+
+const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): void => {
+  state.members.delete(storageKey);
+  for (const packDigest of packs) {
+    const count = (state.counts.get(packDigest) ?? 0) - 1;
+    if (count > 0) state.counts.set(packDigest, count);
+    else state.counts.delete(packDigest);
+  }
+};
+
 export class LivePacks {
   private readonly manifests: SnapshotManifests;
   private readonly livePage: (after: string, limit: number) => string[];
-  private readonly counts = new Map<string, number>();
-  private readonly members = new Set<string>();
-  private readonly unreadable = new Map<string, string>();
-  private built = false;
+  private state: LiveState | null = null;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(manifests: SnapshotManifests, livePage: (after: string, limit: number) => string[]) {
@@ -410,63 +431,120 @@ export class LivePacks {
   }
 
   async names(store: R2Bucket, tenantId: string): Promise<LiveNames> {
-    await this.turn(async () => {
-      if (!this.built) await this.build(store, tenantId);
-    });
-    const [unreadable] = this.unreadable.values();
-    return { has: (packDigest) => this.counts.has(packDigest), unreadable };
+    const state = await this.turn(() => this.loaded(store, tenantId));
+    const [unreadable] = state.unreadable.values();
+    return { has: (packDigest) => state.counts.has(packDigest), unreadable };
   }
 
-  add(storageKey: string, packs: ReadonlySet<string>): Promise<void> {
+  add(store: R2Bucket, tenantId: string, storageKey: string, packs: ReadonlySet<string>): Promise<void> {
     return this.turn(async () => {
-      if (this.built) this.count(storageKey, packs);
+      const state = this.state;
+      if (state === null || state.members.has(storageKey)) return;
+      counted(state, storageKey, packs);
+      await this.persist(store, tenantId, state);
     });
   }
 
   release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
-    return this.turn(async () => {
-      if (!this.built) return;
-      for (const storageKey of storageKeys) {
-        this.unreadable.delete(storageKey);
-        if (!this.members.has(storageKey)) continue;
-        const read = await this.manifests.packs(store, tenantId, storageKey);
-        this.members.delete(storageKey);
-        if (read.kind !== "Read") {
-          console.error(
-            `released snapshot ${storageKey} has no readable pack list, so its packs stay counted as live until the control plane restarts: ${read.detail}`,
-          );
-          continue;
-        }
-        for (const packDigest of read.value) {
-          const count = (this.counts.get(packDigest) ?? 0) - 1;
-          if (count > 0) this.counts.set(packDigest, count);
-          else this.counts.delete(packDigest);
-        }
-      }
-    });
+    return this.turn(() =>
+      this.released(store, tenantId, storageKeys).catch((error: unknown) => {
+        this.state = null;
+        console.error(
+          `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
+        );
+      }),
+    );
   }
 
-  private async build(store: R2Bucket, tenantId: string): Promise<void> {
-    for (let page = this.livePage("", LIVE_PAGE); page.length > 0; ) {
-      for (const storageKey of page) {
-        const read = await this.manifests.packs(store, tenantId, storageKey);
-        if (read.kind === "Read") this.count(storageKey, read.value);
-        if (read.kind === "Unreadable") {
-          this.unreadable.set(
-            storageKey,
-            `snapshot ${storageKey} is live but its packs cannot be read, so retention keeps every pack until it can: ${read.detail}`,
-          );
-        }
-      }
-      page = this.livePage(page.at(-1) ?? "", LIVE_PAGE);
+  private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
+    const state = await this.loaded(store, tenantId);
+    let changed = false;
+    for (const storageKey of storageKeys) {
+      if (state.unreadable.delete(storageKey) || !state.members.has(storageKey)) continue;
+      const read = await this.manifests.packs(store, tenantId, storageKey);
+      if (read.kind !== "Read") throw new Error(`snapshot ${storageKey} has no readable pack list: ${read.detail}`);
+      uncounted(state, storageKey, read.value);
+      changed = true;
     }
-    this.built = true;
+    if (changed) await this.persist(store, tenantId, state);
   }
 
-  private count(storageKey: string, packs: ReadonlySet<string>): void {
-    if (this.members.has(storageKey)) return;
-    this.members.add(storageKey);
-    for (const packDigest of packs) this.counts.set(packDigest, (this.counts.get(packDigest) ?? 0) + 1);
+  private async loaded(store: R2Bucket, tenantId: string): Promise<LiveState> {
+    if (this.state !== null) return this.state;
+    const state = (await this.reconciled(store, tenantId)) ?? (await this.rebuilt(store, tenantId));
+    this.state = state;
+    return state;
+  }
+
+  private async reconciled(store: R2Bucket, tenantId: string): Promise<LiveState | null> {
+    const object = await store.get(livePacksKey(tenantId));
+    if (object === null) return null;
+    const parsed = LivePacksSchema.safeParse(parsedJson(await object.text()));
+    if (!parsed.success) {
+      console.error(
+        `tenant ${tenantId} holds live pack names that do not parse, so they are rebuilt: ${issues(parsed.error)}`,
+      );
+      return null;
+    }
+    const state: LiveState = {
+      counts: new Map(parsed.data.counts),
+      members: new Set(parsed.data.members),
+      unreadable: new Map(),
+    };
+    const live = new Set<string>();
+    let changed = false;
+    await this.eachLive(async (storageKey) => {
+      live.add(storageKey);
+      if (state.members.has(storageKey)) return;
+      changed = (await this.counts(store, tenantId, state, storageKey)) || changed;
+    });
+    for (const member of [...state.members]) {
+      if (live.has(member)) continue;
+      const read = await this.manifests.packs(store, tenantId, member);
+      if (read.kind !== "Read") return null;
+      uncounted(state, member, read.value);
+      changed = true;
+    }
+    if (changed) await this.persist(store, tenantId, state);
+    return state;
+  }
+
+  private async rebuilt(store: R2Bucket, tenantId: string): Promise<LiveState> {
+    const state: LiveState = { counts: new Map(), members: new Set(), unreadable: new Map() };
+    await this.eachLive(async (storageKey) => {
+      await this.counts(store, tenantId, state, storageKey);
+    });
+    await this.persist(store, tenantId, state);
+    return state;
+  }
+
+  private async counts(store: R2Bucket, tenantId: string, state: LiveState, storageKey: string): Promise<boolean> {
+    const read = await this.manifests.packs(store, tenantId, storageKey);
+    if (read.kind === "Read") counted(state, storageKey, read.value);
+    if (read.kind === "Unreadable") {
+      state.unreadable.set(
+        storageKey,
+        `snapshot ${storageKey} is live but its packs cannot be read, so retention keeps every pack until it can: ${read.detail}`,
+      );
+    }
+    return read.kind === "Read";
+  }
+
+  private async eachLive(visit: (storageKey: string) => Promise<void>): Promise<void> {
+    for (let page = this.livePage("", LIVE_PAGE); page.length > 0; page = this.livePage(page.at(-1) ?? "", LIVE_PAGE)) {
+      for (const storageKey of page) await visit(storageKey);
+    }
+  }
+
+  private persist(store: R2Bucket, tenantId: string, state: LiveState): Promise<void> {
+    const body = JSON.stringify({ members: [...state.members], counts: [...state.counts] });
+    return store.put(livePacksKey(tenantId), body).then(
+      () => undefined,
+      (error: unknown) =>
+        console.error(
+          `tenant ${tenantId} could not store its live pack names, so the next restart reconciles them with the snapshots table: ${errorOf(error).message}`,
+        ),
+    );
   }
 
   private turn<T>(run: () => Promise<T>): Promise<T> {
