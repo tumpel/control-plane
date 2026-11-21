@@ -99,6 +99,7 @@ import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
+import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import {
@@ -1377,6 +1378,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
           now,
           turnId,
         );
+        sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turnId);
         return { ...session, state: "Running", host_id: hostId, box_id: boxId };
       });
     const connectors = this.usesConnectors(session.session_id);
@@ -1407,7 +1409,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const stays = place(hosts.filter((host) => host.hostId === session.host_id && host.state === "Online"));
     const placement = stays.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") {
-      this.deferOffer(session, turn, now);
+      if (!this.waitsForCapacity(turnId) && this.capacityWaitCount() >= CAPACITY_WAIT_LIMIT) {
+        const detail = `the session's box was released while the turn waited, no host has room for a new one, and ${CAPACITY_WAIT_LIMIT} turns already wait for room: ${placement.hosts.map(why).join(", ")}`;
+        return this.failTurn(tenantId, turnId, "PoolExhausted", detail, iso(now), "Stopped");
+      }
+      sql.exec(
+        "INSERT INTO turn_capacity_waits (turn_id, created_at) VALUES (?, ?) ON CONFLICT (turn_id) DO NOTHING",
+        turnId,
+        now,
+      );
       return this.timers(tenantId, session.session_id, {
         Total: { turnId, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
       });
@@ -3812,15 +3822,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (name === "Total" && turn.state === "Offered" && this.waitsForCapacity(turnId)) {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
-        failedAt,
-      );
-    }
     if (name === "Total" && turn.state === "Offered" && session.state === "Stopped") {
       return this.failTurn(
         tenantId,
@@ -3829,6 +3830,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `no host of your tenant had room for the session's new box within ${settings.turnTotalBudgetSeconds} seconds of the turn's start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
         failedAt,
         "Stopped",
+      );
+    }
+    if (name === "Total" && turn.state === "Offered" && this.waitsForCapacity(turnId)) {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "Undelivered",
+        `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
+        failedAt,
       );
     }
     if (name === "Total" && turn.state === "Offered") {

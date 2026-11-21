@@ -4116,7 +4116,7 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("a delivery to an evicted session waits while every box runs or releases, and a heartbeat after a box goes places it", async () => {
+  test("a delivery to an evicted session waits while every box runs or releases, and another host places it once it has room", async () => {
     const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
     host.close();
     await hostState(hostId, "Offline");
@@ -4205,20 +4205,20 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual([waiting.state, waiting.deliveryFailuresInARow], ["Active", 0]);
     assert.equal(side.holds("TurnOffer"), false, "the delivery waits while both boxes are taken");
 
-    side.send({ type: "BoxGone", sessionId: crew.session.sessionId, boxId: crewOffer.boxId });
-    await until(
-      "the crew session reading Stopped",
-      () => getJson(`/v1/sessions/${crew.session.sessionId}`, SessionSchema),
-      (session) => session.state === "Stopped",
-    );
-    side.report(USAGE);
-    const offer = await side.next("TurnOffer");
+    const roomy = await enrol("roomy");
+    const other = await connect(roomy.id, roomy.key, 1);
+    await hostState(roomy.id, "Online");
+    other.quiet();
+    other.report(USAGE);
+    const offer = await other.next("TurnOffer");
     assert.equal(offer.turnId, delivery?.turnId);
     assert.notEqual(offer.boxId, foreman.offer.boxId);
     assert.deepEqual(
       offer.snapshots.map((each) => each.snapshotId),
       [snapshot.snapshotId],
     );
+    assert.equal(side.holds("TurnOffer"), false, "the full host never gets the delivery");
+    other.close();
     side.close();
   });
 
