@@ -20,6 +20,11 @@ const STRINGS = [
   "a".repeat(64),
   "x@scenario.test",
   "main",
+  "A",
+  "gh/acme/app",
+  "a".repeat(87),
+  ".github/workflows/ci.yml",
+  "tenant_abc",
 ];
 
 const defOf = (schema: unknown): Def => (schema as { _zod: { def: Def } })._zod.def;
@@ -60,8 +65,10 @@ const generate = (schema: unknown, known: Known, key: string): unknown => {
       }
       return out;
     }
-    case "array":
-      return [];
+    case "array": {
+      if (accepts([])) return [];
+      return [generate(def.element, known, key)];
+    }
     case "record":
       return {};
     case "optional":
