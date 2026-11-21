@@ -3975,6 +3975,45 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
+  test("an Auto box idle for 15 minutes with its snapshot stored is torn down, and the next turn restores it on a fresh box", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const idle = await idleTurn(host, { ...(await sessionStart()), prompt: "go quiet" }, bearer);
+    const { sessionId, tenantId } = idle.session;
+    const snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    const timers = await until(
+      "the idle teardown armed",
+      () => storedTimers(sessionId),
+      (stored) => stored?.deadlines.Teardown !== undefined,
+    );
+    const armed = z.object({ turnId: z.string(), at: z.number() }).parse(timers?.deadlines.Teardown);
+    assert.equal(armed.turnId, idle.offer.turnId);
+    assert.ok(armed.at > Date.now() + 14 * 60 * 1000, `the eviction is due at ${armed.at}, before 15 idle minutes`);
+    assert.equal(host.holds("BoxTeardown"), false);
+
+    const at = Date.now();
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Teardown: { turnId: armed.turnId, at } } }, at);
+    assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: idle.offer.boxId });
+    host.send({ type: "BoxGone", sessionId, boxId: idle.offer.boxId });
+    const evicted = await until(
+      "the evicted session settling",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state !== "Stopping",
+    );
+    assert.notEqual(evicted.state, "Failed");
+
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "wake up" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const offer = await host.next("TurnOffer");
+    assert.equal(offer.sessionId, sessionId);
+    assert.notEqual(offer.boxId, idle.offer.boxId);
+    assert.deepEqual(
+      offer.snapshots.map((each) => each.snapshotId),
+      [snapshot.snapshotId],
+    );
+  });
+
   test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
