@@ -10,7 +10,6 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { errorOf } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
@@ -278,11 +277,7 @@ export class Tenant extends TenantConnectors {
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     this.wakeWebhooks();
-    this.ctx.waitUntil(
-      this.deliverPushes(this.tenantName(), Date.now()).catch((error: unknown) =>
-        console.error(`PushDeliveryFailed: tenant ${this.tenantName()}: ${errorOf(error).message}`),
-      ),
-    );
+    this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
     return response;
   }
 
@@ -302,13 +297,7 @@ export class Tenant extends TenantConnectors {
     const tenantId = this.tenantName();
     for (const wake of this.takeWebhookWakes()) {
       this.ctx.waitUntil(
-        this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhookEndpointId))
-          .wake({ tenantId, ...wake })
-          .catch((error: unknown) =>
-            console.error(
-              `WebhookWakeFailed: webhook endpoint ${wake.webhookEndpointId} of tenant ${tenantId}: ${errorOf(error).message}`,
-            ),
-          ),
+        this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhookEndpointId)).wake({ tenantId, ...wake }),
       );
     }
   }

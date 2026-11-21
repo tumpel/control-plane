@@ -317,7 +317,7 @@ const prepareStart = async (
   return ok({
     principalId: caller.principalId,
     startedBy: caller.origin,
-    hosts: await listHosts(env.DB, caller.tenantId),
+    hosts: await listHosts(env, caller.tenantId),
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
@@ -503,7 +503,7 @@ export const sendTurn = async (
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
-  const hosts = await listHosts(env.DB, caller.tenantId);
+  const hosts = await listHosts(env, caller.tenantId);
   const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);

@@ -126,5 +126,6 @@ export class SessionTimer extends DurableObject<Env> {
     await this.ctx.storage.put(TIMERS_KEY, timers);
     const next = Math.min(...Object.values(timers.deadlines).map((deadline) => deadline.at));
     if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next);
+    else await this.ctx.storage.deleteAlarm();
   }
 }

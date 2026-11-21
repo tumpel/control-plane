@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { ListEventsResultSchema, TenantEventSchema } from "@tumpel/schemas";
+import type { ListEventsResultSchema, TenantEventSchema, WebhookDeliveryStatusSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { Env } from "./index.ts";
 import { keyStoreOf } from "./key-store.ts";
@@ -14,6 +14,7 @@ type SenderState = {
   cursorEventId: number;
 };
 
+type WebhookDeliveryStatus = z.infer<typeof WebhookDeliveryStatusSchema>;
 type Wake = { tenantId: string; webhookEndpointId: string; cursorEventId: number };
 type Listed = z.infer<typeof ListEventsResultSchema>["listed"];
 type TenantEvent = z.infer<typeof TenantEventSchema>;
@@ -56,10 +57,18 @@ export class WebhookSender extends DurableObject<Env> {
       tenantId: state.tenantId,
       webhookEndpointId: state.webhookEndpointId,
     });
-    if (endpoint === null || endpoint.status.delivery === "Failing") {
-      if (endpoint === null) await this.ctx.storage.deleteAll();
+    if (endpoint === null) {
+      await this.ctx.storage.deleteAll();
       return;
     }
+    let failing = endpoint.status.delivery === "Failing";
+    const { tenantId, webhookEndpointId } = state;
+    const setStatus = (status: WebhookDeliveryStatus): Promise<unknown> =>
+      tenant.call("setWebhookEndpointStatus", {
+        tenantId,
+        webhookEndpointId,
+        status,
+      });
     for (;;) {
       const result: { listed: Listed } = await tenant.call("listEvents", {
         tenantId: state.tenantId,
@@ -71,9 +80,7 @@ export class WebhookSender extends DurableObject<Env> {
       });
       const listed: Listed = result.listed;
       if (listed.kind === "CursorExpired") {
-        throw new Error(
-          `webhook endpoint ${state.webhookEndpointId} fell behind event ${listed.oldestEventId} before its three-day failure window ended`,
-        );
+        throw new Error(`webhook endpoint ${state.webhookEndpointId} fell behind event ${listed.oldestEventId}`);
       }
       const events: TenantEvent[] = listed.page.events;
       for (const event of events) {
@@ -100,8 +107,11 @@ export class WebhookSender extends DurableObject<Env> {
           console.error(
             `WebhookDeliveryFailed: webhook endpoint ${state.webhookEndpointId} of tenant ${state.tenantId} did not take event ${event.eventId}: ${detail}`,
           );
+          if (!failing) await setStatus({ delivery: "Failing", detail, failingSince: new Date().toISOString() });
           return;
         }
+        if (failing) await setStatus({ delivery: "Delivering" });
+        failing = false;
         state = await this.advanceCursor(event.eventId);
       }
       state = await this.advanceCursor(listed.page.lastEventId);

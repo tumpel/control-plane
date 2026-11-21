@@ -109,6 +109,17 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
+  lastReceivedAt(): number | null {
+    const received = this.ctx
+      .getWebSockets()
+      .filter(
+        (socket) =>
+          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
+      )
+      .map((socket) => this.attachment(socket).lastReceivedAt);
+    return received.length === 0 ? null : Math.max(...received);
+  }
+
   async send(message: StoredControlMessage): Promise<"Sent" | "Deferred"> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);

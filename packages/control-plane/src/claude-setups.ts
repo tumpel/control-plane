@@ -64,7 +64,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
     });
   }
   const now = Date.now();
-  const hosts = await listHosts(env.DB, caller.tenantId);
+  const hosts = await listHosts(env, caller.tenantId);
   const { started } = await tenant.call("startClaudeSetup", {
     tenantId: caller.tenantId,
     input: {

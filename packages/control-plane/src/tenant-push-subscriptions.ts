@@ -40,7 +40,7 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
     WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events
   FROM push_subscriptions AS p`;
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
-const PUSH_TTL_MS = 86_400 * 1000;
+const PUSH_TTL_SECONDS = 86_400;
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
@@ -146,7 +146,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     );
   }
 
-  protected async deliverPushes(tenantId: string, now: number): Promise<void> {
+  protected async deliverPushes(tenantId: string): Promise<void> {
     const eventIds = this.pushEventIds.splice(0);
     if (eventIds.length === 0) return;
     const rows = this.ctx.storage.sql
@@ -166,8 +166,6 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     const dataKey = await this.dataKey();
     const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
     for (const row of rows) {
-      const expiresAt = row.event_created_at + PUSH_TTL_MS;
-      if (now >= expiresAt) continue;
       const event = TenantEventSchema.parse({
         ...JSON.parse(row.payload),
         eventId: row.event_id,
@@ -215,7 +213,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
               path,
             };
       const payload = await buildPushPayload(
-        { data: PushNotificationSchema.parse(data), options: { ttl: Math.ceil((expiresAt - now) / 1000) } },
+        { data: PushNotificationSchema.parse(data), options: { ttl: PUSH_TTL_SECONDS } },
         {
           endpoint: row.endpoint,
           expirationTime: null,

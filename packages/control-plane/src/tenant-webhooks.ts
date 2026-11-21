@@ -41,7 +41,7 @@ const toWebhookEndpoint = (sql: SqlStorage, tenantId: string, row: WebhookEndpoi
   });
 
 export abstract class TenantWebhooks extends TenantSubscriptions {
-  private readonly webhookWakes = new Set<string>();
+  private readonly webhookWakes = new Map<string, number>();
 
   protected listWebhookEndpoints(tenantId: string): WebhookEndpoint[] {
     const sql = this.ctx.storage.sql;
@@ -111,28 +111,22 @@ export abstract class TenantWebhooks extends TenantSubscriptions {
   protected override appendEvent(event: NewTenantEvent, now: number): number {
     const eventId = super.appendEvent(event, now);
     const wakes = this.ctx.storage.sql
-      .exec<{ webhook_endpoint_id: string }>(
-        `SELECT w.webhook_endpoint_id FROM webhook_endpoints AS w
-        JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id)
-        WHERE e.event = ? AND NOT EXISTS (SELECT 1 FROM webhook_failings AS f WHERE f.webhook_endpoint_id = w.webhook_endpoint_id)`,
+      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
+        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_endpoints AS w
+        JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ? ORDER BY w.created_at, w.webhook_endpoint_id`,
         event.event,
       )
       .toArray();
-    for (const wake of wakes) this.webhookWakes.add(wake.webhook_endpoint_id);
+    for (const wake of wakes) this.webhookWakes.set(wake.webhook_endpoint_id, wake.start_event_id);
     return eventId;
   }
 
   protected takeWebhookWakes(): { webhookEndpointId: string; cursorEventId: number }[] {
-    if (this.webhookWakes.size === 0) return [];
-    const ids = [...this.webhookWakes];
+    const wakes = [...this.webhookWakes].map(([webhookEndpointId, cursorEventId]) => ({
+      webhookEndpointId,
+      cursorEventId,
+    }));
     this.webhookWakes.clear();
-    return this.ctx.storage.sql
-      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
-        `SELECT webhook_endpoint_id, start_event_id FROM webhook_endpoints
-        WHERE webhook_endpoint_id IN (SELECT value FROM json_each(?)) ORDER BY created_at, webhook_endpoint_id`,
-        JSON.stringify(ids),
-      )
-      .toArray()
-      .map((row) => ({ webhookEndpointId: row.webhook_endpoint_id, cursorEventId: row.start_event_id }));
+    return wakes;
   }
 }

@@ -279,8 +279,12 @@ test("the sender signs ordered events, sends a failed event once and stops on de
   const read = await server.fetch(
     `${origin}/__fixture/endpoint?tenantId=${TENANT_ID}&webhookEndpointId=${endpoint.webhookEndpointId}`,
   );
-  const delivering = EndpointResultSchema.parse(await read.json()).result.endpoint;
-  assert.deepEqual(delivering?.status, { delivery: "Delivering" });
+  const failing = EndpointResultSchema.parse(await read.json()).result.endpoint;
+  assert.deepEqual(failing?.status, {
+    delivery: "Failing",
+    detail: "HTTP 500",
+    failingSince: failing?.status.delivery === "Failing" ? failing.status.failingSince : "",
+  });
 
   const deleted = await post("/__fixture/delete", {
     tenantId: TENANT_ID,
@@ -443,46 +447,6 @@ test("a legacy malformed browser key is dropped without blocking another browser
   );
   assert.equal(state, 1);
   assert.equal(received.length, receivedBefore + 1);
-});
-
-test("an expired push event is not sent and a fresh one is", async () => {
-  const tenantId = crypto.randomUUID();
-  const now = Date.now();
-  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
-  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
-  await post("/__fixture/push/create", {
-    tenantId,
-    subscription: {
-      endpoint: `${receiverOrigin}/push/retry`,
-      keys: { p256dh, auth },
-      events: ["SubscriptionPaused"],
-    },
-    now,
-  });
-  const emit = (at: number) =>
-    post("/__fixture/emit", {
-      tenantId,
-      event: {
-        event: "SubscriptionPaused",
-        subscriptionId: "subscription-expiry",
-        sessionId: "session-expiry",
-        reason: { kind: "ByRequest", message: "Choose a release." },
-      },
-      now: at,
-    });
-  const receivedBefore = received.length;
-  await emit(now - 86_400_001);
-  await emit(now - 3_600_000);
-  await until(
-    "the fresh push attempt",
-    async () => received.length,
-    (length) => length >= receivedBefore + 1,
-  );
-  await wait(100);
-  assert.equal(received.length, receivedBefore + 1);
-  const ttl = Number(received.at(-1)?.ttl);
-  assert.ok(ttl >= 82_799 && ttl <= 82_800, `received TTL ${ttl}`);
 });
 
 test("archiving or failing a session ends its subscription and sends the ended event", async () => {

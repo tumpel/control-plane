@@ -446,7 +446,7 @@
       "SELECT deletions FROM snapshot_requests WHERE snapshot_id = ?",
       "SELECT github_user_id, login FROM secret_set_github_users WHERE secret_set_id = ?",
       "SELECT host_id, detail FROM turn_refusals WHERE turn_id = ?",
-      "SELECT list_cursor, failures, retry_at, deletions FROM pack_collection",
+      "SELECT list_cursor, deletions FROM pack_collection",
       "SELECT p.prebuild_id, l.layer_digest, NULL AS reason, NULL AS detail FROM session_prebuild_layers AS p JOIN prebuild_layers AS l ON l.prebuild_id = p.prebuild_id WHERE p.session_id = ?1 UNION ALL SELECT NULL, NULL, reason, detail FROM session_layer_absences WHERE session_id = ?1",
       "SELECT p.tumpel_mcp FROM sessions s JOIN personas p ON p.persona_id = s.persona_id WHERE s.session_id = ?",
       "SELECT path, digest, size_bytes FROM persona_files WHERE persona_id = ? ORDER BY path",
@@ -504,9 +504,8 @@
       "SELECT u.host_id, u.box_capacity, u.boxes_warm, u.load_average, u.memory_available_mib, u.channel_protocol, d.disk_budget_mib, d.disk_held_mib, m.memory_budget_mib, m.memory_held_mib, (SELECT COALESCE(SUM(o.box_memory_mib), 0) FROM unreported_box_offers o WHERE o.host_id = u.host_id) AS unreported_mib, u.created_at, u.updated_at FROM host_usage u LEFT JOIN host_disk_usage d ON d.host_id = u.host_id LEFT JOIN host_memory_usage m ON m.host_id = u.host_id ORDER BY u.created_at, u.host_id",
       "SELECT wrapped FROM data_keys",
       "UPDATE host_usage SET boxes_warm = ?, load_average = ?, memory_available_mib = ?, updated_at = ? WHERE host_id = ?",
-      "UPDATE pack_collection SET list_cursor = '', failures = ?, retry_at = ?",
-      "UPDATE pack_collection SET list_cursor = ?, failures = 0, retry_at = 0",
-      "UPDATE pack_collection SET list_cursor = ?, failures = 0, retry_at = 0, deletions = deletions + 1",
+      "UPDATE pack_collection SET list_cursor = ?",
+      "UPDATE pack_collection SET list_cursor = ?, deletions = deletions + 1",
       "UPDATE prebuilds SET state = 'Building', updated_at = ?1 WHERE state = 'Dispatched' AND prebuild_id IN (SELECT prebuild_id FROM prebuild_sessions WHERE session_id = ?2)",
       "UPDATE prebuilds SET state = 'Done', updated_at = ? WHERE prebuild_id = ? AND state = 'Building'",
       "UPDATE secret_sets SET updated_at = ? WHERE secret_set_id = ?",
@@ -590,9 +589,8 @@
       "INSERT INTO webhook_failings (webhook_endpoint_id, detail, failing_since) VALUES (?, ?, ?)",
       "SELECT 1 FROM webhook_endpoints WHERE webhook_endpoint_id = ?",
       "SELECT event FROM webhook_endpoint_events WHERE webhook_endpoint_id = ? ORDER BY event",
-      "SELECT w.webhook_endpoint_id FROM webhook_endpoints AS w JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ? AND NOT EXISTS (SELECT 1 FROM webhook_failings AS f WHERE f.webhook_endpoint_id = w.webhook_endpoint_id)",
-      "SELECT w.webhook_endpoint_id, w.url, w.start_event_id, w.created_at, CASE WHEN f.webhook_endpoint_id IS NULL THEN json_object('delivery', 'Delivering') ELSE json_object('delivery', 'Failing', 'detail', f.detail, 'failingSince', f.failing_since) END AS status FROM webhook_endpoints AS w LEFT JOIN webhook_failings AS f USING (webhook_endpoint_id)",
-      "SELECT webhook_endpoint_id, start_event_id FROM webhook_endpoints WHERE webhook_endpoint_id IN (SELECT value FROM json_each(?)) ORDER BY created_at, webhook_endpoint_id"
+      "SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_endpoints AS w JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ? ORDER BY w.created_at, w.webhook_endpoint_id",
+      "SELECT w.webhook_endpoint_id, w.url, w.start_event_id, w.created_at, CASE WHEN f.webhook_endpoint_id IS NULL THEN json_object('delivery', 'Delivering') ELSE json_object('delivery', 'Failing', 'detail', f.detail, 'failingSince', f.failing_since) END AS status FROM webhook_endpoints AS w LEFT JOIN webhook_failings AS f USING (webhook_endpoint_id)"
     ],
     "packages/control-plane/src/tenant.ts": [
       "DELETE FROM harness_pins WHERE harness = ?",
