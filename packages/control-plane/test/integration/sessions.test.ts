@@ -3884,6 +3884,97 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
+  test("an evicted session keeps its subscription, and the next delivery boots it a fresh box from its snapshot", async () => {
+    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const tight = await enrol("tight");
+    const side = await connect(tight.id, tight.key, 1);
+    await hostState(tight.id, "Online");
+    const foreman = await idleTurn(side, { ...(await sessionStart()), prompt: "lead the crew" }, bearer);
+    const foremanId = foreman.session.sessionId;
+    const snapshot = await side.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    side.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "the foreman reading Idle",
+      () => getJson(`/v1/sessions/${foremanId}`, SessionSchema),
+      (session) => session.state === "Idle",
+    );
+    const subscription = await tool(
+      "tumpel_subscription_create",
+      {
+        sessionId: foremanId,
+        prompt: "review what the crew did",
+        goal: "every crew turn is reviewed",
+        events: ["TurnCompleted"],
+        crewTags: ["crew:review"],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      SubscriptionSchema,
+    );
+
+    const response = await postJson(
+      "/v1/sessions",
+      { ...(await sessionStart()), prompt: "review a pull request", tags: ["crew:review"] },
+      bearer,
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+    const crew = StartedSessionSchema.parse(await response.json());
+    assert.deepEqual(await side.next("BoxTeardown"), {
+      type: "BoxTeardown",
+      sessionId: foremanId,
+      boxId: foreman.offer.boxId,
+    });
+    side.send({ type: "BoxGone", sessionId: foremanId, boxId: foreman.offer.boxId });
+    const crewOffer = await side.next("TurnOffer");
+    assert.equal(crewOffer.turnId, crew.turn.turnId);
+    assert.equal((await getJson(`/v1/sessions/${foremanId}`, SessionSchema)).state, "Stopped");
+
+    side.send({ type: "TurnClaim", turnId: crewOffer.turnId, boxId: crewOffer.boxId });
+    side.send({
+      type: "TurnLine",
+      turnId: crewOffer.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    side.send({
+      type: "TurnComplete",
+      turnId: crewOffer.turnId,
+      lastLineSeq: 1,
+      completedAt: new Date().toISOString(),
+    });
+    const crewSnapshot = await side.next("SnapshotRequest");
+    await storeRoot(crewSnapshot.storageKey);
+    side.send({ type: "SnapshotDone", snapshotId: crewSnapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "the crew turn reading Completed",
+      () => getJson(`/v1/turns/${crewOffer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    assert.deepEqual(await side.next("BoxTeardown"), {
+      type: "BoxTeardown",
+      sessionId: crew.session.sessionId,
+      boxId: crewOffer.boxId,
+    });
+    side.send({ type: "BoxGone", sessionId: crew.session.sessionId, boxId: crewOffer.boxId });
+
+    const delivery = await side.next("TurnOffer");
+    assert.equal(delivery.sessionId, foremanId);
+    assert.notEqual(delivery.boxId, foreman.offer.boxId);
+    assert.deepEqual(
+      delivery.snapshots.map((each) => each.snapshotId),
+      [snapshot.snapshotId],
+    );
+    const kept = await tool(
+      "tumpel_subscription_get",
+      { subscriptionId: subscription.subscriptionId },
+      SubscriptionSchema,
+    );
+    assert.equal(kept.state, "Active");
+    side.close();
+  });
+
   test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
