@@ -10,7 +10,6 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
@@ -19,7 +18,6 @@ import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import { limitsOf, type TenantTier, tierLimits } from "./limits.ts";
 import { meteredState } from "./metered-state.ts";
-import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
   type MemberUpdate,
@@ -184,7 +182,6 @@ const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
 const USAGE_KEY = "usage";
-const TIER_FIRST_RETRY_MS = 1_000;
 
 const tierOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<TenantTier> => {
   const row = await db
@@ -194,12 +191,10 @@ const tierOf = async (db: D1Database, tenantId: string, fallback: TenantTier): P
   return row?.tier ?? fallback;
 };
 
-type TierRead = { settled: boolean; retries: number; retryAt: number; reading: Promise<void> | null };
-
 export class Tenant extends TenantConnectors {
   private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
   private meter: UsageMeter | undefined;
-  private readonly tierRead: TierRead = { settled: false, retries: 0, retryAt: 0, reading: null };
+  private tierRead: Promise<void> | null = null;
   private readonly opened: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -223,39 +218,18 @@ export class Tenant extends TenantConnectors {
     this.meter = new UsageMeter(tier, tierLimits(limitsOf(this.env), tier), saved, this.cursors, Date.now());
   }
 
-  private async settleTier(now: number): Promise<void> {
-    const read = this.tierRead;
-    if (read.settled || read.retries > RETRY_LIMIT || now < read.retryAt) return;
-    read.reading ??= this.readTier().finally(() => {
-      read.reading = null;
+  private settleTier(): Promise<void> {
+    this.tierRead ??= this.readTier().catch((error: unknown) => {
+      this.tierRead = null;
+      throw error;
     });
-    await read.reading;
+    return this.tierRead;
   }
 
   private async readTier(): Promise<void> {
-    const read = this.tierRead;
-    const tenantId = this.tenantName();
     const { defaultTier } = limitsOf(this.env);
-    const outcome = await tierOf(this.env.DB, tenantId, defaultTier).then(
-      (tier) => ({ ok: true as const, tier }),
-      (error: unknown) => ({ ok: false as const, error: errorOf(error) }),
-    );
-    if (outcome.ok) {
-      read.settled = true;
-      this.usageMeter().retier(outcome.tier, tierLimits(limitsOf(this.env), outcome.tier), Date.now());
-      return;
-    }
-    read.retries += 1;
-    if (read.retries > RETRY_LIMIT) {
-      console.error(
-        `TenantTierUnread: tenant ${tenantId} stays on the default ${defaultTier} tier until the object restarts, because reading its tier from D1 failed ${RETRY_LIMIT + 1} times: ${outcome.error.message}`,
-      );
-      return;
-    }
-    read.retryAt = Date.now() + backoffMs(read.retries, TIER_FIRST_RETRY_MS);
-    console.error(
-      `TenantTierRetry: tenant ${tenantId} retry ${read.retries} of ${RETRY_LIMIT} reading its tier from D1, on the default ${defaultTier} tier meanwhile: ${outcome.error.message}`,
-    );
+    const tier = await tierOf(this.env.DB, this.tenantName(), defaultTier);
+    this.usageMeter().retier(tier, tierLimits(limitsOf(this.env), tier), Date.now());
   }
 
   private usageMeter(): UsageMeter {
@@ -263,10 +237,10 @@ export class Tenant extends TenantConnectors {
     return this.meter;
   }
 
-  private async meterUsage(operation: string | null, requested: boolean): Promise<void> {
+  private async meterUsage(operation: string | null): Promise<void> {
     const meter = this.usageMeter();
     const now = Date.now();
-    for (const signal of meter.count(operation, now, requested)) {
+    for (const signal of meter.count(operation, now)) {
       if (signal.event === "UsageLimitReached") {
         console.error(
           `UsageLimitReached: tenant ${this.tenantName()} on the ${signal.tier} tier spent its limit of ${signal.limit} ${signal.measure} per ${signal.window.toLowerCase()}; it is refused until ${signal.resetsAt}`,
@@ -281,52 +255,30 @@ export class Tenant extends TenantConnectors {
 
   async handle(request: TenantRequest): Promise<TenantResponse> {
     await this.opened;
-    await this.settleTier(Date.now());
+    await this.settleTier();
     return this.serve(request, null);
   }
 
   async handleForTenant(request: TenantRequest): Promise<TenantResponse> {
     await this.opened;
     const operation = typeof request.operation === "string" ? request.operation : "";
-    await this.settleTier(Date.now());
+    await this.settleTier();
     const spent = operation === "readUsage" ? null : this.usageMeter().spent(operation, Date.now());
     if (spent !== null) return spent;
     return this.serve(request, operation);
   }
 
   private async serve(request: TenantRequest, operation: string | null): Promise<TenantResponse> {
+    this.expireSubscriptions(Date.now());
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.meterUsage(operation, true);
-    await this.ctx.storage.setAlarm(Date.now());
+    await this.meterUsage(operation);
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
-    await this.armAlarm();
+    this.wakeWebhooks();
+    this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
     return response;
-  }
-
-  override async alarm(): Promise<void> {
-    await this.opened;
-    const now = Date.now();
-    await this.meterUsage(null, false);
-    const queued = this.queuedAt();
-    if (queued === null || queued > now) return this.armAlarm();
-    await this.ctx.storage.setAlarm(now);
-    await this.deliverPushes(this.tenantName(), now);
-    this.expireSubscriptions(now);
-    await this.startDeliveries(this.tenantName());
-    this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
-    await this.meterUsage(null, false);
-    await this.armAlarm();
-  }
-
-  private drainObjects(): void {
-    this.ctx.waitUntil(drainObjectCleanups(this.ctx.storage.sql, this.env.STORE));
   }
 
   private tenantName(): string {
@@ -341,44 +293,13 @@ export class Tenant extends TenantConnectors {
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
   }
 
-  private async wakeWebhooks(): Promise<void> {
+  private wakeWebhooks(): void {
     const tenantId = this.tenantName();
-    const wakes = this.ctx.storage.sql
-      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
-        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_wakes
-        JOIN webhook_endpoints AS w USING (webhook_endpoint_id) ORDER BY w.created_at, w.webhook_endpoint_id`,
-      )
-      .toArray();
-    if (wakes.length === 0) return;
-    for (const wake of wakes) {
-      await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id)).wake({
-        tenantId,
-        webhookEndpointId: wake.webhook_endpoint_id,
-        cursorEventId: wake.start_event_id,
-      });
-      this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+    for (const wake of this.takeWebhookWakes()) {
+      this.ctx.waitUntil(
+        this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhookEndpointId)).wake({ tenantId, ...wake }),
+      );
     }
-  }
-
-  private queuedAt(): number | null {
-    const [next] = this.ctx.storage.sql
-      .exec<{ at: number | null }>(`SELECT MIN(at) AS at FROM (
-        SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
-          WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
-        UNION ALL
-        SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
-          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id))`)
-      .toArray();
-    return next?.at ?? null;
-  }
-
-  private async armAlarm(): Promise<void> {
-    const flushAt = this.meter?.flushAt() ?? null;
-    const queued = this.queuedAt();
-    const at = queued === null || flushAt === null ? (queued ?? flushAt) : Math.min(queued, flushAt);
-    if (at === null) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(at);
   }
 
   private readonly operations: TenantHandlers = {

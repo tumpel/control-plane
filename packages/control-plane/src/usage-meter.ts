@@ -41,8 +41,6 @@ const counts = (counter: Counter, operation: string | null): boolean => {
   return true;
 };
 
-const MINUTE_MS = 60_000;
-
 const sameCounter = (a: SavedCounter, b: SavedCounter): boolean => a.measure === b.measure && a.window === b.window;
 
 const countersOf = (limits: TenantLimit[], saved: SavedCounter[], now: number): Counter[] =>
@@ -115,7 +113,7 @@ export class UsageMeter {
     };
   }
 
-  count(operation: string | null, now: number, requested: boolean): UsageSignal[] {
+  count(operation: string | null, now: number): UsageSignal[] {
     this.roll(now);
     const drained = this.cursors.splice(0);
     const added: Record<Measure, number> = {
@@ -124,7 +122,7 @@ export class UsageMeter {
       RowsWritten: drained.reduce((sum, cursor) => sum + cursor.rowsWritten, 0),
       RowsRead: drained.reduce((sum, cursor) => sum + cursor.rowsRead, 0),
     };
-    if (requested || this.savedMinute === null || added.RowsWritten > 0) this.unsaved = true;
+    this.unsaved = true;
     const signals: UsageSignal[] = [];
     for (const counter of this.counters) {
       counter.used += added[counter.measure];
@@ -167,10 +165,5 @@ export class UsageMeter {
     this.unsaved = false;
     this.stored = this.saved(now);
     return this.stored;
-  }
-
-  flushAt(): number | null {
-    if (!this.unsaved || this.savedMinute === null) return null;
-    return this.savedMinute + MINUTE_MS;
   }
 }

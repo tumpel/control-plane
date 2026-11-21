@@ -13,6 +13,14 @@
     {
       "path": "./npm-scripts/biome-plugins/prose.grit",
       "includes": ["packages/control-plane/src/**/*.ts", "!packages/control-plane/src/**/*.test.ts"]
+    },
+    {
+      "path": "./npm-scripts/biome-plugins/no-alarm.grit",
+      "includes": [
+        "packages/control-plane/**/*.ts",
+        "!packages/control-plane/src/session-timer.ts",
+        "!packages/control-plane/test/scenarios/harness/runtime.ts"
+      ]
     }
   ],
   "formatter": {

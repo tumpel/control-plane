@@ -34,7 +34,7 @@ import {
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
+import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import { linesLost } from "./channel/failure.ts";
@@ -85,10 +85,9 @@ import {
 } from "./github.ts";
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
-import { type HostRecord, hostOf, listHosts } from "./hosts";
+import { type HostRecord, hostOf, hostSilent, listHosts } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
-import { drainObjectCleanups, recordObjectCleanups } from "./object-cleanups.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
@@ -464,10 +463,9 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
-const PACK_COLLECTION_BACKOFF_MS = 2000;
 const UPLOAD_CLOCK_SKEW_MS = 60_000;
 
-type PackCollection = { list_cursor: string; failures: number; retry_at: number; deletions: number };
+type PackCollection = { list_cursor: string; deletions: number };
 const IDLE_EVICTION_MS = 15 * 60 * 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
@@ -1468,7 +1466,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return;
     }
     if (session.state !== "Stopped") return;
-    const hosts = await listHosts(this.env.DB, tenantId);
+    const hosts = await listHosts(this.env, tenantId);
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (this.turnRow(turnId)?.state !== "Offered" || this.sessionRow(session.session_id)?.state !== "Stopped") return;
     if (image.kind === "ReleaseUnreadable") {
@@ -2275,7 +2273,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
-    return this.placeOffered(tenantId, session, turn, false, await listHosts(this.env.DB, tenantId));
+    return this.placeOffered(tenantId, session, turn, false, await listHosts(this.env, tenantId));
   }
 
   private async placeOffered(
@@ -2383,7 +2381,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const deferred = pending("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId);
     const waits = pending("SELECT turn_id FROM turn_capacity_waits ORDER BY created_at");
     if (deferred.length === 0 && waits.length === 0) return [];
-    const hosts = await listHosts(this.env.DB, tenantId);
+    const hosts = await listHosts(this.env, tenantId);
     const handoffs: TurnHandoff[] = [];
     for (const turnId of deferred) {
       const handoff = await this.offerDeferred(tenantId, turnId, hosts);
@@ -2636,8 +2634,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray()
       .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
+    await this.deleteObjects([...keys, ...this.objectKeys(stored)]);
     this.ctx.storage.transactionSync(() => {
-      recordObjectCleanups(sql, [...keys, ...this.releaseSnapshots(stored)]);
+      this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
     });
@@ -2646,7 +2645,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       tenantId,
       stored.map((snapshot) => snapshot.storage_key),
     );
-    await this.drainCleanups(tenantId);
     await this.collectChunks(tenantId);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
@@ -2657,16 +2655,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
-    this.ctx.storage.transactionSync(() => {
-      recordObjectCleanups(
-        sql,
-        sql
-          .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
-          .toArray()
-          .map((row) => row.storage_key),
-      );
-      sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
-    });
+    const transcriptKeys = sql
+      .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
+      .toArray()
+      .map((row) => row.storage_key);
+    await this.deleteObjects(transcriptKeys);
+    sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     return { kind: "Deleted" };
   }
 
@@ -2685,31 +2679,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
       stored.session_id,
       stored.snapshot_seq,
     );
-    this.ctx.storage.transactionSync(() => recordObjectCleanups(sql, this.releaseSnapshots(older)));
+    await this.deleteObjects([...this.objectKeys(older), ...failed]);
+    this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
     await this.live.release(
       this.env.STORE,
       tenantId,
       older.map((snapshot) => snapshot.storage_key),
     );
-    await this.drainCleanups(tenantId);
-    await this.deleteObjects(failed);
     await this.collectChunks(tenantId);
     await this.archiveSupersededPrebuilds(tenantId, now);
   }
 
-  private drainCleanups(tenantId: string): Promise<void> {
-    return drainObjectCleanups(this.ctx.storage.sql, this.env.STORE).catch((error: unknown) =>
-      console.error(
-        `tenant ${tenantId} could not delete released snapshot objects now, so the object cleanup step deletes them later: ${errorOf(error).message}`,
-      ),
-    );
-  }
-
-  private releaseSnapshots(snapshots: { snapshot_id: string; storage_key: string }[]): string[] {
+  private releaseSnapshots(snapshots: { snapshot_id: string; storage_key: string }[]): void {
     for (const snapshot of snapshots) {
       this.ctx.storage.sql.exec("DELETE FROM snapshots WHERE snapshot_id = ?", snapshot.snapshot_id);
       this.manifests.forget(snapshot.storage_key);
     }
+  }
+
+  private objectKeys(snapshots: { storage_key: string }[]): string[] {
     return snapshots.flatMap((snapshot) => [snapshot.storage_key, packListKey(snapshot.storage_key)]);
   }
 
@@ -2733,38 +2721,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private packCollection(): PackCollection {
     const [row] = this.ctx.storage.sql
-      .exec<PackCollection>("SELECT list_cursor, failures, retry_at, deletions FROM pack_collection")
+      .exec<PackCollection>("SELECT list_cursor, deletions FROM pack_collection")
       .toArray();
     if (row === undefined) throw new Error("the tenant holds no pack_collection row, though migration 0088 inserts it");
     return row;
   }
 
   private async collectChunks(tenantId: string): Promise<void> {
-    const state = this.packCollection();
-    const now = Date.now();
-    if (state.failures >= RETRY_LIMIT || now < state.retry_at) return;
-    await this.collectPackPage(tenantId, state.list_cursor).then(
-      (next) => {
-        const current = this.packCollection();
-        if (current.list_cursor === next && current.failures === 0) return;
-        this.ctx.storage.sql.exec("UPDATE pack_collection SET list_cursor = ?, failures = 0, retry_at = 0", next);
-      },
-      (error: unknown) => {
-        const failures = state.failures + 1;
-        const backoff = backoffMs(failures, PACK_COLLECTION_BACKOFF_MS);
-        const detail = errorOf(error).message;
-        console.error(
-          failures >= RETRY_LIMIT
-            ? `tenant ${tenantId} stopped collecting unreferenced packs after ${failures} failed runs: ${detail}; packs no snapshot names stay in object storage until the cause is fixed and the failures of its pack_collection row are reset to 0`
-            : `tenant ${tenantId} failed to collect unreferenced packs on run ${failures} of ${RETRY_LIMIT}, and tries again in ${Math.round(backoff / 1000)} seconds: ${detail}`,
-        );
-        this.ctx.storage.sql.exec(
-          "UPDATE pack_collection SET list_cursor = '', failures = ?, retry_at = ?",
-          failures,
-          now + backoff,
-        );
-      },
-    );
+    const { list_cursor: cursor } = this.packCollection();
+    const next = await this.collectPackPage(tenantId, cursor);
+    if (next !== cursor) this.ctx.storage.sql.exec("UPDATE pack_collection SET list_cursor = ?", next);
   }
 
   private async collectPackPage(tenantId: string, cursor: string): Promise<string> {
@@ -2800,10 +2766,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const from = uploadsFrom();
       const dead = unnamed.filter((object) => object.uploaded.getTime() < from).map((object) => object.key);
       if (dead.length === 0) return { next };
-      sql.exec(
-        "UPDATE pack_collection SET list_cursor = ?, failures = 0, retry_at = 0, deletions = deletions + 1",
-        next,
-      );
+      sql.exec("UPDATE pack_collection SET list_cursor = ?, deletions = deletions + 1", next);
       return this.deleteObjects(dead).then(
         () => ({ next }),
         (error: unknown) => ({ failed: errorOf(error) }),
@@ -3596,7 +3559,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
       .bind(hostId)
       .first<{ state: string }>();
-    return row?.state === "Offline";
+    return row?.state === "Offline" || (row?.state === "Online" && (await hostSilent(this.env, hostId)));
   }
 
   protected async hostMessage(

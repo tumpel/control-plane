@@ -238,7 +238,7 @@ after(async () => {
 });
 
 suite("hosts", { concurrency: true }, () => {
-  test("a host enrols with a one-time token, holds its channel, drops to Offline when it falls silent, and stops on revoke", async () => {
+  test("a host enrols with a one-time token, holds its channel, reads Offline when it falls silent, and stops on revoke", async () => {
     const token = await mint();
     const first = await enrol("first", token);
     assert.equal(first.finished.code, 0, first.finished.stderr);

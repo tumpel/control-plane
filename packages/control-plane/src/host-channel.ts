@@ -109,6 +109,17 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
+  lastReceivedAt(): number | null {
+    const received = this.ctx
+      .getWebSockets()
+      .filter(
+        (socket) =>
+          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
+      )
+      .map((socket) => this.attachment(socket).lastReceivedAt);
+    return received.length === 0 ? null : Math.max(...received);
+  }
+
   async send(message: StoredControlMessage): Promise<"Sent" | "Deferred"> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
@@ -167,7 +178,6 @@ export class HostChannel extends DurableObject<Env> {
     };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
-    await this.armAlarm(now + this.deadlineMs());
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -243,7 +253,6 @@ export class HostChannel extends DurableObject<Env> {
     )
       control.beat(context);
     this.keep(socket, attachment);
-    await this.armAlarm(attachment.lastReceivedAt + this.deadlineMs());
     if (event.kind !== "Welcomed") return;
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
@@ -399,34 +408,10 @@ export class HostChannel extends DurableObject<Env> {
     await this.refreshPresence(socket);
   }
 
-  override async alarm(): Promise<void> {
-    const now = Date.now();
-    const deadlineMs = this.deadlineMs();
-    const live: number[] = [];
-    for (const socket of this.ctx.getWebSockets()) {
-      const { lastReceivedAt } = this.attachment(socket);
-      if (now - lastReceivedAt < deadlineMs) {
-        live.push(lastReceivedAt);
-        continue;
-      }
-      socket.close(CloseCode.HeartbeatDeadline, `nothing arrived for ${deadlineMs / 1000} seconds; reconnect`);
-    }
-    await this.refreshPresence();
-    if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + deadlineMs);
-  }
-
   private keep(socket: WebSocket, attachment: Attachment): void {
     attachment.heldFrom = this.ledger.first();
     attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
     socket.serializeAttachment(attachment);
-  }
-
-  private async armAlarm(at: number): Promise<void> {
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(at);
-  }
-
-  private deadlineMs(): number {
-    return settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {

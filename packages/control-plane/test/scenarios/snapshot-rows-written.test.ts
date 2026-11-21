@@ -18,7 +18,6 @@ const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_PADDING = 120 * 1024 * 1024;
 const OVER_CAP_ROOT_PLACEMENTS = 700_000;
-const COLLECTION_RUNS = 10;
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 type ManifestsModule = {
@@ -357,11 +356,14 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     await uploadsChunks(world, host, request.snapshotId, chunks);
 
     await storesRoot(world, request.storageKey, chunks, [unknownEntry]);
-    await host.says({
-      type: "SnapshotDone",
-      snapshotId: request.snapshotId,
-      uploadedBytes: chunks.length * CHUNK_BYTES,
-    });
+    await assert.rejects(
+      host.says({
+        type: "SnapshotDone",
+        snapshotId: request.snapshotId,
+        uploadedBytes: chunks.length * CHUNK_BYTES,
+      }),
+      /its packs cannot be read/,
+    );
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -372,11 +374,6 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     for (const packDigest of new Set([manifestPack, ...chunks.map((chunk) => chunk.packDigest)])) {
       assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
     }
-    assert.equal(
-      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures,
-      1,
-      "retention stops on the unreadable snapshot",
-    );
   });
 });
 
@@ -540,107 +537,8 @@ test("a stored snapshot whose index would pass the cap keeps its packs without s
     await host.completes(secondOffer);
     await storesSnapshot(world, host, second.sessionId, tree(1, "new"));
 
-    assert.equal(world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures, 0);
     assert.equal(await world.store.get(junk), null, "retention frees the pack no snapshot names");
     for (const packDigest of new Set([manifestPack, ...old.map((chunk) => chunk.packDigest)])) {
-      assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
-    }
-  });
-});
-
-test("a pack delete that object storage keeps refusing backs retention off and stops it after 10 runs, and snapshots keep working", async () => {
-  await inWorld(async (world, host) => {
-    const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
-    await world.store.put(junk, "junk");
-    await world.passes(2 * 60_000);
-    world.store.failure = {
-      operation: "delete",
-      prefix: `${TENANT_ID}/packs/`,
-      error: new Error("object storage refused the delete"),
-    };
-    const failures = (): unknown =>
-      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures;
-    const failedRun = async (prompt: string): Promise<void> => {
-      const session = await world.startSession({ prompt, tags: [] });
-      const offer = host.takeOffer();
-      await host.claims(offer);
-      await host.completes(offer);
-      await failsSnapshot(host, snapshotAsked(host, session.sessionId).snapshotId);
-      await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: session.sessionId, now: Date.now() });
-    };
-
-    await failedRun("the first run");
-    assert.equal(failures(), 1);
-    await failedRun("a run inside the backoff");
-    assert.equal(failures(), 1, "a run inside the backoff does not collect");
-    for (let run = 2; run <= COLLECTION_RUNS + 1; run++) {
-      await world.passes(2 ** run * 1000);
-      await failedRun(`run ${run}`);
-      assert.equal(failures(), Math.min(run, COLLECTION_RUNS));
-    }
-    assert.notEqual(await world.store.get(junk), null, "the refused pack stays");
-
-    world.store.failure = null;
-    const session = await world.startSession({ prompt: "build after retention stopped", tags: [] });
-    const offer = host.takeOffer();
-    await host.claims(offer);
-    await host.completes(offer);
-    await storesSnapshot(world, host, session.sessionId, tree(1, "after"));
-    const { snapshots } = SnapshotsSchema.parse(
-      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
-    );
-    assert.equal(snapshots[0]?.outcome.state, "Stored");
-  });
-});
-
-test("an object storage error while the live pack names are rebuilt leaves nothing behind, and retention runs again once it clears", async () => {
-  await inWorld(async (world, host) => {
-    const first = await world.startSession({ prompt: "a session with stored snapshots", tags: [] });
-    const firstOffer = host.takeOffer();
-    await host.claims(firstOffer);
-    await host.completes(firstOffer);
-    const request = snapshotAsked(host, first.sessionId);
-    const released = tree(DIGESTS_PER_PART, "released");
-    const kept = tree(DIGESTS_PER_PART, "kept");
-    const releasedKey = `${TENANT_ID}/${first.sessionId}/snapshots/released`;
-    const keptKey = `${TENANT_ID}/z-another-session/snapshots/kept`;
-    const releasedManifest = (await storesRoot(world, releasedKey, released)).packDigest;
-    const keptManifest = (await storesRoot(world, keptKey, kept)).packDigest;
-    for (const packDigest of new Set([...released, ...kept].map((chunk) => chunk.packDigest))) {
-      await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
-    }
-    insertsSnapshot(world, "released", request, releasedKey);
-    insertsSnapshot(world, "kept", request, keptKey, "another-session");
-    const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
-    await world.store.put(junk, "junk");
-    await world.passes(2 * 60_000);
-    const failures = (): unknown =>
-      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures;
-
-    world.store.failure = { operation: "get", prefix: keptKey, error: new Error("object storage timed out") };
-    await failsSnapshot(host, request.snapshotId);
-    assert.equal(failures(), 1, "the failed rebuild fails the retention run");
-    await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: first.sessionId, now: Date.now() });
-    assert.equal(await world.store.get(releasedKey), null, "the archive deletes the released root");
-    world.store.failure = null;
-    await world.passes(5_000);
-
-    const second = await world.startSession({ prompt: "a session after the outage", tags: [] });
-    const secondOffer = host.takeOffer();
-    await host.claims(secondOffer);
-    await host.completes(secondOffer);
-    await failsSnapshot(host, snapshotAsked(host, second.sessionId).snapshotId);
-
-    assert.equal(failures(), 0, "retention runs again");
-    assert.equal(await world.store.get(junk), null, "retention frees the pack no snapshot names");
-    for (const packDigest of new Set([releasedManifest, ...released.map((chunk) => chunk.packDigest)])) {
-      assert.equal(
-        await world.store.get(`${TENANT_ID}/packs/${packDigest}`),
-        null,
-        `released pack ${packDigest} is freed`,
-      );
-    }
-    for (const packDigest of new Set([keptManifest, ...kept.map((chunk) => chunk.packDigest)])) {
       assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
     }
   });

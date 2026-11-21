@@ -20,10 +20,9 @@ type WebhookEndpointRow = {
 };
 
 const WEBHOOK_ENDPOINT_SELECT = `SELECT w.webhook_endpoint_id, w.url, w.start_event_id, w.created_at,
-  CASE WHEN d.webhook_endpoint_id IS NOT NULL THEN json_object('delivery', 'Delivering')
+  CASE WHEN f.webhook_endpoint_id IS NULL THEN json_object('delivery', 'Delivering')
     ELSE json_object('delivery', 'Failing', 'detail', f.detail, 'failingSince', f.failing_since) END AS status
-  FROM webhook_endpoints AS w LEFT JOIN webhook_deliverings AS d USING (webhook_endpoint_id)
-  LEFT JOIN webhook_failings AS f USING (webhook_endpoint_id)`;
+  FROM webhook_endpoints AS w LEFT JOIN webhook_failings AS f USING (webhook_endpoint_id)`;
 
 const toWebhookEndpoint = (sql: SqlStorage, tenantId: string, row: WebhookEndpointRow): WebhookEndpoint =>
   WebhookEndpointSchema.parse({
@@ -42,6 +41,8 @@ const toWebhookEndpoint = (sql: SqlStorage, tenantId: string, row: WebhookEndpoi
   });
 
 export abstract class TenantWebhooks extends TenantSubscriptions {
+  private readonly webhookWakes = new Map<string, number>();
+
   protected listWebhookEndpoints(tenantId: string): WebhookEndpoint[] {
     const sql = this.ctx.storage.sql;
     return sql
@@ -76,7 +77,6 @@ export abstract class TenantWebhooks extends TenantSubscriptions {
           event,
         );
       }
-      sql.exec("INSERT INTO webhook_deliverings (webhook_endpoint_id) VALUES (?)", webhookEndpointId);
     });
     const created = this.getWebhookEndpoint(tenantId, webhookEndpointId);
     if (created === null) throw new Error(`webhook endpoint ${webhookEndpointId} vanished while it was read back`);
@@ -97,12 +97,8 @@ export abstract class TenantWebhooks extends TenantSubscriptions {
       .toArray();
     if (endpoint === undefined) return;
     this.ctx.storage.transactionSync(() => {
-      sql.exec("DELETE FROM webhook_deliverings WHERE webhook_endpoint_id = ?", webhookEndpointId);
       sql.exec("DELETE FROM webhook_failings WHERE webhook_endpoint_id = ?", webhookEndpointId);
-      if (status.delivery === "Delivering") {
-        sql.exec("INSERT INTO webhook_deliverings (webhook_endpoint_id) VALUES (?)", webhookEndpointId);
-        return;
-      }
+      if (status.delivery === "Delivering") return;
       sql.exec(
         "INSERT INTO webhook_failings (webhook_endpoint_id, detail, failing_since) VALUES (?, ?, ?)",
         webhookEndpointId,
@@ -114,13 +110,23 @@ export abstract class TenantWebhooks extends TenantSubscriptions {
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
     const eventId = super.appendEvent(event, now);
-    this.ctx.storage.sql.exec(
-      `INSERT OR IGNORE INTO webhook_wakes (webhook_endpoint_id)
-        SELECT w.webhook_endpoint_id FROM webhook_endpoints AS w
-        JOIN webhook_deliverings AS d USING (webhook_endpoint_id)
-        JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ?`,
-      event.event,
-    );
+    const wakes = this.ctx.storage.sql
+      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
+        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_endpoints AS w
+        JOIN webhook_endpoint_events AS e USING (webhook_endpoint_id) WHERE e.event = ? ORDER BY w.created_at, w.webhook_endpoint_id`,
+        event.event,
+      )
+      .toArray();
+    for (const wake of wakes) this.webhookWakes.set(wake.webhook_endpoint_id, wake.start_event_id);
     return eventId;
+  }
+
+  protected takeWebhookWakes(): { webhookEndpointId: string; cursorEventId: number }[] {
+    const wakes = [...this.webhookWakes].map(([webhookEndpointId, cursorEventId]) => ({
+      webhookEndpointId,
+      cursorEventId,
+    }));
+    this.webhookWakes.clear();
+    return wakes;
   }
 }

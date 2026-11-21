@@ -146,7 +146,7 @@ export abstract class TenantTriggers extends TenantWebhooks {
     const session: NewSession = {
       principalId: trigger.principalId,
       startedBy: origin,
-      hosts: await listHosts(this.env.DB, tenantId),
+      hosts: await listHosts(this.env, tenantId),
       harness: entry.harness,
       harnessVersion: entry.harnessVersion,
       endpoint: apiOriginOf(this.env),

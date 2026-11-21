@@ -1048,7 +1048,7 @@ const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Respo
 const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await hostReads(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
+  return json(await hostReads(env, caller.tenantId, await listHosts(env, caller.tenantId)));
 };
 
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
