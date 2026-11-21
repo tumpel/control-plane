@@ -200,8 +200,13 @@ const objects = (bucket: "STORE" | "RELEASES"): Objects => {
 
 const store = objects("STORE");
 
-const storeRoot = async (storageKey: string, digests: string[] = []): Promise<string> => {
-  const chunks = digests.map((digest) => ({ digest, packDigest: digest, offset: 0, length: 1 }));
+const storeRoot = async (storageKey: string, digests: string[] = []): Promise<string> =>
+  storePlacedRoot(
+    storageKey,
+    digests.map((digest) => ({ digest, packDigest: digest, offset: 0, length: 1 })),
+  );
+
+const storePlacedRoot = async (storageKey: string, chunks: Placement[]): Promise<string> => {
   const manifest = JSON.stringify({
     entries: [
       {
@@ -768,7 +773,7 @@ const tenant = async () => {
       assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(upload.packDigest, "hex").toString("base64"));
       await store.put(url.pathname.replace("/tumpel-sessions/", ""), "pack bytes");
     }
-    await storeRoot(request.storageKey, digests);
+    await storePlacedRoot(request.storageKey, [...answer.held, ...chunks]);
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
     await until(
       "a stored snapshot",
@@ -2577,7 +2582,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.match(failure.detail, /cancelled the turn/);
   });
 
-  test("a snapshot learns where the tenant holds its chunks and uploads only new packs, a restore gets only its session's packs, and an archive keeps every pack", async () => {
+  test("a snapshot uploads only the packs object storage lacks, a restore gets only the packs of its snapshot, and an archive deletes the packs no snapshot holds", async () => {
     const { host, getJson, tool, completedTurn, storedChunks } = await tenant();
     const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
     const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
@@ -2591,8 +2596,11 @@ suite("sessions", { concurrency: 8 }, () => {
     const tenantId = request.storageKey.split("/")[0] ?? "";
 
     const second = await completedTurn("chunk the second");
-    const shared = await storedChunks(second.session.sessionId, [two, three, three], { [packThree]: [three] });
-    assert.deepEqual(shared.held, [{ digest: two, packDigest: packTwo, offset: 0, length: CHUNK_BYTES }]);
+    const shared = await storedChunks(second.session.sessionId, [two, three, three], {
+      [packTwo]: [two],
+      [packThree]: [three],
+    });
+    assert.deepEqual(shared.held, []);
     assert.deepEqual(shared.uploaded, [packThree]);
 
     await tool("tumpel_turn_send", { sessionId: first.session.sessionId, prompt: "restore me" }, TurnSchema);
@@ -2695,17 +2703,14 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Stopped",
     );
     await tool("tumpel_session_archive", { sessionId: first.session.sessionId }, SessionSchema);
-    assert.notEqual(await store.text(`${tenantId}/packs/${packOne}`), null);
+    assert.equal(await store.text(`${tenantId}/packs/${packOne}`), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packTwo}`), null);
     assert.notEqual(await store.text(`${tenantId}/packs/${packThree}`), null);
 
     const third = await completedTurn("chunk the third");
-    const again = await storedChunks(third.session.sessionId, [one, two], {});
-    assert.deepEqual(
-      again.held.map((placement) => placement.digest),
-      [one, two],
-    );
-    assert.deepEqual(again.uploaded, []);
+    const again = await storedChunks(third.session.sessionId, [one, two], { [packOne]: [one], [packTwo]: [two] });
+    assert.deepEqual(again.held, []);
+    assert.deepEqual(again.uploaded, [packOne]);
   });
 
   test("a stored snapshot deletes the session's older root and keeps the packs its chunks lie in", async () => {
@@ -2733,7 +2738,8 @@ suite("sessions", { concurrency: 8 }, () => {
       lastLineSeq: lineSeq,
       completedAt: new Date().toISOString(),
     });
-    const newer = await storedChunks(sessionId, [two], { [packTwo]: [two] });
+    const newer = await storedChunks(sessionId, [one, two], { [packTwo]: [two] });
+    assert.deepEqual(newer.held, [{ digest: one, packDigest: packOne, offset: 0, length: CHUNK_BYTES }]);
     await until(
       "the older snapshot gone",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
