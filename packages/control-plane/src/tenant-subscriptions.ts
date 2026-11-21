@@ -203,11 +203,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
     for (const row of due) this.ctx.storage.transactionSync(() => this.end(row, "Expired", now));
   }
 
-  protected async armExpiry(): Promise<void> {
+  protected async armExpiry(before?: number): Promise<void> {
     const [next] = this.ctx.storage.sql
       .exec<{ at: number | null }>(`SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
         WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)`)
       .toArray();
+    if (before !== undefined && (next?.at === null || next?.at === undefined || before < next.at)) {
+      return this.ctx.storage.setAlarm(before);
+    }
     if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
     return this.ctx.storage.setAlarm(next.at);
   }

@@ -202,12 +202,13 @@ export class Tenant extends TenantConnectors {
   }
 
   override async alarm(): Promise<void> {
-    await this.deliverPushes(this.tenantName());
-    this.expireSubscriptions(Date.now());
+    const now = Date.now();
+    await this.deliverPushes(this.tenantName(), now);
+    this.expireSubscriptions(now);
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
-    if (!(await this.armPushes())) await this.armExpiry();
+    await this.armPushes();
     this.drainObjects();
   }
 
@@ -248,11 +249,11 @@ export class Tenant extends TenantConnectors {
     await this.armExpiry();
   }
 
-  private async armPushes(): Promise<boolean> {
-    const [wake] = this.ctx.storage.sql.exec("SELECT 1 FROM push_wakes LIMIT 1").toArray();
-    if (wake === undefined) return false;
-    await this.ctx.storage.setAlarm(Date.now());
-    return true;
+  private async armPushes(): Promise<void> {
+    const [wake] = this.ctx.storage.sql
+      .exec<{ at: number | null }>("SELECT MIN(next_attempt_at) AS at FROM push_wakes")
+      .toArray();
+    await this.armExpiry(wake?.at ?? undefined);
   }
 
   private readonly operations: TenantHandlers = {

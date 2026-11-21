@@ -68,7 +68,7 @@ let receiverServer: Server | undefined;
 let receiverOrigin: string;
 let receiverStatus = 204;
 let holdReceiver = false;
-const blockedResponses: ServerResponse[] = [];
+const blockedResponses: { response: ServerResponse; status: number }[] = [];
 const received: {
   body: string;
   eventId: string | undefined;
@@ -89,14 +89,14 @@ const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> => {
   return Uint8Array.from(atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4)), (char) => char.charCodeAt(0));
 };
 
-const finishReceiver = (response: ServerResponse): void => {
-  response.writeHead(receiverStatus);
+const finishReceiver = (response: ServerResponse, status: number): void => {
+  response.writeHead(status);
   response.end();
 };
 
 const releaseReceiver = (): void => {
   holdReceiver = false;
-  for (const response of blockedResponses.splice(0)) finishReceiver(response);
+  for (const blocked of blockedResponses.splice(0)) finishReceiver(blocked.response, blocked.status);
 };
 
 before(async () => {
@@ -108,6 +108,7 @@ before(async () => {
       body += chunk;
     });
     request.on("end", () => {
+      const status = request.url === "/push/retry" ? 500 : receiverStatus;
       received.push({
         body,
         eventId: Array.isArray(request.headers["tumpel-event-id"])
@@ -121,8 +122,8 @@ before(async () => {
           ? request.headers["content-encoding"][0]
           : request.headers["content-encoding"],
       });
-      if (holdReceiver) blockedResponses.push(response);
-      else finishReceiver(response);
+      if (holdReceiver) blockedResponses.push({ response, status });
+      else finishReceiver(response, status);
     });
   });
   receiverServer = localReceiver;
@@ -322,7 +323,7 @@ test("push delivery drops subscriptions the push service no longer knows", async
       .parse(await response.json()).result.subscriptions.length;
   };
 
-  for (const [index, status] of [404, 410].entries()) {
+  for (const [index, status] of [400, 404, 410].entries()) {
     const created = await post("/__fixture/push/create", {
       tenantId: TENANT_ID,
       subscription: {
@@ -365,4 +366,98 @@ test("push delivery drops subscriptions the push service no longer knows", async
     assert.match(delivery?.authorization ?? "", /^vapid t=.+, k=.+$/);
   }
   receiverStatus = 204;
+});
+
+test("a transient push failure leaves its wake without blocking another browser", async () => {
+  const tenantId = crypto.randomUUID();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  for (const path of ["retry", "success"]) {
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint: `${receiverOrigin}/push/${path}`,
+        keys: { p256dh, auth },
+        events: ["SubscriptionPaused"],
+      },
+      now: 20,
+    });
+  }
+  const receivedBefore = received.length;
+  await post("/__fixture/emit", {
+    tenantId,
+    event: {
+      event: "SubscriptionPaused",
+      subscriptionId: "subscription-5",
+      sessionId: "session-5",
+      reason: { kind: "ByRequest", message: "Choose a release." },
+    },
+    now: 21,
+  });
+  await post("/__fixture/push/alarm", { tenantId });
+  assert.ok(received.length >= receivedBefore + 2);
+  const wakes = z
+    .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+    .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+  assert.equal(wakes.length, 1);
+  assert.ok((wakes[0]?.failures ?? 0) >= 1);
+  assert.ok((wakes[0]?.next_attempt_at ?? 0) > 21);
+});
+
+test("a terminal response keeps the wake when browser keys changed in flight", async () => {
+  const tenantId = crypto.randomUUID();
+  const firstPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const firstP256dh = Buffer.from(await crypto.subtle.exportKey("raw", firstPair.publicKey)).toString("base64url");
+  const firstAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  const endpoint = `${receiverOrigin}/push/replaced`;
+  await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint,
+      keys: { p256dh: firstP256dh, auth: firstAuth },
+      events: ["SubscriptionEnded"],
+    },
+    now: 30,
+  });
+  receiverStatus = 410;
+  holdReceiver = true;
+  const receivedBefore = received.length;
+  await post("/__fixture/emit", {
+    tenantId,
+    event: {
+      event: "SubscriptionEnded",
+      subscriptionId: "subscription-6",
+      sessionId: "session-6",
+      reason: "GoalMet",
+    },
+    now: 31,
+  });
+  const alarm = post("/__fixture/push/alarm", { tenantId });
+  await until(
+    "the blocked push request",
+    async () => received.length,
+    (length) => length > receivedBefore,
+  );
+  const secondPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const secondP256dh = Buffer.from(await crypto.subtle.exportKey("raw", secondPair.publicKey)).toString("base64url");
+  const secondAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint,
+      keys: { p256dh: secondP256dh, auth: secondAuth },
+      events: ["SubscriptionEnded"],
+    },
+    now: 32,
+  });
+  receiverStatus = 204;
+  releaseReceiver();
+  await alarm;
+  await post("/__fixture/push/alarm", { tenantId });
+  assert.ok(received.length >= receivedBefore + 2);
+  const listed = z
+    .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+    .parse(await (await post("/__fixture/push/list", { tenantId })).json());
+  assert.equal(listed.result.subscriptions.length, 1);
 });
