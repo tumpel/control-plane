@@ -121,7 +121,7 @@ import {
   restartDeadline,
   type SupervisorUpdateMessage,
 } from "./supervisor-updates";
-import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
+import { appendEvent, boundedDetail, type NewTenantEvent } from "./tenant-events.ts";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 import {
   type Dimensions,
@@ -1395,11 +1395,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     sessionId: string,
     turnId: string,
     reason: TurnFailureReason,
-    detail: string,
+    fullDetail: string,
     failedAt: string,
     now: number,
   ): void {
     const sql = this.ctx.storage.sql;
+    const detail = boundedDetail(fullDetail);
     sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
     this.appendEvent({ event: "TurnFailed", turnId, sessionId, reason, detail }, now);
     sql.exec(

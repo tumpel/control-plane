@@ -10,6 +10,9 @@ type Listed = z.infer<typeof ListEventsResultSchema>["listed"];
 
 export const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 100;
+export const EVENT_DETAIL_LIMIT = 16384;
+
+export const boundedDetail = (detail: string): string => detail.slice(0, EVENT_DETAIL_LIMIT);
 
 export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number): number => {
   const [row] = sql
