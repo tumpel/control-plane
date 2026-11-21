@@ -3004,20 +3004,20 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("tenant events record a turn's start, completion and the idle session in order, wake an MCP wait and stream over a WebSocket, also to a browser that sends its token as a subprotocol", async () => {
-    const { tenantId, bearer, host, tool, toolRefusal, sessionStart } = await tenant();
-    const start = await tool("tumpel_events_wait", { waitSeconds: 0 }, EventPageSchema);
+  test("tenant events record a turn's start, completion and the idle session in order, read over MCP and stream over a WebSocket, also to a browser that sends its token as a subprotocol", async () => {
+    const { tenantId, bearer, host, tool, sessionStart } = await tenant();
+    const start = await tool("tumpel_events_wait", {}, EventPageSchema);
     assert.deepEqual(start.events, []);
 
     const socket = new WebSocket(
-      `${origin.replace(/^http/, "ws")}/v1/events?waitSeconds=0&afterEventId=${start.lastEventId}&event=TurnCompleted`,
+      `${origin.replace(/^http/, "ws")}/v1/events?afterEventId=${start.lastEventId}&event=TurnCompleted`,
       { headers: bearer } as unknown as string[],
     );
     const streamed = new Promise<unknown>((resolve) => {
       socket.addEventListener("message", (message) => resolve(JSON.parse(String(message.data))));
     });
     await new Promise((resolve) => socket.addEventListener("open", resolve));
-    const browser = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/events?waitSeconds=0&event=TurnCompleted`, {
+    const browser = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/events?event=TurnCompleted`, {
       protocols: ["tumpel.bearer", `tumpel.bearer.${bearer.authorization.slice("Bearer ".length)}`],
       headers: { origin: "https://app.tumpel.test" },
     } as unknown as string[]);
@@ -3027,11 +3027,6 @@ suite("sessions", { concurrency: 8 }, () => {
     await new Promise((resolve) => browser.addEventListener("open", resolve));
     assert.equal(browser.protocol, "tumpel.bearer");
 
-    const waiting = tool(
-      "tumpel_events_wait",
-      { afterEventId: start.lastEventId, event: ["TurnCompleted"], waitSeconds: 50 },
-      EventPageSchema,
-    );
     const started = await tool(
       "tumpel_session_start",
       { ...(await sessionStart()), prompt: "events" },
@@ -3052,11 +3047,6 @@ suite("sessions", { concurrency: 8 }, () => {
     await storeRoot(snapshot.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
 
-    const woken = await waiting;
-    assert.deepEqual(
-      woken.events.map((event) => event.event),
-      ["TurnCompleted"],
-    );
     const pushed = TenantEventSchema.parse(await streamed);
     assert.equal(pushed.event, "TurnCompleted");
     assert.equal("turnId" in pushed && pushed.turnId, started.turn.turnId);
@@ -3065,28 +3055,22 @@ suite("sessions", { concurrency: 8 }, () => {
     browser.close();
 
     const { sessionId } = started.session;
-    const all = await tool(
-      "tumpel_events_wait",
-      { afterEventId: start.lastEventId, sessionId, waitSeconds: 0 },
-      EventPageSchema,
-    );
+    const all = await tool("tumpel_events_wait", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
     assert.deepEqual(
       all.events.map((event) => event.event),
       ["TurnStarted", "TurnCompleted", "SessionIdle"],
     );
     assert.deepEqual(
-      (await tool("tumpel_events_wait", { afterEventId: all.lastEventId, sessionId, waitSeconds: 0 }, EventPageSchema))
-        .events,
+      (await tool("tumpel_events_wait", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,
       [],
     );
-    assert.match(await toolRefusal("tumpel_events_wait", { waitSeconds: 51 }), /waitSeconds/);
 
     const first = all.events[0];
     const second = all.events[1];
     assert.ok(first && second);
     await tenantSql(tenantId, "DELETE FROM events WHERE event_id <= ?", first.eventId);
     for (const headers of [bearer, { ...bearer, upgrade: "websocket" }]) {
-      const expired = await call(`/v1/events?waitSeconds=0&afterEventId=${start.lastEventId}`, { headers });
+      const expired = await call(`/v1/events?afterEventId=${start.lastEventId}`, { headers });
       assert.equal(expired.status, 410);
       assert.equal(EventCursorExpiredProblemSchema.parse(await expired.json()).oldestEventId, second.eventId);
     }

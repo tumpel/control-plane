@@ -37,11 +37,6 @@ export const oldestKept = (sql: SqlStorage, end: number): number =>
 type EventRow = { event_id: number; payload: string; created_at: number };
 
 export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
-  if (input.waitSeconds !== 0) {
-    throw new Error(
-      `listEvents got waitSeconds ${input.waitSeconds}; the tenant Durable Object never waits, the Worker waits on the event channel`,
-    );
-  }
   const end = endOfLog(sql);
   const after = input.afterEventId;
   if (after === null) return { kind: "Read", page: { events: [], lastEventId: end } };

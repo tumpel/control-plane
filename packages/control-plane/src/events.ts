@@ -21,7 +21,6 @@ const read = async (env: Env, caller: Caller, query: EventQuery, afterEventId: n
     events: query.event ?? [],
     sessionId: query.sessionId ?? null,
     triggerId: query.triggerId ?? null,
-    waitSeconds: 0,
   });
   if (listed.kind === "Read") return { kind: "Read", page: listed.page };
   return {
@@ -67,10 +66,7 @@ export const waitOnChannel = async (
 export const listEvents = async (env: Env, caller: Caller, query: EventQuery): Promise<Response> => {
   const first = await read(env, caller, query, query.afterEventId ?? null);
   if (first.kind === "Expired") return first.response;
-  if (first.page.events.length > 0 || query.waitSeconds === 0) return json(first.page);
-  await waitOnChannel(env, subscriptionOf(caller, query, first.page.lastEventId), query.waitSeconds, () => true);
-  const next = await read(env, caller, query, first.page.lastEventId);
-  return next.kind === "Read" ? json(next.page) : next.response;
+  return json(first.page);
 };
 
 const followEvents = async (env: Env, caller: Caller, query: EventQuery): Promise<Response> => {
@@ -122,7 +118,6 @@ export const handleEvents = async (
     event: events.length > 0 ? events : undefined,
     sessionId: url.searchParams.get("sessionId") ?? undefined,
     triggerId: url.searchParams.get("triggerId") ?? undefined,
-    waitSeconds: number("waitSeconds"),
   });
   if (!query.success) {
     return problem(400, {

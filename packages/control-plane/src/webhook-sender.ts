@@ -76,7 +76,6 @@ export class WebhookSender extends DurableObject<Env> {
         events: endpoint.events,
         sessionId: null,
         triggerId: null,
-        waitSeconds: 0,
       });
       const listed: Listed = result.listed;
       if (listed.kind === "CursorExpired") {

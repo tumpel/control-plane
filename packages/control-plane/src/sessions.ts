@@ -739,7 +739,6 @@ export const waitTurns = async (
     triggerId: null,
     events: [],
     sessionId: null,
-    waitSeconds: 0,
   });
   if (listed.kind !== "Read") throw new Error(`tenant ${tenantId} refused a read from the end of its event log`);
   const read = () => tenant.call("waitTurns", { tenantId, turnIds, timeoutSeconds: 0 });
