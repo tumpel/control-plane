@@ -43,8 +43,8 @@ test("a delivery turn that cannot be composed fails Undelivered while the turn q
           event: "TurnFailed",
           turnId: crewTurn?.turnId,
           sessionId: crewTurn?.sessionId,
-          reason: "HarnessReportedError",
-          detail: "x".repeat(20_000),
+          reason: "NoLongerAReason",
+          detail: "the harness reported an error",
         }),
         Date.now(),
       )
