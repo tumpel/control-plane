@@ -33,18 +33,21 @@ for (const override of [undefined, 10800]) {
 
     await world.passes(3601 * 1000);
     assert.equal((await world.turn(turn.turnId)).state, "Running");
-    assert.equal((await world.session(seed.sessionId)).turnTotalBudgetSeconds, 7200);
+    assert.equal((await world.session(seed.sessionId)).turnTotalBudgetSeconds, seed.turnTotalBudgetSeconds);
     const listed = z
       .object({ sessions: SessionSchema.array() })
       .parse(await world.call("listSessions", { tenantId: seed.tenantId, filter: {} }));
-    assert.equal(listed.sessions.find((session) => session.sessionId === seed.sessionId)?.turnTotalBudgetSeconds, 7200);
+    assert.equal(
+      listed.sessions.find((session) => session.sessionId === seed.sessionId)?.turnTotalBudgetSeconds,
+      seed.turnTotalBudgetSeconds,
+    );
     await world.call("patchPersona", {
       tenantId: crew.tenantId,
       personaId: crew.personaId,
       patch: { turnTotalBudgetSeconds: 14400 },
       now: Date.now(),
     });
-    assert.equal((await world.session(crew.sessionId)).turnTotalBudgetSeconds, override ?? 14400);
+    assert.equal((await world.session(crew.sessionId)).turnTotalBudgetSeconds, override ?? 7200);
     const budget = override ?? 7200;
     await world.passes((budget - 3602) * 1000);
     assert.equal((await world.turn(turn.turnId)).state, "Running");

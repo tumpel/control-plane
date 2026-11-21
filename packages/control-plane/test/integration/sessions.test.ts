@@ -2258,7 +2258,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await tool("tumpel_turn_get", { turnId: second.turnId }, TurnSchema)).state, "Completed");
   });
 
-  test("turn offers take persona edits on later turns and keep explicit session budgets", async () => {
+  test("a session keeps the turn budget it started with, and a later session takes the persona edit", async () => {
     const { bearer, host, tool, getJson, sessionStart } = await tenant();
     const start = await sessionStart();
     const started = await tool("tumpel_session_start", { ...start, prompt: "first" }, StartedSessionSchema);
@@ -2275,7 +2275,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(PersonaSchema.parse(await changed.json()).turnTotalBudgetSeconds, 14400);
     assert.equal(
       (await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema)).turnTotalBudgetSeconds,
-      14400,
+      SETTINGS.turnTotalBudgetSeconds,
     );
     const queued = await tool("tumpel_turn_send", { sessionId: started.session.sessionId, prompt: "next" }, TurnSchema);
     host.send({
@@ -2287,11 +2287,10 @@ suite("sessions", { concurrency: 8 }, () => {
     });
     const next = await host.next("TurnOffer");
     assert.equal(next.turnId, queued.turnId);
-    assert.equal(next.turnTotalBudgetSeconds, 14400);
-    assert.equal(
-      (await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema)).turnTotalBudgetSeconds,
-      14400,
-    );
+    assert.equal(next.turnTotalBudgetSeconds, SETTINGS.turnTotalBudgetSeconds);
+    const later = await tool("tumpel_session_start", { ...start, prompt: "later" }, StartedSessionSchema);
+    assert.equal(later.session.turnTotalBudgetSeconds, 14400);
+    assert.equal((await host.next("TurnOffer")).turnTotalBudgetSeconds, 14400);
     const override = await tool(
       "tumpel_session_start",
       { ...start, prompt: "override", turnTotalBudgetSeconds: 18000 },
