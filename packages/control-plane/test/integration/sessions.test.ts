@@ -2805,6 +2805,33 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(session.lastTurn, read);
   });
 
+  test("a first turn that fails before its box exists leaves the session Stopped, and the next turn gets a new box", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
+    assert.equal(response.status, 200);
+    const started = StartedSessionSchema.parse(await response.json());
+    const offer = await host.next("TurnOffer");
+    const { sessionId, tenantId } = started.session;
+    const at = Date.now() + 500;
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
+
+    await until(
+      "the turn reading Failed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Stopped");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnWithdrawn")).turnId, offer.turnId);
+    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
+
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const again = await host.next("TurnOffer");
+    assert.equal(again.sessionId, sessionId);
+    assert.notEqual(again.boxId, offer.boxId);
+  });
+
   test("a turn whose harness exits without a successful result fails HarnessExitedWithoutResult on every read, and a snapshot of its box follows", async () => {
     const { bearer, host, getJson, tool, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "stops mid-work" }, bearer);
