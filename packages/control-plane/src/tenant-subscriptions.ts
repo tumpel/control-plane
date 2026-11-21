@@ -244,7 +244,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     for (const { session_id: sessionId } of sessions) {
       const now = Date.now();
       const next = this.ctx.storage.transactionSync(() => this.takeNextWaiting(sessionId, now));
-      if (next !== null) await this.startWaiting(tenantId, sessionId, next);
+      if (next !== null) await this.startWaiting(tenantId, sessionId, next, now);
     }
   }
 

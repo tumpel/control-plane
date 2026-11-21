@@ -316,6 +316,7 @@ test("a write that breaks a constraint inside the apply transaction rolls back e
   const secretSetId = crypto.randomUUID();
   const persona: TenantInput<"createPersona">["persona"] = {
     name: "Rollback",
+    turnTotalBudgetSeconds: 3600,
     harness: "ClaudeCode",
     secretSetId,
     connectorIds: [],

@@ -98,7 +98,7 @@ import {
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
-import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
+import type { Deadline, DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
@@ -110,7 +110,6 @@ import {
 } from "./supervisor-updates";
 import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
-import { turnBudget } from "./turn-budgets.ts";
 import {
   type Dimensions,
   DimensionsSchema,
@@ -931,7 +930,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (turn.state !== "Running") return { kind: "NotRunning" };
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) throw new Error(`the tenant Durable Object serving turn ${turnId} has no name`);
-    const expiresAt = this.budgetStart(turn) + turnBudget(this.ctx.storage.sql, turn.turn_id) * 1000;
+    const expiresAt = this.budgetStart(turn) + this.turnBudget(turn.turn_id) * 1000;
     const key = await keyStoreOf(this.env).signingKey(TURN_TOKEN_SIGNING_PURPOSE);
     const accessToken = await mintTurnToken(key, {
       tenantId,
@@ -1267,7 +1266,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return queued;
     });
     await this.timers(tenantId, session.session_id, {
-      Total: null,
+      Total: { turnId: turn.turn_id, at: turn.created_at + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
     });
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
@@ -1311,16 +1310,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     sql.exec("DELETE FROM turn_session_waits WHERE turn_id = ?", next);
-    sql.exec("INSERT INTO turn_budget_starts (turn_id, started_at) VALUES (?, ?)", next, now);
     this.holdOffer(next, session.host_id, now);
     return next;
   }
 
-  protected async startWaiting(tenantId: string, sessionId: string, turnId: string): Promise<void> {
+  protected async startWaiting(tenantId: string, sessionId: string, turnId: string, now: number): Promise<void> {
     if (this.sessionRow(sessionId)?.state !== "Stopping") return this.runQueued(tenantId, turnId);
     this.ctx.storage.sql.exec("INSERT INTO turn_release_waits (turn_id, session_id) VALUES (?, ?)", turnId, sessionId);
     await this.timers(tenantId, sessionId, {
-      Total: null,
+      Total: { turnId, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
     });
   }
 
@@ -1358,10 +1356,35 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private budgetStart(turn: TurnRow): number {
-    const [started] = this.ctx.storage.sql
-      .exec<{ started_at: number }>("SELECT started_at FROM turn_budget_starts WHERE turn_id = ?", turn.turn_id)
+    const [claimed] = this.ctx.storage.sql
+      .exec<{ claimed_at: number }>("SELECT claimed_at FROM turn_claims WHERE turn_id = ?", turn.turn_id)
       .toArray();
-    return started?.started_at ?? turn.created_at;
+    return claimed?.claimed_at ?? turn.created_at;
+  }
+
+  private deliveryDeadline(turn: TurnRow): Deadline {
+    const [ended] = this.ctx.storage.sql
+      .exec<{ ended_at: number | null }>(
+        "SELECT MAX(updated_at) AS ended_at FROM turns WHERE session_id = ? AND turn_id != ? AND state != 'Offered'",
+        turn.session_id,
+        turn.turn_id,
+      )
+      .toArray();
+    return {
+      turnId: turn.turn_id,
+      at: Math.max(turn.created_at, ended?.ended_at ?? 0) + settingsOf(this.env).turnTotalBudgetSeconds * 1000,
+    };
+  }
+
+  private turnBudget(turnId: string): number {
+    const [budget] = this.ctx.storage.sql
+      .exec<{ turn_total_budget_seconds: number }>(
+        "SELECT turn_total_budget_seconds FROM turn_budgets WHERE turn_id = ?",
+        turnId,
+      )
+      .toArray();
+    if (budget === undefined) throw new Error(`turn ${turnId} has no running budget`);
+    return budget.turn_total_budget_seconds;
   }
 
   private async runQueued(tenantId: string, turnId: string): Promise<void> {
@@ -1428,7 +1451,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
       return this.timers(tenantId, session.session_id, {
-        Total: null,
+        Total: this.deliveryDeadline(turn),
       });
     }
     await this.offerAfter(tenantId, move(placement.host.hostId, crypto.randomUUID()), turn, placement.evict);
@@ -1480,7 +1503,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     await this.timers(tenantId, session.session_id, {
       FirstLine: null,
-      Total: null,
+      Total: this.deliveryDeadline(turn),
       Snapshot: null,
       Teardown: null,
       HostOffline: null,
@@ -1489,7 +1512,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private offerMessage(session: SessionRow, turn: TurnRow): StoredTurnOffer {
-    turnBudget(this.ctx.storage.sql, turn.turn_id);
     this.ctx.storage.sql.exec(
       `INSERT INTO unreported_box_offers (box_id, host_id, box_memory_mib)
       SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM turns WHERE session_id = ?4 AND box_id = ?1 AND turn_id != ?5)
@@ -1560,6 +1582,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turn.line_count,
       turn.created_at,
       turn.updated_at,
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT INTO turn_budgets (turn_id, turn_total_budget_seconds)
+      SELECT ?1, COALESCE(o.turn_total_budget_seconds, p.turn_total_budget_seconds)
+      FROM sessions s JOIN personas p ON p.persona_id = s.persona_id
+      LEFT JOIN session_turn_budget_overrides o ON o.session_id = s.session_id
+      WHERE s.session_id = ?2`,
+      turn.turn_id,
+      sessionId,
     );
     if (turn.goal !== null) {
       this.ctx.storage.sql.exec(
@@ -2055,7 +2086,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (placement.kind === "Placed") await this.offerAfter(tenantId, session, turn, placement.evict);
     if (placement.kind === "Waiting") {
       await this.timers(tenantId, session.session_id, {
-        Total: null,
+        Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
       });
     }
     return {
@@ -3180,7 +3211,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (inbox !== null) connectors.push(inbox.connector);
     return {
       kind: "Ready",
-      turnTotalBudgetSeconds: turnBudget(this.ctx.storage.sql, turnId),
+      turnTotalBudgetSeconds: this.turnBudget(turnId),
       credential: {
         credentialHandoverId: handover.credentialHandoverId,
         expiresAt: iso(now + credentialSeconds * 1000),
@@ -3588,7 +3619,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         turn.turn_id,
       );
-      await this.timers(tenantId, session.session_id, { Total: null, FirstLine: null });
+      await this.timers(tenantId, session.session_id, {
+        Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+        FirstLine: null,
+      });
       const offeredAgain = { ...turn, state: "Offered" as const };
       if (handedOver) return this.deferOffer(session, offeredAgain, now);
       return this.offerMessage(session, offeredAgain);
@@ -3631,11 +3665,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
-      sql.exec(
-        "INSERT INTO turn_budget_starts (turn_id, started_at) VALUES (?, ?) ON CONFLICT (turn_id) DO UPDATE SET started_at = excluded.started_at",
-        turn.turn_id,
-        now,
-      );
       this.appendEvent({ event: "TurnStarted", turnId: turn.turn_id, sessionId: session.session_id }, now);
       sql.exec(
         `UPDATE prebuilds SET state = 'Building', updated_at = ?1 WHERE state = 'Dispatched'
@@ -3645,7 +3674,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     });
     await this.timers(tenantId, session.session_id, {
-      Total: { turnId: turn.turn_id, at: now + turnBudget(sql, turn.turn_id) * 1000 },
+      Total: { turnId: turn.turn_id, at: now + this.turnBudget(turn.turn_id) * 1000 },
     });
     return { type: "TurnClaimed", turnId: turn.turn_id };
   }
@@ -3807,7 +3836,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       HostOffline: null,
       Snapshot: { turnId: turn.turn_id, at: now + delay },
     });
-    if (next !== null) await this.startWaiting(tenantId, turn.session_id, next);
+    if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
   }
 
   protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
@@ -3863,12 +3892,56 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
+    if (name === "Total" && turn.state === "Offered" && session.state === "Stopped") {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "Undelivered",
+        `no host of your tenant had room for the session's new box within ${settings.turnTotalBudgetSeconds} seconds of the turn's start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
+        failedAt,
+        "Stopped",
+      );
+    }
+    if (name === "Total" && turn.state === "Offered" && this.waitsForCapacity(turnId)) {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "Undelivered",
+        `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
+        failedAt,
+      );
+    }
+    if (name === "Total" && turn.state === "Offered") {
+      const [refusal] = this.ctx.storage.sql
+        .exec<{ host_id: string; detail: string }>(
+          "SELECT host_id, detail FROM turn_refusals WHERE turn_id = ?",
+          turnId,
+        )
+        .toArray();
+      if (refusal !== undefined) {
+        return this.failTurn(
+          tenantId,
+          turnId,
+          "Undelivered",
+          `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${await this.hostName(tenantId, refusal.host_id)} last refused it: ${refusal.detail}`,
+          failedAt,
+        );
+      }
+      const presence = (await this.hostOffline(session.host_id)) ? "is offline" : "is online but never claimed it";
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "Undelivered",
+        `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${host} ${presence}. Check that its supervisor runs and reads Online, then send the turn again`,
+        failedAt,
+      );
+    }
     if (name === "Total" && turn.state === "Running") {
       return this.failTurn(
         tenantId,
         turnId,
         "TurnTimedOut",
-        `the turn did not finish within ${turnBudget(this.ctx.storage.sql, turn.turn_id)} seconds; send a smaller prompt or raise the persona or session turnTotalBudgetSeconds`,
+        `the turn did not finish within ${this.turnBudget(turn.turn_id)} seconds; send a smaller prompt or raise the persona or session turnTotalBudgetSeconds`,
         failedAt,
       );
     }
@@ -4193,7 +4266,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const completed = this.sessionRow(session.session_id);
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
       this.startAfterTurnRelease(completed, now);
-    if (next !== null) await this.startWaiting(tenantId, request.session_id, next);
+    if (next !== null) await this.startWaiting(tenantId, request.session_id, next, now);
     await this.armIdleEviction(tenantId, request.session_id);
     if (this.sessionRow(session.session_id)?.state === "Stopping") {
       const latest = this.latestTurn(session.session_id, null);

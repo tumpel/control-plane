@@ -19,7 +19,26 @@ CREATE TABLE turn_budgets (
 
 INSERT INTO turn_budgets (turn_id, turn_total_budget_seconds) SELECT turn_id, 3600 FROM turns;
 
-INSERT INTO turn_budget_starts (turn_id, started_at)
-SELECT t.turn_id, COALESCE(c.claimed_at, (SELECT MAX(e.created_at) FROM events e JOIN event_sessions es USING (event_id)
-  WHERE es.session_id = t.session_id AND json_extract(e.payload, '$.event') = 'TurnStarted' AND json_extract(e.payload, '$.turnId') = t.turn_id), t.created_at) FROM turns t LEFT JOIN turn_claims c ON c.turn_id = t.turn_id WHERE t.state = 'Running'
-ON CONFLICT (turn_id) DO UPDATE SET started_at = excluded.started_at;
+DROP TRIGGER turns_delete_owned_rows;
+
+CREATE TRIGGER turns_delete_owned_rows BEFORE DELETE ON turns
+BEGIN
+  DELETE FROM turn_failures WHERE turn_id = OLD.turn_id;
+  DELETE FROM credential_handovers WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_metric_dimensions WHERE turn_id = OLD.turn_id;
+  DELETE FROM deferred_offers WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_results WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_full_images WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_layered_images WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_goals WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_image_fetches WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_claims WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_refusals WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_warnings WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_eviction_waits WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_release_waits WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_session_waits WHERE turn_id = OLD.turn_id;
+  DELETE FROM turn_budgets WHERE turn_id = OLD.turn_id;
+END;
+
+DROP TABLE turn_budget_starts;

@@ -2301,7 +2301,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await host.next("TurnOffer")).turnTotalBudgetSeconds, 18000);
   });
 
-  test("a waiting turn's running budget starts at claim", async () => {
+  test("a waiting turn's whole-turn budget starts when it starts, not when it was sent", async () => {
     const { host, tool, sessionStart } = await tenant();
     const started = await tool(
       "tumpel_session_start",
@@ -2324,6 +2324,7 @@ suite("sessions", { concurrency: 8 }, () => {
       waiting.turnId,
     );
 
+    const ended = Date.now();
     host.send({
       type: "TurnFailed",
       turnId: first.turnId,
@@ -2332,16 +2333,20 @@ suite("sessions", { concurrency: 8 }, () => {
       failedAt: new Date().toISOString(),
     });
     assert.equal((await host.next("TurnOffer")).turnId, waiting.turnId);
-    assert.equal((await storedTimers(sessionId))?.deadlines.Total, undefined);
-    const claimed = Date.now();
-    host.send({ type: "TurnClaim", turnId: waiting.turnId, boxId: first.boxId });
-    await host.next("TurnClaimed");
     const total = z
       .object({ turnId: z.string(), at: z.number() })
       .parse((await storedTimers(sessionId))?.deadlines.Total);
     assert.equal(total.turnId, waiting.turnId);
-    assert.ok(total.at >= claimed + SETTINGS.turnTotalBudgetSeconds * 1000, `${total.at} is before ${claimed}`);
-    assert.equal((await tool("tumpel_turn_get", { turnId: waiting.turnId }, TurnSchema)).state, "Running");
+    assert.ok(total.at >= ended + SETTINGS.turnTotalBudgetSeconds * 1000, `${total.at} is before ${ended}`);
+    assert.equal((await tool("tumpel_turn_get", { turnId: waiting.turnId }, TurnSchema)).state, "Offered");
+
+    const claimed = Date.now();
+    host.send({ type: "TurnClaim", turnId: waiting.turnId, boxId: first.boxId });
+    await host.next("TurnClaimed");
+    const running = z
+      .object({ turnId: z.string(), at: z.number() })
+      .parse((await storedTimers(sessionId))?.deadlines.Total);
+    assert.ok(running.at >= claimed + SETTINGS.turnTotalBudgetSeconds * 1000, `${running.at} is before ${claimed}`);
   });
 
   test("a cancel fails a waiting turn Cancelled and the turns behind it keep their order, and a running turn is refused", async () => {
@@ -2882,25 +2887,35 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
   });
 
-  test("an unclaimed turn ignores a total timer from before running budgets", async () => {
+  test("a turn no host claims by its whole-turn deadline dead-letters Undelivered on turn and session reads, also from a timer stored before its owner field was dropped", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
     assert.equal(response.status, 200);
     const started = StartedSessionSchema.parse(await response.json());
     const offer = await host.next("TurnOffer");
     const { sessionId, tenantId } = started.session;
-    assert.equal((await storedTimers(sessionId))?.deadlines.Total, undefined);
     const at = Date.now() + 500;
     await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
-    await until(
-      "the old timer being consumed",
-      () => storedTimers(sessionId),
-      (timers) => timers?.deadlines.Total === undefined,
+
+    const failed = await until(
+      "the turn reading Failed",
+      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
     );
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Offered");
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    await host.next("TurnClaimed");
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
+    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "Undelivered");
+    assert.match(
+      failure.detail,
+      /^no host took the turn within 60 seconds of its first offer, so it never ran; host box is online but never claimed it\./,
+    );
+    assert.doesNotMatch(failure.detail, UUID);
+    const read = FailedTurnSchema.parse(failed);
+    assert.deepEqual(
+      { reason: read.reason, detail: read.detail, failedAt: read.failedAt },
+      { reason: failure.reason, detail: failure.detail, failedAt: failure.failedAt },
+    );
+    const session = await getJson(`/v1/sessions/${sessionId}`, SessionSchema);
+    assert.deepEqual(session.lastTurn, read);
   });
 
   test("a first turn that fails before its box exists leaves the session Stopped, and the next turn gets a new box", async () => {
@@ -2909,14 +2924,9 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(response.status, 200);
     const started = StartedSessionSchema.parse(await response.json());
     const offer = await host.next("TurnOffer");
-    const { sessionId } = started.session;
-    host.send({
-      type: "TurnFailed",
-      turnId: offer.turnId,
-      reason: "ImageFetchTimedOut",
-      detail: "image fetch timed out",
-      failedAt: new Date().toISOString(),
-    });
+    const { sessionId, tenantId } = started.session;
+    const at = Date.now() + 500;
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
 
     await until(
       "the turn reading Failed",
@@ -2971,26 +2981,24 @@ suite("sessions", { concurrency: 8 }, () => {
     const offer = await host.next("TurnOffer");
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     assert.equal((await host.next("TurnClaimed")).turnId, running.turn.turnId);
-    const expiring = await tool(
+    const unclaimed = await tool(
       "tumpel_session_start",
       { ...(await sessionStart()), prompt: "never claimed" },
       StartedSessionSchema,
     );
-    const expiringOffer = await host.next("TurnOffer");
-    host.send({ type: "TurnClaim", turnId: expiringOffer.turnId, boxId: expiringOffer.boxId });
-    await host.next("TurnClaimed");
-    const { sessionId, tenantId } = expiring.session;
+    const unclaimedOffer = await host.next("TurnOffer");
+    const { sessionId, tenantId } = unclaimed.session;
     const at = Date.now() + 500;
     await storeTimers(
       sessionId,
-      { tenantId, sessionId, deadlines: { Total: { turnId: expiringOffer.turnId, at } } },
+      { tenantId, sessionId, deadlines: { Total: { turnId: unclaimedOffer.turnId, at } } },
       at,
     );
 
     const firstWait = Date.now();
     const failed = await tool(
       "tumpel_turn_wait",
-      { turnId: [running.turn.turnId, expiring.turn.turnId], timeoutSeconds: 50 },
+      { turnId: [running.turn.turnId, unclaimed.turn.turnId], timeoutSeconds: 50 },
       TurnSchema.array(),
     );
     assert.ok(Date.now() - firstWait < 20_000);
@@ -2998,12 +3006,12 @@ suite("sessions", { concurrency: 8 }, () => {
       failed.map((turn) => [turn.turnId, turn.state]),
       [
         [running.turn.turnId, "Running"],
-        [expiring.turn.turnId, "Failed"],
+        [unclaimed.turn.turnId, "Failed"],
       ],
     );
     assert.equal(
-      (await tool("tumpel_turn_failure", { turnId: expiring.turn.turnId }, TurnFailureSchema)).reason,
-      "TurnTimedOut",
+      (await tool("tumpel_turn_failure", { turnId: unclaimed.turn.turnId }, TurnFailureSchema)).reason,
+      "Undelivered",
     );
 
     const timedOut = await tool(
@@ -3811,7 +3819,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await host.next("TurnOffer")).boxMemoryMib, 512);
   });
 
-  test("a turn refused for capacity stays Offered without a running deadline", async () => {
+  test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline, naming the refusal", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never fits" }, bearer);
     assert.equal(response.status, 200, await response.clone().text());
@@ -3834,10 +3842,14 @@ suite("sessions", { concurrency: 8 }, () => {
       });
     refuse((await host.next("TurnOffer")).turnId);
     refuse((await host.next("TurnOffer")).turnId);
-    const again = await host.next("TurnOffer");
-    assert.equal(again.turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
-    assert.equal((await storedTimers(session.sessionId))?.deadlines.Total, undefined);
+    await until(
+      "the turn reading Failed",
+      () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
+      (read) => read.state === "Failed",
+    );
+    const failure = await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "Undelivered");
+    assert.ok(failure.detail.endsWith(`last refused it: ${refusal}`), failure.detail);
   });
 
   test("a turn a host refuses PoolExhausted goes to an idle host on the refusing host's next heartbeat, in a new box", async () => {
