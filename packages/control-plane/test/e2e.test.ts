@@ -13,6 +13,7 @@ import {
   OAuthTokenSchema,
   PersonaSchema,
   ProblemSchema,
+  StoredPersonaSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -193,7 +194,7 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
   );
   const listedPersonas = await call("/v1/personas", { headers: bearer });
   assert.equal(listedPersonas.status, 200);
-  const personas = PersonaSchema.array().parse(await listedPersonas.json());
+  const personas = StoredPersonaSchema.array().parse(await listedPersonas.json());
   assert.deepEqual(
     personas.map((persona) => [persona.tenantId, persona.name]),
     [[owner.tenant.tenantId, "Default"]],

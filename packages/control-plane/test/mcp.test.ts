@@ -21,6 +21,7 @@ import {
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
+  StoredPersonaSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -429,8 +430,8 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   );
   await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId, updatedAt: disconnected.updatedAt });
   assert.deepEqual(
-    await toolJson(PersonaSchema.array(), "tumpel_persona_list"),
-    await rest(PersonaSchema.array(), "GET", "/v1/personas"),
+    await toolJson(StoredPersonaSchema.array(), "tumpel_persona_list"),
+    await rest(StoredPersonaSchema.array(), "GET", "/v1/personas"),
   );
   await toolDone("tumpel_persona_delete", { personaId: persona.personaId });
   assert.equal((await call(`/v1/personas/${persona.personaId}`, { headers: bearer })).status, 404);

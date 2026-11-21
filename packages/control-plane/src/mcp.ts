@@ -404,7 +404,13 @@ export const TOOLS: ToolDefinition[] = [
     PersonaFileUploadRequestSchema,
     "Presign the upload of one persona file larger than 65536 bytes, named by the sha256 digest and size of its bytes. Returns uploadUrl and uploadExpiresAt: PUT the bytes to uploadUrl before uploadExpiresAt, then name the file as Stored by digest in a persona write.",
   ),
-  rest("tumpel_persona_list", "GET", "/v1/personas", NO_ARGUMENTS, "List the tenant's personas."),
+  rest(
+    "tumpel_persona_list",
+    "GET",
+    "/v1/personas",
+    NO_ARGUMENTS,
+    "List the tenant's personas with file paths, digests, sizes and timestamps. Use tumpel_persona_get to read file content.",
+  ),
   rest("tumpel_persona_get", "GET", "/v1/personas/{personaId}", PersonaPathSchema, "Read one persona."),
   rest(
     "tumpel_persona_update",

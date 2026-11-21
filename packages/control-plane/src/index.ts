@@ -427,8 +427,7 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
   const { personas } = await tenantApi(env.TENANT, caller.tenantId).call("listPersonas", { tenantId: caller.tenantId });
-  const now = Date.now();
-  return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
+  return json(personas);
 };
 
 const personaNotFound = (personaId: string): Response =>

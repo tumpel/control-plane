@@ -13,10 +13,10 @@ import {
   GitHubActionsConnectionLinkSchema,
   NamespaceConnectionLinkSchema,
   OpenRouterAuthorizationSchema,
-  PersonaSchema,
   PrebuildSchema,
   ProblemSchema,
   SecretSetSchema,
+  StoredPersonaSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -189,7 +189,7 @@ after(async () => {
 });
 
 test("a prebuild start refuses before it stores anything: an unreadable repository, a foreign repository, an unknown persona", async () => {
-  const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
+  const [persona] = await rest(StoredPersonaSchema.array(), "GET", "/v1/personas");
   assert.ok(persona);
   const unnamed = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
   const start = { ...unnamed, provider: "GitHubActions" };

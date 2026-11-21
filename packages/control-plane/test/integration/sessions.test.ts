@@ -46,6 +46,7 @@ import {
   StartedSessionFromIssueSchema,
   StartedSessionSchema,
   StopFailureSchema,
+  StoredPersonaSchema,
   SubscriptionSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
@@ -669,7 +670,7 @@ const tenant = async () => {
   };
 
   const sessionStart = async (name = "Default") => {
-    const personas = await getJson("/v1/personas", PersonaSchema.array());
+    const personas = await getJson("/v1/personas", StoredPersonaSchema.array());
     return {
       repository: "https://github.com/acme/app.git",
       model: "claude-sonnet-5-5",
@@ -682,7 +683,7 @@ const tenant = async () => {
     assert.equal(created.status, 200);
     const { secretSetId } = SecretSetSchema.parse(await created.json());
     const persona = { name, harness: "ClaudeCode", secretSetId, connectorIds: [], files };
-    const personas = await getJson("/v1/personas", PersonaSchema.array());
+    const personas = await getJson("/v1/personas", StoredPersonaSchema.array());
     const existing = personas.find((candidate) => candidate.name === name);
     const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
       method: existing ? "PUT" : "POST",
@@ -3696,7 +3697,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
   test("a persona's box disk reads back, a host without disk room refuses its session by name, and every offer carries it", async () => {
     const { bearer, host, getJson } = await tenant();
-    const [persona] = await getJson("/v1/personas", PersonaSchema.array());
+    const [persona] = await getJson("/v1/personas", StoredPersonaSchema.array());
     assert.ok(persona);
     const sized = async (boxDiskMib: number) => {
       const written = await server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
@@ -3736,7 +3737,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
   test("a persona created without box memory reads 2048 MiB, takes 512 MiB, and is refused 511 MiB by name", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
-    const [persona] = await getJson("/v1/personas", PersonaSchema.array());
+    const [persona] = await getJson("/v1/personas", StoredPersonaSchema.array());
     assert.ok(persona);
     assert.equal(persona.boxMemoryMib, 2048);
     const sized = (boxMemoryMib: number) =>

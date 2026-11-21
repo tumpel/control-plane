@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 const WORKERS = new URL("./cloudflare-workers.mjs", import.meta.url).href;
-const TEXT = /\.(sql|css)$/;
+const TEXT = /\.(sql|css|sh|jsonc)$/;
 
 const bare = (specifier) => specifier.startsWith(".") && !/\.[a-z]+$/.test(specifier);
 

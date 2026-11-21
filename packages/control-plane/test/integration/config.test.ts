@@ -17,6 +17,8 @@ import {
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
+  StoredFileReadSchema,
+  StoredPersonaSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -230,7 +232,7 @@ test("tumpel config apply makes the tenant match the file, and a second plan is 
   assert.equal(rotated.code, 0, rotated.stderr);
   assert.match(rotated.stdout.trim(), /^rewrite secret set prod \(/);
 
-  const personas = PersonaSchema.array().parse(await getJson("/v1/personas"));
+  const personas = StoredPersonaSchema.array().parse(await getJson("/v1/personas"));
   assert.deepEqual(
     personas.map((persona) => [persona.name, persona.harness, persona.files.map((held) => [held.path, held.digest])]),
     [
@@ -489,7 +491,7 @@ test("a persona file at a path its harness does not read is refused, a stored fi
   );
 });
 
-test("tumpel persona get output without its server fields creates a copy with the same files, and persona list returns every file's bytes", async () => {
+test("tumpel persona get output without its server fields creates a copy with the same files, and persona list returns file metadata", async () => {
   const [set] = SecretSetSchema.array().parse(await getJson("/v1/secret-sets"));
   assert.ok(set);
   const large = Buffer.alloc(PersonaFileLimit.InlineFileBytes + 1, "l");
@@ -545,10 +547,10 @@ test("tumpel persona get output without its server fields creates a copy with th
   const listed = await tumpel(["persona", "list"]);
   assert.equal(listed.code, 0, listed.stderr);
   const [listedMemory] =
-    PersonaSchema.array()
+    StoredPersonaSchema.array()
       .parse(JSON.parse(listed.stdout))
       .find((persona) => persona.personaId === personaId)?.files ?? [];
-  assert.deepEqual(listedMemory, memory);
+  assert.deepEqual(listedMemory, StoredFileReadSchema.parse(memory));
 });
 
 test("secret-set set-member writes one member from stdin and keeps the rest, and remove-member drops one", async () => {

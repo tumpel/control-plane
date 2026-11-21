@@ -128,6 +128,7 @@ export class World {
   readonly db = new D1Database(migratedDatabase(MIGRATIONS));
   private readonly hosts = new Map<string, Host>();
   private api!: TenantApi;
+  private dispatch!: (request: Request) => Promise<Response>;
   readonly runtime: Runtime;
 
   private constructor(runtime: Runtime) {
@@ -163,12 +164,24 @@ export class World {
       R2_ACCOUNT_ID: "scenario",
       RELEASES_BUCKET_NAME: "releases",
       API_ORIGIN: "https://api.scenario.test",
+      DASHBOARD_ORIGIN: "https://dashboard.scenario.test",
       GITHUB_API_ORIGIN: "https://github.scenario.test",
     };
     env.TENANT = this.runtime.namespace(Tenant, () => env);
+    const worker = await imported<{ fetch(request: Request, env: Record<string, unknown>): Promise<Response> }>(
+      "index.ts",
+      "default",
+    );
+    this.dispatch = (request) => worker.fetch(request, env);
     this.api = tenantApi(env.TENANT, TENANT_ID);
     await this.releases.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
     await this.call("open", { tenantId: TENANT_ID, now: Date.now() });
+  }
+
+  async fetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const response = await this.dispatch(new Request(`https://api.scenario.test${path}`, init));
+    await this.runtime.settle();
+    return response;
   }
 
   host(hostId: string): Host {
