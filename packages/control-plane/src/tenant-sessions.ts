@@ -1195,32 +1195,41 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
     if (victims.length === 0) return this.offer(tenantId, session, turn);
     await this.armOffer(tenantId, session, turn);
-    const sql = this.ctx.storage.sql;
     const now = Date.now();
     for (const victim of victims) {
       const evicted = this.sessionRow(victim.sessionId);
       if (evicted === null) throw new Error(`session ${victim.sessionId} was picked for eviction and then not found`);
-      this.ctx.storage.transactionSync(() => {
-        sql.exec(
-          "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
-          evicted.session_id,
-          evicted.box_id,
-          now,
-        );
-        sql.exec(
-          "INSERT INTO turn_eviction_waits (turn_id, session_id) VALUES (?, ?)",
-          turn.turn_id,
-          evicted.session_id,
-        );
-      });
-      if (evicted.state !== "Idle") continue;
-      const latest = this.latestTurn(evicted.session_id, null);
-      if (latest === null)
-        throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
-      this.setSessionState(evicted.session_id, "Stopping", now);
-      await this.timers(tenantId, evicted.session_id, { Snapshot: null });
-      await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
+      await this.startBoxEviction(tenantId, evicted, turn.turn_id, now);
     }
+  }
+
+  private async startBoxEviction(
+    tenantId: string,
+    evicted: SessionRow,
+    waitingTurnId: string | null,
+    now: number,
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
+        evicted.session_id,
+        evicted.box_id,
+        now,
+      );
+      if (waitingTurnId === null) return;
+      sql.exec(
+        "INSERT INTO turn_eviction_waits (turn_id, session_id) VALUES (?, ?)",
+        waitingTurnId,
+        evicted.session_id,
+      );
+    });
+    if (evicted.state !== "Idle") return;
+    const latest = this.latestTurn(evicted.session_id, null);
+    if (latest === null) throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
+    this.setSessionState(evicted.session_id, "Stopping", now);
+    await this.timers(tenantId, evicted.session_id, { Snapshot: null });
+    await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
   }
 
   private releasing(sessionId: string): boolean {
@@ -2492,19 +2501,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (this.latestTurn(session.session_id, null)?.turn_id !== turn.turn_id) return;
     if (this.heldBoxes().find((held) => held.sessionId === session.session_id)?.evictable !== true) return;
     if (!this.snapshotHolds(session.session_id, turn.turn_id)) return;
-    const sql = this.ctx.storage.sql;
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      sql.exec(
-        "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
-        session.session_id,
-        session.box_id,
-        now,
-      );
-      this.setSessionState(session.session_id, "Stopping", now);
-    });
-    await this.timers(tenantId, session.session_id, { Snapshot: null });
-    await this.snapshotOrTeardown(tenantId, { ...session, state: "Stopping" }, turn);
+    await this.startBoxEviction(tenantId, session, null, Date.now());
   }
 
   private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
