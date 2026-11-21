@@ -3,12 +3,14 @@ import { test } from "node:test";
 import { binOf, histogramOfBins, histogramQuantile } from "../src/metrics-histogram.ts";
 import {
   dataPointsOf,
+  declareInstruments,
   METRICS_LIMITS,
   type MetricBatch,
   metricBatches,
   normaliseDimensions,
   pointCount,
 } from "../src/metrics-store.ts";
+import { migratedDatabase, SqlStorage } from "./scenarios/harness/runtime.ts";
 
 const T0 = Date.parse("2026-11-16T10:00:00+00:00");
 
@@ -123,4 +125,25 @@ test("a histogram of negative and positive bins keeps its quantiles within 5 % o
       `p${quantile * 100} ${estimate} is not near ${exact}`,
     );
   }
+});
+
+test("a tenant past its metric limit refuses a new metric name and writes no row, while known metrics still declare", () => {
+  const storage = new SqlStorage(migratedDatabase(new URL("../migrations/metrics/", import.meta.url)));
+  const sql = storage as never;
+  const limits = { ...METRICS_LIMITS, instrumentsPerTenant: 2 };
+  declareInstruments(sql, INSTRUMENTS, T0, limits);
+  const written = storage.totalRowsWritten();
+
+  declareInstruments(sql, INSTRUMENTS, T0, limits);
+  assert.throws(
+    () =>
+      declareInstruments(
+        sql,
+        [{ metric: "host.invented", unit: "1", kind: "Sample", description: "Invented" }],
+        T0,
+        limits,
+      ),
+    /limit of 2 metrics per tenant/,
+  );
+  assert.equal(storage.totalRowsWritten(), written);
 });

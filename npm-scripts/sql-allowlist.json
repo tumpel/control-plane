@@ -140,7 +140,9 @@
     ],
     "packages/control-plane/src/metrics-store.ts": [
       "INSERT INTO metric (metric, unit, kind, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric) DO NOTHING",
-      "SELECT kind FROM metric WHERE metric = ?"
+      "SELECT COUNT(*) AS count FROM metric",
+      "SELECT kind FROM metric WHERE metric = ?",
+      "SELECT metric FROM metric WHERE metric = ?"
     ],
     "packages/control-plane/src/oauth.ts": [
       "DELETE FROM oauth_clients WHERE created_at <= ? AND first_party = 0 AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id AND t.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM oauth_requests r WHERE r.client_id = oauth_clients.client_id AND r.expires_at > ?)",

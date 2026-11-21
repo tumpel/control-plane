@@ -34,6 +34,7 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 const BUCKET_MS: Record<MetricBucket, number> = { Minute: MINUTE_MS, Hour: HOUR_MS, Day: DAY_MS };
 const SAFE_TEXT = /^[A-Za-z0-9._:@/+-]{1,128}$/;
+const QUOTABLE = /^[A-Za-z0-9._:@/+=-]{1,257}$/;
 
 const refuse = (status: ProblemStatus, problem: Refused["problem"]): Refused => ({ ok: false, status, problem });
 
@@ -42,12 +43,12 @@ const invalid = (detail: string, fix: string): Refused =>
 
 const unsafe = (what: string, text: string): Refused =>
   invalid(
-    `the ${what} ${JSON.stringify(text)} holds characters a metrics query cannot match`,
-    "Use only letters, digits and . _ : @ / + - in metrics filters, groups and session ids",
+    `the ${what} ${JSON.stringify(text)} holds characters or a length a metrics query cannot match`,
+    "Use at most 128 letters, digits and . _ : @ / + - in each metrics filter dimension, value, group and session id",
   );
 
 const quoted = (text: string): string => {
-  if (!SAFE_TEXT.test(text.replaceAll("=", ""))) {
+  if (!QUOTABLE.test(text)) {
     throw new Error(`${JSON.stringify(text)} reached a metrics query unchecked; refuse it where the query is parsed`);
   }
   return `'${text}'`;

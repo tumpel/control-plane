@@ -16,6 +16,7 @@ export interface MetricsLimits {
   retentionMs: number;
   pointsPerRecord: number;
   rowsPerQuery: number;
+  instrumentsPerTenant: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -26,6 +27,7 @@ export const METRICS_LIMITS: MetricsLimits = {
   retentionMs: 90 * DAY_MS,
   pointsPerRecord: 250,
   rowsPerQuery: 10_000,
+  instrumentsPerTenant: 1_000,
 };
 
 export const DIMENSION_SLOTS = 8;
@@ -103,8 +105,21 @@ export const metricBatches = (batch: MetricBatch, limits: MetricsLimits): Metric
   return chunks;
 };
 
-export const declareInstruments = (sql: MetricsSql, instruments: MetricBatch["instruments"], now: number): void => {
+export const declareInstruments = (
+  sql: MetricsSql,
+  instruments: MetricBatch["instruments"],
+  now: number,
+  limits: MetricsLimits,
+): void => {
   for (const { metric, unit, kind, description } of instruments) {
+    if (sql.exec<{ metric: string }>("SELECT metric FROM metric WHERE metric = ?", metric).toArray().length > 0)
+      continue;
+    const [declared] = sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM metric").toArray();
+    if ((declared?.count ?? 0) >= limits.instrumentsPerTenant) {
+      throw new Error(
+        `metric ${metric} would pass the limit of ${limits.instrumentsPerTenant} metrics per tenant; send points only for the metrics the host already declared`,
+      );
+    }
     sql.exec(
       "INSERT INTO metric (metric, unit, kind, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric) DO NOTHING",
       metric,

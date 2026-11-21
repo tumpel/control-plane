@@ -53,7 +53,7 @@ export class TenantMetrics extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
-      declareInstruments(sql, parsed.data.instruments, Date.now());
+      declareInstruments(sql, parsed.data.instruments, Date.now(), METRICS_LIMITS);
       checkKinds(sql, parsed.data);
     });
     for (const point of dataPointsOf(this.table().tenantId, parsed.data, METRICS_LIMITS)) {

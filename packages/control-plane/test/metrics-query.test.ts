@@ -80,6 +80,16 @@ test("a filter, group or session holding a quote or space is refused before it r
   }
 });
 
+test("a filter of a 128-character dimension and value plans a query, and one character more is refused", () => {
+  const window = { from: iso(T0), to: iso(T0 + HOUR), bucket: "Hour" as const };
+  const longest = `${"d".repeat(128)}:${"v".repeat(128)}`;
+  assert.ok(planSeriesQuery(TABLE, "turn.cost", { ...window, filter: [longest] }, T0, METRICS_LIMITS).ok);
+  assert.ok(planSeriesQuery(TABLE, "turn.cost", { ...window, groupBy: ["g".repeat(128)] }, T0, METRICS_LIMITS).ok);
+  const refused = planSeriesQuery(TABLE, "turn.cost", { ...window, filter: [`${longest}v`] }, T0, METRICS_LIMITS);
+  assert.ok(!refused.ok);
+  assert.equal(refused.problem.code, "InvalidRequest");
+});
+
 test("group-by keys each row by its slot value and folds groups past the cap into Other", () => {
   const query: MetricSeriesQuery = { from: iso(T0), to: iso(T0 + HOUR), bucket: "Hour", groupBy: ["model"] };
   const planned = value(planSeriesQuery(TABLE, "turn.cost", query, T0, METRICS_LIMITS));
