@@ -1,15 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import {
-  createHash,
-  createHmac,
-  createPrivateKey,
-  generateKeyPairSync,
-  type KeyObject,
-  randomBytes,
-  randomUUID,
-  sign,
-} from "node:crypto";
+import { createHash, createPrivateKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -49,7 +40,6 @@ import {
   SubscriptionSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
-  TriggerSchema,
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
@@ -3859,79 +3849,6 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
-  test("a trigger fired while every host is full queues its session, and the first host to report room takes it", async () => {
-    const { tenantId, bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    await installPrebuiltApp(tenantId);
-    host.close();
-    await hostState(hostId, "Offline");
-    const box = BoxMemoryLimit.DefaultMib;
-    const sides = new Map<string, HostSide>();
-    for (const name of ["full-a", "full-b"]) {
-      const full = await enrol(name);
-      const side = await connect(full.id, full.key, 8, undefined, undefined, {
-        ...USAGE,
-        memoryBudgetMib: box,
-        memoryHeldMib: box,
-      });
-      await hostState(full.id, "Online");
-      side.quiet();
-      sides.set(full.id, side);
-    }
-    const { personaId, model } = await sessionStart();
-    const created = await postJson(
-      "/v1/triggers",
-      {
-        name: "agent-review",
-        source: { kind: "GitHub", event: "status", conditions: [{ field: "context", values: ["agent-review"] }] },
-        personaId,
-        model,
-        prompt: "Review {{target_url}} at {{sha}}",
-      },
-      bearer,
-    );
-    assert.equal(created.status, 200, await created.clone().text());
-    const { triggerId } = TriggerSchema.parse(await created.json());
-    const body = JSON.stringify({
-      installation: { id: 77 },
-      repository: { html_url: "https://github.com/acme/app" },
-      context: "agent-review",
-      state: "pending",
-      sha: "c".repeat(40),
-      target_url: "https://github.com/acme/app/pull/7",
-    });
-    const delivered = await call("/github/webhook", {
-      method: "POST",
-      headers: {
-        "x-github-event": "status",
-        "x-github-delivery": randomUUID(),
-        "x-hub-signature-256": `sha256=${createHmac("sha256", "sessions-webhook-secret").update(body).digest("hex")}`,
-      },
-      body,
-    });
-    assert.equal(delivered.status, 204, await delivered.clone().text());
-    const [queued] = await getJson(`/v1/sessions?triggerId=${triggerId}`, SessionSchema.array());
-    assert.ok(queued, "the trigger started no session");
-    assert.deepEqual(
-      { state: queued.lastTurn.state, prompt: queued.lastTurn.prompt },
-      { state: "Offered", prompt: `Review https://github.com/acme/app/pull/7 at ${"c".repeat(40)}` },
-    );
-    const [freed, side] = [...sides].find(([id]) => id !== queued.hostId) ?? assert.fail("no second host");
-    assert.equal(side.holds("TurnOffer"), false);
-    side.report({ ...USAGE, memoryBudgetMib: box, memoryHeldMib: 0 });
-    const offer = await side.next("TurnOffer");
-    assert.deepEqual(
-      { sessionId: offer.sessionId, turnId: offer.turnId },
-      {
-        sessionId: queued.sessionId,
-        turnId: queued.lastTurn.turnId,
-      },
-    );
-    assert.equal((await getJson(`/v1/sessions/${queued.sessionId}`, SessionSchema)).hostId, freed);
-    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await side.next("TurnClaimed")).turnId, offer.turnId);
-    for (const each of sides.values()) each.close();
-  });
-
   test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
     const { bearer, host, hostId, refused, getJson, enrol, sessionStart, hostState } = await tenant();
     host.close();
@@ -4122,112 +4039,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: first.boxId });
   });
 
-  test("a delivery to an evicted session waits while every box runs or releases, and another host places it once it has room", async () => {
-    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const tight = await enrol("tight");
-    const side = await connect(tight.id, tight.key, 2);
-    await hostState(tight.id, "Online");
-    side.quiet();
-    const foreman = await idleTurn(side, { ...(await sessionStart()), prompt: "lead the crew" }, bearer);
-    const foremanId = foreman.session.sessionId;
-    const snapshot = await side.next("SnapshotRequest");
-    await storeRoot(snapshot.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the foreman reading Idle",
-      () => getJson(`/v1/sessions/${foremanId}`, SessionSchema),
-      (session) => session.state === "Idle",
-    );
-    const subscription = await tool(
-      "tumpel_subscription_create",
-      {
-        sessionId: foremanId,
-        prompt: "review what the crew did",
-        goal: "every crew turn is reviewed",
-        events: ["TurnCompleted"],
-        crewTags: ["crew:review"],
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-      },
-      SubscriptionSchema,
-    );
-
-    const crewStart = await postJson(
-      "/v1/sessions",
-      { ...(await sessionStart()), prompt: "review a pull request", tags: ["crew:review"], boxRetention: "Off" },
-      bearer,
-    );
-    assert.equal(crewStart.status, 200, await crewStart.clone().text());
-    const crew = StartedSessionSchema.parse(await crewStart.json());
-    const crewOffer = await side.next("TurnOffer");
-    assert.equal(crewOffer.turnId, crew.turn.turnId);
-    side.send({ type: "TurnClaim", turnId: crewOffer.turnId, boxId: crewOffer.boxId });
-
-    const busyStart = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "keep running" }, bearer);
-    assert.equal(busyStart.status, 200, await busyStart.clone().text());
-    const busy = StartedSessionSchema.parse(await busyStart.json());
-    assert.deepEqual(await side.next("BoxTeardown"), {
-      type: "BoxTeardown",
-      sessionId: foremanId,
-      boxId: foreman.offer.boxId,
-    });
-    side.send({ type: "BoxGone", sessionId: foremanId, boxId: foreman.offer.boxId });
-    const busyOffer = await side.next("TurnOffer");
-    assert.equal(busyOffer.turnId, busy.turn.turnId);
-    side.send({ type: "TurnClaim", turnId: busyOffer.turnId, boxId: busyOffer.boxId });
-
-    side.send({
-      type: "TurnLine",
-      turnId: crewOffer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    side.send({
-      type: "TurnComplete",
-      turnId: crewOffer.turnId,
-      lastLineSeq: 1,
-      completedAt: new Date().toISOString(),
-    });
-    const crewSnapshot = await side.next("SnapshotRequest");
-    await storeRoot(crewSnapshot.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: crewSnapshot.snapshotId, uploadedBytes: 14 });
-    assert.deepEqual(await side.next("BoxTeardown"), {
-      type: "BoxTeardown",
-      sessionId: crew.session.sessionId,
-      boxId: crewOffer.boxId,
-    });
-    const [, delivery] = await until(
-      "the foreman's delivery turn",
-      () => getJson(`/v1/sessions/${foremanId}/turns`, TurnSchema.array()),
-      (turns) => turns.length === 2,
-    );
-    assert.equal(delivery?.state, "Offered");
-    const waiting = await tool(
-      "tumpel_subscription_get",
-      { subscriptionId: subscription.subscriptionId },
-      SubscriptionSchema,
-    );
-    assert.deepEqual([waiting.state, waiting.deliveryFailuresInARow], ["Active", 0]);
-    assert.equal(side.holds("TurnOffer"), false, "the delivery waits while both boxes are taken");
-
-    const roomy = await enrol("roomy");
-    const other = await connect(roomy.id, roomy.key, 1);
-    await hostState(roomy.id, "Online");
-    other.quiet();
-    other.report(USAGE);
-    const offer = await other.next("TurnOffer");
-    assert.equal(offer.turnId, delivery?.turnId);
-    assert.notEqual(offer.boxId, foreman.offer.boxId);
-    assert.deepEqual(
-      offer.snapshots.map((each) => each.snapshotId),
-      [snapshot.snapshotId],
-    );
-    assert.equal(side.holds("TurnOffer"), false, "the full host never gets the delivery");
-    other.close();
-    side.close();
-  });
-
   test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
@@ -4246,44 +4057,6 @@ suite("sessions", { concurrency: 8 }, () => {
     const offer = await host.next("TurnOffer");
     assert.equal(offer.sessionId, sessionId);
     assert.notEqual(offer.boxId, off.offer.boxId);
-  });
-
-  test("a send during an Off release waits for the box to go and runs on a fresh box, while a person's stop refuses sends", async () => {
-    const { bearer, host, getJson, refused, tool, sessionStart } = await tenant();
-    const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
-    const { sessionId } = off.session;
-    const request = await host.next("SnapshotRequest");
-    await storeRoot(request.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
-    const teardown = await host.next("BoxTeardown");
-    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "while releasing" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const queued = TurnSchema.parse(await sent.json());
-    assert.equal(queued.state, "Offered");
-    assert.equal(host.holds("TurnOffer"), false, "the queued turn waits for the released box's BoxGone");
-    host.send({ type: "BoxGone", sessionId, boxId: teardown.boxId });
-    const offer = await host.next("TurnOffer");
-    assert.deepEqual([offer.turnId, offer.sessionId], [queued.turnId, sessionId]);
-    assert.notEqual(offer.boxId, off.offer.boxId);
-
-    const kept = await idleTurn(host, { ...(await sessionStart()), prompt: "keep" }, bearer);
-    const keptSnapshot = await host.next("SnapshotRequest");
-    await storeRoot(keptSnapshot.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: keptSnapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the kept session reading Idle",
-      () => getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema),
-      (session) => session.state === "Idle",
-    );
-    assert.equal(
-      (await tool("tumpel_session_stop", { sessionId: kept.session.sessionId }, SessionSchema)).state,
-      "Stopping",
-    );
-    const stopping = await refused(`/v1/sessions/${kept.session.sessionId}/turns`, {
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "too late" }),
-    });
-    assert.equal(stopping.code, "SessionStopping");
   });
 
   test("the first heartbeat after a reconnect releases the boxes a host still holds for Stopped, archived and idle Off sessions, and keeps Warm, Auto and running boxes", async () => {

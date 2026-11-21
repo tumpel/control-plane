@@ -567,9 +567,11 @@ export class Tenant extends TenantConnectors {
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),
-    steerTurn: ({ tenantId, turnId, steer, now }) => ({ sent: this.steerTurn(tenantId, turnId, steer.prompt, now) }),
+    steerTurn: async ({ tenantId, turnId, steer, now }) => ({
+      sent: await this.steerTurn(tenantId, turnId, steer.prompt, now),
+    }),
     listSteers: ({ tenantId, turnId }) => ({ steers: this.listSteers(tenantId, turnId) }),
-    takeSteers: ({ turnId, now }) => ({ taken: this.takeSteers(turnId, now) }),
+    takeSteers: ({ turnId }) => ({ taken: this.takeSteers(turnId) }),
     cancelTurn: ({ tenantId, turnId, cancelledBy, now }) => ({
       cancelled: this.cancelTurn(tenantId, turnId, cancelledBy, now),
     }),

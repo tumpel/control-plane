@@ -1,4 +1,3 @@
-import type { CredentialCheck, SecretMember } from "@tumpel/api/credentials";
 import type { MetricBatchSchema, TurnPointSchema } from "@tumpel/schemas";
 import { z } from "zod";
 
@@ -9,16 +8,9 @@ const SPEND_METRICS = new Set(["turn.cost", "turn.tokens"]);
 
 export const DimensionsSchema = z.record(z.string(), z.string());
 
-export const offeredDimensions = (
-  personaId: string,
-  secretSetId: string,
-  credential: CredentialCheck<SecretMember> | null,
-): Dimensions => ({
+export const offeredDimensions = (personaId: string, secretSetId: string): Dimensions => ({
   personaId,
   secretSetId,
-  ...(credential?.kind === "Usable"
-    ? { provider: credential.credential.provider, costBasis: credential.costBasis }
-    : {}),
 });
 
 export const stampTurnPoints = (
