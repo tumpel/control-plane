@@ -42,8 +42,7 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
   FROM push_subscriptions AS p`;
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
 const PUSH_BATCH_SIZE = 20;
-const PUSH_TTL_SECONDS = 86_400;
-const PUSH_TTL_MS = PUSH_TTL_SECONDS * 1000;
+const PUSH_TTL_MS = 86_400 * 1000;
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
@@ -225,7 +224,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
               path,
             };
       const payload = await buildPushPayload(
-        { data: PushNotificationSchema.parse(data), options: { ttl: PUSH_TTL_SECONDS } },
+        { data: PushNotificationSchema.parse(data), options: { ttl: Math.ceil((expiresAt - now) / 1000) } },
         {
           endpoint: row.endpoint,
           expirationTime: null,
@@ -276,11 +275,24 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         );
         continue;
       }
-      this.ctx.storage.sql.exec(
-        "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
+      const deleted = this.ctx.storage.sql.exec(
+        `DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?
+          AND EXISTS (SELECT 1 FROM push_subscriptions WHERE push_subscription_id = ?
+            AND p256dh = ? AND auth_sealed = ?)`,
         row.event_id,
         row.push_subscription_id,
-      );
+        row.push_subscription_id,
+        row.p256dh,
+        row.auth_sealed,
+      ).rowsWritten;
+      if (deleted === 0) {
+        this.ctx.storage.sql.exec(
+          "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
+          now,
+          row.event_id,
+          row.push_subscription_id,
+        );
+      }
     }
     if (rows.length === PUSH_BATCH_SIZE) await this.ctx.storage.setAlarm(now);
   }

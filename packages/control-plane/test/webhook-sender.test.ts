@@ -80,6 +80,7 @@ const received: {
   signature: string | undefined;
   authorization: string | undefined;
   contentEncoding: string | undefined;
+  ttl: string | undefined;
 }[] = [];
 
 const post = (path: string, body: unknown): ReturnType<TestHarness["fetch"]> =>
@@ -151,6 +152,7 @@ before(async () => {
           : request.headers["tumpel-signature"],
         authorization: request.headers.authorization,
         contentEncoding,
+        ttl: Array.isArray(request.headers.ttl) ? request.headers.ttl[0] : request.headers.ttl,
       });
       if (holdReceiver) blockedResponses.push({ response, status });
       else finishReceiver(response, status);
@@ -562,7 +564,7 @@ test("an expired push wake advances to the next event", async () => {
     });
   const receivedBefore = received.length;
   await emit(now - 86_400_001);
-  await emit(now);
+  await emit(now - 3_600_000);
   const wakes = await until(
     "the fresh push attempt",
     async () =>
@@ -573,6 +575,8 @@ test("an expired push wake advances to the next event", async () => {
   );
   assert.equal(wakes.length, 1);
   assert.equal(received.length, receivedBefore + 1);
+  const ttl = Number(received.at(-1)?.ttl);
+  assert.ok(ttl >= 82_799 && ttl <= 82_800, `received TTL ${ttl}`);
 });
 
 test("archiving or failing a session ends its subscription and sends the ended event", async () => {
@@ -611,61 +615,63 @@ test("archiving or failing a session ends its subscription and sends the ended e
   }
 });
 
-test("a terminal response keeps the wake when browser keys changed in flight", async () => {
-  const tenantId = crypto.randomUUID();
-  const now = Date.now();
-  const firstPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const firstP256dh = Buffer.from(await crypto.subtle.exportKey("raw", firstPair.publicKey)).toString("base64url");
-  const firstAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
-  const endpoint = `${receiverOrigin}/push/replaced`;
-  await post("/__fixture/push/create", {
-    tenantId,
-    subscription: {
-      endpoint,
-      keys: { p256dh: firstP256dh, auth: firstAuth },
-      events: ["SubscriptionEnded"],
-    },
-    now,
-  });
-  receiverStatus = 410;
-  holdReceiver = true;
-  const receivedBefore = received.length;
-  await post("/__fixture/emit", {
-    tenantId,
-    event: {
-      event: "SubscriptionEnded",
-      subscriptionId: "subscription-6",
-      sessionId: "session-6",
-      reason: "GoalMet",
-    },
-    now,
-  });
-  await until(
-    "the blocked push request",
-    async () => received.length,
-    (length) => length > receivedBefore,
-  );
-  const secondPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const secondP256dh = Buffer.from(await crypto.subtle.exportKey("raw", secondPair.publicKey)).toString("base64url");
-  const secondAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
-  await post("/__fixture/push/create", {
-    tenantId,
-    subscription: {
-      endpoint,
-      keys: { p256dh: secondP256dh, auth: secondAuth },
-      events: ["SubscriptionEnded"],
-    },
-    now: now + 1,
-  });
-  receiverStatus = 204;
-  releaseReceiver();
-  const listed = await until(
-    "delivery with the replacement browser keys",
-    async () =>
-      z
-        .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
-        .parse(await (await post("/__fixture/push/list", { tenantId })).json()),
-    (value) => received.length >= receivedBefore + 2 && value.result.subscriptions.length === 1,
-  );
-  assert.equal(listed.result.subscriptions.length, 1);
+test("a response keeps the wake when browser keys changed in flight", async () => {
+  for (const firstStatus of [204, 410]) {
+    const tenantId = crypto.randomUUID();
+    const now = Date.now();
+    const firstPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const firstP256dh = Buffer.from(await crypto.subtle.exportKey("raw", firstPair.publicKey)).toString("base64url");
+    const firstAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+    const endpoint = `${receiverOrigin}/push/replaced`;
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint,
+        keys: { p256dh: firstP256dh, auth: firstAuth },
+        events: ["SubscriptionEnded"],
+      },
+      now,
+    });
+    receiverStatus = firstStatus;
+    holdReceiver = true;
+    const receivedBefore = received.length;
+    await post("/__fixture/emit", {
+      tenantId,
+      event: {
+        event: "SubscriptionEnded",
+        subscriptionId: "subscription-6",
+        sessionId: "session-6",
+        reason: "GoalMet",
+      },
+      now,
+    });
+    await until(
+      "the blocked push request",
+      async () => received.length,
+      (length) => length > receivedBefore,
+    );
+    const secondPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const secondP256dh = Buffer.from(await crypto.subtle.exportKey("raw", secondPair.publicKey)).toString("base64url");
+    const secondAuth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint,
+        keys: { p256dh: secondP256dh, auth: secondAuth },
+        events: ["SubscriptionEnded"],
+      },
+      now: now + 1,
+    });
+    receiverStatus = 204;
+    releaseReceiver();
+    const listed = await until(
+      "delivery with the replacement browser keys",
+      async () =>
+        z
+          .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+          .parse(await (await post("/__fixture/push/list", { tenantId })).json()),
+      (value) => received.length >= receivedBefore + 2 && value.result.subscriptions.length === 1,
+    );
+    assert.equal(listed.result.subscriptions.length, 1);
+  }
 });
