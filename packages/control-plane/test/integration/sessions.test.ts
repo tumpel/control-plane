@@ -2322,22 +2322,27 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(host.holds("TurnOffer"), false);
   });
 
-  test("a stop whose teardown the host refuses returns the session to Idle with the failure and snapshots its box again", async () => {
-    const { host, getJson, tool, sessionStart } = await tenant();
+  test("a stop whose teardown the host refuses returns to Idle and becomes evictable after its recovery snapshot", async () => {
+    const { bearer, host, hostId, getJson, tool, sessionStart, enrol, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const enrolled = await enrol("tight");
+    const side = await connect(enrolled.id, enrolled.key, 1);
+    await hostState(enrolled.id, "Online");
     const started = await tool(
       "tumpel_session_start",
       { ...(await sessionStart()), prompt: "keep my box" },
       StartedSessionSchema,
     );
     const { sessionId } = started.session;
-    const offer = await host.next("TurnOffer");
+    const offer = await side.next("TurnOffer");
     const { turnId } = offer;
-    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    const warm = await host.next("SnapshotRequest");
+    side.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    side.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    side.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const warm = await side.next("SnapshotRequest");
     await storeRoot(warm.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
+    side.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
     await until(
       "a stored snapshot",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
@@ -2345,10 +2350,10 @@ suite("sessions", { concurrency: 8 }, () => {
     );
 
     await tool("tumpel_session_stop", { sessionId }, SessionSchema);
-    const teardown = await host.next("BoxTeardown");
+    const teardown = await side.next("BoxTeardown");
     const failedAt = new Date().toISOString();
     const detail = `box ${teardown.boxId} holds turn ${turnId}, which no snapshot holds; snapshot it, then tear it down`;
-    host.send({ type: "BoxTeardownFailed", sessionId, boxId: teardown.boxId, reason: "BoxDirty", detail, failedAt });
+    side.send({ type: "BoxTeardownFailed", sessionId, boxId: teardown.boxId, reason: "BoxDirty", detail, failedAt });
     const idle = await until(
       "the session reading Idle",
       () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
@@ -2360,17 +2365,30 @@ suite("sessions", { concurrency: 8 }, () => {
       failures.map((failure) => [failure.sessionId, failure.reason, failure.detail, failure.failedAt]),
       [[sessionId, "BoxDirty", detail, failedAt]],
     );
+    const blocked = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "wait for recovery" }, bearer);
+    assert.equal(blocked.status, 409, await blocked.clone().text());
+    assert.equal(ProblemSchema.parse(await blocked.json()).code, "PoolExhausted");
+    assert.equal(side.holds("BoxTeardown"), false);
 
-    const again = await host.next("SnapshotRequest");
+    const again = await side.next("SnapshotRequest");
     assert.equal(again.sessionId, sessionId);
     assert.equal(again.turnId, turnId);
     await storeRoot(again.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: again.snapshotId, uploadedBytes: 14 });
+    side.send({ type: "SnapshotDone", snapshotId: again.snapshotId, uploadedBytes: 14 });
     await until(
       "the second snapshot stored in place of the first",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
       (snapshots) => snapshots.length === 1 && snapshots[0]?.snapshotId === again.snapshotId,
     );
+    const replacement = await postJson(
+      "/v1/sessions",
+      { ...(await sessionStart()), prompt: "replace the recovered box" },
+      bearer,
+    );
+    assert.equal(replacement.status, 200, await replacement.clone().text());
+    assert.equal(StartedSessionSchema.parse(await replacement.json()).session.hostId, enrolled.id);
+    assert.deepEqual(await side.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: offer.boxId });
+    side.close();
   });
 
   test("a stop whose snapshot fails returns the session to Idle and does not ask for that snapshot again", async () => {
