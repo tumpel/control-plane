@@ -1370,7 +1370,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private turnBudget(turnId: string): number {
     return this.ctx.storage.sql
-      .exec<{ turn_total_budget_seconds: number }>("SELECT turn_total_budget_seconds FROM turns WHERE turn_id = ?", turnId)
+      .exec<{ turn_total_budget_seconds: number }>(
+        "SELECT turn_total_budget_seconds FROM turns WHERE turn_id = ?",
+        turnId,
+      )
       .one().turn_total_budget_seconds;
   }
 
