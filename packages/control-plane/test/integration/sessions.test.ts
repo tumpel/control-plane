@@ -2052,6 +2052,31 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(completed.state === "Ended" ? completed.reason : completed.state, "GoalMet");
   });
 
+  test("a subscription with crew tags is refused while its session runs a persona without tumpelMcp", async () => {
+    const { getJson, tool, toolRefusal, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "lead the crew" },
+      StartedSessionSchema,
+    );
+    const create = {
+      sessionId: started.session.sessionId,
+      prompt: "start a crew session per open issue",
+      goal: "every open issue has a merged pull request",
+      events: ["TurnCompleted"],
+      crewTags: ["crew:issues"],
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    };
+    assert.match(
+      await toolRefusal("tumpel_subscription_create", create),
+      /runs persona Default, which has no tumpelMcp, so it cannot start the crew that crewTags names/,
+    );
+
+    const [persona] = await getJson("/v1/personas", PersonaSchema.array());
+    await tool("tumpel_persona_patch", { personaId: persona?.personaId, tumpelMcp: true }, PersonaSchema);
+    assert.equal((await tool("tumpel_subscription_create", create, SubscriptionSchema)).state, "Active");
+  });
+
   test("a stop with cancelTurn fails the running turn Cancelled, snapshots and frees its box, and the next send boots a fresh box", async () => {
     const { email, host, refused, getJson, tool, sessionStart } = await tenant();
     const started = await tool(
@@ -4014,6 +4039,8 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/sessions/${foremanId}`, SessionSchema),
       (session) => session.state === "Idle",
     );
+    const [defaultPersona] = await getJson("/v1/personas", PersonaSchema.array());
+    await tool("tumpel_persona_patch", { personaId: defaultPersona?.personaId, tumpelMcp: true }, PersonaSchema);
     const subscription = await tool(
       "tumpel_subscription_create",
       {
@@ -4195,6 +4222,8 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/sessions/${foremanId}`, SessionSchema),
       (session) => session.state === "Idle",
     );
+    const [defaultPersona] = await getJson("/v1/personas", PersonaSchema.array());
+    await tool("tumpel_persona_patch", { personaId: defaultPersona?.personaId, tumpelMcp: true }, PersonaSchema);
     const subscription = await tool(
       "tumpel_subscription_create",
       {

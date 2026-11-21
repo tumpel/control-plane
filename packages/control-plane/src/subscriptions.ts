@@ -80,6 +80,17 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   if (session === null) return sessionNotFound(subscription.sessionId);
   const goal = refusedGoal(session, { prompt: subscription.prompt, goal: subscription.goal });
   if (goal !== null) return refused(goal.status, goal.problem);
+  if (subscription.crewTags.length > 0) {
+    const { persona } = await tenant.call("getPersona", { tenantId: caller.tenantId, personaId: session.personaId });
+    if (persona?.tumpelMcp !== true) {
+      const name = persona?.name ?? session.personaId;
+      return invalid(
+        "Persona lacks tumpelMcp",
+        `session ${subscription.sessionId} runs persona ${name}, which has no tumpelMcp, so it cannot start the crew that crewTags names`,
+        `Set tumpelMcp: true on persona ${name}, or create the subscription without crewTags`,
+      );
+    }
+  }
   const goalFold = GOAL_FOLDS.get(session.harness);
   if (goalFold === undefined) throw new Error(`${session.harness} passed the goal check and has no goal fold`);
   const leanest = `${subscription.prompt}\n\n${widestReference(subscription.events)}`;
