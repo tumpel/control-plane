@@ -20,18 +20,20 @@ export const widestReference = (events: string[]): string =>
     "x".repeat(SESSION_ID_MAX),
   );
 
+export const subscriptionPrompt = (plan: string, goal: string): string =>
+  `${plan}\n\nSubscription goal: ${goal}\nCall tumpel_subscription_complete when the goal holds. End this event turn after dispatching or handling the event; crew work continues in later event turns.`;
+
 export const deliveryPrompt = (
   plan: string,
   goal: string,
   tenantId: string,
   events: DeliveryEvent[],
-  fold: (prompt: string, goal: string) => string,
   limit: number,
 ): { prompt: string; lastEventId: number } | null => {
   const parsed = events.map((row) =>
     TenantEventSchema.parse({ ...JSON.parse(row.payload), eventId: row.event_id, tenantId, createdAt: row.created_at }),
   );
-  const fits = (prompt: string) => fold(prompt, goal).length <= limit;
+  const fits = (prompt: string) => subscriptionPrompt(prompt, goal).length <= limit;
   const lines = parsed.map((event) => JSON.stringify(event));
   const batch = parsed
     .map((event, index) => ({

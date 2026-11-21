@@ -1909,7 +1909,7 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("a foreman subscribed to its crew gets each crew turn as a delivery turn until its goal is met, and a turn token dies with its turn", async () => {
+  test("a foreman dispatches crew and ends its event turn while the subscription goal is unmet", async () => {
     const { bearer, host, getJson, tool, storedSnapshot, sessionStart } = await tenant();
     const [defaults] = await getJson("/v1/personas", PersonaSchema.array());
     const created = await postJson(
@@ -2026,7 +2026,10 @@ suite("sessions", { concurrency: 8 }, () => {
     const delivery = await host.next("TurnOffer");
     assert.equal(delivery.sessionId, foremanId);
     assert.ok(delivery.credential.connectors.some((connector) => connector.connectorId === "tumpel"));
-    assert.match(delivery.prompt, /^\/goal start a crew session per open issue and review what it did\n\n/);
+    assert.match(delivery.prompt, /^start a crew session per open issue and review what it did\n\n/);
+    assert.doesNotMatch(delivery.prompt, /^\/goal/);
+    assert.match(delivery.prompt, /every open issue has a merged pull request/);
+    assert.equal((await tool("tumpel_turn_get", { turnId: delivery.turnId }, TurnSchema)).goal, undefined);
     const events = delivery.prompt
       .split("\n")
       .filter((line) => line.startsWith("{"))
@@ -2043,6 +2046,7 @@ suite("sessions", { concurrency: 8 }, () => {
       SubscriptionSchema,
     );
     assert.equal(delivered.cursorEventId, events[0]?.eventId);
+    assert.equal(delivered.state, "Active");
 
     const completed = await tool(
       "tumpel_subscription_complete",

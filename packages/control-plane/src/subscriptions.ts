@@ -4,8 +4,8 @@ import {
   SubscriptionPathSchema,
   SubscriptionPauseSchema,
 } from "@tumpel/schemas";
-import { widestReference } from "./delivery-prompt.ts";
-import { DELIVERY_GOAL_ROUNDS, GOAL_FOLDS } from "./harness-catalog.ts";
+import { subscriptionPrompt, widestReference } from "./delivery-prompt.ts";
+import { GOAL_FOLDS } from "./harness-catalog.ts";
 import { issues, json, type Problem, type ProblemStatus, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
@@ -83,7 +83,7 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   const goalFold = GOAL_FOLDS.get(session.harness);
   if (goalFold === undefined) throw new Error(`${session.harness} passed the goal check and has no goal fold`);
   const leanest = `${subscription.prompt}\n\n${widestReference(subscription.events)}`;
-  const length = goalFold.fold(leanest, subscription.goal, DELIVERY_GOAL_ROUNDS).length;
+  const length = subscriptionPrompt(leanest, subscription.goal).length;
   if (length > goalFold.limit) {
     return invalid(
       "Plan and goal too long",
