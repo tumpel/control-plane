@@ -2557,9 +2557,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session?.state !== "Idle" || session.box_retention !== "Auto" || this.inFlightTurn(sessionId) !== null) return;
     const latest = this.latestTurn(sessionId, null);
     if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
-    if (!this.snapshotHolds(sessionId, latest.turn_id)) return;
+    const sql = this.ctx.storage.sql;
+    const [pending] = sql.exec("SELECT 1 FROM snapshot_requests WHERE session_id = ? LIMIT 1", sessionId).toArray();
+    if (pending !== undefined) return;
+    const [stored] = sql
+      .exec<{ created_at: number }>(
+        "SELECT created_at FROM snapshots WHERE session_id = ? AND turn_id = ? ORDER BY created_at DESC LIMIT 1",
+        sessionId,
+        latest.turn_id,
+      )
+      .toArray();
+    if (stored !== undefined) {
+      return this.timers(tenantId, sessionId, {
+        Teardown: { turnId: latest.turn_id, at: stored.created_at + IDLE_EVICTION_MS },
+      });
+    }
+    const [failed] = sql
+      .exec("SELECT 1 FROM snapshot_failures WHERE session_id = ? AND turn_id = ? LIMIT 1", sessionId, latest.turn_id)
+      .toArray();
+    if (failed !== undefined) return;
     await this.timers(tenantId, sessionId, {
-      Teardown: { turnId: latest.turn_id, at: latest.updated_at + IDLE_EVICTION_MS },
+      Snapshot: { turnId: latest.turn_id, at: Date.now() + settingsOf(this.env).snapshotDelaySeconds * 1000 },
     });
   }
 
