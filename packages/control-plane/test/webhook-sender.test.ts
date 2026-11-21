@@ -355,7 +355,6 @@ test("push delivery drops subscriptions the push service no longer knows", async
             },
       now: 7 + index * 2,
     });
-    await post("/__fixture/push/alarm", { tenantId: TENANT_ID });
     await until(
       `the push service's HTTP ${status} response`,
       async () => ({ received: received.length, subscriptions: await list() }),
@@ -419,8 +418,12 @@ test("a later event does not bypass a subscription wake in backoff", async () =>
     },
     now: 25,
   });
-  for (const now of [26, 27]) {
-    await post("/__fixture/emit", {
+  const readWakes = async () =>
+    z
+      .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+      .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+  const emit = (now: number) =>
+    post("/__fixture/emit", {
       tenantId,
       event: {
         event: "SubscriptionPaused",
@@ -430,11 +433,10 @@ test("a later event does not bypass a subscription wake in backoff", async () =>
       },
       now,
     });
-    if (now === 26) await post("/__fixture/push/alarm", { tenantId });
-  }
-  const wakes = z
-    .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
-    .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+  await emit(26);
+  await until("the first push attempt", readWakes, (wakes) => wakes.some((wake) => wake.failures === 1));
+  await emit(27);
+  const wakes = await until("the later push wake", readWakes, (value) => value.length === 2);
   assert.equal(wakes.length, 2);
   const firstAttempt = wakes.find((wake) => wake.failures === 1)?.next_attempt_at;
   assert.ok(firstAttempt !== undefined);
