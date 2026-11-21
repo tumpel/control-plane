@@ -361,7 +361,7 @@ export const receive = async (
   }
   const overRate = RATE_LIMITED_MESSAGES.has(envelope.message.type) ? await context.admitFrame() : null;
   if (overRate !== null) {
-    context.ledger.save(outcome.ledger);
+    context.ledger.skip(envelope);
     refuseFrame(context.port, envelope.seq, overRate);
     return { connection, event: { kind: "FrameRefused", seq: envelope.seq, reason: overRate } };
   }

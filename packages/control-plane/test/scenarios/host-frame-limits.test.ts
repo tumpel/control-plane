@@ -34,7 +34,16 @@ const openChannel = async (rate: RateLimiter) => {
       },
     },
     host: { hostId: HOST_ID, publicKey, revoked: false },
-    ledger: { load: () => structuredClone(ledger), save: (next) => (ledger = structuredClone(next)) },
+    ledger: {
+      load: () => structuredClone(ledger),
+      save: (next) => {
+        ledger = structuredClone(next);
+      },
+      heard: () => ledger.received,
+      skip: (frame) => {
+        ledger = { ...ledger, received: frame.seq };
+      },
+    },
     prepareOffer: async () => ({ kind: "Withdrawn" }),
     prepareClaudeSetup: async (stored) => ({
       kind: "Withdrawn",
@@ -51,7 +60,7 @@ const openChannel = async (rate: RateLimiter) => {
     const received = await control.receive(channel.connection, JSON.stringify(envelope), context);
     channel.connection = received.connection;
     if (received.event.kind === "Message") {
-      control.acknowledge(context, received.event.frame);
+      control.acknowledge(context, [received.event.frame]);
       channel.delivered.push(received.event.frame.seq);
     }
     return received.event;
