@@ -534,7 +534,11 @@ test("a later event does not bypass a subscription wake in backoff", async () =>
   const alarm = z
     .object({ alarmAt: z.number() })
     .parse(await (await post("/__fixture/push/alarm-at", { tenantId })).json());
-  assert.equal(alarm.alarmAt, firstAttempt);
+  const usageSave = alarm.alarmAt % 60_000 === 0 && alarm.alarmAt < firstAttempt;
+  assert.ok(
+    alarm.alarmAt === firstAttempt || usageSave,
+    `the alarm at ${alarm.alarmAt} is neither the push retry at ${firstAttempt} nor an earlier minute-end usage save`,
+  );
 });
 
 test("an expired push wake advances to the next event", async () => {
