@@ -139,19 +139,16 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
           JOIN events AS e USING (event_id)
           JOIN event_sessions AS es USING (event_id)
           JOIN sessions AS s USING (session_id)
+          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
+            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)
           ORDER BY w.event_id, p.push_subscription_id`,
       )
       .toArray();
     if (rows.length === 0) return;
     const dataKey = await this.dataKey();
     const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
-    const blocked = new Set<string>();
     for (const row of rows) {
-      if (blocked.has(row.push_subscription_id)) continue;
-      if (row.next_attempt_at > now) {
-        blocked.add(row.push_subscription_id);
-        continue;
-      }
+      if (row.next_attempt_at > now) continue;
       const event = TenantEventSchema.parse({
         ...JSON.parse(row.payload),
         eventId: row.event_id,
@@ -188,7 +185,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
       const response = await fetch(row.endpoint, { ...payload, signal }).catch((error: unknown) =>
         signal.aborted ? "The push service did not answer within 10 seconds" : error,
       );
-      if (response instanceof Response && response.status >= 400 && response.status < 500 && response.status !== 429) {
+      if (response instanceof Response && (response.status === 404 || response.status === 410)) {
         const deleted = this.ctx.storage.sql.exec(
           "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
           row.push_subscription_id,
@@ -203,7 +200,6 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
             row.push_subscription_id,
           );
         }
-        blocked.add(row.push_subscription_id);
         continue;
       }
       if (!(response instanceof Response) || !response.ok) {
@@ -214,7 +210,6 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
           row.event_id,
           row.push_subscription_id,
         );
-        blocked.add(row.push_subscription_id);
         continue;
       }
       this.ctx.storage.sql.exec(

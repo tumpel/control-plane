@@ -323,7 +323,7 @@ test("push delivery drops subscriptions the push service no longer knows", async
       .parse(await response.json()).result.subscriptions.length;
   };
 
-  for (const [index, status] of [400, 404, 410].entries()) {
+  for (const [index, status] of [404, 410].entries()) {
     const created = await post("/__fixture/push/create", {
       tenantId: TENANT_ID,
       subscription: {
@@ -403,6 +403,45 @@ test("a transient push failure leaves its wake without blocking another browser"
   assert.equal(wakes.length, 1);
   assert.ok((wakes[0]?.failures ?? 0) >= 1);
   assert.ok((wakes[0]?.next_attempt_at ?? 0) > 21);
+});
+
+test("a later event does not bypass a subscription wake in backoff", async () => {
+  const tenantId = crypto.randomUUID();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint: `${receiverOrigin}/push/retry`,
+      keys: { p256dh, auth },
+      events: ["SubscriptionPaused"],
+    },
+    now: 25,
+  });
+  for (const now of [26, 27]) {
+    await post("/__fixture/emit", {
+      tenantId,
+      event: {
+        event: "SubscriptionPaused",
+        subscriptionId: "subscription-7",
+        sessionId: "session-7",
+        reason: { kind: "ByRequest", message: "Choose a release." },
+      },
+      now,
+    });
+    if (now === 26) await post("/__fixture/push/alarm", { tenantId });
+  }
+  const wakes = z
+    .array(z.object({ push_subscription_id: z.string(), failures: z.int(), next_attempt_at: z.number() }))
+    .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+  assert.equal(wakes.length, 2);
+  const firstAttempt = wakes.find((wake) => wake.failures === 1)?.next_attempt_at;
+  assert.ok(firstAttempt !== undefined);
+  const alarm = z
+    .object({ alarmAt: z.number() })
+    .parse(await (await post("/__fixture/push/alarm-at", { tenantId })).json());
+  assert.equal(alarm.alarmAt, firstAttempt);
 });
 
 test("a terminal response keeps the wake when browser keys changed in flight", async () => {

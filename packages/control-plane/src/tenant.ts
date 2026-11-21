@@ -251,7 +251,9 @@ export class Tenant extends TenantConnectors {
 
   private async armPushes(): Promise<void> {
     const [wake] = this.ctx.storage.sql
-      .exec<{ at: number | null }>("SELECT MIN(next_attempt_at) AS at FROM push_wakes")
+      .exec<{ at: number | null }>(`SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
+        WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
+          WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)`)
       .toArray();
     await this.armExpiry(wake?.at ?? undefined);
   }

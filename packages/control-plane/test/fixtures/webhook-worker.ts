@@ -43,6 +43,10 @@ export class Tenant extends BaseTenant {
       .exec("SELECT push_subscription_id, failures, next_attempt_at FROM push_wakes ORDER BY push_subscription_id")
       .toArray();
   }
+
+  alarmAt(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
 }
 
 export class WebhookSender extends BaseWebhookSender {
@@ -138,6 +142,10 @@ export default {
     if (url.pathname === "/__fixture/push/wakes") {
       const { tenantId } = await requestBody<{ tenantId: string }>(request);
       return Response.json(await tenant(env, tenantId).pushWakes());
+    }
+    if (url.pathname === "/__fixture/push/alarm-at") {
+      const { tenantId } = await requestBody<{ tenantId: string }>(request);
+      return Response.json({ alarmAt: await tenant(env, tenantId).alarmAt() });
     }
     const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/fail-since|\/alarm)?$/.exec(url.pathname);
     if (senderMatch !== null) {
