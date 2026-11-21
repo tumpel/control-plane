@@ -2637,10 +2637,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
           .toArray()
           .map((row) => row.storage_key),
       );
-      sql.exec(
-        "DELETE FROM push_wakes WHERE event_id IN (SELECT event_id FROM event_sessions WHERE session_id = ?)",
-        sessionId,
-      );
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
     return { kind: "Deleted" };
@@ -4035,47 +4031,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       Snapshot: { turnId: turn.turn_id, at: now + delay },
     });
     if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
-  }
-
-  protected async abandonDeadline(tenantId: string, due: SessionDueDeadline, detail: string): Promise<void> {
-    const turn = this.turnRow(due.deadline.turnId);
-    if (turn === null) return;
-    const failedAt = iso(Date.now());
-    if (due.name === "FirstLine" && turn.state === "Running" && turn.line_count === 0) {
-      return this.failTurn(tenantId, turn.turn_id, "NoFirstOutput", detail, failedAt);
-    }
-    if (due.name === "HostOffline" && turn.state === "Running" && this.lastSeenOffline(turn.host_id)) {
-      return this.failTurn(tenantId, turn.turn_id, "HostOffline", detail, failedAt);
-    }
-    if (due.name === "Total" && turn.state === "Running") {
-      return this.failTurn(tenantId, turn.turn_id, "TurnTimedOut", detail, failedAt);
-    }
-    if (due.name === "Total" && turn.state === "Offered") {
-      return this.failTurn(tenantId, turn.turn_id, "Undelivered", detail, failedAt);
-    }
-    const session = this.sessionRow(turn.session_id);
-    if (session === null) return;
-    if (due.name === "SnapshotAnswer") {
-      await this.snapshotUnanswered(tenantId, session, turn, session.host_id, failedAt);
-      return this.evictionSettled(tenantId, session.session_id);
-    }
-    if (due.name !== "Teardown" && due.name !== "TeardownAnswer") return;
-    if (session.state !== "Stopping") return;
-    if (this.latestTurn(session.session_id, null)?.turn_id !== turn.turn_id) return;
-    this.recordStopFailure(session.session_id, "NotAnswered", detail, failedAt);
-    return this.returnToIdle(tenantId, session.session_id);
-  }
-
-  private lastSeenOffline(hostId: string): boolean {
-    const [last] = this.ctx.storage.sql
-      .exec<{ event: string }>(
-        `SELECT json_extract(payload, '$.event') AS event FROM events
-        WHERE json_extract(payload, '$.hostId') = ? AND json_extract(payload, '$.event') IN ('HostOnline', 'HostOffline')
-        ORDER BY event_id DESC LIMIT 1`,
-        hostId,
-      )
-      .toArray();
-    return last?.event === "HostOffline";
   }
 
   protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {

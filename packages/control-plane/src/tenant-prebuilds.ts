@@ -615,23 +615,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     }
   }
 
-  protected async abandonPrebuildDeadline(tenantId: string, due: PrebuildDueDeadline, detail: string): Promise<void> {
-    const prebuild = this.getPrebuild(tenantId, due.deadline.prebuildId);
-    if (prebuild === null) return;
-    await this.failPrebuild(
-      tenantId,
-      due.deadline.prebuildId,
-      [due.name === "PrebuildDispatch" ? "Dispatched" : "Building"],
-      {
-        phase: due.name === "PrebuildDispatch" ? "Dispatch" : "Build",
-        detail,
-        fix: "Start the prebuild again with rebuild set; if it fails the same way, report it to the operator",
-      },
-      prebuild.logUrl,
-      Date.now(),
-    );
-  }
-
   protected async prebuildDeadlineReached(tenantId: string, due: PrebuildDueDeadline): Promise<void> {
     const { prebuildId } = due.deadline;
     const prebuild = this.getPrebuild(tenantId, prebuildId);
