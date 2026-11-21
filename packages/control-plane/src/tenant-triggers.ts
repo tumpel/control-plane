@@ -6,7 +6,7 @@ import {
   type TriggerFiredResultSchema,
   type TriggerPatchSchema,
   TriggerSchema,
-  type TriggerStartRefusalSchema,
+  TriggerStartRefusalSchema,
   type UpdateTriggerResultSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
@@ -29,10 +29,11 @@ type Updated = z.infer<typeof UpdateTriggerResultSchema>["updated"];
 type Fired = z.infer<typeof TriggerFiredResultSchema>["fired"];
 type Origin = { kind: "Trigger"; triggerId: string; deliveryId: string };
 
-const refusalOf = ({ problem }: Refused): TriggerStartRefusal => ({
-  code: problem.code,
-  detail: `${problem.detail}. ${problem.fix}`,
-});
+const refusalOf = ({ problem }: Refused): TriggerStartRefusal => {
+  const detail = `${problem.detail}. ${problem.fix}`;
+  const detailMax = TriggerStartRefusalSchema.shape.detail.maxLength;
+  return { code: problem.code, detail: detailMax === null ? detail : detail.slice(0, detailMax).toWellFormed() };
+};
 
 type TriggerRow = {
   trigger_id: string;

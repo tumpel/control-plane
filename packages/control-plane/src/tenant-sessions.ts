@@ -27,6 +27,7 @@ import {
   type SteerSchema,
   StopFailureSchema,
   TranscriptLineSchema,
+  TurnFailedEventSchema,
   TurnFailureSchema,
   TurnImageSchema,
   TurnSchema,
@@ -121,7 +122,7 @@ import {
   restartDeadline,
   type SupervisorUpdateMessage,
 } from "./supervisor-updates";
-import { appendEvent, boundedDetail, type NewTenantEvent } from "./tenant-events.ts";
+import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 import {
   type Dimensions,
@@ -1400,7 +1401,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     now: number,
   ): void {
     const sql = this.ctx.storage.sql;
-    const detail = boundedDetail(fullDetail);
+    const detailMax = TurnFailedEventSchema.shape.detail.maxLength;
+    const detail = detailMax === null ? fullDetail : fullDetail.slice(0, detailMax).toWellFormed();
     sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
     this.appendEvent({ event: "TurnFailed", turnId, sessionId, reason, detail }, now);
     sql.exec(
