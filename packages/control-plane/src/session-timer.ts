@@ -83,7 +83,8 @@ const FIRST_RETRY_MS = 2_000;
 export class SessionTimer extends DurableObject<Env> {
   async set(tenantId: string, changes: DeadlineChanges): Promise<void> {
     const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, deadlines: {} };
-    timers.deadlines = { ...(await this.takeHeld()), ...timers.deadlines, ...changes };
+    timers.deadlines = { ...(await this.takeHeld()), ...timers.deadlines };
+    Object.assign(timers.deadlines, changes);
     for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, { at: number } | null][]) {
       if (deadline === null) delete timers.deadlines[name];
     }
