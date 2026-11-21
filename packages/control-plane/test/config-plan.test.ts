@@ -55,6 +55,7 @@ const livePersona = (personaId: string, name: string, harness: string, secretSet
     connectorIds: [],
     boxMemoryMib: 2048,
     boxDiskMib: 32768,
+    turnTotalBudgetSeconds: 3600,
     boxRetention: "Auto",
     tumpelMcp: false,
     files,
@@ -94,6 +95,7 @@ const liveHost = (hostId: string, state: string, labels: string[]) =>
 
 const liveSession = (sessionId: string, personaId: string, state: string) =>
   SessionSchema.parse({
+    turnTotalBudgetSeconds: 3600,
     sessionId,
     tenantId: "t1",
     principalId: "u1",
@@ -414,14 +416,14 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
 
 for (const each of cases) {
   test(each.name, () => {
-    assert.deepEqual(planOf(each.desired, each.live), each.planned);
+    assert.deepEqual(planOf(each.desired, each.live, 3600), each.planned);
   });
 }
 
 test("a persona naming a connector the tenant lacks fails the plan, and a changed connector list updates it", () => {
   const live = steady({ connectors: [{ connectorId: "c1", name: "Recall" }] });
   assert.deepEqual(
-    planOf(desired(config({ personas: [persona("Default", "ClaudeCode", "prod", [], ["Linear"])] })), live),
+    planOf(desired(config({ personas: [persona("Default", "ClaudeCode", "prod", [], ["Linear"])] })), live, 3600),
     problems(
       'persona "Default" names the connector "Linear", which your tenant does not have; create and connect it first, or drop it from connectorNames',
     ),
@@ -429,6 +431,7 @@ test("a persona naming a connector the tenant lacks fails the plan, and a change
   const planned = planOf(
     desired(config({ personas: [persona("Default", "ClaudeCode", "prod", [], ["Recall"])] })),
     live,
+    3600,
   );
   assert.equal(planned.ok && planned.steps.some((step) => step.kind === "UpdatePersona"), true);
 });
@@ -443,12 +446,13 @@ test("a persona's tumpel MCP setting follows the config and defaults to false", 
       }),
     ),
     live,
+    3600,
   );
   assert.equal(
     kept.ok && kept.steps.some((step) => step.kind === "UpdatePersona" && step.persona.tumpelMcp === true),
     true,
   );
-  const disabled = planOf(desired(config()), live);
+  const disabled = planOf(desired(config()), live, 3600);
   assert.equal(disabled.ok && disabled.steps.some((step) => step.kind === "UpdatePersona"), true);
 });
 
@@ -487,24 +491,39 @@ test("triggers plan by name: create, keep when only the condition rows reorder, 
     updatedAt: 1,
   };
   assert.deepEqual(
-    planOf(desired(config({ triggers: [review] })), steady()),
+    planOf(desired(config({ triggers: [review] })), steady(), 3600),
     steps({ kind: "CreateTrigger", trigger: review }),
   );
-  assert.deepEqual(planOf(desired(config({ triggers: [review] })), steady({ triggers: [held] })), steps());
+  assert.deepEqual(planOf(desired(config({ triggers: [review] })), steady({ triggers: [held] }), 3600), steps());
   const changed = { ...review, prompt: "Review {{sha}} again" };
   assert.deepEqual(
-    planOf(desired(config({ triggers: [changed] })), steady({ triggers: [held] })),
+    planOf(desired(config({ triggers: [changed] })), steady({ triggers: [held] }), 3600),
     steps({ kind: "UpdateTrigger", triggerId: "g1", trigger: changed }),
   );
   assert.deepEqual(
-    planOf(desired(config({ triggers: [] })), steady({ triggers: [held] })),
+    planOf(desired(config({ triggers: [] })), steady({ triggers: [held] }), 3600),
     steps({ kind: "DeleteTrigger", triggerId: "g1", name: "review" }),
   );
-  assert.deepEqual(planOf(desired(config()), steady({ triggers: [held] })), steps());
+  assert.deepEqual(planOf(desired(config()), steady({ triggers: [held] }), 3600), steps());
   assert.deepEqual(
-    planOf(desired(config({ triggers: [{ ...review, personaName: "Reviewer" }] })), steady()),
+    planOf(desired(config({ triggers: [{ ...review, personaName: "Reviewer" }] })), steady(), 3600),
     problems(
       'trigger "review" names persona "Reviewer", which the config does not hold; add it to personas or name one that is there',
     ),
   );
+});
+
+test("config planning compares explicit turn budgets and the current setting for omitted budgets", () => {
+  const live = steady({
+    personas: [{ ...livePersona("p1", "Default", "ClaudeCode", "s1"), turnTotalBudgetSeconds: 7200 }],
+  });
+  assert.deepEqual(planOf(desired(config()), live, 7200), steps());
+  const reset = planOf(desired(config()), live, 3600);
+  assert.equal(reset.ok && reset.steps.some((step) => step.kind === "UpdatePersona"), true);
+  const changed = planOf(
+    desired(config({ personas: [{ ...persona("Default", "ClaudeCode", "prod"), turnTotalBudgetSeconds: 14400 }] })),
+    live,
+    7200,
+  );
+  assert.equal(changed.ok && changed.steps.some((step) => step.kind === "UpdatePersona"), true);
 });

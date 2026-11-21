@@ -110,6 +110,7 @@ import {
 } from "./supervisor-updates";
 import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
 import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
+import { turnBudget } from "./turn-budgets.ts";
 import {
   type Dimensions,
   DimensionsSchema,
@@ -230,6 +231,7 @@ export type TranscriptCursor = {
 } & ({ kind: "Chunk"; storageKey: string; range: Range } | { kind: "Lines"; lines: TranscriptLine[] });
 
 type SessionRow = {
+  turn_total_budget_seconds: number;
   session_id: string;
   principal_id: string;
   host_id: string;
@@ -275,6 +277,7 @@ type SessionViewRow = SessionRow & {
 };
 
 type PersonaRow = {
+  turnTotalBudgetSeconds: number;
   secretSetId: string;
   boxMemoryMib: number;
   boxDiskMib: number;
@@ -406,12 +409,12 @@ type SnapshotRequestRow = {
 };
 
 const SESSION_SELECT =
-  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, COALESCE((SELECT box_retention FROM session_box_retention WHERE session_box_retention.session_id = sessions.session_id), 'Auto') AS box_retention, created_at, updated_at FROM sessions";
+  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, turn_total_budget_seconds, COALESCE((SELECT box_retention FROM session_box_retention WHERE session_box_retention.session_id = sessions.session_id), 'Auto') AS box_retention, created_at, updated_at FROM sessions";
 const TURN_SELECT = `SELECT * FROM (
   SELECT turn_id, turns.session_id, host_id, box_id, prompt, (SELECT goal FROM turn_goals WHERE turn_goals.turn_id = turns.turn_id) AS goal, (SELECT warning FROM turn_warnings WHERE turn_warnings.turn_id = turns.turn_id) AS warning, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
   FROM turns LEFT JOIN turn_failures USING (turn_id)
 )`;
-const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib, COALESCE(r.box_retention, 'Auto') AS box_retention, s.created_at, s.updated_at,
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib, s.turn_total_budget_seconds, COALESCE(r.box_retention, 'Auto') AS box_retention, s.created_at, s.updated_at,
   t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.goal AS last_turn_goal, t.warning AS last_turn_warning, t.state AS last_turn_state,
   t.line_count AS last_turn_line_count, t.created_at AS last_turn_created_at, t.updated_at AS last_turn_at,
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
@@ -506,6 +509,7 @@ const toSession = (
     harnessVersion: row.harness_version,
     model: row.model,
     boxRetention: row.box_retention,
+    turnTotalBudgetSeconds: row.turn_total_budget_seconds,
     state: row.state,
     lastTurnId: row.last_turn_id,
     lastTurnState: row.last_turn_state,
@@ -890,9 +894,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
         box_memory_mib: number;
         box_disk_mib: number;
         box_retention: BoxRetention;
+        turn_total_budget_seconds: number;
         tumpel_mcp: number;
       }>(
-        "SELECT secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp FROM personas WHERE persona_id = ?",
+        "SELECT secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, turn_total_budget_seconds FROM personas WHERE persona_id = ?",
         personaId,
       )
       .toArray();
@@ -903,6 +908,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       boxDiskMib: row.box_disk_mib,
       boxRetention: row.box_retention,
       tumpelMcp: row.tumpel_mcp === 1,
+      turnTotalBudgetSeconds: row.turn_total_budget_seconds,
     };
   }
 
@@ -923,7 +929,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (turn.state !== "Running") return { kind: "NotRunning" };
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) throw new Error(`the tenant Durable Object serving turn ${turnId} has no name`);
-    const expiresAt = this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000;
+    const expiresAt = this.budgetStart(turn) + turnBudget(this.ctx.storage.sql, turn.turn_id) * 1000;
     const key = await keyStoreOf(this.env).signingKey(TURN_TOKEN_SIGNING_PURPOSE);
     const accessToken = await mintTurnToken(key, {
       tenantId,
@@ -1259,7 +1265,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return queued;
     });
     await this.timers(tenantId, session.session_id, {
-      Total: { turnId: turn.turn_id, at: turn.created_at + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      Total: null,
     });
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
   }
@@ -1308,11 +1314,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return next;
   }
 
-  protected async startWaiting(tenantId: string, sessionId: string, turnId: string, now: number): Promise<void> {
+  protected async startWaiting(tenantId: string, sessionId: string, turnId: string): Promise<void> {
     if (this.sessionRow(sessionId)?.state !== "Stopping") return this.runQueued(tenantId, turnId);
     this.ctx.storage.sql.exec("INSERT INTO turn_release_waits (turn_id, session_id) VALUES (?, ?)", turnId, sessionId);
     await this.timers(tenantId, sessionId, {
-      Total: { turnId, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      Total: null,
     });
   }
 
@@ -1420,7 +1426,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
       return this.timers(tenantId, session.session_id, {
-        Total: { turnId, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+        Total: null,
       });
     }
     await this.offerAfter(tenantId, move(placement.host.hostId, crypto.randomUUID()), turn, placement.evict);
@@ -1472,7 +1478,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     await this.timers(tenantId, session.session_id, {
       FirstLine: null,
-      Total: { turnId: turn.turn_id, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      Total: null,
       Snapshot: null,
       Teardown: null,
       HostOffline: null,
@@ -1481,6 +1487,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private offerMessage(session: SessionRow, turn: TurnRow): StoredTurnOffer {
+    turnBudget(this.ctx.storage.sql, turn.turn_id);
     this.ctx.storage.sql.exec(
       `INSERT INTO unreported_box_offers (box_id, host_id, box_memory_mib)
       SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM turns WHERE session_id = ?4 AND box_id = ?1 AND turn_id != ?5)
@@ -1980,13 +1987,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       box_memory_mib: boxMemoryMib,
       box_disk_mib: boxDiskMib,
       box_retention: start.boxRetention ?? persona.boxRetention,
+      turn_total_budget_seconds: start.turnTotalBudgetSeconds ?? persona.turnTotalBudgetSeconds,
       created_at: now,
       updated_at: now,
     };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_disk_mib, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_disk_mib, turn_total_budget_seconds, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         session.session_id,
         session.principal_id,
         session.host_id,
@@ -2000,9 +2008,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.last_line_seq,
         session.endpoint,
         session.box_disk_mib,
+        session.turn_total_budget_seconds,
         session.created_at,
         session.updated_at,
       );
+      if (start.turnTotalBudgetSeconds !== undefined) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO session_turn_budget_overrides (session_id, turn_total_budget_seconds) VALUES (?, ?)",
+          session.session_id,
+          start.turnTotalBudgetSeconds,
+        );
+      }
       copyPersonaConnectors(this.ctx.storage.sql, session.session_id, session.persona_id);
       this.ctx.storage.sql.exec(
         "INSERT INTO session_box_memory (session_id, box_memory_mib) VALUES (?, ?)",
@@ -2038,7 +2054,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (placement.kind === "Placed") await this.offerAfter(tenantId, session, turn, placement.evict);
     if (placement.kind === "Waiting") {
       await this.timers(tenantId, session.session_id, {
-        Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+        Total: null,
       });
     }
     return {
@@ -3163,6 +3179,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (inbox !== null) connectors.push(inbox.connector);
     return {
       kind: "Ready",
+      turnTotalBudgetSeconds: turnBudget(this.ctx.storage.sql, turnId),
       credential: {
         credentialHandoverId: handover.credentialHandoverId,
         expiresAt: iso(now + credentialSeconds * 1000),
@@ -3570,6 +3587,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         turn.turn_id,
       );
+      await this.timers(tenantId, session.session_id, { Total: null, FirstLine: null });
       const offeredAgain = { ...turn, state: "Offered" as const };
       if (handedOver) return this.deferOffer(session, offeredAgain, now);
       return this.offerMessage(session, offeredAgain);
@@ -3612,6 +3630,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
+      sql.exec(
+        "INSERT INTO turn_budget_starts (turn_id, started_at) VALUES (?, ?) ON CONFLICT (turn_id) DO UPDATE SET started_at = excluded.started_at",
+        turn.turn_id,
+        now,
+      );
       this.appendEvent({ event: "TurnStarted", turnId: turn.turn_id, sessionId: session.session_id }, now);
       sql.exec(
         `UPDATE prebuilds SET state = 'Building', updated_at = ?1 WHERE state = 'Dispatched'
@@ -3621,7 +3644,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     });
     await this.timers(tenantId, session.session_id, {
-      Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      Total: { turnId: turn.turn_id, at: now + turnBudget(sql, turn.turn_id) * 1000 },
     });
     return { type: "TurnClaimed", turnId: turn.turn_id };
   }
@@ -3783,7 +3806,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       HostOffline: null,
       Snapshot: { turnId: turn.turn_id, at: now + delay },
     });
-    if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
+    if (next !== null) await this.startWaiting(tenantId, turn.session_id, next);
   }
 
   protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
@@ -3839,56 +3862,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
       );
     }
-    if (name === "Total" && turn.state === "Offered" && session.state === "Stopped") {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host of your tenant had room for the session's new box within ${settings.turnTotalBudgetSeconds} seconds of the turn's start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
-        failedAt,
-        "Stopped",
-      );
-    }
-    if (name === "Total" && turn.state === "Offered" && this.waitsForCapacity(turnId)) {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
-        failedAt,
-      );
-    }
-    if (name === "Total" && turn.state === "Offered") {
-      const [refusal] = this.ctx.storage.sql
-        .exec<{ host_id: string; detail: string }>(
-          "SELECT host_id, detail FROM turn_refusals WHERE turn_id = ?",
-          turnId,
-        )
-        .toArray();
-      if (refusal !== undefined) {
-        return this.failTurn(
-          tenantId,
-          turnId,
-          "Undelivered",
-          `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${await this.hostName(tenantId, refusal.host_id)} last refused it: ${refusal.detail}`,
-          failedAt,
-        );
-      }
-      const presence = (await this.hostOffline(session.host_id)) ? "is offline" : "is online but never claimed it";
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${host} ${presence}. Check that its supervisor runs and reads Online, then send the turn again`,
-        failedAt,
-      );
-    }
     if (name === "Total" && turn.state === "Running") {
       return this.failTurn(
         tenantId,
         turnId,
         "TurnTimedOut",
-        `the turn did not finish within ${settings.turnTotalBudgetSeconds} seconds; send a smaller prompt or raise turnTotalBudgetSeconds`,
+        `the turn did not finish within ${turnBudget(this.ctx.storage.sql, turn.turn_id)} seconds; send a smaller prompt or raise the persona or session turnTotalBudgetSeconds`,
         failedAt,
       );
     }
@@ -4213,7 +4192,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const completed = this.sessionRow(session.session_id);
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
       this.startAfterTurnRelease(completed, now);
-    if (next !== null) await this.startWaiting(tenantId, request.session_id, next, now);
+    if (next !== null) await this.startWaiting(tenantId, request.session_id, next);
     await this.armIdleEviction(tenantId, request.session_id);
     if (this.sessionRow(session.session_id)?.state === "Stopping") {
       const latest = this.latestTurn(session.session_id, null);

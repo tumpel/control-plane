@@ -6,6 +6,7 @@ import {
   type EffectiveHarnessVersionSchema,
   type HarnessPinCreateSchema,
   PersonaFileLimit,
+  type PersonaWriteSchema,
   type SecretSetCreateSchema,
   type SecretSetSchema,
   type SecretValueSchema,
@@ -38,14 +39,7 @@ type Pin = z.infer<typeof EffectiveHarnessVersionSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
 type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-type PersonaWrite = Pick<
-  StoredPersona,
-  "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention" | "tumpelMcp"
-> & {
-  boxMemoryMib: number;
-  boxDiskMib: number;
-  files: StoredFile[];
-};
+type PersonaWrite = z.infer<typeof PersonaWriteSchema>;
 
 export type ConfigWrite =
   | { kind: "CreateSecretSet"; secretSetId: string; secretSet: SecretSetWrite; githubUser: GitHubUser | null }
@@ -338,6 +332,7 @@ const planPersonas = (
   live: Live,
   steps: Step[],
   problems: string[],
+  turnTotalBudgetSeconds: number,
 ): void => {
   const byName = new Map(live.personas.map((persona) => [persona.name, persona]));
   const setIds = new Map(live.secretSets.map((set) => [set.name, set.secretSetId]));
@@ -372,6 +367,7 @@ const planPersonas = (
       persona.connectorNames.map((name) => connectorIds.get(name)).join() === current.connectorIds.join() &&
       (persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib) === current.boxMemoryMib &&
       (persona.boxDiskMib ?? BoxDiskLimit.DefaultMib) === current.boxDiskMib &&
+      (persona.turnTotalBudgetSeconds ?? turnTotalBudgetSeconds) === current.turnTotalBudgetSeconds &&
       (persona.boxRetention ?? "Auto") === current.boxRetention &&
       tumpelMcp === current.tumpelMcp &&
       removed.length === 0 &&
@@ -497,7 +493,7 @@ export interface Desired {
 
 export type Planned = { ok: true; steps: Step[] } | { ok: false; problems: string[] };
 
-export const planOf = (desired: Desired, live: Live): Planned => {
+export const planOf = (desired: Desired, live: Live, turnTotalBudgetSeconds: number): Planned => {
   const { config } = desired;
   const problems: string[] = [];
   const rename = "give each one its own name";
@@ -572,7 +568,7 @@ export const planOf = (desired: Desired, live: Live): Planned => {
   const bundles = readBundles(config, desired.files, problems);
   const steps: Step[] = [];
   planSecretSets(sets, live.secretSets, rewrite, steps);
-  planPersonas(config.personas, bundles, live, steps, problems);
+  planPersonas(config.personas, bundles, live, steps, problems, turnTotalBudgetSeconds);
   planPersonaDeletes(config.personas, live, steps, problems);
   planSecretSetDeletes(sets, live.secretSets, steps);
   planPins(config.harnessPins, live.pins, steps);

@@ -36,6 +36,7 @@ import type { Env } from "./index.ts";
 import { ownerRequired } from "./members.ts";
 import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-files.ts";
 import { keyPrefixMismatch, unreadableSecretSet } from "./secret-members.ts";
+import { settingsOf } from "./settings.ts";
 import type { ConfigApplied } from "./tenant.ts";
 import { tenantApi } from "./tenant-api.ts";
 import { dropRoute, projectRoute } from "./trigger-routes.ts";
@@ -189,6 +190,8 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
             connectorIds: connectorIdsOf(prepare, step.persona.connectorNames),
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
             boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
+            turnTotalBudgetSeconds:
+              step.persona.turnTotalBudgetSeconds ?? settingsOf(prepare.env).turnTotalBudgetSeconds,
             boxRetention: step.persona.boxRetention ?? "Auto",
             tumpelMcp: step.persona.tumpelMcp ?? false,
             files: files.value,
@@ -212,6 +215,8 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
             connectorIds: connectorIdsOf(prepare, step.persona.connectorNames),
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
             boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
+            turnTotalBudgetSeconds:
+              step.persona.turnTotalBudgetSeconds ?? settingsOf(prepare.env).turnTotalBudgetSeconds,
             boxRetention: step.persona.boxRetention ?? "Auto",
             tumpelMcp: step.persona.tumpelMcp ?? false,
             files: files.value,
@@ -341,6 +346,7 @@ export const planConfig = async (body: PlanRequest, env: Env, caller: Caller): P
       secretEnvs: new Set(body.secretValues.map((each) => each.env)),
     },
     live.value,
+    settingsOf(env).turnTotalBudgetSeconds,
   );
   if (!planned.ok) return stopped(planned.problems);
   return json(ConfigPlanSchema.parse({ changes: planned.steps.map(changeOf) }));
@@ -377,6 +383,7 @@ export const applyConfig = async (body: ApplyRequest, env: Env, caller: Caller):
   const planned = planOf(
     { config: body.config, files, expiryValues: body.expiryValues, secretEnvs: new Set(values.keys()) },
     live.value,
+    settingsOf(env).turnTotalBudgetSeconds,
   );
   if (!planned.ok) return stopped(planned.problems);
   const missing = missingValues(planned.steps, values);

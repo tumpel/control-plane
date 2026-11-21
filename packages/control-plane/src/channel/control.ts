@@ -159,9 +159,19 @@ const outbound = async (
   if (stored.type !== "TurnOffer") return stored;
   const prepared = await context.prepareOffer(stored);
   if (prepared.kind === "Withdrawn") return { type: "TurnWithdrawn", turnId: stored.turnId };
-  const { credential, lastLineSeq, snapshots, personaFiles, image, gitAuthorName, gitAuthorEmail } = prepared;
+  const {
+    credential,
+    lastLineSeq,
+    snapshots,
+    personaFiles,
+    image,
+    gitAuthorName,
+    gitAuthorEmail,
+    turnTotalBudgetSeconds,
+  } = prepared;
   return {
     ...stored,
+    turnTotalBudgetSeconds,
     credential: spokenGrant(credential, protocolVersion),
     lastLineSeq,
     snapshots,

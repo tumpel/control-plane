@@ -14,7 +14,8 @@
           "path": ".claude/settings.json",
           "from": "reviewer/settings.json"
         }
-      ]
+      ],
+      "tumpelMcp": false
     }
   ],
   "secretSets": [

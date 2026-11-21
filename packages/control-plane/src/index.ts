@@ -568,6 +568,7 @@ const personaWrite = async (
       connectorIds: body.connectorIds,
       boxMemoryMib: body.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
       boxDiskMib: body.boxDiskMib ?? BoxDiskLimit.DefaultMib,
+      turnTotalBudgetSeconds: body.turnTotalBudgetSeconds ?? settingsOf(env).turnTotalBudgetSeconds,
       boxRetention: body.boxRetention ?? "Auto",
       tumpelMcp: body.tumpelMcp ?? false,
       files: stored.value,

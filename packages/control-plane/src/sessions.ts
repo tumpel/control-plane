@@ -433,7 +433,14 @@ export const startSessionFromIssue = async (
   const prepared = await prepareStart(
     env,
     caller,
-    { personaId: start.personaId, repository: repositoryUrl(target), model: start.model, prompt, tags: start.tags },
+    {
+      personaId: start.personaId,
+      repository: repositoryUrl(target),
+      model: start.model,
+      prompt,
+      tags: start.tags,
+      turnTotalBudgetSeconds: start.turnTotalBudgetSeconds,
+    },
     endpoint,
     now,
   );

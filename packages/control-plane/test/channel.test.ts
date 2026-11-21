@@ -82,6 +82,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
     minted += 1;
     return {
       kind: "Ready",
+      turnTotalBudgetSeconds: 3600,
       credential: {
         credentialHandoverId: `grant-${minted}`,
         expiresAt: "2026-11-14T12:00:00+01:00",

@@ -4,6 +4,7 @@ import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
   type PersonaPatchChangeSchema,
+  type PersonaWriteSchema,
   type SecretSetCreateSchema,
   type SecretSetPatchSchema,
   SecretSetSchema,
@@ -27,6 +28,7 @@ import {
   type UnreadableSecretSet,
 } from "./secret-members.ts";
 import { checkStart } from "./sessions.ts";
+import { settingsOf } from "./settings.ts";
 import {
   recordSupervisorUpdate,
   type SupervisorUpdateMessage,
@@ -40,14 +42,7 @@ import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 import { webhookSenderName } from "./webhook-sender.ts";
 
-export type PersonaWrite = Pick<
-  StoredPersona,
-  "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention" | "tumpelMcp"
-> & {
-  boxMemoryMib: number;
-  boxDiskMib: number;
-  files: StoredFile[];
-};
+export type PersonaWrite = z.infer<typeof PersonaWriteSchema>;
 export type PersonaChange = Omit<PersonaWrite, "harness">;
 export type SecretSet = z.infer<typeof SecretSetSchema>;
 export type SecretSetWrite = z.infer<typeof SecretSetCreateSchema>;
@@ -125,6 +120,7 @@ type PersonaRow = {
   secret_set_id: string;
   box_memory_mib: number;
   box_disk_mib: number;
+  turn_total_budget_seconds: number;
   box_retention: string;
   tumpel_mcp: number;
   created_at: number;
@@ -140,7 +136,7 @@ type PersonaFileRow = {
 };
 
 const PERSONA_SELECT =
-  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, created_at, updated_at FROM personas";
+  "SELECT persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, turn_total_budget_seconds, created_at, updated_at FROM personas";
 
 export const personaFileRows = (sql: SqlStorage, personaId: string): PersonaFileRow[] =>
   sql
@@ -160,6 +156,7 @@ const toPersona = (row: PersonaRow, files: PersonaFileRow[], connectorIds: strin
     secretSetId: row.secret_set_id,
     boxMemoryMib: row.box_memory_mib,
     boxDiskMib: row.box_disk_mib,
+    turnTotalBudgetSeconds: row.turn_total_budget_seconds,
     boxRetention: row.box_retention,
     tumpelMcp: row.tumpel_mcp === 1,
     files: files.map((file) => ({
@@ -697,7 +694,7 @@ export class Tenant extends TenantConnectors {
         now,
       );
       sql.exec(
-        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, turn_total_budget_seconds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         crypto.randomUUID(),
         tenantId,
         DEFAULT_PERSONA.name,
@@ -705,6 +702,7 @@ export class Tenant extends TenantConnectors {
         secretSetId,
         BoxMemoryLimit.DefaultMib,
         BoxDiskLimit.DefaultMib,
+        settingsOf(this.env).turnTotalBudgetSeconds,
         now,
         now,
       );
@@ -771,7 +769,7 @@ export class Tenant extends TenantConnectors {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, turn_total_budget_seconds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           persona.name,
@@ -781,6 +779,7 @@ export class Tenant extends TenantConnectors {
           persona.boxDiskMib,
           persona.boxRetention,
           persona.tumpelMcp ? 1 : 0,
+          persona.turnTotalBudgetSeconds ?? settingsOf(this.env).turnTotalBudgetSeconds,
           now,
           now,
         );
@@ -803,13 +802,14 @@ export class Tenant extends TenantConnectors {
     const written = uniquely(() =>
       this.ctx.storage.transactionSync(() => {
         const updated = this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, turn_total_budget_seconds = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           persona.name,
           persona.secretSetId,
           persona.boxMemoryMib,
           persona.boxDiskMib,
           persona.boxRetention,
           persona.tumpelMcp ? 1 : 0,
+          persona.turnTotalBudgetSeconds ?? settingsOf(this.env).turnTotalBudgetSeconds,
           now,
           tenantId,
           personaId,
@@ -836,13 +836,14 @@ export class Tenant extends TenantConnectors {
         if (current === null) return false;
         const merged = { ...current, ...patch };
         this.ctx.storage.sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, turn_total_budget_seconds = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           merged.name,
           merged.secretSetId,
           merged.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
           merged.boxDiskMib ?? BoxDiskLimit.DefaultMib,
           merged.boxRetention,
           merged.tumpelMcp ? 1 : 0,
+          merged.turnTotalBudgetSeconds,
           now,
           tenantId,
           personaId,
@@ -1205,7 +1206,7 @@ export class Tenant extends TenantConnectors {
       case "CreatePersona": {
         const personaId = crypto.randomUUID();
         sql.exec(
-          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO personas (persona_id, tenant_id, name, harness, secret_set_id, box_memory_mib, box_disk_mib, box_retention, tumpel_mcp, turn_total_budget_seconds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           personaId,
           tenantId,
           write.persona.name,
@@ -1215,6 +1216,7 @@ export class Tenant extends TenantConnectors {
           write.persona.boxDiskMib,
           write.persona.boxRetention,
           write.persona.tumpelMcp ? 1 : 0,
+          write.persona.turnTotalBudgetSeconds ?? settingsOf(this.env).turnTotalBudgetSeconds,
           now,
           now,
         );
@@ -1224,13 +1226,14 @@ export class Tenant extends TenantConnectors {
       }
       case "UpdatePersona": {
         sql.exec(
-          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
+          "UPDATE personas SET name = ?, secret_set_id = ?, box_memory_mib = ?, box_disk_mib = ?, box_retention = ?, tumpel_mcp = ?, turn_total_budget_seconds = ?, updated_at = ? WHERE tenant_id = ? AND persona_id = ?",
           write.persona.name,
           write.persona.secretSetId,
           write.persona.boxMemoryMib,
           write.persona.boxDiskMib,
           write.persona.boxRetention,
           write.persona.tumpelMcp ? 1 : 0,
+          write.persona.turnTotalBudgetSeconds ?? settingsOf(this.env).turnTotalBudgetSeconds,
           now,
           tenantId,
           write.personaId,
