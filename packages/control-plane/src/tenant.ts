@@ -204,6 +204,7 @@ export class Tenant extends TenantConnectors {
 
   override async alarm(): Promise<void> {
     const now = Date.now();
+    await this.ctx.storage.setAlarm(now);
     await this.deliverPushes(this.tenantName(), now);
     this.expireSubscriptions(now);
     await this.startDeliveries(this.tenantName());

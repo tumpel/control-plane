@@ -66,6 +66,10 @@ export class Tenant extends BaseTenant {
       .toArray();
   }
 
+  corruptPushKey(endpoint: string): void {
+    this.ctx.storage.sql.exec("UPDATE push_subscriptions SET p256dh = ? WHERE endpoint = ?", "A".repeat(87), endpoint);
+  }
+
   alarmAt(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
   }
@@ -159,6 +163,11 @@ export default {
     if (url.pathname === "/__fixture/push/wakes") {
       const { tenantId } = await requestBody<{ tenantId: string }>(request);
       return Response.json(await tenant(env, tenantId).pushWakes());
+    }
+    if (url.pathname === "/__fixture/push/corrupt-key") {
+      const { tenantId, endpoint } = await requestBody<{ tenantId: string; endpoint: string }>(request);
+      await tenant(env, tenantId).corruptPushKey(endpoint);
+      return new Response(null, { status: 204 });
     }
     if (url.pathname === "/__fixture/push/alarm-at") {
       const { tenantId } = await requestBody<{ tenantId: string }>(request);

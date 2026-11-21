@@ -444,6 +444,53 @@ test("a transient push failure leaves its wake without blocking another browser"
   assert.ok((wakes[0]?.next_attempt_at ?? 0) > now);
 });
 
+test("a legacy malformed browser key is dropped without blocking another browser", async () => {
+  const tenantId = crypto.randomUUID();
+  const now = Date.now();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  const invalidEndpoint = `${receiverOrigin}/push/invalid-key`;
+  for (const endpoint of [invalidEndpoint, `${receiverOrigin}/push/valid-key`]) {
+    await post("/__fixture/push/create", {
+      tenantId,
+      subscription: {
+        endpoint,
+        keys: { p256dh, auth },
+        events: ["SubscriptionPaused"],
+      },
+      now,
+    });
+  }
+  await post("/__fixture/push/corrupt-key", { tenantId, endpoint: invalidEndpoint });
+  const receivedBefore = received.length;
+  await post("/__fixture/emit", {
+    tenantId,
+    event: {
+      event: "SubscriptionPaused",
+      subscriptionId: "subscription-invalid-key",
+      sessionId: "session-invalid-key",
+      reason: { kind: "ByRequest", message: "Choose a release." },
+    },
+    now,
+  });
+  const state = await until(
+    "the valid browser delivery",
+    async () => {
+      const listed = z
+        .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+        .parse(await (await post("/__fixture/push/list", { tenantId })).json());
+      const wakes = z
+        .array(z.object({ push_subscription_id: z.string() }))
+        .parse(await (await post("/__fixture/push/wakes", { tenantId })).json());
+      return { subscriptions: listed.result.subscriptions.length, wakes: wakes.length };
+    },
+    (value) => received.length >= receivedBefore + 1 && value.subscriptions === 1 && value.wakes === 0,
+  );
+  assert.deepEqual(state, { subscriptions: 1, wakes: 0 });
+  assert.equal(received.length, receivedBefore + 1);
+});
+
 test("a later event does not bypass a subscription wake in backoff", async () => {
   const tenantId = crypto.randomUUID();
   const now = Date.now();

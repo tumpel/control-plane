@@ -189,6 +189,18 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
       }
       const repository = githubRepository(row.repository);
       if (repository === null) throw new Error(`session repository ${row.repository} is not a GitHub repository`);
+      const validKey = await importP256dh(row.p256dh).then(
+        () => true,
+        () => false,
+      );
+      if (!validKey) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ?",
+          row.push_subscription_id,
+          row.p256dh,
+        );
+        continue;
+      }
       const path = `/t/${encodeURIComponent(event.tenantId)}/sessions/${encodeURIComponent(event.sessionId)}`;
       const data =
         event.event === "SubscriptionPaused"
