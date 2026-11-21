@@ -10,6 +10,7 @@ import {
   type UpdateTriggerResultSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { boundedTo } from "./bounded-detail.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
 import { listHosts, type Outcome, type Refused } from "./hosts.ts";
 import { placed } from "./sessions.ts";
@@ -31,8 +32,7 @@ type Origin = { kind: "Trigger"; triggerId: string; deliveryId: string };
 
 const refusalOf = ({ problem }: Refused): TriggerStartRefusal => {
   const detail = `${problem.detail}. ${problem.fix}`;
-  const detailMax = TriggerStartRefusalSchema.shape.detail.maxLength;
-  return { code: problem.code, detail: detailMax === null ? detail : detail.slice(0, detailMax).toWellFormed() };
+  return { code: problem.code, detail: boundedTo(TriggerStartRefusalSchema.shape.detail.maxLength, detail) };
 };
 
 type TriggerRow = {

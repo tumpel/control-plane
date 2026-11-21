@@ -1,5 +1,6 @@
 import { type ListEventsInputSchema, type ListEventsResultSchema, TenantEventSchema } from "@tumpel/schemas";
 import type { z } from "zod";
+import { storedEvent } from "./bounded-detail.ts";
 
 type TenantEvent = z.infer<typeof TenantEventSchema>;
 
@@ -65,7 +66,7 @@ export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
     .toArray();
   const events = rows.map((row) =>
     TenantEventSchema.parse({
-      ...JSON.parse(row.payload),
+      ...storedEvent(row.payload),
       eventId: row.event_id,
       tenantId: input.tenantId,
       createdAt: row.created_at,

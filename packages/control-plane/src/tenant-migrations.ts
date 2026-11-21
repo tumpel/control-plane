@@ -92,7 +92,6 @@ import tenant0088_5 from "../migrations/tenant/0088_5_drop_packs.sql";
 import tenant0088_6 from "../migrations/tenant/0088_6_drop_snapshot_manifest_chunks.sql";
 import tenant0088_7 from "../migrations/tenant/0088_7_drop_snapshot_chunks.sql";
 import tenant0088 from "../migrations/tenant/0088_chunk_lists_in_object_storage.sql";
-import tenant0089 from "../migrations/tenant/0089_bound_event_details.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -190,5 +189,4 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0088_5_drop_packs", sql: tenant0088_5 },
   { name: "0088_6_drop_snapshot_manifest_chunks", sql: tenant0088_6 },
   { name: "0088_7_drop_snapshot_chunks", sql: tenant0088_7 },
-  { name: "0089_bound_event_details", sql: tenant0089 },
 ];

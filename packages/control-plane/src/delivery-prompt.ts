@@ -1,4 +1,5 @@
 import { TenantEventSchema } from "@tumpel/schemas";
+import { storedEvent } from "./bounded-detail.ts";
 
 export const DELIVERY_BATCH = 100;
 export const DELIVERY_PROMPT_LIMIT = 4000;
@@ -30,7 +31,12 @@ export const deliveryPrompt = (
   events: DeliveryEvent[],
 ): { prompt: string; lastEventId: number } | null => {
   const parsed = events.map((row) =>
-    TenantEventSchema.parse({ ...JSON.parse(row.payload), eventId: row.event_id, tenantId, createdAt: row.created_at }),
+    TenantEventSchema.parse({
+      ...storedEvent(row.payload),
+      eventId: row.event_id,
+      tenantId,
+      createdAt: row.created_at,
+    }),
   );
   const lines = parsed.map((event) => JSON.stringify(event));
   const batch = parsed

@@ -38,16 +38,11 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   const legacy = failed("turn-legacy", "x".repeat(20_000));
   failed("turn-2", "the harness exited");
   failed("turn-3", "the harness exited");
-  world.tenantSql().exec("DELETE FROM __migrations WHERE name = '0089_bound_event_details'");
 
   const before = world.tenantRowsWritten();
   world.restartTenant();
   await world.runtime.settle();
-  assert.equal(
-    world.tenantRowsWritten() - before,
-    2,
-    "the restart rewrites the one long event and records the migration",
-  );
+  assert.equal(world.tenantRowsWritten() - before, 0, "the restart rewrites no stored event");
 
   const resumed = await world.fetch(world.owner, "POST", `${path}/resume`);
   assert.equal(resumed.status, 200);
@@ -57,6 +52,22 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   assert.equal(delivery.sessionId, foreman.sessionId);
   assert.ok(delivery.prompt.length <= DELIVERY_PROMPT_LIMIT);
   assert.match(delivery.prompt, new RegExp(`"eventId":${legacy},"event":"TurnFailed"`));
+
+  const { listed } = ListEventsResultSchema.parse(
+    await world.call("listEvents", {
+      tenantId: TENANT_ID,
+      afterEventId: legacy - 1,
+      events: ["TurnFailed"],
+      sessionId: crew.sessionId,
+      triggerId: null,
+      waitSeconds: 0,
+    }),
+  );
+  assert.equal(listed.kind, "Read");
+  const [event] = listed.page.events;
+  assert.equal(event?.event, "TurnFailed");
+  assert.equal(event.eventId, legacy);
+  assert.equal(event.detail, "x".repeat(16384));
 });
 
 test("a turn failed by a snapshot failure stores a detail within the event bound, with no split surrogate pair", async (t) => {
