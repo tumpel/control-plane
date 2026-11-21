@@ -51,6 +51,8 @@ const SUBSCRIPTION_STATES = `WITH states (subscription_id, state, variant) AS (
     'reason', json_object('kind', 'DeliveryFailed', 'turnId', turn_id), 'pausedAt', paused_at) FROM subscription_delivery_failed_pauses
   UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
     'reason', json_object('kind', 'CrewFailing'), 'pausedAt', paused_at) FROM subscription_crew_failing_pauses
+  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+    'reason', json_object('kind', 'CreditExhausted', 'turnId', turn_id), 'pausedAt', paused_at) FROM subscription_credit_exhausted_pauses
   UNION ALL SELECT subscription_id, 'Ended', json_object('state', 'Ended', 'reason', reason, 'endedAt', ended_at) FROM subscription_ends
 )`;
 
@@ -65,6 +67,7 @@ const STATE_TABLES = [
   "subscription_requested_pauses",
   "subscription_delivery_failed_pauses",
   "subscription_crew_failing_pauses",
+  "subscription_credit_exhausted_pauses",
 ];
 
 const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription => {
@@ -414,6 +417,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
         iso(now),
       );
     }
+    if (reason.kind === "CreditExhausted") {
+      sql.exec(
+        "INSERT INTO subscription_credit_exhausted_pauses (subscription_id, turn_id, paused_at) VALUES (?, ?, ?)",
+        row.subscription_id,
+        reason.turnId,
+        iso(now),
+      );
+    }
     this.appendEvent(
       { event: "SubscriptionPaused", subscriptionId: row.subscription_id, sessionId: row.session_id, reason },
       now,
@@ -443,7 +454,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     );
   }
 
-  private deliveryEnded(event: { event: "TurnCompleted" | "TurnFailed"; turnId: string }, now: number): void {
+  private deliveryEnded(event: Extract<NewTenantEvent, { event: "TurnCompleted" | "TurnFailed" }>, now: number): void {
     const sql = this.ctx.storage.sql;
     const [delivery] = sql
       .exec<{ subscription_id: string; last_event_id: number | null }>(
@@ -472,6 +483,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
     }
     const row = this.subscriptionRow(subscriptionId);
     if (row === null || row.state !== "Active") return;
+    if (event.event === "TurnFailed" && event.reason === "CreditExhausted") {
+      this.pause(row, { kind: "CreditExhausted", turnId: event.turnId }, now);
+      return;
+    }
     if (row.delivery_failures_in_a_row >= DELIVERY_FAILURE_LIMIT) {
       this.pause(row, { kind: "DeliveryFailed", turnId: event.turnId }, now);
       return;
@@ -503,6 +518,11 @@ export abstract class TenantSubscriptions extends TenantSessions {
         sql.exec("INSERT INTO subscription_matches (subscription_id, event_id) VALUES (?, ?)", subscriptionId, eventId);
       }
       if (crew.active === 0) continue;
+      if (event.event === "TurnFailed" && event.reason === "CreditExhausted") {
+        const row = this.subscriptionRow(subscriptionId);
+        if (row !== null) this.pause(row, { kind: "CreditExhausted", turnId: event.turnId }, now);
+        continue;
+      }
       if (event.event === "TurnCompleted") {
         sql.exec(
           "UPDATE subscriptions SET crew_failures_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
