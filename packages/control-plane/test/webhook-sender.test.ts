@@ -198,7 +198,7 @@ after(async () => {
   else process.env.NODE_TLS_REJECT_UNAUTHORIZED = TLS_REJECT_UNAUTHORIZED;
 });
 
-test("the sender signs ordered events, retries its cursor, fails after ten retries and stops on deletion", async () => {
+test("the sender signs ordered events, retries its cursor, fails after three days and stops on deletion", async () => {
   const created = await post("/__fixture/create", {
     tenantId: TENANT_ID,
     endpoint: {
@@ -302,10 +302,10 @@ test("the sender signs ordered events, retries its cursor, fails after ten retri
     .parse(await failed.json());
   assert.equal(firstFailure.state.cursorEventId, 2);
   assert.equal(firstFailure.failure.failures, 1);
-  assert.ok(firstFailure.alarmAt >= failedAt + 29_000 && firstFailure.alarmAt <= Date.now() + 61_000);
+  assert.ok(firstFailure.alarmAt >= failedAt + 59_000 && firstFailure.alarmAt <= Date.now() + 61_000);
 
-  const { failingSince } = firstFailure.failure;
-  await post(`${senderPath}/exhaust-retries`, {});
+  const failingSince = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  await post(`${senderPath}/fail-since`, { at: failingSince });
   await post(`${senderPath}/alarm`, {});
   assert.equal(received.length, 4);
   assert.equal(received[2]?.eventId, received[3]?.eventId);
@@ -316,7 +316,7 @@ test("the sender signs ordered events, retries its cursor, fails after ten retri
   if (failing === null) throw new Error("the failing webhook endpoint read back null");
   assert.deepEqual(failing.status, {
     delivery: "Failing",
-    detail: "HTTP 500; still failing after 10 retries",
+    detail: "HTTP 500",
     failingSince: new Date(failingSince).toISOString(),
   });
 
