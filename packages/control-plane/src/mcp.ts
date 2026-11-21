@@ -902,7 +902,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/subscriptions",
     SubscriptionCreateSchema,
-    "Give a session a subscription for a long job: prompt is the plan, goal the condition that ends the work, events the session event types to react to, crewTags the tags a session must carry to count as its crew, and expiresAt (an ISO 8601 time with offset) the time it ends at the latest. Each matching event of a crew session becomes a new turn of the session, with the plan, the events and the goal; sessions that this session starts inherit the crew tags. Only a person creates one: a call from inside a tumpel session is refused, so an agent in a box tells its person instead. The session must run a harness that takes a goal. Returns the Active subscription.",
+    "Give a session a subscription for a long job: prompt is the plan, goal the condition that ends the work, events the session event types to react to, crewTags the tags a session must carry to count as its crew, and expiresAt (an ISO 8601 time with offset) the time it ends at the latest. Each matching event of a crew session becomes a new turn of the session, with the plan, the events and the goal; sessions that this session starts inherit the crew tags. Only a person creates one: a call from inside a tumpel session is refused, so an agent in a box tells its person instead. Returns the Active subscription.",
   ),
   rest(
     "tumpel_subscription_list",

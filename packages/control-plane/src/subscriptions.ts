@@ -74,8 +74,6 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
     );
   }
   const tenant = tenantApi(env.TENANT, caller.tenantId);
-  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId: subscription.sessionId });
-  if (session === null) return sessionNotFound(subscription.sessionId);
   const leanest = `${subscription.prompt}\n\n${widestReference(subscription.events)}`;
   const length = subscriptionPrompt(leanest, subscription.goal).length;
   if (length > DELIVERY_PROMPT_LIMIT) {
