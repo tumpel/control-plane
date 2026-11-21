@@ -1,5 +1,4 @@
 import worker, { Tenant as BaseTenant, type Env } from "../../src/index";
-import type { HeldBox } from "../../src/placement";
 import { SessionTimer as BaseSessionTimer } from "../../src/session-timer";
 
 export { EventChannel, HostChannel, TenantMetrics, WebhookSender } from "../../src/index";
@@ -18,10 +17,6 @@ export class SessionTimer extends BaseSessionTimer {
 export class Tenant extends BaseTenant {
   sql(query: string, bindings: SqlStorageValue[]): Record<string, SqlStorageValue>[] {
     return this.ctx.storage.sql.exec(query, ...bindings).toArray();
-  }
-
-  held(): HeldBox[] {
-    return this.heldBoxes();
   }
 }
 
@@ -67,11 +62,6 @@ const sql = async (request: Request, env: Env, tenantId: string): Promise<Respon
   return Response.json(await tenant.sql(query, bindings));
 };
 
-const held = async (env: Env, tenantId: string): Promise<Response> => {
-  const tenant = (env.TENANT as unknown as DurableObjectNamespace<Tenant>).getByName(tenantId);
-  return Response.json(await tenant.held());
-};
-
 const d1 = async (request: Request, env: Env): Promise<Response> => {
   const { query, bindings } = await request.json<{ query: string; bindings: unknown[] }>();
   await env.DB.prepare(query)
@@ -86,7 +76,6 @@ const fixture = (request: Request, env: Env, path: string): Promise<Response> =>
   if (kind === "objects") return objects(request, env, target);
   if (kind === "timers") return timers(request, env, target);
   if (kind === "sql") return sql(request, env, target);
-  if (kind === "held") return held(env, target);
   if (kind === "d1") return d1(request, env);
   return Promise.resolve(new Response(`no fixture route ${path}`, { status: 404 }));
 };

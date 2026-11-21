@@ -1724,11 +1724,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.session_id AND t.state IN ('Offered', 'Running'))
             AND NOT EXISTS (SELECT 1 FROM after_turn_releases a WHERE a.session_id = s.session_id)
             AND NOT EXISTS (SELECT 1 FROM box_evictions e WHERE e.session_id = s.session_id)
-            AND NOT EXISTS (
-              SELECT 1 FROM stop_failures x WHERE x.session_id = s.session_id
-              AND x.created_at >= COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), 0)
-              AND x.created_at > COALESCE((SELECT MAX(p.updated_at) FROM snapshots p WHERE p.session_id = s.session_id), 0)
-            )
+            AND NOT EXISTS (SELECT 1 FROM box_eviction_blocks b WHERE b.session_id = s.session_id)
             AND NOT EXISTS (
               SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
                 SELECT MAX(seq) FROM (
@@ -2162,6 +2158,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private runTurn(session: SessionRow, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
     return this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM box_eviction_blocks WHERE session_id = ?", session.session_id);
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
         hostId,
@@ -2514,15 +2511,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private recordStopFailure(sessionId: string, reason: StopFailure["reason"], detail: string, failedAt: string): void {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO stop_failures (stop_failure_id, session_id, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      crypto.randomUUID(),
-      sessionId,
-      reason,
-      detail,
-      failedAt,
-      Date.now(),
-    );
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        "INSERT INTO stop_failures (stop_failure_id, session_id, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        crypto.randomUUID(),
+        sessionId,
+        reason,
+        detail,
+        failedAt,
+        Date.now(),
+      );
+      sql.exec("INSERT OR IGNORE INTO box_eviction_blocks (session_id) VALUES (?)", sessionId);
+    });
   }
 
   private async returnToIdle(tenantId: string, sessionId: string): Promise<void> {
@@ -4018,6 +4019,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
     const next = this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
+      sql.exec("DELETE FROM box_eviction_blocks WHERE session_id = ?", request.session_id);
       this.promotePlacements(request.snapshot_id, now);
       sql.exec(
         "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
