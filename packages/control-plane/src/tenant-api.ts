@@ -517,7 +517,7 @@ type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };
 
 const refused = (tenantId: string, operation: string, refusal: TenantRefusal): Error => {
   if (refusal.refusal === "TenantRequestInvalid")
-    return new Error(`tenant ${tenantId} refused ${operation} as invalid: ${refusal.issues.join("; ")}`);
+    return new TenantSkew(`tenant ${tenantId} refused ${operation} as invalid: ${refusal.issues.join("; ")}`);
   if (refusal.refusal === "TenantOperationUnknown")
     return new TenantSkew(`tenant ${tenantId} runs older code that does not know ${operation}`);
   return new TenantSkew(
@@ -531,7 +531,13 @@ export const tenantApi = (namespace: { getByName(name: string): TenantStub }, te
       .getByName(tenantId)
       .handle({ tenantApiVersion: TenantApiProtocol.Version, operation, input });
     if ("refusal" in response) throw refused(tenantId, operation, TenantRefusalSchema.parse(response));
-    return TENANT_OPERATIONS[operation].result.parse(response.result) as TenantResult<O>;
+    const result = TENANT_OPERATIONS[operation].result.safeParse(response.result);
+    if (!result.success) {
+      throw new TenantSkew(
+        `tenant ${tenantId} answered ${operation} with a result this Worker cannot read: ${result.error.message}`,
+      );
+    }
+    return result.data as TenantResult<O>;
   },
 });
 

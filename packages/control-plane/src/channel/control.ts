@@ -36,6 +36,7 @@ export type ControlConnection =
   | { phase: "Closed" };
 
 export const TURN_CANCEL_VERSION = 23;
+export const MAX_HOST_FRAME_BYTES = 4_000_000;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -286,6 +287,12 @@ export const receive = async (
   context: ControlContext,
 ): Promise<Received> => {
   if (connection.phase === "Closed") return { connection, event: { kind: "None" } };
+  const bytes = new TextEncoder().encode(text).byteLength;
+  if (bytes > MAX_HOST_FRAME_BYTES) {
+    const reason = `a host frame of ${bytes} bytes is over the ${MAX_HOST_FRAME_BYTES}-byte bound the control plane stores; split the message or shorten its text`;
+    if (connection.phase === "Open") return refuse(connection, text, reason, context);
+    return close(context.port, CloseCode.ProtocolError, reason);
+  }
   if (connection.phase === "AwaitingHello") {
     const greeting = parseEnvelope(HelloVersionSchema, text);
     if (greeting.ok && !spoken(greeting.value.protocolVersion)) {
