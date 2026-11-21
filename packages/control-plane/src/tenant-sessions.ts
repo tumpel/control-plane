@@ -432,6 +432,7 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
+const IDLE_EVICTION_MS = 15 * 60 * 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
@@ -1194,32 +1195,41 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
     if (victims.length === 0) return this.offer(tenantId, session, turn);
     await this.armOffer(tenantId, session, turn);
-    const sql = this.ctx.storage.sql;
     const now = Date.now();
     for (const victim of victims) {
       const evicted = this.sessionRow(victim.sessionId);
       if (evicted === null) throw new Error(`session ${victim.sessionId} was picked for eviction and then not found`);
-      this.ctx.storage.transactionSync(() => {
-        sql.exec(
-          "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
-          evicted.session_id,
-          evicted.box_id,
-          now,
-        );
-        sql.exec(
-          "INSERT INTO turn_eviction_waits (turn_id, session_id) VALUES (?, ?)",
-          turn.turn_id,
-          evicted.session_id,
-        );
-      });
-      if (evicted.state !== "Idle") continue;
-      const latest = this.latestTurn(evicted.session_id, null);
-      if (latest === null)
-        throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
-      this.setSessionState(evicted.session_id, "Stopping", now);
-      await this.timers(tenantId, evicted.session_id, { Snapshot: null });
-      await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
+      await this.startBoxEviction(tenantId, evicted, turn.turn_id, now);
     }
+  }
+
+  private async startBoxEviction(
+    tenantId: string,
+    evicted: SessionRow,
+    waitingTurnId: string | null,
+    now: number,
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
+        evicted.session_id,
+        evicted.box_id,
+        now,
+      );
+      if (waitingTurnId === null) return;
+      sql.exec(
+        "INSERT INTO turn_eviction_waits (turn_id, session_id) VALUES (?, ?)",
+        waitingTurnId,
+        evicted.session_id,
+      );
+    });
+    if (evicted.state !== "Idle") return;
+    const latest = this.latestTurn(evicted.session_id, null);
+    if (latest === null) throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
+    this.setSessionState(evicted.session_id, "Stopping", now);
+    await this.timers(tenantId, evicted.session_id, { Snapshot: null });
+    await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
   }
 
   private releasing(sessionId: string): boolean {
@@ -1443,6 +1453,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
       Snapshot: null,
+      Teardown: null,
       HostOffline: null,
     });
     return this.offerMessage(session, turn);
@@ -1631,6 +1642,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     for (const { session_id } of gone) {
       await this.timers(tenantId, session_id, { Snapshot: null });
       await this.evictionSettled(tenantId, session_id);
+    }
+    for (const sessionId of heldSessionIds) {
+      if (this.sessionRow(sessionId)?.host_id === hostId) await this.armIdleEviction(tenantId, sessionId);
     }
     const lost = this.ctx.storage.sql
       .exec<{ turn_id: string }>(
@@ -2458,6 +2472,34 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
     }
     return this.timers(tenantId, session.session_id, { Snapshot: { turnId: latest.turn_id, at: now } });
+  }
+
+  private async armIdleEviction(tenantId: string, sessionId: string): Promise<void> {
+    const session = this.sessionRow(sessionId);
+    if (session?.state !== "Idle" || session.box_retention !== "Auto" || this.inFlightTurn(sessionId) !== null) return;
+    const latest = this.latestTurn(sessionId, null);
+    if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
+    if (!this.snapshotHolds(sessionId, latest.turn_id)) return;
+    await this.timers(tenantId, sessionId, {
+      Teardown: { turnId: latest.turn_id, at: latest.updated_at + IDLE_EVICTION_MS },
+    });
+  }
+
+  private snapshotHolds(sessionId: string, turnId: string): boolean {
+    const sql = this.ctx.storage.sql;
+    const [pending] = sql.exec("SELECT 1 FROM snapshot_requests WHERE session_id = ? LIMIT 1", sessionId).toArray();
+    const [stored] = sql
+      .exec("SELECT 1 FROM snapshots WHERE session_id = ? AND turn_id = ? LIMIT 1", sessionId, turnId)
+      .toArray();
+    return pending === undefined && stored !== undefined;
+  }
+
+  private async evictIdle(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
+    if (await this.hostOffline(session.host_id)) return;
+    if (this.latestTurn(session.session_id, null)?.turn_id !== turn.turn_id) return;
+    if (this.heldBoxes().find((held) => held.sessionId === session.session_id)?.evictable !== true) return;
+    if (!this.snapshotHolds(session.session_id, turn.turn_id)) return;
+    await this.startBoxEviction(tenantId, session, null, Date.now());
   }
 
   private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
@@ -3671,6 +3713,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${host} did not answer the snapshot within ${settings.snapshotDeadlineSeconds} seconds`,
       );
     }
+    if (name === "Teardown" && session.state === "Idle") return this.evictIdle(tenantId, session, turn);
     if (name === "Teardown" && session.state === "Stopping") return this.teardown(tenantId, session, turnId);
     if (name === "TeardownAnswer" && session.state === "Stopping") {
       this.recordStopFailure(
@@ -4055,6 +4098,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
       this.startAfterTurnRelease(completed, now);
     if (next !== null) await this.startWaiting(tenantId, request.session_id, next, now);
+    await this.armIdleEviction(tenantId, request.session_id);
     if (this.sessionRow(session.session_id)?.state === "Stopping") {
       const latest = this.latestTurn(session.session_id, null);
       if (latest === null)
