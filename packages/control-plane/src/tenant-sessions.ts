@@ -27,6 +27,7 @@ import {
   type SteerSchema,
   StopFailureSchema,
   TranscriptLineSchema,
+  TurnFailedEventSchema,
   TurnFailureSchema,
   TurnImageSchema,
   TurnSchema,
@@ -34,7 +35,7 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
-import { turnFailureDetail } from "./bounded-detail.ts";
+import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import { linesLost } from "./channel/failure.ts";
 import type {
@@ -295,6 +296,8 @@ type PersonaRow = {
   boxRetention: BoxRetention;
   tumpelMcp: boolean;
 };
+
+export type OfferedPrompt = { kind: "Composed"; prompt: string } | { kind: "Uncomposable"; cause: string };
 
 export type TurnRow = {
   turn_id: string;
@@ -935,8 +938,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return appendEvent(this.ctx.storage.sql, event, now);
   }
 
-  protected offeredPrompt(harness: string, turn: TurnRow): string {
-    return offerPrompt(harness, turn);
+  protected offeredPrompt(harness: string, turn: TurnRow): OfferedPrompt {
+    return { kind: "Composed", prompt: offerPrompt(harness, turn) };
   }
 
   private sessionEntered(sessionId: string, state: SessionState, now: number): void {
@@ -1252,8 +1255,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async offer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
     this.offering.add(turn.turn_id);
     await this.armOffer(tenantId, session, turn)
-      .then((offer) => this.host(session.host_id).send(offer))
+      .then((offer) => (offer === null ? null : this.host(session.host_id).send(offer)))
       .then((sent) => {
+        if (sent === null) return;
         if (sent === "Sent") return this.offerSent(turn.turn_id);
         this.deferOffer(session, turn, Date.now());
       })
@@ -1267,7 +1271,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
     if (victims.length === 0) return this.offer(tenantId, session, turn);
-    await this.armOffer(tenantId, session, turn);
+    if ((await this.armOffer(tenantId, session, turn)) === null) return;
     const now = Date.now();
     for (const victim of victims) {
       const evicted = this.sessionRow(victim.sessionId);
@@ -1535,7 +1539,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turnId);
   }
 
-  private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
+  private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer | null> {
+    const offer = await this.composeOffer(tenantId, session, turn);
+    if (offer === null) return null;
     if (this.waitsForCapacity(turn.turn_id)) {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
@@ -1549,10 +1555,29 @@ export abstract class TenantSessions extends DurableObject<Env> {
       Teardown: null,
       HostOffline: null,
     });
-    return this.offerMessage(session, turn);
+    return offer;
   }
 
-  private offerMessage(session: SessionRow, turn: TurnRow): StoredTurnOffer {
+  private async composeOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer | null> {
+    const composed = this.offerMessage(session, turn);
+    if (composed.kind === "Composed") return composed.offer;
+    const detail = `the turn's offer could not be composed, so it never reached a host; report this to the tumpel maintainers, then send the turn again: ${composed.cause}`;
+    await this.failTurn(
+      tenantId,
+      turn.turn_id,
+      "Undelivered",
+      boundedTo(TurnFailedEventSchema.shape.detail.maxLength, detail),
+      iso(Date.now()),
+    );
+    return null;
+  }
+
+  private offerMessage(
+    session: SessionRow,
+    turn: TurnRow,
+  ): { kind: "Composed"; offer: StoredTurnOffer } | { kind: "Uncomposable"; cause: string } {
+    const prompt = this.offeredPrompt(session.harness, turn);
+    if (prompt.kind === "Uncomposable") return prompt;
     this.ctx.storage.sql.exec(
       `INSERT INTO unreported_box_offers (box_id, host_id, box_memory_mib)
       SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM turns WHERE session_id = ?4 AND box_id = ?1 AND turn_id != ?5)
@@ -1564,7 +1589,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turn.turn_id,
     );
     const prebuild = this.hostPrebuild(session.session_id);
-    return {
+    const offer: StoredTurnOffer = {
       type: "TurnOffer",
       turnId: turn.turn_id,
       sessionId: session.session_id,
@@ -1573,11 +1598,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       harness: SessionSchema.shape.harness.parse(session.harness),
       harnessVersion: session.harness_version,
       model: session.model,
-      prompt: this.offeredPrompt(session.harness, turn),
+      prompt: prompt.prompt,
       boxMemoryMib: session.box_memory_mib,
       boxDiskMib: session.box_disk_mib,
       ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
+    return { kind: "Composed", offer };
   }
 
   private insertTurn(sessionId: string, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
@@ -2286,6 +2312,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (placement.host.hostId === session.host_id) {
       if (placement.evict.length > 0) return this.evictFirst(tenantId, session, turn, placement.evict);
       const offer = await this.armOffer(tenantId, session, turn);
+      if (offer === null) return null;
       this.deferOffer(session, turn, now);
       return { type: "TurnHandoff", hostId: session.host_id, offer };
     }
@@ -2314,6 +2341,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const moved = { ...session, host_id: hostId, box_id: boxId };
     if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
     const offer = await this.armOffer(tenantId, moved, turn);
+    if (offer === null) return null;
     this.deferOffer(moved, turn, now);
     return { type: "TurnHandoff", hostId, offer };
   }
@@ -3816,7 +3844,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
       const offeredAgain = { ...turn, state: "Offered" as const };
       if (handedOver) return this.deferOffer(session, offeredAgain, now);
-      return this.offerMessage(session, offeredAgain);
+      return this.composeOffer(tenantId, session, offeredAgain);
     }
     const detail =
       message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
