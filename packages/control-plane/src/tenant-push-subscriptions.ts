@@ -1,4 +1,5 @@
 import { type CreatePushSubscriptionInputSchema, PushSubscriptionSchema } from "@tumpel/schemas";
+import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
 import { seal } from "./envelope.ts";
 import { TenantTriggers } from "./tenant-triggers.ts";
@@ -18,6 +19,7 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
   (SELECT json_group_array(event) FROM (SELECT event FROM push_subscription_events
     WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events
   FROM push_subscriptions AS p`;
+const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
@@ -49,13 +51,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     now: number,
   ): Promise<PushSubscription> {
     const sql = this.ctx.storage.sql;
-    const [existing] = sql
-      .exec<{ push_subscription_id: string }>(
-        "SELECT push_subscription_id FROM push_subscriptions WHERE endpoint = ?",
-        create.endpoint,
-      )
-      .toArray();
-    const pushSubscriptionId = existing?.push_subscription_id ?? crypto.randomUUID();
+    const pushSubscriptionId = uuidV5(create.endpoint, PUSH_SUBSCRIPTION_NAMESPACE);
     const authSealed = await seal(await this.dataKey(), create.keys.auth, authContext(pushSubscriptionId));
     this.ctx.storage.transactionSync(() => {
       sql.exec(
