@@ -25,7 +25,9 @@ test("a body over the 4 MB bound is refused with 413 before any row is written",
 });
 
 test("a write burst past the per-minute write rate gets 429 and writes nothing", async (t) => {
-  const world = await World.open({ limits: { ...LIMITS, writesPerMinute: 5 } });
+  const world = await World.open({
+    limits: { ...LIMITS, writesPerMinute: 5, ceiling: { ...LIMITS.ceiling, writesPerMinute: 5 } },
+  });
   t.after(() => world.close());
 
   for (const name of ["one", "two", "three", "four", "five"]) {
@@ -43,7 +45,9 @@ test("a write burst past the per-minute write rate gets 429 and writes nothing",
 });
 
 test("one tenant bursting gets 429 while a second tenant's requests still succeed", async (t) => {
-  const world = await World.open({ limits: { ...LIMITS, writesPerMinute: 3 } });
+  const world = await World.open({
+    limits: { ...LIMITS, writesPerMinute: 3, ceiling: { ...LIMITS.ceiling, writesPerMinute: 3 } },
+  });
   t.after(() => world.close());
   const quiet = await world.tenant("quiet", "Configured");
 

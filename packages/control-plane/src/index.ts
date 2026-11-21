@@ -61,9 +61,13 @@ import {
   SignUpSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
+  TenantLimitsSchema,
+  TenantLimitsSetSchema,
+  TenantTierSchema,
   WhoamiSchema,
   WhoamiWithEndpointSchema,
 } from "@tumpel/schemas";
+import { and, eq, sql } from "drizzle-orm";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
@@ -75,6 +79,8 @@ import { applyConfig, planConfig } from "./config-apply.ts";
 import { handleConnections } from "./connections.ts";
 import { handleConnectors } from "./connectors.ts";
 import { randomToken, sameSecret } from "./crypto";
+import { tenantLimits, tenants } from "./db/central-schema.ts";
+import { centralDb } from "./db/client.ts";
 import { handleReleaseRollout } from "./deploy-drain";
 import {
   approveDeviceCode,
@@ -150,9 +156,9 @@ import {
   openIdConfiguration,
 } from "./issuer.ts";
 import { keyStoreOf } from "./key-store.ts";
-import { bodyBoundOf, limitsOf } from "./limits.ts";
+import { bodyBoundOf, freeProfile, limitsOf, pastBound, type TenantLimitsProfile, type TenantTier } from "./limits.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
-import { handleMembers } from "./members";
+import { handleMembers, ownerRequired } from "./members";
 import { handleMetrics } from "./metrics";
 import {
   AUTHORIZATION_SERVER_PATH,
@@ -974,6 +980,95 @@ const handlePin = async (request: Request, _url: URL, env: Env): Promise<Respons
   return json(HarnessPinSchema.parse(pinned));
 };
 
+const handleLimitsRead = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const { limits } = await tenantApi(env.TENANT, caller.tenantId).call("readLimits", { tenantId: caller.tenantId });
+  return json(TenantLimitsSchema.parse(limits));
+};
+
+const aboveFreeTier = (detail: string): Response =>
+  problem(403, {
+    code: "AboveFreeTier",
+    title: "Above the Free tier",
+    detail: `the tenant is on the Free tier, and ${detail}`,
+    fix: "Set limits at or below the Free preset, or ask the operator of this deployment to move the tenant off the Free tier",
+  });
+
+const profileRefusal = (profile: TenantLimitsProfile, tier: TenantTier, env: Env): Response | null => {
+  const limits = limitsOf(env);
+  const pastFree = tier === "Free" ? pastBound(profile, freeProfile(limits)) : [];
+  if (pastFree.length > 0) return aboveFreeTier(`the profile goes past the Free preset: ${pastFree.join("; ")}`);
+  const pastCeiling = pastBound(profile, limits.ceiling);
+  if (pastCeiling.length > 0) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Limits past the ceiling",
+      detail: `the profile goes past the ceiling of this deployment: ${pastCeiling.join("; ")}`,
+      fix: "Lower each value to the ceiling or below it",
+    });
+  }
+  return null;
+};
+
+const tierChanged = (tier: TenantTier): Response =>
+  problem(409, {
+    code: "Conflict",
+    title: "Tier changed",
+    detail: `the tenant left the ${tier} tier while these limits were checked against it; nothing was written`,
+    fix: "Read the limits with tumpel limits get and set them again",
+  });
+
+const handleLimitsSet = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const refused = ownerRequired(caller, "limits.set");
+  if (refused !== null) return refused;
+  const body = await parseBody(request, TenantLimitsSetSchema, "limits.set");
+  if (!body.ok) return body.response;
+  const set = body.value;
+  const now = Date.now();
+  if ("reset" in set) {
+    await centralDb(env.DB).delete(tenantLimits).where(eq(tenantLimits.tenantId, caller.tenantId)).run();
+  } else {
+    const db = centralDb(env.DB);
+    const row = await db
+      .select({ tier: tenants.tier })
+      .from(tenants)
+      .where(eq(tenants.tenantId, caller.tenantId))
+      .get();
+    if (row === undefined)
+      throw new Error(`tenant ${caller.tenantId} has a signed-in caller but no row in the tenants table`);
+    const tier = TenantTierSchema.parse(row.tier);
+    const past = profileRefusal(set, tier, env);
+    if (past !== null) return past;
+    const written = await db
+      .insert(tenantLimits)
+      .select(
+        db
+          .select({
+            tenantId: tenants.tenantId,
+            profile: sql<string>`${JSON.stringify(set)}`.as("profile"),
+            updatedAt: sql<number>`${now}`.as("updated_at"),
+          })
+          .from(tenants)
+          .where(and(eq(tenants.tenantId, caller.tenantId), eq(tenants.tier, tier))),
+      )
+      .onConflictDoUpdate({
+        target: tenantLimits.tenantId,
+        set: { profile: sql`excluded.profile`, updatedAt: sql`excluded.updated_at` },
+      })
+      .run();
+    if (written.meta.changes === 0) return tierChanged(tier);
+  }
+  const { limits } = await tenantApi(env.TENANT, caller.tenantId).call("setLimits", {
+    tenantId: caller.tenantId,
+    limits: set,
+    now,
+  });
+  return json(TenantLimitsSchema.parse(limits));
+};
+
 const PIN_PATH = /^\/v1\/harnesses\/pins\/([^/]+)$/;
 
 const handleUnpin = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
@@ -1683,6 +1778,8 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/harnesses": handleHarnessCatalog,
   "GET /v1/harnesses/pins": handlePinsList,
   "PUT /v1/harnesses/pins": handlePin,
+  "GET /v1/limits": handleLimitsRead,
+  "PUT /v1/limits": handleLimitsSet,
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
   "GET /v1/enrolment-tokens": handleListEnrolmentTokens,

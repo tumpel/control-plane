@@ -4,9 +4,11 @@ import { TenantLimited, type TenantRequest, type TenantResponse, tenantSkewed } 
 
 export type RateLimit = { limit(options: { key: string }): Promise<{ success: boolean }> };
 
+export type WriteRateRefusal = { writeRateLimited: string };
+
 type TenantStub = {
   handle(request: TenantRequest): Promise<TenantResponse>;
-  handleForTenant(request: TenantRequest): Promise<TenantResponse>;
+  handleForTenant(request: TenantRequest, writes: number): Promise<TenantResponse | WriteRateRefusal>;
 };
 type TenantNamespace = { getByName(name: string): TenantStub };
 
@@ -54,14 +56,19 @@ export const rateLimited = <N extends TenantNamespace, E extends RateLimitedEnv<
     charged.set(key, charging);
     return charging;
   };
+  const wrote = new Set<string>();
   const stubOf = (tenantId: string, stub: TenantStub): TenantStub =>
     new Proxy(stub, {
       get: (target, property) => {
         if (property !== "handle") return Reflect.get(target, property);
-        return async (request: TenantRequest) => {
+        return async (request: TenantRequest): Promise<TenantResponse> => {
           await charge(tenantId, "Request");
           if (writes(request.operation)) await charge(tenantId, "Write");
-          return target.handleForTenant(request);
+          const counted = writes(request.operation) && !signed && !wrote.has(tenantId);
+          if (counted) wrote.add(tenantId);
+          const response = await target.handleForTenant(request, counted ? 1 : 0);
+          if ("writeRateLimited" in response) throw new RateLimited(response.writeRateLimited);
+          return response;
         };
       },
     });

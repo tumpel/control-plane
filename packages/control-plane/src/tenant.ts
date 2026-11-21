@@ -8,17 +8,30 @@ import {
   type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
+  TenantTierSchema,
 } from "@tumpel/schemas";
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import type { ConfigWrite } from "./configs.ts";
+import { tenantLimits, tenants } from "./db/central-schema.ts";
+import { centralDb } from "./db/client.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import { limitsOf, type TenantTier, tierLimits } from "./limits.ts";
+import {
+  customProfileOf,
+  effectiveLimits,
+  limitsOf,
+  type TenantLimitsProfile,
+  type TenantLimitsView,
+  type TenantTier,
+  windowStart,
+} from "./limits.ts";
 import { meteredState } from "./metered-state.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import type { WriteRateRefusal } from "./rate-limit.ts";
 import {
   type MemberUpdate,
   memberWith,
@@ -34,7 +47,13 @@ import {
   type SupervisorUpdates,
   supervisorUpdatesByHost,
 } from "./supervisor-updates";
-import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
+import {
+  serveTenantRequest,
+  type TenantHandlers,
+  type TenantInput,
+  type TenantRequest,
+  type TenantResponse,
+} from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
@@ -183,17 +202,29 @@ const toPin = (row: HarnessPinRow): HarnessPin =>
 
 const USAGE_KEY = "usage";
 
-const tierOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<TenantTier> => {
-  const row = await db
-    .prepare("SELECT tier FROM tenants WHERE tenant_id = ?")
-    .bind(tenantId)
-    .first<{ tier: TenantTier }>();
-  return row?.tier ?? fallback;
+type StoredLimits = { tier: TenantTier; custom: TenantLimitsProfile | null };
+
+const storedLimitsOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<StoredLimits> => {
+  const row = await centralDb(db)
+    .select({ tier: tenants.tier, profile: tenantLimits.profile })
+    .from(tenants)
+    .leftJoin(tenantLimits, eq(tenantLimits.tenantId, tenants.tenantId))
+    .where(eq(tenants.tenantId, tenantId))
+    .get();
+  if (row === undefined) return { tier: fallback, custom: null };
+  return { tier: TenantTierSchema.parse(row.tier), custom: customProfileOf(row.profile) };
 };
+
+type WriteWindow = { start: number; writes: number };
+
+const UNMETERED = new Set(["readUsage", "readLimits", "setLimits"]);
 
 export class Tenant extends TenantConnectors {
   private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
   private meter: UsageMeter | undefined;
+  private tier: TenantTier;
+  private limits: TenantLimitsView;
+  private writeWindow: WriteWindow = { start: 0, writes: 0 };
   private tierRead: Promise<void> | null = null;
   private readonly opened: Promise<void>;
 
@@ -202,6 +233,8 @@ export class Tenant extends TenantConnectors {
     super(ctx, env);
     this.ctx = meteredState(this.ctx, cursors);
     this.cursors = cursors;
+    this.tier = limitsOf(env).defaultTier;
+    this.limits = effectiveLimits(limitsOf(env), this.tier, null);
     this.opened = this.ctx.blockConcurrencyWhile(async () => {
       await migrateDurableObject(this.ctx.storage, TENANT_MIGRATIONS);
       await this.holdDataKey();
@@ -213,9 +246,8 @@ export class Tenant extends TenantConnectors {
   private async openMeter(): Promise<void> {
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) return;
-    const tier = limitsOf(this.env).defaultTier;
     const saved = (await this.ctx.storage.get<SavedCounter[]>(USAGE_KEY)) ?? [];
-    this.meter = new UsageMeter(tier, tierLimits(limitsOf(this.env), tier), saved, this.cursors, Date.now());
+    this.meter = new UsageMeter(this.tier, this.limits.profile.usage, saved, this.cursors, Date.now());
   }
 
   private settleTier(): Promise<void> {
@@ -228,8 +260,33 @@ export class Tenant extends TenantConnectors {
 
   private async readTier(): Promise<void> {
     const { defaultTier } = limitsOf(this.env);
-    const tier = await tierOf(this.env.DB, this.tenantName(), defaultTier);
-    this.usageMeter().retier(tier, tierLimits(limitsOf(this.env), tier), Date.now());
+    const stored = await storedLimitsOf(this.env.DB, this.tenantName(), defaultTier);
+    this.relimit(stored);
+  }
+
+  private relimit(stored: StoredLimits): void {
+    this.tier = stored.tier;
+    this.limits = effectiveLimits(limitsOf(this.env), stored.tier, stored.custom);
+    this.usageMeter().retier(stored.tier, this.limits.profile.usage, Date.now());
+  }
+
+  private writeRateRefusal(writes: number, now: number): WriteRateRefusal | null {
+    if (writes === 0) return null;
+    const start = windowStart("Minute", now);
+    if (this.writeWindow.start !== start) this.writeWindow = { start, writes: 0 };
+    const { writesPerMinute } = this.limits.profile;
+    if (this.writeWindow.writes + writes > writesPerMinute) {
+      return {
+        writeRateLimited: `tenant ${this.tenantName()} sent more than ${writesPerMinute} writing requests in a minute`,
+      };
+    }
+    this.writeWindow.writes += writes;
+    return null;
+  }
+
+  private async setLimits({ tenantId }: TenantInput<"setLimits">): Promise<TenantLimitsView> {
+    this.relimit(await storedLimitsOf(this.env.DB, tenantId, limitsOf(this.env).defaultTier));
+    return this.limits;
   }
 
   private usageMeter(): UsageMeter {
@@ -259,11 +316,13 @@ export class Tenant extends TenantConnectors {
     return this.serve(request, null);
   }
 
-  async handleForTenant(request: TenantRequest): Promise<TenantResponse> {
+  async handleForTenant(request: TenantRequest, writes: number): Promise<TenantResponse | WriteRateRefusal> {
     await this.opened;
     const operation = typeof request.operation === "string" ? request.operation : "";
     await this.settleTier();
-    const spent = operation === "readUsage" ? null : this.usageMeter().spent(operation, Date.now());
+    const refused = this.writeRateRefusal(writes, Date.now());
+    if (refused !== null) return refused;
+    const spent = UNMETERED.has(operation) ? null : this.usageMeter().spent(operation, Date.now());
     if (spent !== null) return spent;
     return this.serve(request, operation);
   }
@@ -649,6 +708,8 @@ export class Tenant extends TenantConnectors {
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
     listHostUsage: ({ tenantId }) => ({ usage: this.listHostUsage(tenantId) }),
     readUsage: () => ({ usage: this.usageMeter().usage(Date.now()) }),
+    readLimits: () => ({ limits: this.limits }),
+    setLimits: async (input) => ({ limits: await this.setLimits(input) }),
     deferredOffers: async ({ tenantId, hostId }) => ({ handoffs: await this.deferredOffers(tenantId, hostId) }),
     turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({

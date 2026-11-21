@@ -19,7 +19,7 @@ export type TripStore = {
 const windowOf = (at: number): number => at - (at % WINDOW_MS);
 
 export class HostFrameMeter {
-  readonly framesPerMinute: number;
+  #framesPerMinute: number;
   readonly #store: TripStore;
   #windowStart = 0;
   #count = 0;
@@ -28,10 +28,18 @@ export class HostFrameMeter {
   #health: HostHealth;
 
   constructor(framesPerMinute: number, health: HostHealth, trips: number[], store: TripStore) {
-    this.framesPerMinute = framesPerMinute;
+    this.#framesPerMinute = framesPerMinute;
     this.#health = health;
     this.#trips = trips;
     this.#store = store;
+  }
+
+  get framesPerMinute(): number {
+    return this.#framesPerMinute;
+  }
+
+  relimit(framesPerMinute: number): void {
+    this.#framesPerMinute = framesPerMinute;
   }
 
   health(): HostHealth {

@@ -302,6 +302,14 @@ export const principals = sqliteTable(
   (table) => [unique().on(table.email)],
 );
 
+export const tenantLimits = sqliteTable("tenant_limits", {
+  tenantId: text("tenant_id")
+    .primaryKey()
+    .references((): AnySQLiteColumn => tenants.tenantId, { onDelete: "cascade" }),
+  profile: text("profile").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 export const tenants = sqliteTable("tenants", {
   tenantId: text("tenant_id").primaryKey(),
   name: text("name").notNull(),

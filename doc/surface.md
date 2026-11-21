@@ -74,6 +74,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Invitations_create`                     | `tumpel_invitation_create`                   | `tumpel invitation create`                   |
 | `Invitations_list`                       | `tumpel_invitation_list`                     | `tumpel invitation list`                     |
 | `Invitations_revoke`                     | `tumpel_invitation_revoke`                   | `tumpel invitation revoke`                   |
+| `Limits_get`                             | `tumpel_limits_get`                          | `tumpel limits get`                          |
+| `Limits_set`                             | `tumpel_limits_set`                          | `tumpel limits set`                          |
 | `Members_list`                           | `tumpel_member_list`                         | `tumpel member list`                         |
 | `Members_remove`                         | `tumpel_member_remove`                       | `tumpel member remove`                       |
 | `Metrics_catalog`                        | `tumpel_metrics_catalog`                     | `tumpel metrics catalog`                     |
