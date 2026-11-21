@@ -3574,9 +3574,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (handedOver) return this.deferOffer(session, offeredAgain, now);
       return this.offerMessage(session, offeredAgain);
     }
-    const detail =
-      message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
-    await this.failTurn(tenantId, turn.turn_id, message.reason, detail, message.failedAt);
+    const creditExhausted =
+      message.reason === "HarnessReportedError" && /credit balance is too low/i.test(message.detail);
+    const reason = creditExhausted ? "CreditExhausted" : message.reason;
+    const detail = creditExhausted
+      ? "The provider's credit balance is too low. Add credits to the provider account, then send the turn again."
+      : reason === "CredentialRefused"
+        ? this.refusedSetDetail(session, message.detail)
+        : message.detail;
+    await this.failTurn(tenantId, turn.turn_id, reason, detail, message.failedAt);
     return null;
   }
 
