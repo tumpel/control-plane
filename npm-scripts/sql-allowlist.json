@@ -132,28 +132,17 @@
       "SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?"
     ],
     "packages/control-plane/src/metrics-query.ts": [
-      "SELECT m.metric, m.unit, m.kind, m.description FROM metric m WHERE m.metric IN (SELECT s.metric ${seen}) ORDER BY m.metric",
-      "SELECT metric, unit, kind, description FROM metric WHERE metric = ?",
-      "SELECT s.dimensions, r.bucket_start, r.count, r.sum, r.min, r.max, r.histogram FROM series s JOIN rollup r ON r.resolution = ? AND r.series_id = s.series_id AND r.bucket_start >= ? AND r.bucket_start < ? WHERE s.metric = ?${clause.sql}",
-      "SELECT s.metric, d.dimension, d.value, COUNT(*) AS series_count FROM series_dimension d JOIN series s ON s.series_id = d.series_id WHERE s.series_id IN (SELECT s.series_id ${seen}) GROUP BY s.metric, d.dimension, d.value ORDER BY s.metric, d.dimension, d.value",
-      "SELECT t.series_id, t.at, t.turn_id, t.session_id, t.value, s.dimensions FROM turn_point t JOIN series s ON s.series_id = t.series_id WHERE s.metric = ? AND t.at >= ? AND t.at < ?${session.sql}${position.sql}${clause.sql} ORDER BY t.at, t.series_id, t.turn_id LIMIT ?"
+      "SELECT ${columns} FROM ${sqlName(table.dataset)} WHERE ${whereOf(table, metric, first, to, filter.value)} GROUP BY ${keys} ORDER BY ${keys} LIMIT ${limits.rowsPerQuery + 1}",
+      "SELECT blob1 AS metric, blob2 AS dimensions FROM ${sqlName(table.dataset)} WHERE ${whereOf(table, undefined, from, to, filter.value)} GROUP BY metric, dimensions ORDER BY metric, dimensions LIMIT ${limits.rowsPerQuery + 1}",
+      "SELECT double2 AS at, blob3 AS turnId, blob4 AS sessionId, double1 AS value, blob2 AS dimensions FROM ${sqlName(table.dataset)} WHERE ${conditions.join(\" AND \")} ORDER BY at, turnId LIMIT ${pageSize + 1}",
+      "SELECT metric, unit, kind, description FROM metric",
+      "SELECT metric, unit, kind, description FROM metric WHERE metric = ?"
     ],
     "packages/control-plane/src/metrics-store.ts": [
-      "DELETE FROM rollup WHERE (resolution, series_id, bucket_start) IN (SELECT resolution, series_id, bucket_start FROM rollup WHERE resolution = ? AND bucket_start < ? LIMIT ?)",
-      "DELETE FROM series WHERE series_id IN (SELECT s.series_id FROM metric m CROSS JOIN series s ON s.metric = m.metric AND s.last_seen_at < ? LIMIT ?)",
-      "DELETE FROM turn_point WHERE (series_id, at, turn_id) IN (SELECT series_id, at, turn_id FROM turn_point WHERE at < ? LIMIT ?)",
-      "INSERT INTO metric (metric, unit, kind, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric) DO UPDATE SET unit = excluded.unit, kind = excluded.kind, description = excluded.description, updated_at = excluded.updated_at WHERE unit IS NOT excluded.unit OR kind IS NOT excluded.kind OR description IS NOT excluded.description",
-      "INSERT INTO rollup (resolution, series_id, bucket_start, count, sum, min, max, histogram) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (resolution, series_id, bucket_start) DO UPDATE SET count = excluded.count, sum = excluded.sum, min = excluded.min, max = excluded.max, histogram = excluded.histogram",
-      "INSERT INTO series (metric, dimensions, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?) RETURNING series_id",
-      "INSERT INTO series_dimension (dimension, value, series_id) VALUES (?, ?, ?)",
-      "INSERT OR IGNORE INTO turn_point (series_id, at, turn_id, session_id, value) VALUES (?, ?, ?, ?, ?)",
-      "SELECT COUNT(*) AS count FROM series",
-      "SELECT COUNT(*) AS count FROM series WHERE metric = ?",
-      "SELECT count, sum, min, max, histogram FROM rollup WHERE resolution = ? AND series_id = ? AND bucket_start = ?",
+      "INSERT INTO metric (metric, unit, kind, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric) DO NOTHING",
+      "SELECT COUNT(*) AS count FROM metric",
       "SELECT kind FROM metric WHERE metric = ?",
-      "SELECT s.dimensions, r.bucket_start, r.count, r.sum, r.min, r.max, r.histogram FROM series s JOIN rollup r ON r.resolution = ? AND r.series_id = s.series_id AND r.bucket_start >= ? AND r.bucket_start < ? WHERE s.metric = ? ORDER BY s.dimensions, r.bucket_start",
-      "SELECT series_id FROM series WHERE metric = ? AND dimensions = ?",
-      "UPDATE series SET last_seen_at = MAX(last_seen_at, ?) WHERE series_id = ?"
+      "SELECT metric FROM metric WHERE metric = ?"
     ],
     "packages/control-plane/src/oauth.ts": [
       "DELETE FROM oauth_clients WHERE created_at <= ? AND first_party = 0 AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id AND t.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM oauth_requests r WHERE r.client_id = oauth_clients.client_id AND r.expires_at > ?)",

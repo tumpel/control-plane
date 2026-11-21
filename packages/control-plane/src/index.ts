@@ -243,6 +243,10 @@ export interface Env extends SignerEnv {
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
+  METRICS: AnalyticsEngineDataset;
+  METRICS_DATASET: string;
+  METRICS_ACCOUNT_ID?: string;
+  METRICS_READ_TOKEN?: string;
   STORE: R2Bucket;
   RELEASES: R2Bucket;
   TUMPEL_SETTINGS: unknown;
