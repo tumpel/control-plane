@@ -4127,6 +4127,56 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
+  test("an Auto box whose latest turn was cancelled while it waited is snapshotted again and torn down after 15 idle minutes", async () => {
+    const { host, tool, sessionStart } = await tenant();
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "busy" },
+      StartedSessionSchema,
+    );
+    const { sessionId, tenantId } = started.session;
+    const first = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    const waiting = await tool("tumpel_turn_send", { sessionId, prompt: "never mind" }, TurnSchema);
+    const cancelled = await tool("tumpel_turn_cancel", { turnId: waiting.turnId }, TurnSchema);
+    assert.equal(cancelled.state, "Failed");
+
+    host.send({
+      type: "TurnLine",
+      turnId: first.turnId,
+      lineSeq: 1,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({ type: "TurnComplete", turnId: first.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
+    const completed = await host.next("SnapshotRequest");
+    assert.equal(completed.turnId, first.turnId);
+    await storeRoot(completed.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: completed.snapshotId, uploadedBytes: 14 });
+
+    const after = await host.next("SnapshotRequest");
+    assert.deepEqual([after.turnId, after.boxId], [waiting.turnId, first.boxId]);
+    await storeRoot(after.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: after.snapshotId, uploadedBytes: 14 });
+    const timers = await until(
+      "the idle teardown armed",
+      () => storedTimers(sessionId),
+      (stored) => stored?.deadlines.Teardown !== undefined,
+    );
+    const armed = z.object({ turnId: z.string(), at: z.number() }).parse(timers?.deadlines.Teardown);
+    assert.equal(armed.turnId, waiting.turnId);
+    assert.ok(armed.at > Date.now() + 14 * 60 * 1000, `the eviction is due at ${armed.at}, before 15 idle minutes`);
+    assert.equal(host.holds("BoxTeardown"), false);
+
+    const at = Date.now();
+    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Teardown: { turnId: armed.turnId, at } } }, at);
+    assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: first.boxId });
+  });
+
   test("a delivery to an evicted session waits while every box runs or releases, and another host places it once it has room", async () => {
     const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
     host.close();
