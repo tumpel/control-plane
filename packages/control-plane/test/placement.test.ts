@@ -9,6 +9,8 @@ const HOST: Host = {
   tenantId: "tenant-placement",
   name: "base",
   state: "Online",
+  health: "Healthy",
+  reportedHealth: "Healthy",
   architecture: "Amd64",
   cpuCount: 4,
   memoryBytes: 8 * 1024 ** 3,
