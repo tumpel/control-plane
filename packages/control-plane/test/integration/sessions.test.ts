@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash, createPrivateKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  createPrivateKey,
+  generateKeyPairSync,
+  type KeyObject,
+  randomBytes,
+  randomUUID,
+  sign,
+} from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -39,6 +48,7 @@ import {
   SubscriptionSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
+  TriggerSchema,
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
@@ -862,6 +872,7 @@ before(async () => {
             R2_STUB_ORIGIN,
             SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
             DASHBOARD_ORIGIN: "https://app.tumpel.test",
+            API_ORIGIN: "https://api.tumpel.test",
             GITHUB_API_ORIGIN: `http://127.0.0.1:${(github.address() as AddressInfo).port}`,
           },
         },
@@ -3799,6 +3810,79 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
     assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
     side.close();
+  });
+
+  test("a trigger fired while every host is full queues its session, and the first host to report room takes it", async () => {
+    const { tenantId, bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    await installPrebuiltApp(tenantId);
+    host.close();
+    await hostState(hostId, "Offline");
+    const box = BoxMemoryLimit.DefaultMib;
+    const sides = new Map<string, HostSide>();
+    for (const name of ["full-a", "full-b"]) {
+      const full = await enrol(name);
+      const side = await connect(full.id, full.key, 8, undefined, undefined, {
+        ...USAGE,
+        memoryBudgetMib: box,
+        memoryHeldMib: box,
+      });
+      await hostState(full.id, "Online");
+      side.quiet();
+      sides.set(full.id, side);
+    }
+    const { personaId, model } = await sessionStart();
+    const created = await postJson(
+      "/v1/triggers",
+      {
+        name: "agent-review",
+        source: { kind: "GitHub", event: "status", conditions: [{ field: "context", values: ["agent-review"] }] },
+        personaId,
+        model,
+        prompt: "Review {{target_url}} at {{sha}}",
+      },
+      bearer,
+    );
+    assert.equal(created.status, 200, await created.clone().text());
+    const { triggerId } = TriggerSchema.parse(await created.json());
+    const body = JSON.stringify({
+      installation: { id: 77 },
+      repository: { html_url: "https://github.com/acme/app" },
+      context: "agent-review",
+      state: "pending",
+      sha: "c".repeat(40),
+      target_url: "https://github.com/acme/app/pull/7",
+    });
+    const delivered = await call("/github/webhook", {
+      method: "POST",
+      headers: {
+        "x-github-event": "status",
+        "x-github-delivery": randomUUID(),
+        "x-hub-signature-256": `sha256=${createHmac("sha256", "sessions-webhook-secret").update(body).digest("hex")}`,
+      },
+      body,
+    });
+    assert.equal(delivered.status, 204, await delivered.clone().text());
+    const [queued] = await getJson(`/v1/sessions?triggerId=${triggerId}`, SessionSchema.array());
+    assert.ok(queued, "the trigger started no session");
+    assert.deepEqual(
+      { state: queued.lastTurn.state, prompt: queued.lastTurn.prompt },
+      { state: "Offered", prompt: `Review https://github.com/acme/app/pull/7 at ${"c".repeat(40)}` },
+    );
+    const [freed, side] = [...sides].find(([id]) => id !== queued.hostId) ?? assert.fail("no second host");
+    assert.equal(side.holds("TurnOffer"), false);
+    side.report({ ...USAGE, memoryBudgetMib: box, memoryHeldMib: 0 });
+    const offer = await side.next("TurnOffer");
+    assert.deepEqual(
+      { sessionId: offer.sessionId, turnId: offer.turnId },
+      {
+        sessionId: queued.sessionId,
+        turnId: queued.lastTurn.turnId,
+      },
+    );
+    assert.equal((await getJson(`/v1/sessions/${queued.sessionId}`, SessionSchema)).hostId, freed);
+    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await side.next("TurnClaimed")).turnId, offer.turnId);
+    for (const each of sides.values()) each.close();
   });
 
   test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
