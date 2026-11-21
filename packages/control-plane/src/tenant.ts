@@ -662,8 +662,8 @@ export class Tenant extends TenantConnectors {
       handovers: this.listCredentialHandovers(tenantId, sessionId),
     }),
     getSnapshot: ({ tenantId, snapshotId }) => ({ snapshot: this.getSnapshot(tenantId, snapshotId) }),
-    transcriptCursor: ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
-      cursor: this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
+    transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
+      cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
     connectedAccounts: () => ({ accounts: this.connectedAccounts() }),
     deleteBuildConnection: ({ provider }) => ({ deleted: this.deleteBuildConnection(provider) }),

@@ -9,7 +9,7 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
-  await world.startSession({ prompt: "write three lines", tags: [] });
+  const session = await world.startSession({ prompt: "write three lines", tags: [] });
   const offer = host.takeOffer();
   await host.claims(offer);
   const line = (lineSeq: number) =>
@@ -34,7 +34,11 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
   await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
   const turn = await world.turn(offer.turnId);
   assert.equal(turn.state, "Running");
-  assert.equal(turn.lineCount, 4);
+  const read = await world.transcript(session.sessionId, {});
+  assert.deepEqual(
+    read.lines.map((stored) => stored.lineSeq),
+    [1, 2, 3, 4],
+  );
 });
 
 test("a tenant that restarts with nothing held asks for the next frame again, and the resent TurnComplete completes the turn", async (t) => {

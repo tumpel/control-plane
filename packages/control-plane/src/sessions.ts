@@ -838,7 +838,7 @@ export const readTranscript = async (
   }
   let read = cursor;
   for (let pass = 1; ; pass += 1) {
-    const fetched = await linesOf(env, read);
+    const fetched = (await linesOf(env, read)).filter((line) => line.lineSeq > page.cursor);
     const paged = pageOf(page, fetched, compactor, limit, maxBytes);
     if (!paged.ok) {
       return refuse(422, {
