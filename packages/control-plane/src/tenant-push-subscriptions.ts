@@ -7,7 +7,7 @@ import {
 } from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
-import { backoffMs, RETRY_LIMIT, retryableStatus } from "./backoff.ts";
+import { backoffMs, errorOf, RETRY_LIMIT, retryableStatus } from "./backoff.ts";
 import { fromBase64, seal, unseal } from "./envelope.ts";
 import { githubRepository } from "./github.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
@@ -167,143 +167,113 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
       )
       .toArray();
     if (rows.length === 0) return;
-    const dataKey = await this.dataKey();
-    const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
+    const keys = await Promise.all([this.dataKey(), vapidPrivateKey(this.env.VAPID_PRIVATE_KEY)]).then(
+      ([dataKey, privateKey]) => ({ dataKey, privateKey }),
+      errorOf,
+    );
     for (const row of rows) {
-      const expiresAt = row.event_created_at + PUSH_TTL_MS;
-      if (now >= expiresAt) {
-        this.ctx.storage.sql.exec(
-          "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
-          row.event_id,
-          row.push_subscription_id,
-        );
+      if (keys instanceof Error) {
+        this.dropPushWake(row, `${keys.message}, which no retry changes`);
         continue;
       }
-      const event = TenantEventSchema.parse({
-        ...JSON.parse(row.payload),
-        eventId: row.event_id,
-        tenantId,
-        createdAt: row.event_created_at,
-      });
-      if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
-        throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
-      }
-      const repository = githubRepository(row.repository);
-      if (repository === null) {
-        this.dropPushWake(
-          row,
-          `session repository ${row.repository} is not a GitHub repository, which no retry changes`,
-        );
-        continue;
-      }
-      const validKey = await importP256dh(row.p256dh).then(
-        () => true,
-        () => false,
+      await this.deliverPush(tenantId, row, now, keys).catch((error: unknown) =>
+        this.dropPushWake(row, `${errorOf(error).message}, which no retry changes`),
       );
-      if (!validKey) {
-        this.ctx.storage.sql.exec(
-          "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ?",
-          row.push_subscription_id,
-          row.p256dh,
-        );
-        continue;
-      }
-      const path = `/t/${encodeURIComponent(event.tenantId)}/sessions/${encodeURIComponent(event.sessionId)}`;
-      const data =
-        event.event === "SubscriptionPaused"
-          ? {
-              title: `Subscription paused in ${repository.name}`,
-              body:
-                event.reason.kind === "ByRequest"
-                  ? event.reason.message
-                  : event.reason.kind === "DeliveryFailed"
-                    ? "A delivery turn failed. Open the session to decide what to do next."
-                    : "Several crew turns failed. Open the session to decide what to do next.",
-              path,
-            }
-          : {
-              title: `Subscription ended in ${repository.name}`,
-              body: {
-                SessionArchived: "The session was archived.",
-                SessionFailed: "The session failed.",
-                Expired: "The subscription expired.",
-                GoalMet: "The subscription reached its goal.",
-              }[event.reason],
-              path,
-            };
-      const payload = await buildPushPayload(
-        { data: PushNotificationSchema.parse(data), options: { ttl: Math.ceil((expiresAt - now) / 1000) } },
-        {
-          endpoint: row.endpoint,
-          expirationTime: null,
-          keys: {
-            p256dh: row.p256dh,
-            auth: await unseal(
-              dataKey,
-              row.auth_sealed,
-              authContext(row.push_subscription_id),
-              "turn notifications off and on again for this browser",
-            ),
-          },
-        },
-        {
-          privateKey,
-          publicKey: this.env.VAPID_PUBLIC_KEY,
-          subject: this.env.VAPID_SUBJECT,
-        },
-      );
-      const signal = AbortSignal.timeout(10_000);
-      const response = await fetch(row.endpoint, { ...payload, signal }).catch((error: unknown) =>
-        signal.aborted ? "The push service did not answer within 10 seconds" : error,
-      );
-      if (response instanceof Response && (response.status === 404 || response.status === 410)) {
-        const deleted = this.ctx.storage.sql.exec(
-          "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
-          row.push_subscription_id,
-          row.p256dh,
-          row.auth_sealed,
-        ).rowsWritten;
-        if (deleted === 0) {
-          this.ctx.storage.sql.exec(
-            "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-            now,
-            row.event_id,
-            row.push_subscription_id,
-          );
-        }
-        continue;
-      }
-      if (!(response instanceof Response) || !response.ok) {
-        const reason =
-          response instanceof Response
-            ? `HTTP ${response.status}`
-            : response instanceof Error
-              ? response.message
-              : String(response);
-        const retry = row.failures + 1;
-        if (response instanceof Response && !retryableStatus(response.status)) {
-          this.dropPushWake(row, `the push service answered ${reason}, which no retry changes`);
-          continue;
-        }
-        if (retry > RETRY_LIMIT) {
-          this.dropPushWake(row, `the push service still failed after ${RETRY_LIMIT} retries: ${reason}`);
-          continue;
-        }
-        this.ctx.storage.sql.exec(
-          "UPDATE push_wakes SET failures = ?, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-          retry,
-          Math.min(now + backoffMs(retry, PUSH_FIRST_RETRY_MS), expiresAt),
-          row.event_id,
-          row.push_subscription_id,
-        );
-        continue;
-      }
-      const deleted = this.ctx.storage.sql.exec(
-        `DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?
-          AND EXISTS (SELECT 1 FROM push_subscriptions WHERE push_subscription_id = ?
-            AND p256dh = ? AND auth_sealed = ?)`,
+    }
+  }
+
+  private async deliverPush(
+    tenantId: string,
+    row: PushWakeRow,
+    now: number,
+    { dataKey, privateKey }: { dataKey: CryptoKey; privateKey: string },
+  ): Promise<void> {
+    const expiresAt = row.event_created_at + PUSH_TTL_MS;
+    if (now >= expiresAt) {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
         row.event_id,
         row.push_subscription_id,
+      );
+      return;
+    }
+    const event = TenantEventSchema.parse({
+      ...JSON.parse(row.payload),
+      eventId: row.event_id,
+      tenantId,
+      createdAt: row.event_created_at,
+    });
+    if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
+      return this.dropPushWake(row, `it holds unsupported event ${event.event}, which no retry changes`);
+    }
+    const repository = githubRepository(row.repository);
+    if (repository === null) {
+      this.dropPushWake(row, `session repository ${row.repository} is not a GitHub repository, which no retry changes`);
+      return;
+    }
+    const validKey = await importP256dh(row.p256dh).then(
+      () => true,
+      () => false,
+    );
+    if (!validKey) {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ?",
+        row.push_subscription_id,
+        row.p256dh,
+      );
+      return;
+    }
+    const path = `/t/${encodeURIComponent(event.tenantId)}/sessions/${encodeURIComponent(event.sessionId)}`;
+    const data =
+      event.event === "SubscriptionPaused"
+        ? {
+            title: `Subscription paused in ${repository.name}`,
+            body:
+              event.reason.kind === "ByRequest"
+                ? event.reason.message
+                : event.reason.kind === "DeliveryFailed"
+                  ? "A delivery turn failed. Open the session to decide what to do next."
+                  : "Several crew turns failed. Open the session to decide what to do next.",
+            path,
+          }
+        : {
+            title: `Subscription ended in ${repository.name}`,
+            body: {
+              SessionArchived: "The session was archived.",
+              SessionFailed: "The session failed.",
+              Expired: "The subscription expired.",
+              GoalMet: "The subscription reached its goal.",
+            }[event.reason],
+            path,
+          };
+    const payload = await buildPushPayload(
+      { data: PushNotificationSchema.parse(data), options: { ttl: Math.ceil((expiresAt - now) / 1000) } },
+      {
+        endpoint: row.endpoint,
+        expirationTime: null,
+        keys: {
+          p256dh: row.p256dh,
+          auth: await unseal(
+            dataKey,
+            row.auth_sealed,
+            authContext(row.push_subscription_id),
+            "turn notifications off and on again for this browser",
+          ),
+        },
+      },
+      {
+        privateKey,
+        publicKey: this.env.VAPID_PUBLIC_KEY,
+        subject: this.env.VAPID_SUBJECT,
+      },
+    );
+    const signal = AbortSignal.timeout(10_000);
+    const response = await fetch(row.endpoint, { ...payload, signal }).catch((error: unknown) =>
+      signal.aborted ? "The push service did not answer within 10 seconds" : error,
+    );
+    if (response instanceof Response && (response.status === 404 || response.status === 410)) {
+      const deleted = this.ctx.storage.sql.exec(
+        "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
         row.push_subscription_id,
         row.p256dh,
         row.auth_sealed,
@@ -316,6 +286,50 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
           row.push_subscription_id,
         );
       }
+      return;
+    }
+    if (!(response instanceof Response) || !response.ok) {
+      const reason =
+        response instanceof Response
+          ? `HTTP ${response.status}`
+          : response instanceof Error
+            ? response.message
+            : String(response);
+      const retry = row.failures + 1;
+      if (response instanceof Response && !retryableStatus(response.status)) {
+        this.dropPushWake(row, `the push service answered ${reason}, which no retry changes`);
+        return;
+      }
+      if (retry > RETRY_LIMIT) {
+        this.dropPushWake(row, `the push service still failed after ${RETRY_LIMIT} retries: ${reason}`);
+        return;
+      }
+      this.ctx.storage.sql.exec(
+        "UPDATE push_wakes SET failures = ?, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
+        retry,
+        Math.min(now + backoffMs(retry, PUSH_FIRST_RETRY_MS), expiresAt),
+        row.event_id,
+        row.push_subscription_id,
+      );
+      return;
+    }
+    const deleted = this.ctx.storage.sql.exec(
+      `DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?
+        AND EXISTS (SELECT 1 FROM push_subscriptions WHERE push_subscription_id = ?
+          AND p256dh = ? AND auth_sealed = ?)`,
+      row.event_id,
+      row.push_subscription_id,
+      row.push_subscription_id,
+      row.p256dh,
+      row.auth_sealed,
+    ).rowsWritten;
+    if (deleted === 0) {
+      this.ctx.storage.sql.exec(
+        "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
+        now,
+        row.event_id,
+        row.push_subscription_id,
+      );
     }
   }
 

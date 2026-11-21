@@ -75,3 +75,47 @@ test("a webhook endpoint that answers 400 fails hard on the first post", async (
     /HTTP 400; retrying cannot fix this/,
   );
 });
+
+test("a webhook endpoint whose Failing status cannot be written is not left stuck: the next event delivers and marks it Failing", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const logged: string[] = [];
+  t.mock.method(console, "error", (line: string) => logged.push(line));
+  const posts: number[] = [];
+  t.mock.method(globalThis, "fetch", async () => {
+    posts.push(Date.now());
+    return new Response(null, { status: 400 });
+  });
+  const statusWrite = t.mock.method(world.tenantOperations(), "setWebhookEndpointStatus", () => {
+    throw new Error("the tenant refused the status write");
+  });
+
+  const { endpoint } = z.object({ endpoint: WebhookEndpointSchema }).parse(
+    await world.call("createWebhookEndpoint", {
+      tenantId: TENANT_ID,
+      endpoint: { url: "https://hooks.scenario.test/events", events: ["HostOnline"] },
+      now: Date.now(),
+    }),
+  );
+  await world.call("hostPresence", { tenantId: TENANT_ID, hostId: "host-1", presence: "Online", now: Date.now() });
+  await world.passes(DAY);
+  assert.equal(posts.length, 1);
+  assert.equal((await endpointOf(world, endpoint.webhookEndpointId)).status.delivery, "Delivering");
+  assert.deepEqual(
+    logged.filter((line) => line.startsWith("WebhookDeliveryFailed:")).map((line) => line.replace(/^.*?\(/, "(")),
+    [
+      "(HTTP 400; retrying cannot fix this), and marking it Failing failed too, so the next matching event tries again: the tenant refused the status write",
+    ],
+  );
+
+  statusWrite.mock.restore();
+  await world.call("hostPresence", { tenantId: TENANT_ID, hostId: "host-1", presence: "Online", now: Date.now() });
+  await world.passes(DAY);
+  assert.equal(posts.length, 2);
+  assert.match(
+    JSON.stringify((await endpointOf(world, endpoint.webhookEndpointId)).status),
+    /"delivery":"Failing","detail":"HTTP 400; retrying cannot fix this"/,
+  );
+  await world.passes(7 * DAY);
+  assert.equal(posts.length, 2);
+});

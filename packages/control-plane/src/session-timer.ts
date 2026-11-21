@@ -76,6 +76,7 @@ interface Timers {
 
 const TIMERS_KEY = "timers";
 const RETRIES_KEY = "retries";
+const RETRY_AT_KEY = "retryAt";
 const FIRST_RETRY_MS = 2_000;
 
 export class SessionTimer extends DurableObject<Env> {
@@ -112,24 +113,25 @@ export class SessionTimer extends DurableObject<Env> {
     for (const [at, reached] of due.entries()) {
       const failed = await reach(reached).then(() => null, errorOf);
       if (failed !== null) return this.retry(tenantId, due.slice(at), failed);
+      if ((await this.ctx.storage.get<number>(RETRIES_KEY)) !== undefined) {
+        await this.ctx.storage.delete([RETRIES_KEY, RETRY_AT_KEY]);
+      }
     }
-    if ((await this.ctx.storage.get<number>(RETRIES_KEY)) !== undefined) await this.ctx.storage.delete(RETRIES_KEY);
   }
 
   private async retry(tenantId: string, unreached: DueDeadline[], error: Error): Promise<void> {
     const retries = (await this.ctx.storage.get<number>(RETRIES_KEY)) ?? 0;
     const names = unreached.map(({ name, deadline }) => `${name} ${JSON.stringify(deadline)}`).join(", ");
     if (retries >= RETRY_LIMIT) {
-      await this.ctx.storage.delete(RETRIES_KEY);
+      await this.ctx.storage.delete([RETRIES_KEY, RETRY_AT_KEY]);
       console.error(
         `SessionTimerFailed: tenant ${tenantId} dropped the deadlines ${names} after ${RETRY_LIMIT} retries: ${error.message}`,
       );
       return;
     }
     const retry = retries + 1;
+    await this.ctx.storage.put({ [RETRIES_KEY]: retry, [RETRY_AT_KEY]: Date.now() + backoffMs(retry, FIRST_RETRY_MS) });
     await this.restore(unreached);
-    await this.ctx.storage.put(RETRIES_KEY, retry);
-    await this.ctx.storage.setAlarm(Date.now() + backoffMs(retry, FIRST_RETRY_MS));
     console.error(
       `SessionTimerRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} for ${names}: ${error.message}`,
     );
@@ -145,7 +147,7 @@ export class SessionTimer extends DurableObject<Env> {
   private async save(timers: Timers): Promise<void> {
     await this.ctx.storage.put(TIMERS_KEY, timers);
     const next = Math.min(...Object.values(timers.deadlines).map((deadline) => deadline.at));
-    if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next);
-    else await this.ctx.storage.deleteAlarm();
+    if (!Number.isFinite(next)) return this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.setAlarm(Math.max(next, (await this.ctx.storage.get<number>(RETRY_AT_KEY)) ?? next));
   }
 }

@@ -3786,6 +3786,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
   }
 
+  protected async abandonDeadline(tenantId: string, due: SessionDueDeadline, detail: string): Promise<void> {
+    const turn = this.turnRow(due.deadline.turnId);
+    if (turn === null) return;
+    const now = Date.now();
+    if (IN_FLIGHT.includes(turn.state)) {
+      return this.failTurn(tenantId, turn.turn_id, "TurnTimedOut", detail, iso(now), "Failed");
+    }
+    const session = this.sessionRow(turn.session_id);
+    if (session === null || !["Starting", "Running", "Stopping"].includes(session.state)) return;
+    this.ctx.storage.sql.exec(
+      "UPDATE sessions SET state = 'Failed', updated_at = ? WHERE session_id = ?",
+      now,
+      turn.session_id,
+    );
+    this.sessionEntered(turn.session_id, "Failed", now);
+  }
+
   protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
     const { turnId } = due.deadline;
     const { name } = due;

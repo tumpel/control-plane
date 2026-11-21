@@ -251,17 +251,16 @@ export abstract class TenantSubscriptions extends TenantSessions {
   }
 
   protected retryDeliveries(now: number): void {
-    this.ctx.storage.transactionSync(() => {
-      const due = this.ctx.storage.sql
-        .exec<{ subscription_id: string }>(
-          "DELETE FROM subscription_delivery_retries WHERE retry_at <= ? RETURNING subscription_id",
-          now,
-        )
-        .toArray();
-      for (const { subscription_id: subscriptionId } of due) {
-        if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
-      }
-    });
+    const due = this.ctx.storage.sql
+      .exec<{ subscription_id: string }>(
+        "SELECT subscription_id FROM subscription_delivery_retries WHERE retry_at <= ? ORDER BY retry_at",
+        now,
+      )
+      .toArray();
+    for (const { subscription_id: subscriptionId } of due) {
+      this.ctx.storage.sql.exec("DELETE FROM subscription_delivery_retries WHERE subscription_id = ?", subscriptionId);
+      if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
+    }
   }
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
@@ -353,10 +352,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
     );
   }
 
-  private deliveryRetryPending(subscriptionId: string): boolean {
+  private deliveryRetryPending(subscriptionId: string, now: number): boolean {
     return (
       this.ctx.storage.sql
-        .exec("SELECT 1 FROM subscription_delivery_retries WHERE subscription_id = ?", subscriptionId)
+        .exec(
+          "SELECT 1 FROM subscription_delivery_retries WHERE subscription_id = ? AND retry_at > ?",
+          subscriptionId,
+          now,
+        )
         .toArray().length > 0
     );
   }
@@ -374,7 +377,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
   }
 
   private ensureDelivery(subscriptionId: string, now: number): void {
-    if (this.waitingDelivery(subscriptionId) !== null || this.deliveryRetryPending(subscriptionId)) return;
+    if (this.waitingDelivery(subscriptionId) !== null || this.deliveryRetryPending(subscriptionId, now)) return;
     const sql = this.ctx.storage.sql;
     const [row] = sql
       .exec<{ session_id: string; host_id: string; box_id: string; prompt: string }>(

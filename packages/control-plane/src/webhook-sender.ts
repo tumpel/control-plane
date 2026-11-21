@@ -169,20 +169,23 @@ export class WebhookSender extends DurableObject<Env> {
       return null;
     });
     if (failure === null) return;
-    await tenantApi(this.env.TENANT, state.tenantId).call("setWebhookEndpointStatus", {
-      tenantId: state.tenantId,
-      webhookEndpointId: state.webhookEndpointId,
-      status: {
-        delivery: "Failing",
-        detail: retryable
-          ? `${detail}; still failing after ${RETRY_LIMIT} retries`
-          : `${detail}; retrying cannot fix this`,
-        failingSince: new Date(failure.failingSince).toISOString(),
-      },
-    });
     await this.ctx.storage.transaction(async (transaction) => {
       await transaction.delete("failure");
       await transaction.deleteAlarm();
     });
+    const failing = retryable
+      ? `${detail}; still failing after ${RETRY_LIMIT} retries`
+      : `${detail}; retrying cannot fix this`;
+    const unmarked = await tenantApi(this.env.TENANT, state.tenantId)
+      .call("setWebhookEndpointStatus", {
+        tenantId: state.tenantId,
+        webhookEndpointId: state.webhookEndpointId,
+        status: { delivery: "Failing", detail: failing, failingSince: new Date(failure.failingSince).toISOString() },
+      })
+      .then(() => null, errorOf);
+    if (unmarked === null) return;
+    console.error(
+      `WebhookDeliveryFailed: webhook endpoint ${state.webhookEndpointId} of tenant ${state.tenantId} stopped delivering (${failing}), and marking it Failing failed too, so the next matching event tries again: ${unmarked.message}`,
+    );
   }
 }
