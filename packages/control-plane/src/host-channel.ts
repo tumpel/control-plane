@@ -130,8 +130,9 @@ export class HostChannel extends DurableObject<Env> {
   async restoreHealth(detail: string): Promise<void> {
     const host = this.host();
     if (host === null) throw new Error("a health restore reached a host object that was never registered");
-    (await this.frameMeter(host.host_id)).restore();
+    const meter = await this.frameMeter(host.host_id);
     await this.setHealth(host.host_id, "Healthy", detail);
+    meter.restore();
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -208,17 +209,21 @@ export class HostChannel extends DurableObject<Env> {
     if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
       await this.reportHealth(host.host_id, event.health);
-      if (meter.recovered(now))
+      if (meter.recovered(now)) {
         await this.setHealth(
           host.host_id,
           "Healthy",
           `host ${host.host_id} sent no more than ${meter.framesPerMinute} frames a minute for a full minute`,
         );
+        meter.settle("Healthy");
+      }
     }
     if (event.kind === "Message") await this.take(host.host_id, event.frame, now, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
+    if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
+      await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
@@ -354,7 +359,10 @@ export class HostChannel extends DurableObject<Env> {
     if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;
     if (reply.type === "TurnHandoff") {
-      await this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
+      const sent = await this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
+      if (sent !== "Sent") return;
+      const tenantId = await this.tenantOf(hostId);
+      await tenantApi(this.env.TENANT, tenantId).call("offerSent", { turnId: reply.offer.turnId });
       return;
     }
     if (reply.type === "Refused") {
@@ -499,6 +507,7 @@ export class HostChannel extends DurableObject<Env> {
         : `${over}, so the control plane failed its running work and offers it nothing until a full minute passes under the limit`;
     console.error(`Host${health}: ${detail}`);
     await this.setHealth(hostId, health, detail);
+    (await this.frameMeter(hostId)).settle(health);
   }
 
   private async setHealth(hostId: string, health: HostHealth, detail: string): Promise<void> {

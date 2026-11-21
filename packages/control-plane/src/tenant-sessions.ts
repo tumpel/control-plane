@@ -1452,8 +1452,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state === "Idle") {
       const handoff = await this.offerElsewhere(tenantId, move(session.host_id, session.box_id), turn);
       if (handoff === null) return;
-      await this.host(handoff.hostId).send(handoff.offer);
-      return this.offerSent(turnId);
+      if ((await this.host(handoff.hostId).send(handoff.offer)) === "Sent") this.offerSent(turnId);
+      return;
     }
     if (session.state !== "Stopped") return;
     const hosts = await listHosts(this.env.DB, tenantId);
@@ -2277,7 +2277,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (placement.kind === "Refused") return stay();
     if (placement.host.hostId === session.host_id) {
       if (placement.evict.length > 0) return this.evictFirst(tenantId, session, turn, placement.evict);
-      return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
+      const offer = await this.armOffer(tenantId, session, turn);
+      this.deferOffer(session, turn, now);
+      return { type: "TurnHandoff", hostId: session.host_id, offer };
     }
     const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;
@@ -2304,6 +2306,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const moved = { ...session, host_id: hostId, box_id: boxId };
     if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
     const offer = await this.armOffer(tenantId, moved, turn);
+    this.deferOffer(moved, turn, now);
     return { type: "TurnHandoff", hostId, offer };
   }
 

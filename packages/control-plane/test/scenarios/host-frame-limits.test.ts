@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
+import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../../src/channel/control.ts";
 import { HostFrameMeter, rateLimitDetail } from "../../src/channel/host-health.ts";
 import {
@@ -32,7 +32,7 @@ const savedTrips = () => {
 
 const healthyMeter = () => new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], savedTrips().store);
 
-const openChannel = async (meter: HostFrameMeter) => {
+const openChannel = async (meter: HostFrameMeter, protocolVersion: number = ChannelProtocol.Version) => {
   const clock = { now: START };
   const trips: string[] = [];
   const pair = generateKeyPairSync("ed25519");
@@ -71,7 +71,10 @@ const openChannel = async (meter: HostFrameMeter) => {
     admitFrame: (seq) => {
       const admission = meter.admit(seq, clock.now);
       if (admission.kind === "Admitted") return null;
-      if (admission.tripped !== null) trips.push(admission.tripped);
+      if (admission.tripped !== null) {
+        trips.push(admission.tripped);
+        meter.settle(admission.tripped);
+      }
       return {
         reason: rateLimitDetail(HOST_ID, admission.framesPerMinute),
         framesPerMinute: admission.framesPerMinute,
@@ -95,7 +98,7 @@ const openChannel = async (meter: HostFrameMeter) => {
   await receive({
     type: "Hello",
     hostId: HOST_ID,
-    protocolVersion: ChannelProtocol.Version,
+    protocolVersion,
     supervisorVersion: "0.1.0",
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), pair.privateKey).toString("base64"),
     boxCapacity: 8,
@@ -180,6 +183,7 @@ test("a RateLimited host recovers after a full minute under the limit, and its n
   clock.now += 60_000;
 
   assert.equal(meter.recovered(clock.now), true);
+  meter.settle("Healthy");
   assert.equal(meter.health(), "Healthy");
   await stream(frame, 711, 10);
   assert.equal(channel.delivered.length, 620);
@@ -194,7 +198,7 @@ test("a host tripping the limit a third time within an hour stays Unhealthy acro
     await stream(frame, seq, 601);
     seq += 601;
     clock.now += 2 * 60_000;
-    meter.recovered(clock.now);
+    if (meter.recovered(clock.now)) meter.settle("Healthy");
     clock.now += 10 * 60_000;
   }
 
@@ -225,4 +229,31 @@ test("frames the host replays after a reconnect are not counted twice against th
   for (let seq = 1; seq <= 400; seq++) assert.equal(meter.admit(seq, START).kind, "Admitted");
   for (let seq = 401; seq <= 600; seq++) assert.equal(meter.admit(seq, START).kind, "Admitted");
   assert.equal(meter.admit(601, START).kind, "Refused");
+});
+
+test("a trip changes the meter health only once the channel settles it, so a failed health write trips again", () => {
+  const meter = healthyMeter();
+  for (let seq = 1; seq <= 600; seq++) meter.admit(seq, START);
+  const first = meter.admit(601, START);
+  assert.equal(first.kind === "Refused" ? first.tripped : null, "RateLimited");
+  assert.equal(meter.health(), "Healthy");
+  for (let seq = 602; seq <= 1201; seq++) meter.admit(seq, START + 60_000);
+  const second = meter.admit(1202, START + 60_000);
+  assert.equal(second.kind === "Refused" ? second.tripped : null, "RateLimited");
+  meter.settle("RateLimited");
+  assert.equal(meter.health(), "RateLimited");
+});
+
+test("a host below protocol 32 over the limit is closed as an unsupported version with nothing stored, so it updates and replays the frame", async () => {
+  const { channel, frame, rateLimited, received } = await openChannel(
+    healthyMeter(),
+    control.FRAME_RATE_LIMITED_VERSION - 1,
+  );
+
+  await stream(frame, 1, 601);
+
+  assert.equal(channel.delivered.length, 600);
+  assert.deepEqual(rateLimited(), []);
+  assert.equal(received(), 600);
+  assert.match(channel.closed ?? "", new RegExp(`^${CloseCode.UnsupportedVersion} over 600 frames a minute`));
 });

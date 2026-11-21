@@ -228,14 +228,9 @@ export const refuseFrame = (port: Port<ControlEnvelope>, seq: number, reason: st
 
 const refuseOverRate = (
   port: Port<ControlEnvelope>,
-  protocolVersion: number,
   seq: number,
   { reason, framesPerMinute, retryAfter }: FrameRateRefusal,
 ): void => {
-  if (protocolVersion < FRAME_RATE_LIMITED_VERSION) {
-    refuseFrame(port, seq, reason);
-    return;
-  }
   port.send({ type: "FrameRateLimited", seq, reason, framesPerMinute, retryAfter: retryAfter.toISOString() });
 };
 
@@ -382,9 +377,16 @@ export const receive = async (
     );
   }
   const overRate = context.admitFrame(envelope.seq);
+  if (overRate !== null && connection.protocolVersion < FRAME_RATE_LIMITED_VERSION) {
+    return close(
+      context.port,
+      CloseCode.UnsupportedVersion,
+      `over ${overRate.framesPerMinute} frames a minute; protocol ${connection.protocolVersion} cannot slow down, update the supervisor`,
+    );
+  }
   if (overRate !== null) {
     context.ledger.skip(envelope);
-    refuseOverRate(context.port, connection.protocolVersion, envelope.seq, overRate);
+    refuseOverRate(context.port, envelope.seq, overRate);
     return { connection, event: { kind: "FrameRateLimited", seq: envelope.seq, reason: overRate.reason } };
   }
   return {

@@ -52,17 +52,19 @@ export class HostFrameMeter {
     if (this.#count > this.framesPerMinute + 1) return { ...refused, tripped: null };
     this.#trips = [...this.#trips.filter((at) => now - at < TRIP_SPAN_MS), now];
     this.#store.save(this.#trips);
-    this.#health =
+    const tripped =
       this.#health === "Unhealthy" || this.#trips.length >= TRIPS_TO_UNHEALTHY ? "Unhealthy" : "RateLimited";
-    return { ...refused, tripped: this.#health };
+    return { ...refused, tripped };
   }
 
   recovered(now: number): boolean {
     if (this.#health !== "RateLimited") return false;
     const last = this.#trips.at(-1);
-    if (last !== undefined && now < windowOf(last) + 2 * WINDOW_MS) return false;
-    this.#health = "Healthy";
-    return true;
+    return last === undefined || now >= windowOf(last) + 2 * WINDOW_MS;
+  }
+
+  settle(health: HostHealth): void {
+    this.#health = health;
   }
 
   restore(): void {

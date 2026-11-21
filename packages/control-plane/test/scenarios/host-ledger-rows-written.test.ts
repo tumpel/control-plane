@@ -112,3 +112,17 @@ test("a frame refused over the rate with nothing held is stored, so a reconnect 
   assert.equal(await line(2), "Message");
   assert.deepEqual(closed, []);
 });
+
+test("a frame refused over the rate mid-stream is stored with the frames held before it once they flush, so a reconnect right after it opens no gap", async () => {
+  const refuseThird = (seq: number) =>
+    seq === 3 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { ledger, context, closed, line } = channel(refuseThird);
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await line(3), "FrameRateLimited");
+  assert.ok(ledger.holding());
+  control.acknowledge(context, ledger.take());
+  assert.equal(ledger.load().received, 3);
+  ledger.take();
+  assert.equal(await line(4), "Message");
+  assert.deepEqual(closed, []);
+});
