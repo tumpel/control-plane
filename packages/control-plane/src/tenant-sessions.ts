@@ -656,7 +656,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly heldLines = new Map<string, HeldLines>();
   private readonly resentTurns = new Set<string>();
   private readonly heardHosts = new Set<string>();
-  private readonly unstoredTurns = new Map<string, Omit<HeldLines, "lines">>();
   private readonly reportedUsage = new Map<string, ReportedUsage>();
 
   protected abstract failPrebuild(
@@ -1735,62 +1734,41 @@ export abstract class TenantSessions extends DurableObject<Env> {
           `host ${hostId} runs a turn, and this tenant restarted since it last heard from the host, so lines it held for that turn may be gone; the host resends them`,
         );
     }
-    const held = [...this.heldLines]
-      .filter(([, lines]) => lines.hostId === hostId)
-      .map(([turnId, lines]) => ({ tenantId: lines.tenantId, sessionId: lines.sessionId, turnId }));
-    const spilled = [...this.unstoredTurns]
-      .filter(([turnId, turn]) => turn.hostId === hostId && !this.heldLines.has(turnId))
-      .map(([turnId, turn]) => ({ tenantId: turn.tenantId, sessionId: turn.sessionId, turnId }));
-    for (const turn of [...held, ...spilled]) await this.storeLines(turn.tenantId, turn.sessionId, turn.turnId, 1);
+    const held = [...this.heldLines].filter(([, lines]) => lines.hostId === hostId);
+    for (const [turnId, lines] of held) await this.storeLines(lines.tenantId, lines.sessionId, turnId, 1);
   }
 
-  private async storeLines(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
-    await this.chunks.write(tenantId, sessionId, turnId, minLines).then(
-      () => {
-        this.unstoredTurns.delete(turnId);
-      },
+  private async storeLines(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<boolean> {
+    const refused = await this.writeLines(tenantId, sessionId, turnId, minLines);
+    if (refused === null) return true;
+    await this.failTurn(
+      tenantId,
+      turnId,
+      "TranscriptGap",
+      `TranscriptNotStored: the transcript store refused the lines of this turn, so the control plane dropped them; send the turn again: ${refused}`,
+      iso(Date.now()),
+    );
+    return false;
+  }
+
+  private async writeLines(
+    tenantId: string,
+    sessionId: string,
+    turnId: string,
+    minLines: number,
+  ): Promise<string | null> {
+    return this.chunks.write(tenantId, sessionId, turnId, minLines).then(
+      () => null,
       (error: unknown) => {
-        const spilled = this.spillLines(turnId);
+        const dropped = this.heldLines.get(turnId)?.lines.length ?? 0;
+        this.heldLines.delete(turnId);
+        const detail = errorOf(error).message;
         console.error(
-          `TranscriptNotStored: the transcript store refused the lines of turn ${turnId}, so tenant storage keeps ${spilled} more of them and the next heartbeat tries again: ${errorOf(error).message}`,
+          `TranscriptNotStored: the transcript store refused the lines of turn ${turnId}, so the control plane dropped ${dropped} held lines and fails the turn: ${detail}`,
         );
+        return detail;
       },
     );
-  }
-
-  private spillLines(turnId: string): number {
-    const held = this.heldLines.get(turnId);
-    if (held === undefined) return 0;
-    const last = held.lines.at(-1);
-    if (last === undefined) return 0;
-    const sql = this.ctx.storage.sql;
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      for (const line of held.lines)
-        sql.exec(
-          "INSERT OR IGNORE INTO transcript_pending (session_id, line_seq, turn_id, text, created_at) VALUES (?, ?, ?, ?, ?)",
-          line.sessionId,
-          line.lineSeq,
-          line.turnId,
-          line.text,
-          line.createdAt,
-        );
-      sql.exec(
-        "UPDATE turns SET line_count = line_count + ?, updated_at = ? WHERE turn_id = ?",
-        held.lines.length,
-        now,
-        turnId,
-      );
-      sql.exec(
-        "UPDATE sessions SET last_line_seq = MAX(last_line_seq, ?), updated_at = ? WHERE session_id = ?",
-        last.lineSeq,
-        now,
-        held.sessionId,
-      );
-    });
-    this.heldLines.delete(turnId);
-    this.unstoredTurns.set(turnId, { tenantId: held.tenantId, sessionId: held.sessionId, hostId: held.hostId });
-    return held.lines.length;
   }
 
   protected async reconcileHeldBoxes(
@@ -3957,7 +3935,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (this.snapshotAsked(turn.turn_id)) return;
-    await this.storeLines(tenantId, session.session_id, turn.turn_id, 1);
+    if (!(await this.storeLines(tenantId, session.session_id, turn.turn_id, 1))) return;
     if (message.warning !== undefined)
       sql.exec(
         "INSERT INTO turn_warnings (turn_id, warning, created_at) VALUES (?, ?, ?)",
@@ -3995,7 +3973,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
-    await this.storeLines(tenantId, turn.session_id, turn.turn_id, 1);
+    await this.writeLines(tenantId, turn.session_id, turn.turn_id, 1);
     const next = this.ctx.storage.transactionSync(() => {
       record();
       this.ctx.storage.sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", turn.turn_id);
@@ -4201,8 +4179,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     const chunkLines = settingsOf(this.env).transcriptChunkLines;
-    if ((held?.lines.length ?? 0) >= chunkLines)
-      await this.storeLines(tenantId, session.session_id, turn.turn_id, chunkLines);
+    if (
+      (held?.lines.length ?? 0) >= chunkLines &&
+      !(await this.storeLines(tenantId, session.session_id, turn.turn_id, chunkLines))
+    )
+      return;
     const line = toLine(tenantId, {
       session_id: session.session_id,
       line_seq: lineSeq,
