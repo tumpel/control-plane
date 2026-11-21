@@ -67,14 +67,18 @@
       "UPDATE github_installations SET status = ?, updated_at = ? WHERE installation_id = ?"
     ],
     "packages/control-plane/src/host-channel.ts": [
+      "DELETE FROM frame_trips WHERE frame_trips_id = 1",
       "DELETE FROM host_channel_protocols WHERE host_id = ?",
       "DELETE FROM host_guest_protocols WHERE host_id = ?",
+      "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
       "INSERT INTO host_channel_protocols (host_id, channel_protocol_oldest, channel_protocol_version) VALUES (?, ?, ?) ON CONFLICT (host_id) DO UPDATE SET channel_protocol_oldest = excluded.channel_protocol_oldest, channel_protocol_version = excluded.channel_protocol_version WHERE host_channel_protocols.channel_protocol_oldest IS NOT excluded.channel_protocol_oldest OR host_channel_protocols.channel_protocol_version IS NOT excluded.channel_protocol_version",
       "INSERT INTO host_guest_protocols (host_id, guest_protocol_oldest, guest_protocol_version) VALUES (?, ?, ?) ON CONFLICT (host_id) DO UPDATE SET guest_protocol_oldest = excluded.guest_protocol_oldest, guest_protocol_version = excluded.guest_protocol_version WHERE host_guest_protocols.guest_protocol_oldest IS NOT excluded.guest_protocol_oldest OR host_guest_protocols.guest_protocol_version IS NOT excluded.guest_protocol_version",
       "INSERT OR IGNORE INTO host (host_id, public_key, revoked) VALUES (?, ?, 0)",
       "SELECT health FROM hosts WHERE host_id = ?",
+      "SELECT health FROM hosts WHERE host_id = ?",
       "SELECT host_id, public_key, revoked FROM host",
       "SELECT tenant_id FROM hosts WHERE host_id = ?",
+      "SELECT trips FROM frame_trips WHERE frame_trips_id = 1",
       "UPDATE host SET revoked = 1",
       "UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1",
       "UPDATE hosts SET reported_health = ?1, updated_at = ?2 WHERE host_id = ?3 AND reported_health IS NOT ?1",

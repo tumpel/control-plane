@@ -40,9 +40,13 @@ test("a host that is RateLimited is sent no offer, and the waiting turn is offer
   t.after(() => world.close());
   await world.holdsAgentCredentials();
   const host = await world.hostOnline("host-1");
+  const session = await world.startSession({ prompt: "first turn", tags: [] });
+  const first = host.takeOffer();
+  await host.claims(first);
+  await host.finishes(first);
   await healthIs(world, host, "RateLimited", RATE_LIMITED);
 
-  await world.startSession({ prompt: "start while the host is limited", tags: [] });
+  await world.sendTurn(session.sessionId, "a turn while the host is limited");
   assert.equal(host.received("TurnOffer").length, 0);
 
   await healthIs(world, host, "Healthy", "host sent no more than 600 frames a minute for a full minute");

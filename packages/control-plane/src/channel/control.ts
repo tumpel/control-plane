@@ -100,7 +100,7 @@ export interface ControlContext {
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
   messageVersions: MessageVersions;
-  admitFrame(): FrameRateRefusal | null;
+  admitFrame(seq: number): FrameRateRefusal | null;
   now(): Date;
 }
 
@@ -381,7 +381,7 @@ export const receive = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  const overRate = context.admitFrame();
+  const overRate = context.admitFrame(envelope.seq);
   if (overRate !== null) {
     context.ledger.skip(envelope);
     refuseOverRate(context.port, connection.protocolVersion, envelope.seq, overRate);

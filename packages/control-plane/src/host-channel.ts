@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
+import { z } from "zod";
 import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import * as control from "./channel/control.ts";
 import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
@@ -214,8 +215,6 @@ export class HostChannel extends DurableObject<Env> {
           `host ${host.host_id} sent no more than ${meter.framesPerMinute} frames a minute for a full minute`,
         );
     }
-    if (event.kind === "Welcomed" && meter.health() === "Unhealthy" && meter.restore())
-      await this.setHealth(host.host_id, "Healthy", `host ${host.host_id} restarted and said Hello again`);
     if (event.kind === "Message") await this.take(host.host_id, event.frame, now, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
@@ -468,7 +467,22 @@ export class HostChannel extends DurableObject<Env> {
       .bind(hostId)
       .first<{ health: string }>();
     if (row === null) throw new Error(`host ${hostId} has a channel but no row in the hosts table; enrol it again`);
-    this.meter ??= new HostFrameMeter(limitsOf(this.env).hostFramesPerMinute, HostHealthSchema.parse(row.health));
+    const sql = this.ctx.storage.sql;
+    const [saved] = sql.exec<{ trips: string }>("SELECT trips FROM frame_trips WHERE frame_trips_id = 1").toArray();
+    const trips = z.array(z.number()).parse(saved === undefined ? [] : JSON.parse(saved.trips));
+    this.meter ??= new HostFrameMeter(
+      limitsOf(this.env).hostFramesPerMinute,
+      HostHealthSchema.parse(row.health),
+      trips,
+      {
+        save: (next) =>
+          sql.exec(
+            "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
+            JSON.stringify(next),
+          ),
+        clear: () => sql.exec("DELETE FROM frame_trips WHERE frame_trips_id = 1"),
+      },
+    );
     return this.meter;
   }
 
@@ -481,7 +495,7 @@ export class HostChannel extends DurableObject<Env> {
     const over = rateLimitDetail(hostId, framesPerMinute);
     const detail =
       health === "Unhealthy"
-        ? `${over} three times within an hour, so it gets no offers until a person restores its health or its supervisor restarts`
+        ? `${over} three times within an hour, so it gets no offers until a person restores its health`
         : `${over}, so the control plane failed its running work and offers it nothing until a full minute passes under the limit`;
     console.error(`Host${health}: ${detail}`);
     await this.setHealth(hostId, health, detail);
@@ -489,14 +503,15 @@ export class HostChannel extends DurableObject<Env> {
 
   private async setHealth(hostId: string, health: HostHealth, detail: string): Promise<void> {
     const now = Date.now();
-    const changed = await this.env.DB.prepare(
-      "UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1",
-    )
-      .bind(health, now, hostId)
-      .run();
-    if (changed.meta.changes === 0) return;
+    const stored = await this.env.DB.prepare("SELECT health FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ health: string }>();
+    if (stored?.health === health) return;
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHealth", { tenantId, hostId, health, detail, now });
+    await this.env.DB.prepare("UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1")
+      .bind(health, now, hostId)
+      .run();
   }
 
   private async reportHealth(hostId: string, health: HostReportedHealth): Promise<void> {
@@ -628,11 +643,11 @@ export class HostChannel extends DurableObject<Env> {
         return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-      admitFrame: () => {
+      admitFrame: (seq) => {
         if (this.meter === null) throw new Error("a frame reached the host channel before its frame meter loaded");
-        const admission = this.meter.admit(Date.now());
+        const admission = this.meter.admit(seq, Date.now());
         if (admission.kind === "Admitted") return null;
-        if (admission.changed !== null) this.tripped = admission.changed;
+        if (admission.tripped !== null) this.tripped = admission.tripped;
         const retryAfter = new Date(admission.retryAfter);
         return {
           reason: `${rateLimitDetail(host.host_id, admission.framesPerMinute)}, so the control plane recorded nothing of this frame; send no frames until ${retryAfter.toISOString()}`,

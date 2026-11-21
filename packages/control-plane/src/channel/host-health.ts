@@ -9,27 +9,39 @@ const TRIPS_TO_UNHEALTHY = 3;
 
 export type Admission =
   | { kind: "Admitted" }
-  | { kind: "Refused"; framesPerMinute: number; retryAfter: number; changed: HostHealth | null };
+  | { kind: "Refused"; framesPerMinute: number; retryAfter: number; tripped: HostHealth | null };
+
+export type TripStore = {
+  save(trips: number[]): void;
+  clear(): void;
+};
+
+const windowOf = (at: number): number => at - (at % WINDOW_MS);
 
 export class HostFrameMeter {
   readonly framesPerMinute: number;
+  readonly #store: TripStore;
   #windowStart = 0;
   #count = 0;
-  #trippedWindow: number | null = null;
-  #trips: number[] = [];
+  #counted = 0;
+  #trips: number[];
   #health: HostHealth;
 
-  constructor(framesPerMinute: number, health: HostHealth) {
+  constructor(framesPerMinute: number, health: HostHealth, trips: number[], store: TripStore) {
     this.framesPerMinute = framesPerMinute;
     this.#health = health;
+    this.#trips = trips;
+    this.#store = store;
   }
 
   health(): HostHealth {
     return this.#health;
   }
 
-  admit(now: number): Admission {
-    const start = now - (now % WINDOW_MS);
+  admit(seq: number, now: number): Admission {
+    if (seq <= this.#counted) return { kind: "Admitted" };
+    this.#counted = seq;
+    const start = windowOf(now);
     if (start !== this.#windowStart) {
       this.#windowStart = start;
       this.#count = 0;
@@ -37,27 +49,26 @@ export class HostFrameMeter {
     this.#count += 1;
     if (this.#count <= this.framesPerMinute) return { kind: "Admitted" };
     const refused = { kind: "Refused", framesPerMinute: this.framesPerMinute, retryAfter: start + WINDOW_MS } as const;
-    if (this.#count > this.framesPerMinute + 1) return { ...refused, changed: null };
-    this.#trippedWindow = start;
+    if (this.#count > this.framesPerMinute + 1) return { ...refused, tripped: null };
     this.#trips = [...this.#trips.filter((at) => now - at < TRIP_SPAN_MS), now];
-    const next: HostHealth =
+    this.#store.save(this.#trips);
+    this.#health =
       this.#health === "Unhealthy" || this.#trips.length >= TRIPS_TO_UNHEALTHY ? "Unhealthy" : "RateLimited";
-    const changed = next === this.#health ? null : next;
-    this.#health = next;
-    return { ...refused, changed };
+    return { ...refused, tripped: this.#health };
   }
 
   recovered(now: number): boolean {
     if (this.#health !== "RateLimited") return false;
-    if (this.#trippedWindow !== null && now < this.#trippedWindow + 2 * WINDOW_MS) return false;
+    const last = this.#trips.at(-1);
+    if (last !== undefined && now < windowOf(last) + 2 * WINDOW_MS) return false;
     this.#health = "Healthy";
     return true;
   }
 
-  restore(): boolean {
-    if (this.#health === "Healthy") return false;
+  restore(): void {
+    this.#trips = [];
+    this.#store.clear();
     this.#health = "Healthy";
-    return true;
   }
 }
 

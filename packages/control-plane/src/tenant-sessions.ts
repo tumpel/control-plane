@@ -1247,7 +1247,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.armOffer(tenantId, session, turn)
       .then((offer) => this.host(session.host_id).send(offer))
       .then((sent) => {
-        if (sent === "Sent") this.offerSent(turn.turn_id);
+        if (sent === "Sent") return this.offerSent(turn.turn_id);
+        this.deferOffer(session, turn, Date.now());
       })
       .catch((error: unknown) => {
         console.error(

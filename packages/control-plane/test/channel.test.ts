@@ -629,14 +629,19 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
   await first.deliver(beat(["session-1"]));
   await first.deliver(beat([]));
   assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: ["session-1"] },
-    { kind: "Heartbeat", usage: USAGE },
+    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"] },
+    { kind: "Heartbeat", usage: USAGE, health: "Healthy" },
   ]);
 
   const second = channel.connect();
   await second.hello();
   await second.deliver(beat([]));
-  assert.deepEqual(second.events.at(-1), { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: [] });
+  assert.deepEqual(second.events.at(-1), {
+    kind: "FirstHeartbeat",
+    usage: USAGE,
+    health: "Healthy",
+    heldSessionIds: [],
+  });
 });
 
 test("a heartbeat from a host before the held sessions version reports nothing", async () => {
@@ -644,6 +649,6 @@ test("a heartbeat from a host before the held sessions version reports nothing",
   await link.hello(undefined, HELD_SESSIONS_VERSION - 1);
   const heartbeat = { type: "Heartbeat", sentAt: "2026-11-18T10:00:00+01:00", usage: USAGE };
   const received = await control.receive(link.connection, JSON.stringify(heartbeat), link.context);
-  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE });
+  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE, health: "Healthy" });
   assert.equal(link.closed, null);
 });

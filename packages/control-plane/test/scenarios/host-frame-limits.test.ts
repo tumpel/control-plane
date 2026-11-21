@@ -17,6 +17,21 @@ const HOST_ID = "host-1";
 const FRAMES_PER_MINUTE = 600;
 const START = Date.parse("2026-11-21T11:00:00Z");
 
+const savedTrips = () => {
+  const saved = { trips: [] as number[] };
+  const store = {
+    save: (trips: number[]) => {
+      saved.trips = [...trips];
+    },
+    clear: () => {
+      saved.trips = [];
+    },
+  };
+  return { saved, store };
+};
+
+const healthyMeter = () => new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], savedTrips().store);
+
 const openChannel = async (meter: HostFrameMeter) => {
   const clock = { now: START };
   const trips: string[] = [];
@@ -53,10 +68,10 @@ const openChannel = async (meter: HostFrameMeter) => {
       message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
     }),
     messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-    admitFrame: () => {
-      const admission = meter.admit(clock.now);
+    admitFrame: (seq) => {
+      const admission = meter.admit(seq, clock.now);
       if (admission.kind === "Admitted") return null;
-      if (admission.changed !== null) trips.push(admission.changed);
+      if (admission.tripped !== null) trips.push(admission.tripped);
       return {
         reason: rateLimitDetail(HOST_ID, admission.framesPerMinute),
         framesPerMinute: admission.framesPerMinute,
@@ -99,7 +114,7 @@ const openChannel = async (meter: HostFrameMeter) => {
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
 
 test("a host frame over the 4 MB bound is refused and the channel stays open for the next frame", async () => {
-  const { channel, frame, refusals } = await openChannel(new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy"));
+  const { channel, frame, refusals } = await openChannel(healthyMeter());
 
   const oversize = await frame(1, {
     type: "TurnLine",
@@ -121,9 +136,7 @@ const stream = async (frame: (seq: number, message: HostMessage) => Promise<unkn
 };
 
 test("a host streaming 700 lines in a minute has the 100 past the limit refused with the limit and the next window, every one acked so none replays, and the channel stays open", async () => {
-  const { channel, trips, frame, rateLimited, received } = await openChannel(
-    new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy"),
-  );
+  const { channel, trips, frame, rateLimited, received } = await openChannel(healthyMeter());
 
   await stream(frame, 1, 700);
 
@@ -143,7 +156,7 @@ test("a host streaming 700 lines in a minute has the 100 past the limit refused 
 });
 
 test("a host under the limit has every frame delivered and stays Healthy", async () => {
-  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy");
+  const meter = healthyMeter();
   const { channel, clock, trips, frame, rateLimited } = await openChannel(meter);
 
   await stream(frame, 1, 600);
@@ -157,7 +170,7 @@ test("a host under the limit has every frame delivered and stays Healthy", async
 });
 
 test("a RateLimited host recovers after a full minute under the limit, and its next frames land", async () => {
-  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy");
+  const meter = healthyMeter();
   const { channel, clock, frame } = await openChannel(meter);
   await stream(frame, 1, 700);
 
@@ -172,8 +185,9 @@ test("a RateLimited host recovers after a full minute under the limit, and its n
   assert.equal(channel.delivered.length, 620);
 });
 
-test("a host tripping the limit a third time within an hour stays Unhealthy until a person or a restart restores it", async () => {
-  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy");
+test("a host tripping the limit a third time within an hour stays Unhealthy across an eviction until a person restores it, and the restore forgets its trips", async () => {
+  const { saved, store } = savedTrips();
+  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], store);
   const { clock, trips, frame } = await openChannel(meter);
   let seq = 1;
   for (let trip = 0; trip < 3; trip++) {
@@ -185,8 +199,30 @@ test("a host tripping the limit a third time within an hour stays Unhealthy unti
   }
 
   assert.deepEqual(trips, ["RateLimited", "RateLimited", "Unhealthy"]);
-  assert.equal(meter.recovered(clock.now + 3_600_000), false);
-  assert.equal(meter.health(), "Unhealthy");
-  assert.equal(meter.restore(), true);
-  assert.equal(meter.health(), "Healthy");
+  assert.equal(saved.trips.length, 3);
+  const evicted = new HostFrameMeter(FRAMES_PER_MINUTE, "Unhealthy", saved.trips, store);
+  assert.equal(evicted.recovered(clock.now + 3_600_000), false);
+  assert.equal(evicted.health(), "Unhealthy");
+  evicted.restore();
+  assert.equal(evicted.health(), "Healthy");
+  assert.deepEqual(saved.trips, []);
+});
+
+test("a RateLimited host evicted mid-window still waits out the full clean window after its trip", async () => {
+  const { saved, store } = savedTrips();
+  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], store);
+  const { clock, frame } = await openChannel(meter);
+  await stream(frame, 1, 601);
+
+  const evicted = new HostFrameMeter(FRAMES_PER_MINUTE, "RateLimited", saved.trips, store);
+  assert.equal(evicted.recovered(clock.now + 60_000), false);
+  assert.equal(evicted.recovered(clock.now + 2 * 60_000), true);
+});
+
+test("frames the host replays after a reconnect are not counted twice against the limit", async () => {
+  const meter = healthyMeter();
+  for (let seq = 1; seq <= 400; seq++) assert.equal(meter.admit(seq, START).kind, "Admitted");
+  for (let seq = 1; seq <= 400; seq++) assert.equal(meter.admit(seq, START).kind, "Admitted");
+  for (let seq = 401; seq <= 600; seq++) assert.equal(meter.admit(seq, START).kind, "Admitted");
+  assert.equal(meter.admit(601, START).kind, "Refused");
 });
