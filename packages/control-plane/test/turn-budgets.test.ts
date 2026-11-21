@@ -29,14 +29,12 @@ test("old rows keep an hour, new turns inherit persona edits, and session overri
     },
   };
   assert.equal(turnBudget(sql, "old"), 3600);
-  assert.equal(db.prepare("SELECT turn_total_budget_seconds FROM sessions").get()?.turn_total_budget_seconds, 3600);
   assert.equal(db.prepare("SELECT started_at FROM turn_budget_starts WHERE turn_id = 'old'").get()?.started_at, 10);
 
   db.exec("UPDATE personas SET turn_total_budget_seconds = 14400");
   assert.equal(turnBudget(sql, "old"), 3600);
   insertTurn.run("next");
   assert.equal(turnBudget(sql, "next"), 14400);
-  assert.equal(db.prepare("SELECT turn_total_budget_seconds FROM sessions").get()?.turn_total_budget_seconds, 14400);
   db.exec("UPDATE personas SET turn_total_budget_seconds = 7200");
   assert.equal(turnBudget(sql, "next"), 14400);
   insertTurn.run("later");
@@ -51,5 +49,12 @@ test("old rows keep an hour, new turns inherit persona edits, and session overri
     /CHECK constraint failed/,
   );
   assert.throws(() => turnBudget(sql, "missing"), /has no running budget/);
+  db.exec("DELETE FROM session_turn_budget_overrides");
+  db.exec("DELETE FROM personas WHERE persona_id = 'persona'");
+  assert.equal(
+    db.prepare("SELECT turn_total_budget_seconds FROM session_turn_budget_overrides WHERE session_id = 'session'").get()
+      ?.turn_total_budget_seconds,
+    7200,
+  );
   db.close();
 });

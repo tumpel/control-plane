@@ -1,10 +1,16 @@
 ALTER TABLE personas ADD COLUMN turn_total_budget_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (turn_total_budget_seconds BETWEEN 1 AND 86400);
-ALTER TABLE sessions ADD COLUMN turn_total_budget_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (turn_total_budget_seconds BETWEEN 1 AND 86400);
 
 CREATE TABLE session_turn_budget_overrides (
   session_id TEXT PRIMARY KEY REFERENCES sessions (session_id) ON DELETE CASCADE,
   turn_total_budget_seconds INTEGER NOT NULL CHECK (turn_total_budget_seconds BETWEEN 1 AND 86400)
 );
+
+CREATE TRIGGER persona_delete_turn_budget BEFORE DELETE ON personas
+BEGIN
+  INSERT INTO session_turn_budget_overrides (session_id, turn_total_budget_seconds)
+  SELECT session_id, OLD.turn_total_budget_seconds FROM sessions WHERE persona_id = OLD.persona_id
+  ON CONFLICT (session_id) DO NOTHING;
+END;
 
 CREATE TABLE turn_budgets (
   turn_id TEXT PRIMARY KEY REFERENCES turns (turn_id) ON DELETE CASCADE,

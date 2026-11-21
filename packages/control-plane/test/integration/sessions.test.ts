@@ -1767,7 +1767,9 @@ suite("sessions", { concurrency: 8 }, () => {
     const archived = await tool("tumpel_session_archive", { sessionId }, SessionSchema);
     assert.equal(archived.state, "Archived");
     assert.equal((await deletePersona(start.personaId ?? "")).status, 204);
-    assert.equal((await tool("tumpel_session_get", { sessionId }, SessionSchema)).personaId, start.personaId);
+    const historical = await tool("tumpel_session_get", { sessionId }, SessionSchema);
+    assert.equal(historical.personaId, start.personaId);
+    assert.equal(historical.turnTotalBudgetSeconds, SETTINGS.turnTotalBudgetSeconds);
     assert.equal((await tool("tumpel_session_archive", { sessionId }, SessionSchema)).state, "Archived");
     assert.equal(await store.text(request.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
@@ -2271,6 +2273,10 @@ suite("sessions", { concurrency: 8 }, () => {
     });
     assert.equal(changed.status, 200, await changed.clone().text());
     assert.equal(PersonaSchema.parse(await changed.json()).turnTotalBudgetSeconds, 14400);
+    assert.equal(
+      (await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema)).turnTotalBudgetSeconds,
+      14400,
+    );
     const queued = await tool("tumpel_turn_send", { sessionId: started.session.sessionId, prompt: "next" }, TurnSchema);
     host.send({
       type: "TurnFailed",

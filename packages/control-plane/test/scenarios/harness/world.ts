@@ -208,7 +208,7 @@ export class World {
     return this.host(hostId);
   }
 
-  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
+  async startSession(start: { prompt: string; tags: string[]; turnTotalBudgetSeconds?: number }): Promise<Session> {
     const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
     const personas = z
       .object({ personas: z.array(z.object({ personaId: z.string() })) })
@@ -233,6 +233,7 @@ export class World {
             prompt: start.prompt,
             boxRetention: "Auto",
             tags: start.tags,
+            turnTotalBudgetSeconds: start.turnTotalBudgetSeconds,
           },
         },
       }),

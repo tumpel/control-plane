@@ -409,12 +409,12 @@ type SnapshotRequestRow = {
 };
 
 const SESSION_SELECT =
-  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, turn_total_budget_seconds, COALESCE((SELECT box_retention FROM session_box_retention WHERE session_box_retention.session_id = sessions.session_id), 'Auto') AS box_retention, created_at, updated_at FROM sessions";
+  "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, COALESCE((SELECT turn_total_budget_seconds FROM session_turn_budget_overrides WHERE session_id = sessions.session_id), (SELECT turn_total_budget_seconds FROM personas WHERE persona_id = sessions.persona_id)) AS turn_total_budget_seconds, COALESCE((SELECT box_retention FROM session_box_retention WHERE session_box_retention.session_id = sessions.session_id), 'Auto') AS box_retention, created_at, updated_at FROM sessions";
 const TURN_SELECT = `SELECT * FROM (
   SELECT turn_id, turns.session_id, host_id, box_id, prompt, (SELECT goal FROM turn_goals WHERE turn_goals.turn_id = turns.turn_id) AS goal, (SELECT warning FROM turn_warnings WHERE turn_warnings.turn_id = turns.turn_id) AS warning, state, line_count, turns.created_at, updated_at, reason, detail, failed_at
   FROM turns LEFT JOIN turn_failures USING (turn_id)
 )`;
-const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib, s.turn_total_budget_seconds, COALESCE(r.box_retention, 'Auto') AS box_retention, s.created_at, s.updated_at,
+const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.box_id, s.persona_id, s.repository, s.harness, s.harness_version, s.model, s.state, s.last_line_seq, s.endpoint, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib, COALESCE(b.turn_total_budget_seconds, p.turn_total_budget_seconds) AS turn_total_budget_seconds, COALESCE(r.box_retention, 'Auto') AS box_retention, s.created_at, s.updated_at,
   t.turn_id AS last_turn_id, t.host_id AS last_turn_host_id, t.box_id AS last_turn_box_id, t.prompt AS last_turn_prompt, t.goal AS last_turn_goal, t.warning AS last_turn_warning, t.state AS last_turn_state,
   t.line_count AS last_turn_line_count, t.created_at AS last_turn_created_at, t.updated_at AS last_turn_at,
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
@@ -422,6 +422,8 @@ const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.b
   (SELECT json_group_array(tag) FROM session_tags WHERE session_tags.session_id = s.session_id) AS tags,
   o.origin_session_id, o.origin_turn_id, g.trigger_id AS origin_trigger_id, g.delivery_id AS origin_delivery_id
   FROM sessions AS s
+  LEFT JOIN personas AS p ON p.persona_id = s.persona_id
+  LEFT JOIN session_turn_budget_overrides AS b ON b.session_id = s.session_id
   JOIN (${TURN_SELECT}) AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
   LEFT JOIN session_issues AS i ON i.session_id = s.session_id
   LEFT JOIN session_box_memory AS m ON m.session_id = s.session_id
@@ -1993,8 +1995,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
     const turn = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_disk_mib, turn_total_budget_seconds, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, box_disk_mib, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         session.session_id,
         session.principal_id,
         session.host_id,
@@ -2008,7 +2010,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.last_line_seq,
         session.endpoint,
         session.box_disk_mib,
-        session.turn_total_budget_seconds,
         session.created_at,
         session.updated_at,
       );
