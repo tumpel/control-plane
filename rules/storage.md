@@ -8,3 +8,9 @@
 4. Every retry backs off exponentially and fails hard after 10 retries.
 5. Every endpoint has a limit. Every write endpoint caps what one request writes.
 6. Cost is a signal (tenet 8). A rising bill is a design fault to fix.
+
+## Hand-written SQL
+
+`npm run lint` runs `npm-scripts/sql-check.mjs`. It finds every hand-written SQL site under `packages/*/src` and fails on one that is not in `npm-scripts/sql-allowlist.json`, and on an allowlisted site that no longer exists. `npm run sql:update` rewrites the allowlist. The list only shrinks: a PR that adds an entry gives the reason in its body.
+
+A new migration that adds a TEXT or BLOB column carries a `-- bulk-data-reviewed: <reason>` comment, or the check fails.
