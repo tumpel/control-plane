@@ -81,10 +81,9 @@ export const handlePushSubscriptions = async (
   const caller = await authenticate(request, env);
   if (caller instanceof Response) return caller;
   if (key) return pushKey(env);
-  if (request.method !== "GET") {
-    const refused = personRequired(caller, `pushSubscriptions.${request.method === "POST" ? "create" : "delete"}`);
-    if (refused !== null) return refused;
-  }
+  const operation = matched !== undefined ? "delete" : request.method === "POST" ? "create" : "list";
+  const refused = personRequired(caller, `pushSubscriptions.${operation}`);
+  if (refused !== null) return refused;
   if (matched !== undefined) return remove(env, caller, matched);
   return request.method === "POST" ? create(request, env, caller) : list(env, caller);
 };
