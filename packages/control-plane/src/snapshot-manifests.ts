@@ -25,10 +25,11 @@ export const packKey = (tenantId: string, packDigest: string): string => `${tena
 
 export const packListKey = (storageKey: string): string => `${storageKey}.packs`;
 
+const placementsOf = (root: Placement[]): number =>
+  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) + root.length;
+
 export const indexBytesOf = (root: Placement[]): number =>
-  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) *
-    BYTES_PER_PLACEMENT +
-  MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
+  placementsOf(root) * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
 
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -312,7 +313,6 @@ export class SnapshotManifests {
       const sink = new PackSink();
       const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
       if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
-      for (const placement of root.value) sink.packs.add(placement.packDigest);
       return { kind: "Read", value: sink.packs };
     });
     if (read.kind !== "Read") return read;
@@ -349,14 +349,9 @@ export class SnapshotManifests {
       this.indexes.delete(key);
       cached -= index.bytes;
     }
-    const sink = new IndexSink(Math.floor(needed / BYTES_PER_PLACEMENT));
+    const sink = new IndexSink(placementsOf(root.value));
     const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
     if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
-    for (const placement of root.value) {
-      const failure = sink.add(placement);
-      if (failure !== undefined)
-        return { kind: "Unreadable", detail: `the manifest of ${storageKey} holds ${failure}` };
-    }
     return { kind: "Read", value: remember(this.indexes, storageKey, sink.index()) };
   }
 
@@ -377,6 +372,10 @@ export class SnapshotManifests {
     root: Placement[],
     sink: PlacementSink,
   ): Promise<string | undefined> {
+    for (const placement of root) {
+      const failure = sink.add(placement);
+      if (failure !== undefined) return `the manifest of ${storageKey} is unreadable: ${failure}`;
+    }
     const manifest = new ManifestStream(sink);
     for (const range of ranges(root)) {
       const body = await store.get(packKey(tenantId, range.packDigest), {
