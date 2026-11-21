@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@block65/webcrypto-web-push": "^2.0.0",
+    "@streamparser/json": "0.0.26",
     "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.26/tumpel-api-0.21.0-rc.26.tgz",
     "@tumpel/pages": "https://github.com/tumpel/dashboard/releases/download/v0.7.0/pages-0.7.0.tgz",
     "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.31/tumpel-schemas-0.21.0-rc.31.tgz",

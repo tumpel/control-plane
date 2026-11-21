@@ -5,7 +5,15 @@ import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
-import { D1Database, type DurableObjectState, migratedDatabase, type Namespace, R2Bucket, Runtime, type SqlStorage } from "./runtime.ts";
+import {
+  D1Database,
+  type DurableObjectState,
+  migratedDatabase,
+  type Namespace,
+  R2Bucket,
+  Runtime,
+  type SqlStorage,
+} from "./runtime.ts";
 
 register("./hooks.mjs", import.meta.url);
 

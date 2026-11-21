@@ -329,20 +329,34 @@ export class D1Database {
 class R2Object {
   readonly key: string;
   readonly uploaded: Date;
-  private readonly body: Uint8Array;
+  private readonly bytes: Uint8Array;
 
-  constructor(key: string, body: Uint8Array, uploaded: Date) {
+  constructor(key: string, bytes: Uint8Array, uploaded: Date) {
     this.key = key;
-    this.body = body;
+    this.bytes = bytes;
     this.uploaded = uploaded;
   }
 
   get size(): number {
-    return this.body.byteLength;
+    return this.bytes.byteLength;
+  }
+
+  get body(): ReadableStream<Uint8Array> {
+    let at = 0;
+    return new ReadableStream<Uint8Array>({
+      pull: (controller) => {
+        if (at >= this.bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(this.bytes.slice(at, at + 65536));
+        at += 65536;
+      },
+    });
   }
 
   async text(): Promise<string> {
-    return new TextDecoder().decode(this.body);
+    return new TextDecoder().decode(this.bytes);
   }
 
   async json(): Promise<unknown> {
@@ -350,13 +364,14 @@ class R2Object {
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    return this.body.slice().buffer;
+    return this.bytes.slice().buffer;
   }
 }
 
 export class R2Bucket {
   private readonly objects = new Map<string, { body: Uint8Array; uploaded: Date }>();
   gets = 0;
+  headFailure: Error | null = null;
 
   async put(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
@@ -371,6 +386,7 @@ export class R2Bucket {
   }
 
   async head(key: string): Promise<R2Object | null> {
+    if (this.headFailure !== null) throw this.headFailure;
     return this.read(key, undefined);
   }
 

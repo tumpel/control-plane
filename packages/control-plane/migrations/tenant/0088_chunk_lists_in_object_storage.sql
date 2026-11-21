@@ -19,7 +19,8 @@ CREATE TABLE pack_collection (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   list_cursor TEXT NOT NULL,
   failures INTEGER NOT NULL,
-  retry_at INTEGER NOT NULL
+  retry_at INTEGER NOT NULL,
+  deletions INTEGER NOT NULL
 );
 
-INSERT INTO pack_collection (singleton, list_cursor, failures, retry_at) VALUES (1, '', 0, 0);
+INSERT INTO pack_collection (singleton, list_cursor, failures, retry_at, deletions) VALUES (1, '', 0, 0, 0);

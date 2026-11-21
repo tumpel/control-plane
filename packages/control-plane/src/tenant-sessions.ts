@@ -33,6 +33,7 @@ import {
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import type {
   BootImage,
@@ -102,9 +103,9 @@ import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import {
-  MAX_MANIFEST_BYTES,
+  indexBytesOf,
+  MAX_INDEX_BYTES,
   type ManifestRead,
-  manifestBytes,
   packKey,
   packListKey,
   type SnapshotIndex,
@@ -443,11 +444,10 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
-const PACK_COLLECTION_RETRIES = 10;
-const PACK_COLLECTION_BACKOFF_MS = 1000;
+const PACK_COLLECTION_BACKOFF_MS = 2000;
 const UPLOAD_CLOCK_SKEW_MS = 60_000;
 
-type PackCollection = { list_cursor: string; failures: number; retry_at: number };
+type PackCollection = { list_cursor: string; failures: number; retry_at: number; deletions: number };
 const IDLE_EVICTION_MS = 15 * 60 * 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
@@ -2472,7 +2472,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         sessionId,
       )
       .toArray()
-      .map((row) => row.storage_key);
+      .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
     const released = this.ctx.storage.transactionSync(() => {
       const roots = this.releaseSnapshots(this.storedSnapshots("WHERE session_id = ?", sessionId));
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
@@ -2516,7 +2516,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         stored.snapshot_seq,
       )
       .toArray()
-      .map((row) => row.storage_key);
+      .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
     const older = this.storedSnapshots(
       "WHERE session_id = ? AND snapshot_seq < ?",
       stored.session_id,
@@ -2556,7 +2556,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private packCollection(): PackCollection {
     const [row] = this.ctx.storage.sql
-      .exec<PackCollection>("SELECT list_cursor, failures, retry_at FROM pack_collection")
+      .exec<PackCollection>("SELECT list_cursor, failures, retry_at, deletions FROM pack_collection")
       .toArray();
     if (row === undefined) throw new Error("the tenant holds no pack_collection row, though migration 0088 inserts it");
     return row;
@@ -2565,7 +2565,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async collectChunks(tenantId: string): Promise<void> {
     const state = this.packCollection();
     const now = Date.now();
-    if (state.failures >= PACK_COLLECTION_RETRIES || now < state.retry_at) return;
+    if (state.failures >= RETRY_LIMIT || now < state.retry_at) return;
     await this.collectPackPage(tenantId, state.list_cursor).then(
       (next) => {
         const current = this.packCollection();
@@ -2574,12 +2574,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       },
       (error: unknown) => {
         const failures = state.failures + 1;
-        const backoff = PACK_COLLECTION_BACKOFF_MS * 2 ** failures;
-        const detail = error instanceof Error ? error.message : String(error);
+        const backoff = backoffMs(failures, PACK_COLLECTION_BACKOFF_MS);
+        const detail = errorOf(error).message;
         console.error(
-          failures >= PACK_COLLECTION_RETRIES
+          failures >= RETRY_LIMIT
             ? `tenant ${tenantId} stopped collecting unreferenced packs after ${failures} failed runs: ${detail}; packs no snapshot names stay in object storage until the cause is fixed and the failures of its pack_collection row are reset to 0`
-            : `tenant ${tenantId} failed to collect unreferenced packs on run ${failures} of ${PACK_COLLECTION_RETRIES}, and tries again in ${backoff / 1000} seconds: ${detail}`,
+            : `tenant ${tenantId} failed to collect unreferenced packs on run ${failures} of ${RETRY_LIMIT}, and tries again in ${Math.round(backoff / 1000)} seconds: ${detail}`,
         );
         this.ctx.storage.sql.exec(
           "UPDATE pack_collection SET list_cursor = '', failures = ?, retry_at = ?",
@@ -2629,8 +2629,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const from = uploadsFrom();
       const dead = unnamed.filter((object) => object.uploaded.getTime() < from).map((object) => object.key);
       if (dead.length === 0) return next;
-      sql.exec("UPDATE pack_collection SET list_cursor = ?, failures = 0, retry_at = 0", next);
-      await this.deleteObjects(dead);
+      sql.exec(
+        "UPDATE pack_collection SET list_cursor = ?, failures = 0, retry_at = 0, deletions = deletions + 1",
+        next,
+      );
+      await this.deleteObjects(dead).finally(() => sql.exec("UPDATE pack_collection SET deletions = deletions + 1"));
       return next;
     });
   }
@@ -3514,11 +3517,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .exec<{ storage_key: string }>("SELECT storage_key FROM snapshots")
       .toArray()
       .map((row) => row.storage_key);
-    const named = new Set<string>();
+    let missing = message.packs;
     for (const { read } of await this.livePacks(tenantId, live)) {
-      if (read.kind === "Read") for (const packDigest of read.value) named.add(packDigest);
+      if (read.kind === "Read") missing = missing.filter((pack) => !read.value.has(pack.packDigest));
     }
-    const missing = message.packs.filter((pack) => !named.has(pack.packDigest));
     const signer = signerOf(
       this.env,
       this.env.R2_BUCKET_NAME,
@@ -4198,20 +4200,62 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.setSessionState(session.session_id, "Idle", Date.now());
   }
 
-  private async rootRejected(tenantId: string, hostId: string, storageKey: string): Promise<string | null> {
-    const root = await this.env.STORE.get(storageKey);
+  private async snapshotRejection(
+    tenantId: string,
+    hostId: string,
+    request: SnapshotRequestRow,
+  ): Promise<string | null> {
+    const root = await this.env.STORE.get(request.storage_key);
     if (root === null) {
-      return `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${storageKey}; check the host's uploads to object storage`;
+      return `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
     }
     const parsed = SnapshotRootSchema.safeParse(await root.json());
     if (!parsed.success) {
-      throw new Error(
-        `snapshot root ${storageKey} is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
-      );
+      return `host ${await this.hostName(tenantId, hostId)} stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`;
     }
-    const size = manifestBytes(parsed.data.manifest);
-    if (size <= MAX_MANIFEST_BYTES) return null;
-    return `host ${await this.hostName(tenantId, hostId)} stored a snapshot manifest of ${size} bytes under ${storageKey}, above the ${MAX_MANIFEST_BYTES} bytes the control plane reads, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`;
+    const indexBytes = indexBytesOf(parsed.data.manifest);
+    if (indexBytes > MAX_INDEX_BYTES) {
+      return `host ${await this.hostName(tenantId, hostId)} stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`;
+    }
+    const named = await this.manifests.packs(this.env.STORE, tenantId, request.storage_key);
+    if (named.kind !== "Read") {
+      return `host ${await this.hostName(tenantId, hostId)} stored snapshot ${request.snapshot_id} with a manifest the control plane cannot read, so it could never restore it and the session keeps its previous snapshot: ${named.detail}`;
+    }
+    const packs = [...named.value].sort();
+    const heads = await Promise.all(packs.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
+    const missing = packs.find((_, at) => heads[at] === null);
+    if (missing === undefined) return null;
+    return `snapshot ${request.snapshot_id} names pack ${missing}, which object storage does not hold, so the session keeps its previous snapshot`;
+  }
+
+  private async snapshotOutcome(
+    tenantId: string,
+    hostId: string,
+    request: SnapshotRequestRow,
+    uploadedBytes: number,
+  ): Promise<
+    | { kind: "Rejected"; detail: string }
+    | { kind: "Answered" }
+    | { kind: "Stored"; now: number; completes: boolean; next: string | null }
+  > {
+    for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
+      const seen = this.packCollection().deletions;
+      const rejection = await this.snapshotRejection(tenantId, hostId, request).catch(
+        (error: unknown) =>
+          `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`,
+      );
+      if (rejection !== null) return { kind: "Rejected", detail: rejection };
+      const [pending] = this.ctx.storage.sql
+        .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
+        .toArray();
+      if (pending === undefined) return { kind: "Answered" };
+      if (this.packCollection().deletions === seen) {
+        return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes) };
+      }
+    }
+    const detail = `retention deleted packs while the control plane checked snapshot ${request.snapshot_id} on each of ${RETRY_LIMIT} attempts, so the session keeps its previous snapshot`;
+    console.error(`tenant ${tenantId}: ${detail}`);
+    return { kind: "Rejected", detail };
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -4266,22 +4310,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
-    const rootRejected = await this.rootRejected(tenantId, hostId, request.storage_key);
-    const named =
-      rootRejected === null ? await this.manifests.packs(this.env.STORE, tenantId, request.storage_key) : null;
-    const outcome =
-      named === null || named.kind !== "Read"
-        ? {
-            kind: "Rejected" as const,
-            detail:
-              rootRejected ??
-              `host ${await this.hostName(tenantId, hostId)} stored snapshot ${request.snapshot_id} with a manifest the control plane cannot read, so it could never restore it and the session keeps its previous snapshot: ${named?.detail}`,
-          }
-        : await this.ctx.blockConcurrencyWhile(async () => {
-            const lost = await this.lostPack(tenantId, request, named.value);
-            if (lost !== null) return { kind: "Rejected" as const, detail: lost };
-            return { kind: "Stored" as const, ...this.storeSnapshot(request, message.uploadedBytes) };
-          });
+    const outcome = await this.snapshotOutcome(tenantId, hostId, request, message.uploadedBytes);
+    if (outcome.kind === "Answered") return null;
     if (outcome.kind === "Rejected") {
       await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
@@ -4306,26 +4336,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     await this.collectSnapshots(tenantId, request, now);
     return null;
-  }
-
-  private async lostPack(
-    tenantId: string,
-    request: SnapshotRequestRow,
-    packs: ReadonlySet<string>,
-  ): Promise<string | null> {
-    const live = this.ctx.storage.sql
-      .exec<{ storage_key: string }>("SELECT storage_key FROM snapshots")
-      .toArray()
-      .map((row) => row.storage_key);
-    const named = new Set<string>();
-    for (const { read } of await this.livePacks(tenantId, live)) {
-      if (read.kind === "Read") for (const packDigest of read.value) named.add(packDigest);
-    }
-    const unnamed = [...packs].filter((packDigest) => !named.has(packDigest)).sort();
-    const heads = await Promise.all(unnamed.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
-    const missing = unnamed.find((_, at) => heads[at] === null);
-    if (missing === undefined) return null;
-    return `snapshot ${request.snapshot_id} names pack ${missing}, which object storage no longer holds because retention freed it while the snapshot was in flight, so the session keeps its previous snapshot`;
   }
 
   private storeSnapshot(
