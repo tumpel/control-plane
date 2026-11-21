@@ -1,5 +1,6 @@
 import { OpenRouterAuthorizationSchema } from "@tumpel/schemas";
 import { base64Url } from "./crypto";
+import { armDeadlines, type OpenRouterAuthorizationDeadline } from "./deadlines";
 import { seal, unseal } from "./envelope.ts";
 import { type Fetch, signState } from "./github.ts";
 import { keyStoreOf } from "./key-store.ts";
@@ -21,7 +22,6 @@ import {
   STATE_PURPOSE,
   timedOutDetail,
 } from "./openrouter-oauth.ts";
-import type { OpenRouterAuthorizationDeadline } from "./session-timer";
 import { TenantCircleCIAuthorizations } from "./tenant-circleci-authorizations";
 import { sealContext } from "./tenant-sessions";
 
@@ -161,10 +161,8 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     });
   }
 
-  private openRouterTimer(tenantId: string, openRouterAuthorizationId: string, at: number | null): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(openRouterAuthorizationId).set(tenantId, {
-      OpenRouterAuthorization: at === null ? null : { openRouterAuthorizationId, at },
-    });
+  private openRouterTimer(tenantId: string, openRouterAuthorizationId: string, at: number): Promise<void> {
+    return armDeadlines(this.env, tenantId, { OpenRouterAuthorization: { openRouterAuthorizationId, at } });
   }
 
   private endPhase(openRouterAuthorizationId: string, from: LivePhaseTable, now: number): boolean {
@@ -290,9 +288,7 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     const phase = this.openRouterPhase(openRouterAuthorizationId);
     if (phase.state !== "AwaitingCallback") return returned;
     const fail = async (from: LivePhaseTable, reason: OpenRouterAuthorizationFailureReason, detail: string) => {
-      if (this.failOpenRouterAuthorization(openRouterAuthorizationId, from, reason, detail, Date.now())) {
-        await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
-      }
+      this.failOpenRouterAuthorization(openRouterAuthorizationId, from, reason, detail, Date.now());
       return returned;
     };
     if (now >= phase.wait.callback_due_at) {
@@ -314,7 +310,6 @@ export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations
     if (exchanged.kind === "Failed") return fail(EXCHANGES, "ExchangeFailed", exchanged.detail);
     const stored = await this.storeOpenRouterKey(row, exchanged.key);
     if (stored.kind === "NotStored") return fail(EXCHANGES, "KeyNotStored", stored.detail);
-    await this.openRouterTimer(tenantId, openRouterAuthorizationId, null);
     return returned;
   }
 

@@ -75,6 +75,7 @@ import { applyConfig, planConfig } from "./config-apply.ts";
 import { handleConnections } from "./connections.ts";
 import { handleConnectors } from "./connectors.ts";
 import { randomToken, sameSecret } from "./crypto";
+import { type DeadlineMessage, reachDeadlines } from "./deadlines";
 import { handleReleaseRollout } from "./deploy-drain";
 import {
   approveDeviceCode,
@@ -210,7 +211,6 @@ import { admitCaller, limitRefused, type RateLimit, rateLimited } from "./rate-l
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
 import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
-import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import { handleSubscriptions } from "./subscriptions.ts";
@@ -225,7 +225,6 @@ import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryToken
 
 export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
-export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 export { TenantMetrics } from "./tenant-metrics";
 export { WebhookSender } from "./webhook-sender.ts";
@@ -242,7 +241,7 @@ export interface Env extends SignerEnv {
   EVENTS: DurableObjectNamespace<EventChannel>;
   WEBHOOKS: DurableObjectNamespace<WebhookSender>;
   HOST: DurableObjectNamespace<HostChannel>;
-  SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
+  DEADLINES: Queue<DeadlineMessage>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
   METRICS: AnalyticsEngineDataset;
   METRICS_DATASET: string;
@@ -1801,6 +1800,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
 const signedWebhook = (pathname: string): boolean =>
   pathname === GITHUB_WEBHOOK_PATH || CIRCLECI_EVENTS_PATH.test(pathname);
 
+const DEADLINES_QUEUE = "tumpel-deadlines";
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -1815,6 +1816,7 @@ export default {
     return withHeaders(response, cors);
   },
   async queue(batch, env): Promise<void> {
+    if (batch.queue.startsWith(DEADLINES_QUEUE)) return reachDeadlines(env, batch as MessageBatch<DeadlineMessage>);
     await noticeRelease(
       env,
       batch.messages.map((message) => message.body),

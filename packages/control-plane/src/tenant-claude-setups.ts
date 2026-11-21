@@ -22,13 +22,13 @@ import {
   toClaudeSetup,
 } from "./claude-setup.ts";
 import { base64Url, sameSecret } from "./crypto";
+import { armDeadlines, type ClaudeSetupDeadline } from "./deadlines";
 import { seal, unseal } from "./envelope.ts";
 import { type HostRecord, hostOf } from "./hosts";
 import { keyStoreOf } from "./key-store.ts";
 import { placeSession, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, readRelease } from "./releases";
-import type { ClaudeSetupDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
 import { type HostReply, sealContext, type TenantHostMessage } from "./tenant-sessions";
@@ -104,10 +104,8 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return toClaudeSetup(tenantId, row);
   }
 
-  private claudeSetupTimer(tenantId: string, claudeSetupId: string, at: number | null): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(claudeSetupId).set(tenantId, {
-      ClaudeSetup: at === null ? null : { claudeSetupId, at },
-    });
+  private claudeSetupTimer(tenantId: string, claudeSetupId: string, at: number): Promise<void> {
+    return armDeadlines(this.env, tenantId, { ClaudeSetup: { claudeSetupId, at } });
   }
 
   private async boxToken(tenantId: string, claudeSetupId: string): Promise<string> {
@@ -180,7 +178,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const row = this.claudeSetupRow(claudeSetupId);
     if (row === null) throw new Error(`Claude setup ${claudeSetupId} was created and then not found`);
     if (running !== null && superseded) {
-      await this.discardClaudeSetupBox(running, await this.endFailedClaudeSetup(tenantId, running, true));
+      await this.discardClaudeSetupBox(running, await this.endFailedClaudeSetup(running, true));
     }
     await this.claudeSetupTimer(tenantId, claudeSetupId, dueAt);
     const offer: StoredClaudeSetupOffer = { type: "ClaudeSetupBoxOffer", claudeSetupId, boxId: row.box_id };
@@ -264,7 +262,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     const { member, provider, kind } = SETUP_CREDENTIALS[harness];
     if (harness === "Codex" && tokenExpiresAt === undefined) {
       const detail = `the box of Claude setup ${claudeSetupId} sent the Codex token without expiresAt; the token was discarded with the box. Update the host's supervisor, then start the Codex sign-in again`;
-      await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
+      await this.failClaudeSetup(row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
     const sealed = await seal(await this.dataKey(), token, sealContext(secretSetId, member));
@@ -309,14 +307,13 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     if (written.kind === "NotWaiting") return written;
     if (written.kind === "NotStored") {
       const detail = `${written.detail}; the minted token was discarded with the box. Fix the secret set, then start the ${SETUP_CREDENTIALS[harness].name} setup again`;
-      await this.failClaudeSetup(tenantId, row, "TokenNotStored", detail, now, false);
+      await this.failClaudeSetup(row, "TokenNotStored", detail, now, false);
       return { kind: "NotStored", detail };
     }
-    await this.claudeSetupTimer(tenantId, claudeSetupId, null);
     return { kind: "Stored" };
   }
 
-  protected async failHostClaudeSetups(tenantId: string, hostId: string, detail: string, now: number): Promise<void> {
+  protected async failHostClaudeSetups(hostId: string, detail: string, now: number): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<ClaudeSetupRow>(
         `${CLAUDE_SETUP_SELECT} WHERE host_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
@@ -324,14 +321,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       )
       .toArray();
     for (const row of rows)
-      await this.discardClaudeSetupBox(
-        row,
-        await this.failClaudeSetup(tenantId, row, "RateLimited", detail, now, true),
-      );
+      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(row, "RateLimited", detail, now, true));
   }
 
   private async failClaudeSetup(
-    tenantId: string,
     row: ClaudeSetupRow,
     reason: ClaudeSetupFailureReason,
     detail: string,
@@ -339,7 +332,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     discard: boolean,
   ): Promise<ClaudeSetupDiscard | null> {
     if (!this.markClaudeSetupFailed(row, reason, detail, now)) return null;
-    return this.endFailedClaudeSetup(tenantId, row, discard);
+    return this.endFailedClaudeSetup(row, discard);
   }
 
   private markClaudeSetupFailed(
@@ -361,12 +354,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     );
   }
 
-  private async endFailedClaudeSetup(
-    tenantId: string,
-    row: ClaudeSetupRow,
-    discard: boolean,
-  ): Promise<ClaudeSetupDiscard | null> {
-    await this.claudeSetupTimer(tenantId, row.claude_setup_id, null);
+  private async endFailedClaudeSetup(row: ClaudeSetupRow, discard: boolean): Promise<ClaudeSetupDiscard | null> {
     if (!discard) return null;
     return { type: "ClaudeSetupBoxDiscard", claudeSetupId: row.claude_setup_id, boxId: row.box_id };
   }
@@ -383,7 +371,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
   ): Promise<ClaudeSetupDiscard | null> {
     const step = advance(row.claude_setup_id, harnessOf(row), stateOf(row), event, settingsOf(this.env));
     if (step.kind === "Fail") {
-      return this.failClaudeSetup(tenantId, row, step.reason, step.detail, now, event.kind !== "BoxFailed");
+      return this.failClaudeSetup(row, step.reason, step.detail, now, event.kind !== "BoxFailed");
     }
     if (step.kind !== "Advance" || event.kind !== "Url") return null;
     const dueAt = now + step.dueInSeconds * 1000;
@@ -495,7 +483,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     }
     const image = await this.claudeSetupImage(tenantId, row, hostId, now);
     if (typeof image === "string") {
-      await this.failClaudeSetup(tenantId, row, "SetupUrlMissing", image, now, false);
+      await this.failClaudeSetup(row, "SetupUrlMissing", image, now, false);
       return withdrawn;
     }
     const token = await this.boxToken(tenantId, row.claude_setup_id);

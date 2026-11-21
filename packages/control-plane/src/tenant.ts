@@ -418,8 +418,8 @@ export class Tenant extends TenantConnectors {
         now,
       ),
     }),
-    circleCIAuthorizationDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.circleCIAuthorizationDeadlineReached(tenantId, deadline);
+    circleCIAuthorizationDeadlineReached: async ({ deadline }) => {
+      await this.circleCIAuthorizationDeadlineReached(deadline);
       return {};
     },
     startClaudeSetup: async ({ tenantId, input, now }) => ({
@@ -486,13 +486,9 @@ export class Tenant extends TenantConnectors {
     dispatchCircleCIPrebuild: async ({ tenantId, start, project, parameters, now }) => ({
       dispatched: await this.dispatchCircleCIPrebuild(tenantId, start, project, parameters, now),
     }),
-    circleCIWorkflowCompleted: async ({ tenantId, event, now }) => {
+    circleCIWorkflowCompleted: async ({ event, now }) => {
       const { pipelineId, projectId, ...rest } = event;
-      await this.circleCIWorkflowCompleted(
-        tenantId,
-        { ...rest, pipeline: { id: pipelineId }, project: { id: projectId } },
-        now,
-      );
+      await this.circleCIWorkflowCompleted({ ...rest, pipeline: { id: pipelineId }, project: { id: projectId } }, now);
       return {};
     },
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
@@ -662,7 +658,7 @@ export class Tenant extends TenantConnectors {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};
       await this.failHostWork(tenantId, hostId, detail, now);
-      await this.failHostClaudeSetups(tenantId, hostId, detail, now);
+      await this.failHostClaudeSetups(hostId, detail, now);
       return {};
     },
     hostMessage: async ({ tenantId, hostId, message }) => ({

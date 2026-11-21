@@ -59,6 +59,7 @@ import {
   sessionConnectorUses,
 } from "./connector-rows.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
+import { armDeadlines, type DeadlineChanges, type SessionDueDeadline } from "./deadlines";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
@@ -101,7 +102,6 @@ import {
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
-import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import {
@@ -667,7 +667,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly reportedUsage = new Map<string, ReportedUsage>();
 
   protected abstract failPrebuild(
-    tenantId: string,
     prebuildId: string,
     from: readonly string[],
     report: FailureReport,
@@ -691,12 +690,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private async prebuildUnstored(tenantId: string, session: SessionRow, detail: string): Promise<void> {
+  private async prebuildUnstored(session: SessionRow, detail: string): Promise<void> {
     const prebuild = this.hostPrebuild(session.session_id);
     if (prebuild === null) return;
     const report = { phase: "Upload" as const, detail, fix: PREBUILD_FIX };
-    if (!(await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Building"], report, prebuild.log_url, Date.now())))
-      return;
+    if (!(await this.failPrebuild(prebuild.prebuild_id, ["Building"], report, prebuild.log_url, Date.now()))) return;
     await this.host(session.host_id).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id });
   }
 
@@ -1242,8 +1240,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Identity", identity: commitIdentity({ githubUserId: user.github_user_id, login: user.login }) };
   }
 
-  private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, changes);
+  private timers(tenantId: string, changes: DeadlineChanges): Promise<void> {
+    return armDeadlines(this.env, tenantId, changes);
   }
 
   protected host(hostId: string) {
@@ -1303,7 +1301,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const latest = this.latestTurn(evicted.session_id, null);
     if (latest === null) throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
     this.setSessionState(evicted.session_id, "Stopping", now);
-    await this.timers(tenantId, evicted.session_id, { Snapshot: null });
     await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
   }
 
@@ -1331,7 +1328,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
       return queued;
     });
-    await this.timers(tenantId, session.session_id, {
+    await this.timers(tenantId, {
       Total: { turnId: turn.turn_id, at: turn.created_at + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
     });
     return { kind: "Sent", turn: toTurn(tenantId, turn) };
@@ -1384,7 +1381,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   protected async startWaiting(tenantId: string, sessionId: string, turnId: string, now: number): Promise<void> {
     if (this.sessionRow(sessionId)?.state !== "Stopping") return this.runQueued(tenantId, turnId);
     this.ctx.storage.sql.exec("INSERT INTO turn_release_waits (turn_id, session_id) VALUES (?, ?)", turnId, sessionId);
-    await this.timers(tenantId, sessionId, {
+    await this.timers(tenantId, {
       Total: { turnId, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
     });
   }
@@ -1493,7 +1490,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         turnId,
         now,
       );
-      return this.timers(tenantId, session.session_id, {
+      return this.timers(tenantId, {
         Total: { turnId, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
       });
     }
@@ -1546,12 +1543,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         this.deferOffer(session, turn, Date.now());
       });
     }
-    await this.timers(tenantId, session.session_id, {
-      FirstLine: null,
+    await this.timers(tenantId, {
       Total: { turnId: turn.turn_id, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-      Snapshot: null,
-      Teardown: null,
-      HostOffline: null,
     });
     return offer;
   }
@@ -1823,7 +1816,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     for (const { session_id } of gone) this.sessionEntered(session_id, "Stopped", now);
     for (const { session_id } of gone) {
-      await this.timers(tenantId, session_id, { Snapshot: null });
       await this.evictionSettled(tenantId, session_id);
     }
     for (const sessionId of heldSessionIds) {
@@ -1872,7 +1864,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (latest === null)
         throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
       this.startAfterTurnRelease(session, now);
-      await this.timers(tenantId, session.session_id, { Snapshot: null });
       await this.snapshotOrTeardown(tenantId, { ...session, state: "Stopping" }, latest);
     }
   }
@@ -2200,7 +2191,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
     if (placement.kind === "Placed") await this.offerAfter(tenantId, session, turn, placement.evict);
     if (placement.kind === "Waiting") {
-      await this.timers(tenantId, session.session_id, {
+      await this.timers(tenantId, {
         Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
       });
     }
@@ -2265,7 +2256,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, send, now);
     await this.offerAfter(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn, placement.evict);
-    await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
@@ -2335,7 +2325,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         turn.turn_id,
       );
     });
-    await this.timers(tenantId, session.session_id, { SnapshotAnswer: null });
     const moved = { ...session, host_id: hostId, box_id: boxId };
     if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
     const offer = await this.armOffer(tenantId, moved, turn);
@@ -2581,7 +2570,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const latest = this.latestTurn(sessionId, null);
     if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
     this.setSessionState(sessionId, "Stopping", now);
-    await this.timers(tenantId, sessionId, { Snapshot: null });
     const stopping = { ...session, state: "Stopping", updated_at: now };
     await this.snapshotOrTeardown(tenantId, stopping, latest);
     return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
@@ -2603,15 +2591,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     if (session.state !== "Archived") this.setSessionState(sessionId, "Archived", now);
-    await this.timers(tenantId, sessionId, {
-      FirstLine: null,
-      Total: null,
-      Snapshot: null,
-      SnapshotAnswer: null,
-      Teardown: null,
-      TeardownAnswer: null,
-      HostOffline: null,
-    });
+    await this.timers(tenantId, {});
     if (session.state === "Idle") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
@@ -2793,9 +2773,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (held !== undefined) {
-      return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
+      return this.timers(tenantId, { Teardown: { turnId: latest.turn_id, at: now } });
     }
-    return this.timers(tenantId, session.session_id, { Snapshot: { turnId: latest.turn_id, at: now } });
+    return this.timers(tenantId, { Snapshot: { turnId: latest.turn_id, at: now } });
   }
 
   private async armIdleEviction(tenantId: string, sessionId: string): Promise<void> {
@@ -2814,7 +2794,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (stored !== undefined) {
-      return this.timers(tenantId, sessionId, {
+      return this.timers(tenantId, {
         Teardown: { turnId: latest.turn_id, at: stored.created_at + IDLE_EVICTION_MS },
       });
     }
@@ -2822,7 +2802,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .exec("SELECT 1 FROM snapshot_failures WHERE session_id = ? AND turn_id = ? LIMIT 1", sessionId, latest.turn_id)
       .toArray();
     if (failed !== undefined) return;
-    await this.timers(tenantId, sessionId, {
+    await this.timers(tenantId, {
       Snapshot: { turnId: latest.turn_id, at: latest.updated_at + settingsOf(this.env).snapshotDelaySeconds * 1000 },
     });
   }
@@ -2846,7 +2826,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
     const seconds = settingsOf(this.env).snapshotDeadlineSeconds;
-    await this.timers(tenantId, session.session_id, {
+    await this.timers(tenantId, {
       TeardownAnswer: { turnId, at: Date.now() + seconds * 1000 },
     });
     await this.host(session.host_id).send({
@@ -2871,7 +2851,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (session.box_id !== message.boxId || session.state !== "Stopping") return null;
-    await this.timers(tenantId, session.session_id, { TeardownAnswer: null });
     if (message.type === "BoxGone") {
       this.setSessionState(session.session_id, "Stopped", Date.now());
       await this.evictionSettled(tenantId, session.session_id);
@@ -2920,7 +2899,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const now = Date.now();
     const turn = this.latestTurn(sessionId, null);
     if (turn === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
-    await this.timers(tenantId, sessionId, {
+    await this.timers(tenantId, {
       Snapshot: { turnId: turn.turn_id, at: now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
     });
   }
@@ -3505,7 +3484,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async failHostWork(tenantId: string, hostId: string, detail: string, now: number): Promise<void> {
     const running = this.ctx.storage.sql
-      .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running'", hostId)
+      .exec<{ session_id: string; turn_id: string }>(
+        "SELECT session_id, turn_id FROM turns WHERE host_id = ? AND state = 'Running'",
+        hostId,
+      )
       .toArray();
     for (const { turn_id } of running) {
       await this.failTurn(tenantId, turn_id, "RateLimited", detail, iso(now));
@@ -3521,7 +3503,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     for (const request of requests) {
       this.recordSnapshotFailure(request, "RateLimited", detail, iso(now));
-      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       await this.snapshotNotStored(tenantId, request, detail);
       if (this.sessionRow(request.session_id)?.state === "Stopping")
         this.setSessionState(request.session_id, "Idle", Date.now());
@@ -3535,17 +3516,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     now: number,
   ): Promise<void> {
     this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
+    if (presence === "Online") return;
     const inFlight = this.ctx.storage.sql
-      .exec<{ session_id: string; turn_id: string }>(
-        "SELECT session_id, turn_id FROM turns WHERE host_id = ? AND state = 'Running'",
-        hostId,
-      )
+      .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running'", hostId)
       .toArray();
     const heartbeatDeadlineMs = settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
-    for (const { session_id, turn_id } of inFlight) {
-      await this.timers(tenantId, session_id, {
-        HostOffline: presence === "Offline" ? { turnId: turn_id, at: now + heartbeatDeadlineMs } : null,
-      });
+    for (const { turn_id } of inFlight) {
+      await this.timers(tenantId, { HostOffline: { turnId: turn_id, at: now + heartbeatDeadlineMs } });
     }
   }
 
@@ -3857,7 +3834,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
       );
     });
-    await this.timers(tenantId, session.session_id, {
+    await this.timers(tenantId, {
       Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
     });
     return { type: "TurnClaimed", turnId: turn.turn_id };
@@ -3919,7 +3896,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (message.type === "TurnRepositoryReady") {
       if (turn.state !== "Running" || turn.line_count > 0) return;
       const settings = settingsOf(this.env);
-      return this.timers(tenantId, session.session_id, {
+      return this.timers(tenantId, {
         FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
       });
     }
@@ -3972,7 +3949,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
     await this.requestSnapshot(tenantId, session, turn);
-    await this.timers(tenantId, session.session_id, { FirstLine: null, Total: null, HostOffline: null });
   }
 
   private snapshotAsked(turnId: string): boolean {
@@ -4015,10 +3991,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (release) this.startAfterTurnRelease(session, now);
     const delay =
       this.hostPrebuild(turn.session_id) === null && !release ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
-    await this.timers(tenantId, turn.session_id, {
-      FirstLine: null,
-      Total: null,
-      HostOffline: null,
+    await this.timers(tenantId, {
       Snapshot: { turnId: turn.turn_id, at: now + delay },
     });
     if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
@@ -4034,8 +4007,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session === null) return;
     const settings = settingsOf(this.env);
     const failedAt = iso(Date.now());
+    if (name === "Total" && due.deadline.at < this.budgetStart(turn) + settings.turnTotalBudgetSeconds * 1000) return;
     if (name === "Snapshot") {
       if (session.state !== "Idle" && session.state !== "Stopping") return;
+      if (
+        this.latestTurn(sessionId, null)?.turn_id !== turnId ||
+        this.snapshotAsked(turnId) ||
+        this.snapshotHolds(sessionId, turnId)
+      )
+        return;
       return this.requestSnapshot(tenantId, session, turn);
     }
     const host = await this.hostName(tenantId, session.host_id);
@@ -4043,7 +4023,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.snapshotUnanswered(tenantId, session, turn, host, failedAt);
       await this.evictionSettled(tenantId, sessionId);
       return this.prebuildUnstored(
-        tenantId,
         session,
         `host ${host} did not answer the snapshot within ${settings.snapshotDeadlineSeconds} seconds`,
       );
@@ -4187,8 +4166,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         hostId: turn.host_id,
         lines: [line],
       });
-    if (holding === undefined && turn.line_count === 0)
-      await this.timers(tenantId, session.session_id, { FirstLine: null });
     if ((this.heldLines.get(turn.turn_id)?.lines.length ?? 0) >= chunkLines)
       await this.storeLines(tenantId, session.session_id, turn.turn_id, chunkLines);
   }
@@ -4228,7 +4205,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       detail: `turn ${turnId} failed ${failure.reason}: ${failure.detail}`,
       fix: PREBUILD_FIX,
     } as const;
-    await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
+    await this.failPrebuild(prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
   }
 
   private boxUnborn(turn: TurnRow): boolean {
@@ -4274,7 +4251,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.env.R2_ACCESS_KEY_ID,
       this.env.R2_SECRET_ACCESS_KEY,
     ).presign("PUT", storageKey, deadlineSeconds, new Date(now));
-    await this.timers(tenantId, session.session_id, {
+    await this.timers(tenantId, {
       SnapshotAnswer: { turnId: turn.turn_id, at: now + deadlineSeconds * 1000 },
     });
     await this.host(session.host_id).send({
@@ -4450,13 +4427,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (message.type === "SnapshotFailed") {
-      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
-      await this.prebuildUnstored(tenantId, session, detail);
+      await this.prebuildUnstored(session, detail);
       await this.snapshotNotStored(tenantId, request, detail);
       if (session.state === "Stopping" && message.reason === "BoxNotFound") {
-        await this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
+        await this.timers(tenantId, { Teardown: { turnId: request.turn_id, at: Date.now() } });
       }
       if (session.state === "Stopping" && message.reason !== "BoxNotFound")
         await this.returnToIdle(tenantId, session.session_id);
@@ -4465,15 +4441,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const outcome = await this.snapshotOutcome(tenantId, hostId, request, message.uploadedBytes);
     if (outcome.kind === "Answered") return null;
     if (outcome.kind === "Rejected") {
-      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
-      await this.prebuildUnstored(tenantId, session, outcome.detail);
+      await this.prebuildUnstored(session, outcome.detail);
       await this.snapshotNotStored(tenantId, request, outcome.detail);
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
     const { now, completes, next } = outcome;
-    await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
     await this.prebuildStored(tenantId, request, message.uploadedBytes, now);
     const completed = this.sessionRow(session.session_id);
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")

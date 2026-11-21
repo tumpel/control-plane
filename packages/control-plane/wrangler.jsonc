@@ -19,7 +19,16 @@
   ],
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics" }],
   "queues": {
-    "consumers": [{ "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 }]
+    "producers": [{ "binding": "DEADLINES", "queue": "tumpel-deadlines" }],
+    "consumers": [
+      { "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 },
+      {
+        "queue": "tumpel-deadlines",
+        "max_batch_size": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "tumpel-deadlines-dlq"
+      }
+    ]
   },
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
@@ -74,7 +83,6 @@
     "bindings": [
       { "name": "TENANT", "class_name": "Tenant" },
       { "name": "HOST", "class_name": "HostChannel" },
-      { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
       { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
       { "name": "EVENTS", "class_name": "EventChannel" },
       { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -86,7 +94,8 @@
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
     { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+    { "tag": "v7", "deleted_classes": ["SessionTimer"] }
   ],
   "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
@@ -105,7 +114,16 @@
       ],
       "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics_dev" }],
       "queues": {
-        "consumers": [{ "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 }]
+        "producers": [{ "binding": "DEADLINES", "queue": "tumpel-deadlines-dev" }],
+        "consumers": [
+          { "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 },
+          {
+            "queue": "tumpel-deadlines-dev",
+            "max_batch_size": 1,
+            "max_retries": 3,
+            "dead_letter_queue": "tumpel-deadlines-dlq-dev"
+          }
+        ]
       },
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
@@ -160,7 +178,6 @@
         "bindings": [
           { "name": "TENANT", "class_name": "Tenant" },
           { "name": "HOST", "class_name": "HostChannel" },
-          { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
           { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
           { "name": "EVENTS", "class_name": "EventChannel" },
           { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -172,7 +189,8 @@
         { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
         { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
         { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+        { "tag": "v7", "deleted_classes": ["SessionTimer"] }
       ]
     }
   }

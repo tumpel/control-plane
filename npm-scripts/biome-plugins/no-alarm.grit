@@ -1,5 +1,5 @@
 language js(typescript)
 
 `setAlarm` as $found where {
-  register_diagnostic(span=$found, message="No alarms: send inline, check expiry at read time, and let a failure fail. SessionTimer holds the one setAlarm, excluded in biome.json.", severity="error")
+  register_diagnostic(span=$found, message="No alarms: send inline, check expiry at read time, and hand work to an async worker through a queue.", severity="error")
 }

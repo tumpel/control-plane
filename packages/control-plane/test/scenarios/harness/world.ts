@@ -31,7 +31,10 @@ const MIGRATIONS = new URL("../../../migrations/", import.meta.url);
 type DurableObjectClass = new (ctx: never, env: never) => object;
 type TenantApi = { call(operation: string, input: unknown): Promise<unknown> };
 type HostRecord = { hostId: string };
-type Worker = { fetch(request: Request, env: unknown): Promise<Response> };
+type Worker = {
+  fetch(request: Request, env: unknown): Promise<Response>;
+  queue(batch: unknown, env: unknown): Promise<void>;
+};
 type Tier = "Free" | "Configured";
 type Limit = { measure: string; window: string; limit: number };
 export type ScenarioLimits = {
@@ -79,7 +82,6 @@ const VAPID_PUBLIC_KEY = Buffer.concat([
   Buffer.from(VAPID_JWK.y ?? "", "base64url"),
 ]).toString("base64url");
 
-type SessionTimer = { set(tenantId: string, changes: Record<string, unknown>): Promise<void> };
 type TenantOperations = Record<string, (input: never) => unknown>;
 const REPOSITORY = "https://github.com/acme/app";
 
@@ -197,7 +199,6 @@ export class World {
   private readonly hosts = new Map<string, Host>();
   private api!: TenantApi;
   private tenants!: Namespace<object>;
-  private timers!: Namespace<SessionTimer>;
   private tenantApi!: (namespace: unknown, tenantId: string) => TenantApi;
   private worker!: Worker;
   private env: Record<string, unknown> = {};
@@ -224,10 +225,6 @@ export class World {
 
   private async boot(options: WorldOptions): Promise<void> {
     const Tenant = await imported<DurableObjectClass>("tenant.ts", "Tenant");
-    const SessionTimer = await imported<new (ctx: never, env: never) => SessionTimer>(
-      "session-timer.ts",
-      "SessionTimer",
-    );
     const WebhookSender = await imported<DurableObjectClass>("webhook-sender.ts", "WebhookSender");
     const unreachable = () =>
       this.runtime.stubs(() => ({
@@ -241,7 +238,7 @@ export class World {
       DB: this.db,
       STORE: this.store,
       RELEASES: this.releases,
-      SESSION_TIMER: null,
+      DEADLINES: this.runtime.queue("tumpel-deadlines", (batch) => this.worker.queue(batch, this.env)),
       HOST: this.runtime.stubs((hostId) => this.host(hostId)),
       EVENTS: ignored(),
       WEBHOOKS: options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env) : unreachable(),
@@ -269,8 +266,6 @@ export class World {
       TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
       WEBHOOK_RATE: new RateLimiter(600),
     };
-    this.timers = this.runtime.namespace(SessionTimer, () => env);
-    env.SESSION_TIMER = this.timers;
     this.tenants = this.runtime.namespace(Tenant, () => env);
     env.TENANT = this.tenants;
     this.env = env;
@@ -563,11 +558,6 @@ export class World {
     return z
       .object({ subscription: SubscriptionSchema })
       .parse(await this.call("getSubscription", { tenantId: TENANT_ID, subscriptionId })).subscription;
-  }
-
-  sessionTimer(name: string): { timer: SessionTimer; alarm(): Promise<number | null> } {
-    const { object, ctx } = this.timers.instance(name);
-    return { timer: object, alarm: () => ctx.storage.getAlarm() };
   }
 
   tenantOperations(): TenantOperations {

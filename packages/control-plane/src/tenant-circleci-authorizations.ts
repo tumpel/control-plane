@@ -18,9 +18,9 @@ import {
   timedOutDetail,
 } from "./circleci-oauth.ts";
 import { base64Url, randomToken, sameSecret } from "./crypto";
+import { armDeadlines, type CircleCIAuthorizationDeadline } from "./deadlines";
 import { seal, unseal } from "./envelope.ts";
 import type { Fetch } from "./github.ts";
-import type { CircleCIAuthorizationDeadline } from "./session-timer";
 import { TenantClaudeSetups } from "./tenant-claude-setups";
 
 type AuthorizationRow = {
@@ -147,14 +147,11 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     return { kind: "Stepped", authorization };
   }
 
-  private authorizationTimer(tenantId: string, circleCIAuthorizationId: string, at: number | null) {
-    return this.env.SESSION_TIMER.getByName(circleCIAuthorizationId).set(tenantId, {
-      CircleCIAuthorization: at === null ? null : { circleCIAuthorizationId, at },
-    });
+  private authorizationTimer(tenantId: string, circleCIAuthorizationId: string, at: number) {
+    return armDeadlines(this.env, tenantId, { CircleCIAuthorization: { circleCIAuthorizationId, at } });
   }
 
   private async failAuthorization(
-    tenantId: string,
     circleCIAuthorizationId: string,
     from: string,
     failure: { reason: CircleCIAuthorizationFailureReason; detail: string },
@@ -182,7 +179,6 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
       );
       return true;
     });
-    if (moved) await this.authorizationTimer(tenantId, circleCIAuthorizationId, null);
     return moved;
   }
 
@@ -256,7 +252,7 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
       return { kind: "Invalid", detail: stateMismatchDetail(circleCIAuthorizationId) };
     }
     if (redirect.kind === "Denied") {
-      const failed = await this.failAuthorization(tenantId, circleCIAuthorizationId, "('AwaitingRedirect')", {
+      const failed = await this.failAuthorization(circleCIAuthorizationId, "('AwaitingRedirect')", {
         reason: "AccessDenied",
         detail: deniedDetail(redirect),
       });
@@ -283,7 +279,7 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
   ): Promise<CircleCIAuthorizationStepped> {
     const id = row.circleci_authorization_id;
     const fail = async (reason: CircleCIAuthorizationFailureReason, detail: string) =>
-      (await this.failAuthorization(tenantId, id, "('Exchanging')", { reason, detail }))
+      (await this.failAuthorization(id, "('Exchanging')", { reason, detail }))
         ? this.present(tenantId, id)
         : notWaiting(id, "redirect address");
     const verifier = await unseal(await this.dataKey(), row.verifier_sealed, verifierContext(id), AUTHORIZE_AGAIN);
@@ -402,7 +398,6 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
       return true;
     });
     if (!completed) return notWaiting(circleCIAuthorizationId, "token");
-    await this.authorizationTimer(tenantId, circleCIAuthorizationId, null);
     return this.present(tenantId, circleCIAuthorizationId);
   }
 
@@ -446,13 +441,10 @@ export class TenantCircleCIAuthorizations extends TenantClaudeSetups {
     );
   }
 
-  protected async circleCIAuthorizationDeadlineReached(
-    tenantId: string,
-    deadline: CircleCIAuthorizationDeadline,
-  ): Promise<void> {
+  protected async circleCIAuthorizationDeadlineReached(deadline: CircleCIAuthorizationDeadline): Promise<void> {
     const row = this.authorizationRow(deadline.circleCIAuthorizationId);
     if (row === null || row.phase_due_at !== deadline.at) return;
-    await this.failAuthorization(tenantId, row.circleci_authorization_id, LIVE_PHASES, {
+    await this.failAuthorization(row.circleci_authorization_id, LIVE_PHASES, {
       reason: "AuthorizationTimedOut",
       detail: timedOutDetail(row.circleci_authorization_id, row.phase),
     });

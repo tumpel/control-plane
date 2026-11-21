@@ -230,20 +230,12 @@ const storePlacedRoot = async (storageKey: string, chunks: Placement[]): Promise
 };
 const releases = objects("RELEASES");
 
-const storeTimers = async (sessionId: string, timers: unknown, at: number): Promise<void> => {
-  const response = await call(`/__fixture/timers/${sessionId}`, {
-    method: "PUT",
-    body: JSON.stringify({ timers, at }),
+const reachDeadline = async (tenantId: string, name: string, deadline: Record<string, unknown>): Promise<void> => {
+  const response = await call("/__fixture/deadlines", {
+    method: "POST",
+    body: JSON.stringify({ tenantId, due: { name, deadline } }),
   });
   assert.equal(response.status, 204, await response.text());
-};
-
-const StoredTimersSchema = z.object({ deadlines: z.record(z.string(), z.unknown()) }).nullable();
-
-const storedTimers = async (sessionId: string): Promise<z.infer<typeof StoredTimersSchema>> => {
-  const response = await call(`/__fixture/timers/${sessionId}`);
-  assert.equal(response.status, 200, await response.clone().text());
-  return StoredTimersSchema.parse(await response.json());
 };
 
 const tenantSql = async (tenantId: string, query: string, ...bindings: (string | number)[]): Promise<unknown[]> => {
@@ -1650,7 +1642,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await getJson(`/v1/claude-setups?secretSetId=${secretSetId}`, ClaudeSetupSchema.array()), []);
   });
 
-  test("a Minting setup whose box says nothing lists as the one to resume, and listed or read past the host deadline fails SetupTimedOut and discards its box even when its alarm never fired", async () => {
+  test("a Minting setup whose box says nothing lists as the one to resume, and listed or read past the host deadline fails SetupTimedOut and discards its box even when its deadline message never arrived", async () => {
     const { bearer, host, getJson } = await tenant();
     const created = await postJson("/v1/secret-sets", { name: "Silent setup secrets", secrets: [] }, bearer);
     assert.equal(created.status, 200, await created.clone().text());
@@ -2293,11 +2285,14 @@ suite("sessions", { concurrency: 8 }, () => {
       failedAt: new Date().toISOString(),
     });
     assert.equal((await host.next("TurnOffer")).turnId, waiting.turnId);
-    const total = z
-      .object({ turnId: z.string(), at: z.number() })
-      .parse((await storedTimers(sessionId))?.deadlines.Total);
-    assert.equal(total.turnId, waiting.turnId);
-    assert.ok(total.at >= ended + SETTINGS.turnTotalBudgetSeconds * 1000, `${total.at} is before ${ended}`);
+    const [budget] = z
+      .object({ started_at: z.number() })
+      .array()
+      .parse(await tenantSql(tenantId, "SELECT started_at FROM turn_budget_starts WHERE turn_id = ?", waiting.turnId));
+    assert.ok(
+      budget !== undefined && budget.started_at >= ended,
+      "the budget of the waiting turn starts when it starts",
+    );
     assert.equal((await tool("tumpel_turn_get", { turnId: waiting.turnId }, TurnSchema)).state, "Offered");
   });
 
@@ -2477,8 +2472,6 @@ suite("sessions", { concurrency: 8 }, () => {
       (session) => session.state === "Idle",
     );
 
-    const timers = await storedTimers(sessionId);
-    assert.equal(timers?.deadlines.Snapshot, undefined);
     assert.equal(host.snapshotRequestsFor(sessionId), 0);
   });
 
@@ -2519,7 +2512,7 @@ suite("sessions", { concurrency: 8 }, () => {
       { ...(await sessionStart()), prompt: "wait for my snapshot" },
       StartedSessionSchema,
     );
-    const { sessionId, tenantId } = started.session;
+    const { tenantId } = started.session;
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
@@ -2527,8 +2520,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
 
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { SnapshotAnswer: { turnId, at } } }, at);
+    await reachDeadline(tenantId, "SnapshotAnswer", { turnId, at: Date.now() });
     const failed = await until(
       "the turn reading Failed",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -2774,7 +2766,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
     const refused = await host.refusal();
     assert.equal(refused.seq, host.carried().sent);
-    assert.ok((await storedTimers(request.sessionId))?.deadlines.SnapshotAnswer);
     assert.match(refused.reason, /failed to handle SnapshotDone: .*manifest/);
 
     host.send({
@@ -2847,8 +2838,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const started = StartedSessionSchema.parse(await response.json());
     const offer = await host.next("TurnOffer");
     const { sessionId, tenantId } = started.session;
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
+    await reachDeadline(tenantId, "Total", { turnId: offer.turnId, at: Date.now() });
 
     const failed = await until(
       "the turn reading Failed",
@@ -2878,8 +2868,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const started = StartedSessionSchema.parse(await response.json());
     const offer = await host.next("TurnOffer");
     const { sessionId, tenantId } = started.session;
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
+    await reachDeadline(tenantId, "Total", { turnId: offer.turnId, at: Date.now() });
 
     await until(
       "the turn reading Failed",
@@ -2940,13 +2929,8 @@ suite("sessions", { concurrency: 8 }, () => {
       StartedSessionSchema,
     );
     const unclaimedOffer = await host.next("TurnOffer");
-    const { sessionId, tenantId } = unclaimed.session;
-    const at = Date.now() + 500;
-    await storeTimers(
-      sessionId,
-      { tenantId, sessionId, deadlines: { Total: { turnId: unclaimedOffer.turnId, at } } },
-      at,
-    );
+    const { tenantId } = unclaimed.session;
+    await reachDeadline(tenantId, "Total", { turnId: unclaimedOffer.turnId, at: Date.now() });
 
     const firstWait = Date.now();
     const failed = await tool(
@@ -4040,18 +4024,20 @@ suite("sessions", { concurrency: 8 }, () => {
     const snapshot = await host.next("SnapshotRequest");
     await storeRoot(snapshot.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    const timers = await until(
-      "the idle teardown armed",
-      () => storedTimers(sessionId),
-      (stored) => stored?.deadlines.Teardown !== undefined,
+    await until(
+      "the snapshot stored",
+      () =>
+        tenantSql(
+          tenantId,
+          "SELECT 1 FROM snapshots WHERE session_id = ? AND turn_id = ?",
+          sessionId,
+          idle.offer.turnId,
+        ),
+      (rows) => rows.length > 0,
     );
-    const armed = z.object({ turnId: z.string(), at: z.number() }).parse(timers?.deadlines.Teardown);
-    assert.equal(armed.turnId, idle.offer.turnId);
-    assert.ok(armed.at > Date.now() + 14 * 60 * 1000, `the eviction is due at ${armed.at}, before 15 idle minutes`);
     assert.equal(host.holds("BoxTeardown"), false);
 
-    const at = Date.now();
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Teardown: { turnId: armed.turnId, at } } }, at);
+    await reachDeadline(tenantId, "Teardown", { turnId: idle.offer.turnId, at: Date.now() });
     assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: idle.offer.boxId });
     host.send({ type: "BoxGone", sessionId, boxId: idle.offer.boxId });
     const evicted = await until(
@@ -4107,18 +4093,15 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual([after.turnId, after.boxId], [waiting.turnId, first.boxId]);
     await storeRoot(after.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: after.snapshotId, uploadedBytes: 14 });
-    const timers = await until(
-      "the idle teardown armed",
-      () => storedTimers(sessionId),
-      (stored) => stored?.deadlines.Teardown !== undefined,
+    await until(
+      "the snapshot stored",
+      () =>
+        tenantSql(tenantId, "SELECT 1 FROM snapshots WHERE session_id = ? AND turn_id = ?", sessionId, waiting.turnId),
+      (rows) => rows.length > 0,
     );
-    const armed = z.object({ turnId: z.string(), at: z.number() }).parse(timers?.deadlines.Teardown);
-    assert.equal(armed.turnId, waiting.turnId);
-    assert.ok(armed.at > Date.now() + 14 * 60 * 1000, `the eviction is due at ${armed.at}, before 15 idle minutes`);
     assert.equal(host.holds("BoxTeardown"), false);
 
-    const at = Date.now();
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Teardown: { turnId: armed.turnId, at } } }, at);
+    await reachDeadline(tenantId, "Teardown", { turnId: waiting.turnId, at: Date.now() });
     assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: first.boxId });
   });
 

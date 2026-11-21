@@ -3,7 +3,7 @@ import worker, { Tenant as BaseTenant, WebhookSender as BaseWebhookSender, type 
 import type { NewTenantEvent } from "../../src/tenant-events.ts";
 import { webhookSenderName } from "../../src/webhook-sender.ts";
 
-export { EventChannel, HostChannel, SessionTimer, TenantMetrics } from "../../src/index.ts";
+export { EventChannel, HostChannel, TenantMetrics } from "../../src/index.ts";
 
 export class Tenant extends BaseTenant {
   createFixtureSubscription(sessionId: string, now: number): void {

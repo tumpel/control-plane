@@ -94,7 +94,6 @@ export class SqlStorage {
 class Storage {
   readonly sql = new SqlStorage(new DatabaseSync(":memory:"));
   private readonly values = new Map<string, unknown>();
-  alarmAt: number | null = null;
 
   transactionSync<T>(run: () => T): T {
     return this.sql.inTransaction(run);
@@ -125,18 +124,6 @@ class Storage {
 
   async deleteAll(): Promise<void> {
     this.values.clear();
-  }
-
-  async setAlarm(at: number): Promise<void> {
-    this.alarmAt = at;
-  }
-
-  async deleteAlarm(): Promise<void> {
-    this.alarmAt = null;
-  }
-
-  async getAlarm(): Promise<number | null> {
-    return this.alarmAt;
   }
 }
 
@@ -181,7 +168,6 @@ export class DurableObjectState {
   }
 }
 
-type Alarmed = { alarm?: () => Promise<void> };
 type DurableObjectClass<T> = new (ctx: never, env: never) => T;
 
 export class Namespace<T extends object> {
@@ -234,8 +220,23 @@ export class Namespace<T extends object> {
   }
 }
 
+type Delivered = { queue: string; messages: { body: unknown; ack(): void; retry(): void }[] };
+
+export class FakeQueue {
+  readonly delayed: { at: number; body: unknown }[] = [];
+
+  async send(body: unknown, options?: { delaySeconds?: number }): Promise<void> {
+    this.delayed.push({ at: Date.now() + (options?.delaySeconds ?? 0) * 1000, body });
+  }
+
+  async sendBatch(messages: Iterable<{ body: unknown; delaySeconds?: number }>): Promise<void> {
+    for (const { body, delaySeconds } of messages) await this.send(body, { delaySeconds });
+  }
+}
+
 export class Runtime {
-  private readonly objects: { object: Alarmed; ctx: DurableObjectState }[] = [];
+  private readonly objects: { object: object; ctx: DurableObjectState }[] = [];
+  private readonly queues: { name: string; queue: FakeQueue; deliver: (batch: Delivered) => Promise<void> }[] = [];
 
   constructor(start: number) {
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: start });
@@ -243,6 +244,12 @@ export class Runtime {
 
   namespace<T extends object>(Class: DurableObjectClass<T>, env: () => unknown): Namespace<T> {
     return new Namespace(this, (ctx) => new Class(ctx as never, env() as never));
+  }
+
+  queue(name: string, deliver: (batch: Delivered) => Promise<void>): FakeQueue {
+    const queue = new FakeQueue();
+    this.queues.push({ name, queue, deliver });
+    return queue;
   }
 
   stubs<T extends object>(create: (name: string) => T): Namespace<T> {
@@ -265,14 +272,19 @@ export class Runtime {
     const until = Date.now() + ms;
     for (;;) {
       await this.settle();
-      const due = this.objects
-        .filter(({ ctx }) => ctx.storage.alarmAt !== null && (ctx.storage.alarmAt ?? Infinity) <= until)
-        .sort((a, b) => (a.ctx.storage.alarmAt ?? 0) - (b.ctx.storage.alarmAt ?? 0))[0];
-      if (due === undefined) break;
-      const at = due.ctx.storage.alarmAt ?? until;
-      if (at > Date.now()) mock.timers.setTime(at);
-      due.ctx.storage.alarmAt = null;
-      await due.object.alarm?.();
+      const next = this.queues
+        .flatMap(({ name, queue, deliver }) => queue.delayed.map((delayed) => ({ name, queue, deliver, delayed })))
+        .filter(({ delayed }) => delayed.at <= until)
+        .sort((a, b) => a.delayed.at - b.delayed.at)[0];
+      if (next === undefined) break;
+      if (next.delayed.at > Date.now()) mock.timers.setTime(next.delayed.at);
+      next.queue.delayed.splice(next.queue.delayed.indexOf(next.delayed), 1);
+      await next.deliver({
+        queue: next.name,
+        messages: [
+          { body: next.delayed.body, ack: () => undefined, retry: () => next.queue.delayed.push(next.delayed) },
+        ],
+      });
     }
     if (until > Date.now()) mock.timers.setTime(until);
     await this.settle();

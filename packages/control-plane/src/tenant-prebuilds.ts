@@ -19,6 +19,7 @@ import {
   type WorkflowCompleted,
 } from "./circleci.ts";
 import type { CircleCICredentialRow } from "./circleci-oauth.ts";
+import { armDeadlines, type DeadlineChanges, type PrebuildDueDeadline } from "./deadlines";
 import { seal, unseal } from "./envelope.ts";
 import {
   type GitHubRepository,
@@ -42,7 +43,6 @@ import {
 import { appKey, storedApp } from "./github-store.ts";
 import { keyStoreOf } from "./key-store.ts";
 import { type ConfigSource, inputDigest, readDefaultBranch, readInputs } from "./prebuild-inputs.ts";
-import type { DeadlineChanges, PrebuildDueDeadline } from "./session-timer";
 import { settingsOf } from "./settings";
 import { TenantPushSubscriptions } from "./tenant-push-subscriptions.ts";
 import { type FailureReport, type NewSession, PREBUILD_ARCHITECTURE, type Started } from "./tenant-sessions";
@@ -400,7 +400,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
   }
 
   private async armDispatch(tenantId: string, prebuildId: string, now: number): Promise<Prebuild> {
-    await this.prebuildTimers(tenantId, prebuildId, {
+    await this.prebuildTimers(tenantId, {
       PrebuildDispatch: { prebuildId, at: now + settingsOf(this.env).prebuildDispatchBudgetSeconds * 1000 },
     });
     const prebuild = this.getPrebuild(tenantId, prebuildId);
@@ -436,12 +436,11 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     };
   }
 
-  private prebuildTimers(tenantId: string, prebuildId: string, changes: DeadlineChanges): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(prebuildId).set(tenantId, changes);
+  private prebuildTimers(tenantId: string, changes: DeadlineChanges): Promise<void> {
+    return armDeadlines(this.env, tenantId, changes);
   }
 
   protected async failPrebuild(
-    tenantId: string,
     prebuildId: string,
     from: readonly string[],
     report: FailureReport,
@@ -474,7 +473,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
       );
       return true;
     });
-    if (failed) await this.prebuildTimers(tenantId, prebuildId, { PrebuildDispatch: null, PrebuildBuild: null });
     return failed;
   }
 
@@ -486,8 +484,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
       prebuildId,
     ).rowsWritten;
     if (moved === 0) return;
-    await this.prebuildTimers(tenantId, prebuildId, {
-      PrebuildDispatch: null,
+    await this.prebuildTimers(tenantId, {
       PrebuildBuild: { prebuildId, at: now + settingsOf(this.env).prebuildBuildBudgetSeconds * 1000 },
     });
   }
@@ -595,7 +592,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
         return;
       case "completed":
         await this.failPrebuild(
-          tenantId,
           prebuildId,
           ["Dispatched", "Building"],
           event.conclusion === "success"
@@ -626,7 +622,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
         .exec<{ head_sha: string }>("SELECT head_sha FROM prebuilds WHERE prebuild_id = ?", prebuildId)
         .one();
       await this.failPrebuild(
-        tenantId,
         prebuildId,
         ["Dispatched"],
         {
@@ -643,7 +638,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
       .exec("SELECT 1 FROM prebuild_uploads WHERE prebuild_id = ?", prebuildId)
       .toArray();
     await this.failPrebuild(
-      tenantId,
       prebuildId,
       ["Building"],
       upload === undefined
@@ -844,7 +838,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
   ): Promise<CircleCIJobBound> {
     const prebuild = this.prebuildOf(tenantId, prebuildId);
     await this.failPrebuild(
-      tenantId,
       prebuildId,
       ["Dispatched", "Building"],
       {
@@ -911,7 +904,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
       upload.layerDigest,
       upload.layerSizeBytes,
     ).rowsWritten;
-    if (moved > 0) await this.prebuildTimers(tenantId, prebuildId, { PrebuildBuild: null });
     return this.uploadRecorded(tenantId, prebuildId, moved > 0);
   }
 
@@ -1190,7 +1182,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
         detail: `${run.detail}, running pipeline definition ${project.pipelineDefinitionId} of ${project.projectSlug}${reconnect}`,
       };
     }
-    await this.prebuildTimers(tenantId, prebuildId, {
+    await this.prebuildTimers(tenantId, {
       PrebuildBuild: { prebuildId, at: now + settingsOf(this.env).prebuildBuildBudgetSeconds * 1000 },
     });
     const prebuild = this.getPrebuild(tenantId, prebuildId);
@@ -1198,7 +1190,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     return { kind: "Dispatched", prebuild };
   }
 
-  protected async circleCIWorkflowCompleted(tenantId: string, event: WorkflowCompleted, now: number): Promise<void> {
+  protected async circleCIWorkflowCompleted(event: WorkflowCompleted, now: number): Promise<void> {
     if (event.type !== "workflow-completed" || event.workflow.name !== CIRCLECI_WORKFLOW) return;
     const [row] = this.ctx.storage.sql
       .exec<{ prebuild_id: string }>(
@@ -1209,7 +1201,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     if (row === undefined) return;
     const { status, url } = event.workflow;
     await this.failPrebuild(
-      tenantId,
       row.prebuild_id,
       ["Dispatched", "Building"],
       status === "success"
