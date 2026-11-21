@@ -38,6 +38,7 @@ export type ControlConnection =
 
 export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
+const RATE_LIMITED_MESSAGES: ReadonlySet<HostMessage["type"]> = new Set(["TurnLine", "TelemetryBatch"]);
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -358,7 +359,7 @@ export const receive = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  const overRate = await context.admitFrame();
+  const overRate = RATE_LIMITED_MESSAGES.has(envelope.message.type) ? await context.admitFrame() : null;
   if (overRate !== null) {
     context.ledger.save(outcome.ledger);
     refuseFrame(context.port, envelope.seq, overRate);

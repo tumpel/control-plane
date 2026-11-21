@@ -18,6 +18,7 @@ import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import { limitsOf, type TenantTier, tierLimits } from "./limits.ts";
+import { meteredState } from "./metered-state.ts";
 import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
 import {
@@ -42,7 +43,7 @@ import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { PUSH_WAKES_DUE } from "./tenant-push-subscriptions.ts";
 import { memberRows, sealContext } from "./tenant-sessions";
-import { meteredState, type SavedCounter, UsageMeter } from "./usage-meter.ts";
+import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
 export type PersonaWrite = Pick<
@@ -194,19 +195,22 @@ const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
 const USAGE_KEY = "usage";
+const TIER_FIRST_RETRY_MS = 1_000;
 
-const tierOf = async (db: D1Database, tenantId: string): Promise<TenantTier> => {
+const tierOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<TenantTier> => {
   const row = await db
     .prepare("SELECT tier FROM tenants WHERE tenant_id = ?")
     .bind(tenantId)
     .first<{ tier: TenantTier }>();
-  if (row === null) throw new Error(`tenant ${tenantId} has no row in the central tenants table, so it has no tier`);
-  return row.tier;
+  return row?.tier ?? fallback;
 };
+
+type TierRead = { settled: boolean; retries: number; retryAt: number; reading: Promise<void> | null };
 
 export class Tenant extends TenantConnectors {
   private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
   private meter: UsageMeter | undefined;
+  private readonly tierRead: TierRead = { settled: false, retries: 0, retryAt: 0, reading: null };
   private readonly opened: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -225,9 +229,44 @@ export class Tenant extends TenantConnectors {
   private async openMeter(): Promise<void> {
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) return;
-    const tier = await tierOf(this.env.DB, tenantId);
+    const tier = limitsOf(this.env).defaultTier;
     const saved = (await this.ctx.storage.get<SavedCounter[]>(USAGE_KEY)) ?? [];
     this.meter = new UsageMeter(tier, tierLimits(limitsOf(this.env), tier), saved, this.cursors, Date.now());
+  }
+
+  private async settleTier(now: number): Promise<void> {
+    const read = this.tierRead;
+    if (read.settled || read.retries > RETRY_LIMIT || now < read.retryAt) return;
+    read.reading ??= this.readTier().finally(() => {
+      read.reading = null;
+    });
+    await read.reading;
+  }
+
+  private async readTier(): Promise<void> {
+    const read = this.tierRead;
+    const tenantId = this.tenantName();
+    const { defaultTier } = limitsOf(this.env);
+    const outcome = await tierOf(this.env.DB, tenantId, defaultTier).then(
+      (tier) => ({ ok: true as const, tier }),
+      (error: unknown) => ({ ok: false as const, error: errorOf(error) }),
+    );
+    if (outcome.ok) {
+      read.settled = true;
+      this.usageMeter().retier(outcome.tier, tierLimits(limitsOf(this.env), outcome.tier), Date.now());
+      return;
+    }
+    read.retries += 1;
+    if (read.retries > RETRY_LIMIT) {
+      console.error(
+        `TenantTierUnread: tenant ${tenantId} stays on the default ${defaultTier} tier until the object restarts, because reading its tier from D1 failed ${RETRY_LIMIT + 1} times: ${outcome.error.message}`,
+      );
+      return;
+    }
+    read.retryAt = Date.now() + backoffMs(read.retries, TIER_FIRST_RETRY_MS);
+    console.error(
+      `TenantTierRetry: tenant ${tenantId} retry ${read.retries} of ${RETRY_LIMIT} reading its tier from D1, on the default ${defaultTier} tier meanwhile: ${outcome.error.message}`,
+    );
   }
 
   private usageMeter(): UsageMeter {
@@ -235,10 +274,10 @@ export class Tenant extends TenantConnectors {
     return this.meter;
   }
 
-  private async meterUsage(operation: string | null): Promise<void> {
+  private async meterUsage(operation: string | null, requested: boolean): Promise<void> {
     const meter = this.usageMeter();
     const now = Date.now();
-    for (const signal of meter.count(operation, now)) {
+    for (const signal of meter.count(operation, now, requested)) {
       if (signal.event === "UsageLimitReached") {
         console.error(
           `UsageLimitReached: tenant ${this.tenantName()} on the ${signal.tier} tier spent its limit of ${signal.limit} ${signal.measure} per ${signal.window.toLowerCase()}; it is refused until ${signal.resetsAt}`,
@@ -247,19 +286,30 @@ export class Tenant extends TenantConnectors {
       appendEvent(this.ctx.storage.sql, signal, now);
       this.eventsAppended = true;
     }
-    const saved = meter.rolledOver(now);
+    const saved = meter.saveDue(now);
     if (saved !== null) await this.ctx.storage.put(USAGE_KEY, saved);
   }
 
   async handle(request: TenantRequest): Promise<TenantResponse> {
     await this.opened;
+    await this.settleTier(Date.now());
+    return this.serve(request, null);
+  }
+
+  async handleForTenant(request: TenantRequest): Promise<TenantResponse> {
+    await this.opened;
     const operation = typeof request.operation === "string" ? request.operation : "";
+    await this.settleTier(Date.now());
     const spent = operation === "readUsage" ? null : this.usageMeter().spent(operation, Date.now());
     if (spent !== null) return spent;
+    return this.serve(request, operation);
+  }
+
+  private async serve(request: TenantRequest, operation: string | null): Promise<TenantResponse> {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.meterUsage(operation);
+    await this.meterUsage(operation, true);
     await this.followUp();
     await this.armAlarm();
     return response;
@@ -268,7 +318,7 @@ export class Tenant extends TenantConnectors {
   override async alarm(): Promise<void> {
     await this.opened;
     const now = Date.now();
-    await this.meterUsage(null);
+    await this.meterUsage(null, false);
     const tenantId = this.tenantName();
     const failed = [
       await this.step("push delivery", () => this.deliverPushes(tenantId, now)),
@@ -405,8 +455,11 @@ export class Tenant extends TenantConnectors {
         failedAt ?? Number.MIN_SAFE_INTEGER,
       )
       .toArray();
-    if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(Math.max(next.at, retry?.at ?? next.at));
+    const flushAt = this.meter?.flushAt() ?? null;
+    const queued = next?.at === null || next?.at === undefined ? null : Math.max(next.at, retry?.at ?? next.at);
+    const at = queued === null || flushAt === null ? (queued ?? flushAt) : Math.min(queued, flushAt);
+    if (at === null) return this.ctx.storage.deleteAlarm();
+    return this.ctx.storage.setAlarm(at);
   }
 
   private readonly operations: TenantHandlers = {

@@ -66,7 +66,8 @@
   "ratelimits": [
     { "name": "TENANT_READ_RATE", "namespace_id": "1001", "simple": { "limit": 600, "period": 60 } },
     { "name": "TENANT_WRITE_RATE", "namespace_id": "1002", "simple": { "limit": 120, "period": 60 } },
-    { "name": "HOST_FRAME_RATE", "namespace_id": "1003", "simple": { "limit": 6000, "period": 60 } }
+    { "name": "HOST_FRAME_RATE", "namespace_id": "1003", "simple": { "limit": 6000, "period": 60 } },
+    { "name": "WEBHOOK_RATE", "namespace_id": "1004", "simple": { "limit": 600, "period": 60 } }
   ],
   "durable_objects": {
     "bindings": [
@@ -150,7 +151,8 @@
       "ratelimits": [
         { "name": "TENANT_READ_RATE", "namespace_id": "2001", "simple": { "limit": 600, "period": 60 } },
         { "name": "TENANT_WRITE_RATE", "namespace_id": "2002", "simple": { "limit": 120, "period": 60 } },
-        { "name": "HOST_FRAME_RATE", "namespace_id": "2003", "simple": { "limit": 6000, "period": 60 } }
+        { "name": "HOST_FRAME_RATE", "namespace_id": "2003", "simple": { "limit": 6000, "period": 60 } },
+        { "name": "WEBHOOK_RATE", "namespace_id": "2004", "simple": { "limit": 600, "period": 60 } }
       ],
       "durable_objects": {
         "bindings": [

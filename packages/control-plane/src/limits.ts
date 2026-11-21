@@ -63,6 +63,8 @@ export const windowEnd = (window: UsageWindow, now: number): number => windowSta
 
 export const NEAR_LIMIT_SHARE = 0.8;
 
+export const WEBHOOK_DELIVERIES_PER_MINUTE = 600;
+
 export const MAX_BODY_BYTES = 4_000_000;
 export const MAX_CONFIG_BODY_BYTES = 16_000_000;
 const MAX_GITHUB_WEBHOOK_BODY_BYTES = 25_000_000;

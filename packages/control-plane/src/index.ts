@@ -68,7 +68,7 @@ import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
 import { handleCircleCIAuthorizations } from "./circleci-authorizations.ts";
-import { handleCircleCIEvents } from "./circleci-events.ts";
+import { EVENTS_PATH as CIRCLECI_EVENTS_PATH, handleCircleCIEvents } from "./circleci-events.ts";
 import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, planConfig } from "./config-apply.ts";
@@ -93,7 +93,7 @@ import {
 } from "./device";
 import type { EventChannel } from "./event-channel.ts";
 import { handleEvents } from "./events.ts";
-import { REPOSITORY_TOKEN } from "./github.ts";
+import { WEBHOOK_PATH as GITHUB_WEBHOOK_PATH, REPOSITORY_TOKEN } from "./github.ts";
 import { handleGitHubConnection, handleGitHubPage, handleGitHubWebhook } from "./github-handlers.ts";
 import { effectiveVersions, HARNESS_CATALOG } from "./harness-catalog";
 import type { HostChannel } from "./host-channel";
@@ -205,7 +205,7 @@ import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { handlePushSubscriptions } from "./push-subscriptions.ts";
-import { limitRefused, type RateLimit, rateLimited } from "./rate-limit.ts";
+import { admitCaller, limitRefused, type RateLimit, rateLimited } from "./rate-limit.ts";
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
 import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
@@ -249,6 +249,7 @@ export interface Env extends SignerEnv {
   TUMPEL_LIMITS: unknown;
   TENANT_READ_RATE: RateLimit;
   TENANT_WRITE_RATE: RateLimit;
+  WEBHOOK_RATE: RateLimit;
   HOST_FRAME_RATE: RateLimit;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
@@ -356,20 +357,24 @@ const turnCaller = async (env: Env, token: string, now: number): Promise<Caller 
 
 const deviceCaller = async (request: Request, env: Env): Promise<Caller | Response> => {
   const connector = connectorCallers.get(request);
-  if (connector !== undefined) return connector;
+  if (connector !== undefined) {
+    await admitCaller(env, connector.tenantId);
+    return connector;
+  }
   const token = bearerOf(request);
   const now = Date.now();
   const caller =
     (await callerForDeviceToken(env.DB, token, now)) ??
     (await callerForAccessToken(env.DB, token, now)) ??
     (await turnCaller(env, token, now));
-  return (
-    caller ??
-    signedOut(
+  if (caller === null) {
+    return signedOut(
       "this device or access token is missing, unknown, expired or revoked",
       "Run tumpel login, or sign the dashboard in again",
-    )
-  );
+    );
+  }
+  await admitCaller(env, caller.tenantId);
+  return caller;
 };
 
 const handleWhoami = async (request: Request, env: Env): Promise<Response> => {
@@ -1785,6 +1790,9 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   });
 };
 
+const signedWebhook = (pathname: string): boolean =>
+  pathname === GITHUB_WEBHOOK_PATH || CIRCLECI_EVENTS_PATH.test(pathname);
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -1795,7 +1803,7 @@ export default {
     }
     const bounded = await withinBodyBound(request, bodyBoundOf(request.method, url.pathname));
     if (bounded instanceof Response) return withHeaders(bounded, cors);
-    const response = await dispatch(bounded, url, rateLimited(env, request.method)).catch(limitRefused);
+    const response = await dispatch(bounded, url, rateLimited(env, signedWebhook(url.pathname))).catch(limitRefused);
     return withHeaders(response, cors);
   },
   async queue(batch, env): Promise<void> {

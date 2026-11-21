@@ -95,12 +95,15 @@ test("a host frame over the 4 MB bound is refused and the channel stays open for
   assert.equal(channel.closed, null);
 });
 
-test("a host sending frames past its per-minute rate has each extra frame refused while the channel stays open", async () => {
+const turnLine = (lineSeq: number): HostMessage => ({ type: "TurnLine", turnId: "turn-1", lineSeq, text: "line" });
+
+test("a host sending turn lines past its per-minute rate has each extra line refused, while its outcome frames still land", async () => {
   const { channel, frame, refusals } = await openChannel(new RateLimiter(FRAMES_PER_MINUTE));
 
-  for (const seq of [1, 2, 3, 4, 5]) await frame(seq, snapshotDone(`snap-${seq}`));
+  for (const seq of [1, 2, 3, 4, 5]) await frame(seq, turnLine(seq));
+  await frame(6, snapshotDone("snap-6"));
 
-  assert.deepEqual(channel.delivered, [1, 2, 3]);
+  assert.deepEqual(channel.delivered, [1, 2, 3, 6]);
   assert.deepEqual(refusals(), [
     `4: host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`,
     `5: host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`,

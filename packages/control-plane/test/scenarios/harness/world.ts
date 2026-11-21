@@ -261,6 +261,7 @@ export class World {
       TENANT_READ_RATE: new RateLimiter(this.limits.readsPerMinute),
       TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
       HOST_FRAME_RATE: new RateLimiter(this.limits.hostFramesPerMinute),
+      WEBHOOK_RATE: new RateLimiter(600),
     };
     this.timers = this.runtime.namespace(SessionTimer, () => env);
     env.SESSION_TIMER = this.timers;

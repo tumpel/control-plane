@@ -9,13 +9,15 @@ import {
   windowStart,
   writes,
 } from "./limits.ts";
+
 import type { TenantLimitRefusal } from "./tenant-api.ts";
 
 type Measure = z.infer<typeof TenantUsageMeasureSchema>;
 type TenantUsage = z.infer<typeof TenantUsageSchema>;
-type Rows = { readonly rowsRead: number; readonly rowsWritten: number };
 
 export type SavedCounter = { measure: Measure; window: UsageWindow; start: number; used: number; signalled: number };
+
+export type Rows = { readonly rowsRead: number; readonly rowsWritten: number };
 
 type Counter = TenantLimit & SavedCounter;
 
@@ -33,59 +35,50 @@ const NONE = 0;
 const NEAR = 1;
 const REACHED = 2;
 
-const meteredStorage = (storage: DurableObjectStorage, cursors: Rows[]): DurableObjectStorage =>
-  new Proxy(storage, {
-    get: (target, property) => {
-      if (property !== "sql") {
-        const value: unknown = Reflect.get(target, property);
-        return typeof value === "function" ? value.bind(target) : value;
-      }
-      return new Proxy(target.sql, {
-        get: (inner, name) => {
-          const member: unknown = Reflect.get(inner, name);
-          if (name !== "exec") return typeof member === "function" ? member.bind(inner) : member;
-          return (query: string, ...bindings: unknown[]) => {
-            const cursor = inner.exec(query, ...bindings);
-            cursors.push(cursor);
-            return cursor;
-          };
-        },
-      });
-    },
-  });
-
-export const meteredState = <Props>(ctx: DurableObjectState<Props>, cursors: Rows[]): DurableObjectState<Props> =>
-  new Proxy(ctx, {
-    get: (target, property) => {
-      if (property === "storage") return meteredStorage(target.storage, cursors);
-      const value: unknown = Reflect.get(target, property);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-
 const counts = (counter: Counter, operation: string | null): boolean => {
   if (operation === null) return counter.measure === "RowsWritten" || counter.measure === "RowsRead";
   if (counter.measure === "Writes" || counter.measure === "RowsWritten") return writes(operation);
   return true;
 };
 
+const MINUTE_MS = 60_000;
+
+const countersOf = (limits: TenantLimit[], saved: SavedCounter[], now: number): Counter[] =>
+  limits.map((limit) => {
+    const start = windowStart(limit.window, now);
+    const kept = saved.find(
+      (counter) => counter.measure === limit.measure && counter.window === limit.window && counter.start === start,
+    );
+    return { ...limit, start, used: kept?.used ?? 0, signalled: kept?.signalled ?? NONE };
+  });
+
 export class UsageMeter {
-  private readonly tier: TenantTier;
-  private readonly counters: Counter[];
+  private tier: TenantTier;
+  private counters: Counter[];
   private readonly cursors: Rows[];
-  private checkpoint: number;
+  private savedMinute: number | null = null;
+  private unsaved = false;
 
   constructor(tier: TenantTier, limits: TenantLimit[], saved: SavedCounter[], cursors: Rows[], now: number) {
     this.tier = tier;
     this.cursors = cursors;
-    this.checkpoint = windowStart("Minute", now);
-    this.counters = limits.map((limit) => {
-      const start = windowStart(limit.window, now);
-      const kept = saved.find(
-        (counter) => counter.measure === limit.measure && counter.window === limit.window && counter.start === start,
-      );
-      return { ...limit, start, used: kept?.used ?? 0, signalled: kept?.signalled ?? NONE };
-    });
+    this.counters = countersOf(limits, saved, now);
+  }
+
+  retier(tier: TenantTier, limits: TenantLimit[], now: number): void {
+    this.roll(now);
+    this.tier = tier;
+    this.counters = countersOf(limits, this.saved(), now);
+  }
+
+  private saved(): SavedCounter[] {
+    return this.counters.map(({ measure, window, start, used, signalled }) => ({
+      measure,
+      window,
+      start,
+      used,
+      signalled,
+    }));
   }
 
   private roll(now: number): void {
@@ -113,8 +106,9 @@ export class UsageMeter {
     };
   }
 
-  count(operation: string | null, now: number): UsageSignal[] {
+  count(operation: string | null, now: number, requested: boolean): UsageSignal[] {
     this.roll(now);
+    if (requested || this.savedMinute === null) this.unsaved = true;
     const drained = this.cursors.splice(0);
     const added: Record<Measure, number> = {
       Requests: operation === null ? 0 : 1,
@@ -156,16 +150,17 @@ export class UsageMeter {
     };
   }
 
-  rolledOver(now: number): SavedCounter[] | null {
+  saveDue(now: number): SavedCounter[] | null {
+    if (!this.unsaved) return null;
     const minute = windowStart("Minute", now);
-    if (minute === this.checkpoint) return null;
-    this.checkpoint = minute;
-    return this.counters.map(({ measure, window, start, used, signalled }) => ({
-      measure,
-      window,
-      start,
-      used,
-      signalled,
-    }));
+    if (minute === this.savedMinute) return null;
+    this.savedMinute = minute;
+    this.unsaved = false;
+    return this.saved();
+  }
+
+  flushAt(): number | null {
+    if (!this.unsaved || this.savedMinute === null) return null;
+    return this.savedMinute + MINUTE_MS;
   }
 }
