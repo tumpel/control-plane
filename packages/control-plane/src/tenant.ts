@@ -319,6 +319,8 @@ export class Tenant extends TenantConnectors {
     await this.opened;
     const now = Date.now();
     await this.meterUsage(null, false);
+    const queued = await this.queuedAt();
+    if (queued === null || queued > now) return this.armAlarm();
     const tenantId = this.tenantName();
     const failed = [
       await this.step("push delivery", () => this.deliverPushes(tenantId, now)),
@@ -438,7 +440,7 @@ export class Tenant extends TenantConnectors {
     }
   }
 
-  private async armAlarm(): Promise<void> {
+  private async queuedAt(): Promise<number | null> {
     const retry = await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY);
     const failedAt = await this.ctx.storage.get<number>(ALARM_FAILED_AT_KEY);
     const [next] = this.ctx.storage.sql
@@ -455,8 +457,12 @@ export class Tenant extends TenantConnectors {
         failedAt ?? Number.MIN_SAFE_INTEGER,
       )
       .toArray();
+    return next?.at === null || next?.at === undefined ? null : Math.max(next.at, retry?.at ?? next.at);
+  }
+
+  private async armAlarm(): Promise<void> {
     const flushAt = this.meter?.flushAt() ?? null;
-    const queued = next?.at === null || next?.at === undefined ? null : Math.max(next.at, retry?.at ?? next.at);
+    const queued = await this.queuedAt();
     const at = queued === null || flushAt === null ? (queued ?? flushAt) : Math.min(queued, flushAt);
     if (at === null) return this.ctx.storage.deleteAlarm();
     return this.ctx.storage.setAlarm(at);
