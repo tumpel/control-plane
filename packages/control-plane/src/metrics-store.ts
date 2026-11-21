@@ -1,11 +1,10 @@
 import type { MetricBatchSchema } from "@tumpel/schemas";
-import type { z } from "zod";
+import { z } from "zod";
 import {
   type ExponentialHistogram,
+  ExponentialHistogramSchema,
   histogramOf,
-  histogramQuantile,
   mergeHistograms,
-  parseHistogram,
 } from "./metrics-histogram.ts";
 
 export type MetricBatch = z.infer<typeof MetricBatchSchema>;
@@ -21,13 +20,15 @@ export interface MetricsLimits {
   seriesPerMetric: number;
   dimensionsPerPoint: number;
   dimensionLength: number;
-  expiredRowsPerWrite: number;
+  expiredWindowsPerFlush: number;
   minuteRetentionMs: number;
   hourRetentionMs: number;
   turnPointRetentionMs: number;
   seriesRetentionMs: number;
 }
 
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 
 export const METRICS_LIMITS: MetricsLimits = {
@@ -35,7 +36,7 @@ export const METRICS_LIMITS: MetricsLimits = {
   seriesPerMetric: 1_000,
   dimensionsPerPoint: 8,
   dimensionLength: 128,
-  expiredRowsPerWrite: 500,
+  expiredWindowsPerFlush: 4,
   minuteRetentionMs: 8 * DAY_MS,
   hourRetentionMs: 400 * DAY_MS,
   turnPointRetentionMs: 90 * DAY_MS,
@@ -44,7 +45,14 @@ export const METRICS_LIMITS: MetricsLimits = {
 
 export type Resolution = "Minute" | "Hour";
 
-const BUCKET_MS: Record<Resolution, number> = { Minute: 60_000, Hour: 3_600_000 };
+export const BUCKET_MS: Record<Resolution, number> = { Minute: MINUTE_MS, Hour: HOUR_MS };
+
+export const WINDOW_MS: Record<Resolution, number> = { Minute: HOUR_MS, Hour: DAY_MS };
+
+export const windowRetentionMs = (resolution: Resolution, limits: MetricsLimits): number =>
+  resolution === "Minute" ? Math.max(limits.minuteRetentionMs, limits.turnPointRetentionMs) : limits.hourRetentionMs;
+
+export const floorTo = (at: number, size: number): number => Math.floor(at / size) * size;
 
 export const OVERFLOW_DIMENSIONS: Readonly<Record<string, string>> = { "otel.metric.overflow": "true" };
 
@@ -68,32 +76,280 @@ export const normaliseDimensions = (
   return { entries, canonical };
 };
 
-const expire = (sql: MetricsSql, now: number, limits: MetricsLimits): void => {
-  const rows = limits.expiredRowsPerWrite;
-  for (const [resolution, retention] of [
-    ["Minute", limits.minuteRetentionMs],
-    ["Hour", limits.hourRetentionMs],
-  ] as const) {
-    sql.exec(
-      "DELETE FROM rollup WHERE (resolution, series_id, bucket_start) IN (SELECT resolution, series_id, bucket_start FROM rollup WHERE resolution = ? AND bucket_start < ? LIMIT ?)",
-      resolution,
-      now - retention,
-      rows,
-    );
-  }
-  sql.exec(
-    "DELETE FROM turn_point WHERE (series_id, at, turn_id) IN (SELECT series_id, at, turn_id FROM turn_point WHERE at < ? LIMIT ?)",
-    now - limits.turnPointRetentionMs,
-    rows,
-  );
-  sql.exec(
-    "DELETE FROM series WHERE series_id IN (SELECT s.series_id FROM metric m CROSS JOIN series s ON s.metric = m.metric AND s.last_seen_at < ? LIMIT ?)",
-    now - limits.seriesRetentionMs,
-    rows,
+const RollupSchema = z.object({
+  count: z.number().int().nonnegative(),
+  sum: z.number(),
+  min: z.number(),
+  max: z.number(),
+  histogram: ExponentialHistogramSchema,
+});
+
+const StoredRollupSchema = RollupSchema.extend({ seriesId: z.number().int(), bucketStart: z.number().int() });
+
+const StoredTurnSchema = z.object({
+  seriesId: z.number().int(),
+  at: z.number().int(),
+  turnId: z.string(),
+  sessionId: z.string(),
+  value: z.number(),
+});
+
+const WindowDocSchema = z.object({ rollups: z.array(StoredRollupSchema), turns: z.array(StoredTurnSchema) });
+
+const CatalogSeriesSchema = z.object({
+  seriesId: z.number().int(),
+  metric: z.string(),
+  dimensions: z.string(),
+  firstSeenAt: z.number().int(),
+  lastSeenAt: z.number().int(),
+});
+
+const CatalogSchema = z.object({ nextSeriesId: z.number().int(), series: z.array(CatalogSeriesSchema) });
+
+export type Rollup = z.infer<typeof RollupSchema>;
+export type StoredRollup = z.infer<typeof StoredRollupSchema>;
+export type StoredTurn = z.infer<typeof StoredTurnSchema>;
+export type WindowDoc = z.infer<typeof WindowDocSchema>;
+export type CatalogSeries = z.infer<typeof CatalogSeriesSchema>;
+export type Catalog = z.infer<typeof CatalogSchema>;
+
+export const EMPTY_CATALOG: Catalog = { nextSeriesId: 1, series: [] };
+export const EMPTY_WINDOW: WindowDoc = { rollups: [], turns: [] };
+
+const parsedWith = <T>(schema: z.ZodType<T>, stored: string, what: string): T => {
+  const parsed = schema.safeParse(JSON.parse(stored));
+  if (parsed.success) return parsed.data;
+  throw new Error(
+    `the stored metrics ${what} does not parse: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}; the metrics store wrote it, so the object is corrupt`,
   );
 };
 
-const declareInstruments = (sql: MetricsSql, instruments: MetricBatch["instruments"], now: number): void => {
+export const parseCatalog = (stored: string): Catalog => parsedWith(CatalogSchema, stored, "catalog");
+
+export const parseWindow = (stored: string): WindowDoc => parsedWith(WindowDocSchema, stored, "window");
+
+const rollupOf = (values: readonly number[]): Rollup => ({
+  count: values.length,
+  sum: values.reduce((sum, value) => sum + value, 0),
+  min: Math.min(...values),
+  max: Math.max(...values),
+  histogram: histogramOf(values),
+});
+
+export const combined = (left: Rollup, right: Rollup): Rollup => ({
+  count: left.count + right.count,
+  sum: left.sum + right.sum,
+  min: Math.min(left.min, right.min),
+  max: Math.max(left.max, right.max),
+  histogram: mergeHistograms(left.histogram, right.histogram),
+});
+
+interface PendingTurn {
+  at: number;
+  turnId: string;
+  sessionId: string;
+  value: number;
+}
+
+interface PendingSeries {
+  metric: string;
+  dimensions: NormalisedDimensions;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  minutes: Map<number, number[]>;
+  turns: PendingTurn[];
+}
+
+export type Pending = Map<string, PendingSeries>;
+
+const pendingSeries = (
+  pending: Pending,
+  metric: string,
+  dimensions: Readonly<Record<string, string>>,
+  at: number,
+  limits: MetricsLimits,
+): PendingSeries => {
+  const normalised = normaliseDimensions(dimensions, limits);
+  const key = `${metric} ${normalised.canonical}`;
+  const held = pending.get(key);
+  if (held !== undefined) {
+    held.firstSeenAt = Math.min(held.firstSeenAt, at);
+    held.lastSeenAt = Math.max(held.lastSeenAt, at);
+    return held;
+  }
+  const created: PendingSeries = {
+    metric,
+    dimensions: normalised,
+    firstSeenAt: at,
+    lastSeenAt: at,
+    minutes: new Map(),
+    turns: [],
+  };
+  pending.set(key, created);
+  return created;
+};
+
+const addValue = (series: PendingSeries, at: number, value: number): void => {
+  const minute = floorTo(at, MINUTE_MS);
+  const values = series.minutes.get(minute);
+  if (values === undefined) series.minutes.set(minute, [value]);
+  else values.push(value);
+};
+
+export const bufferBatch = (pending: Pending, batch: MetricBatch, limits: MetricsLimits): void => {
+  for (const { metric, dimensions, at, value } of batch.samples) {
+    const atMs = Date.parse(at);
+    addValue(pendingSeries(pending, metric, dimensions, atMs, limits), atMs, value);
+  }
+  for (const { metric, dimensions, at, value, turnId, sessionId } of batch.turns) {
+    const atMs = Date.parse(at);
+    const series = pendingSeries(pending, metric, dimensions, atMs, limits);
+    addValue(series, atMs, value);
+    series.turns.push({ at: atMs, turnId, sessionId, value });
+  }
+};
+
+export interface WindowUpdate {
+  resolution: Resolution;
+  windowStart: number;
+  rollups: StoredRollup[];
+  turns: StoredTurn[];
+}
+
+const rollupKey = ({ seriesId, bucketStart }: { seriesId: number; bucketStart: number }): string =>
+  `${seriesId} ${bucketStart}`;
+
+const turnKey = ({ seriesId, at, turnId }: StoredTurn): string => `${seriesId} ${at} ${turnId}`;
+
+const turnOrder = (left: StoredTurn, right: StoredTurn): number =>
+  left.at - right.at ||
+  left.seriesId - right.seriesId ||
+  (left.turnId < right.turnId ? -1 : left.turnId > right.turnId ? 1 : 0);
+
+const mergedRollups = (left: readonly StoredRollup[], right: readonly StoredRollup[]): StoredRollup[] => {
+  const merged = new Map<string, StoredRollup>();
+  for (const rollup of [...left, ...right]) {
+    const key = rollupKey(rollup);
+    const held = merged.get(key);
+    merged.set(key, held === undefined ? rollup : { ...held, ...combined(held, rollup) });
+  }
+  return [...merged.values()].sort((a, b) => a.seriesId - b.seriesId || a.bucketStart - b.bucketStart);
+};
+
+const mergedTurns = (left: readonly StoredTurn[], right: readonly StoredTurn[]): StoredTurn[] => {
+  const merged = new Map<string, StoredTurn>();
+  for (const turn of [...left, ...right]) {
+    const key = turnKey(turn);
+    if (!merged.has(key)) merged.set(key, turn);
+  }
+  return [...merged.values()].sort(turnOrder);
+};
+
+export const mergeWindow = (stored: WindowDoc, update: WindowUpdate): WindowDoc => ({
+  rollups: mergedRollups(stored.rollups, update.rollups),
+  turns: mergedTurns(stored.turns, update.turns),
+});
+
+export const mergeUpdates = (held: readonly WindowUpdate[], fresh: readonly WindowUpdate[]): WindowUpdate[] => {
+  const merged = new Map<string, WindowUpdate>();
+  for (const update of [...held, ...fresh]) {
+    const key = `${update.resolution} ${update.windowStart}`;
+    const known = merged.get(key);
+    merged.set(
+      key,
+      known === undefined
+        ? update
+        : {
+            ...known,
+            rollups: mergedRollups(known.rollups, update.rollups),
+            turns: mergedTurns(known.turns, update.turns),
+          },
+    );
+  }
+  return [...merged.values()].sort((a, b) => a.windowStart - b.windowStart || (a.resolution < b.resolution ? -1 : 1));
+};
+
+interface Resolved {
+  catalog: Catalog;
+  changed: boolean;
+  updates: WindowUpdate[];
+}
+
+const seriesResolver = (catalog: Catalog, limits: MetricsLimits) => {
+  const series = [...catalog.series];
+  let nextSeriesId = catalog.nextSeriesId;
+  const byKey = new Map(series.map((each, index) => [`${each.metric} ${each.dimensions}`, index]));
+  const perMetric = new Map<string, number>();
+  for (const each of series) perMetric.set(each.metric, (perMetric.get(each.metric) ?? 0) + 1);
+  const overflow = normaliseDimensions(OVERFLOW_DIMENSIONS, limits).canonical;
+  let changed = false;
+  const create = (metric: string, dimensions: string, firstSeenAt: number, lastSeenAt: number): number => {
+    const seriesId = nextSeriesId;
+    nextSeriesId += 1;
+    byKey.set(`${metric} ${dimensions}`, series.length);
+    series.push({ seriesId, metric, dimensions, firstSeenAt, lastSeenAt });
+    perMetric.set(metric, (perMetric.get(metric) ?? 0) + 1);
+    changed = true;
+    return seriesId;
+  };
+  const seen = (index: number, firstSeenAt: number, lastSeenAt: number): number => {
+    const held = series[index];
+    if (held === undefined) throw new Error(`the metrics catalog lost series ${index} while resolving a flush`);
+    if (firstSeenAt < held.firstSeenAt || lastSeenAt > held.lastSeenAt) {
+      series[index] = {
+        ...held,
+        firstSeenAt: Math.min(held.firstSeenAt, firstSeenAt),
+        lastSeenAt: Math.max(held.lastSeenAt, lastSeenAt),
+      };
+      changed = true;
+    }
+    return held.seriesId;
+  };
+  const resolve = (pending: PendingSeries): number => {
+    const lastSeenHour = floorTo(pending.lastSeenAt, HOUR_MS);
+    const known = byKey.get(`${pending.metric} ${pending.dimensions.canonical}`);
+    if (known !== undefined) return seen(known, pending.firstSeenAt, lastSeenHour);
+    if (series.length < limits.seriesPerTenant && (perMetric.get(pending.metric) ?? 0) < limits.seriesPerMetric) {
+      return create(pending.metric, pending.dimensions.canonical, pending.firstSeenAt, lastSeenHour);
+    }
+    const spill = byKey.get(`${pending.metric} ${overflow}`);
+    if (spill !== undefined) return seen(spill, pending.firstSeenAt, lastSeenHour);
+    return create(pending.metric, overflow, pending.firstSeenAt, lastSeenHour);
+  };
+  const result = (now: number): { catalog: Catalog; changed: boolean } => {
+    const kept = series.filter((each) => each.lastSeenAt >= now - limits.seriesRetentionMs);
+    return { catalog: { nextSeriesId, series: kept }, changed: changed || kept.length !== series.length };
+  };
+  return { resolve, result };
+};
+
+const windowUpdate = (updates: Map<string, WindowUpdate>, resolution: Resolution, at: number): WindowUpdate => {
+  const windowStart = floorTo(at, WINDOW_MS[resolution]);
+  const key = `${resolution} ${windowStart}`;
+  const held = updates.get(key);
+  if (held !== undefined) return held;
+  const created: WindowUpdate = { resolution, windowStart, rollups: [], turns: [] };
+  updates.set(key, created);
+  return created;
+};
+
+export const resolvePending = (catalog: Catalog, pending: Pending, now: number, limits: MetricsLimits): Resolved => {
+  const resolver = seriesResolver(catalog, limits);
+  const updates = new Map<string, WindowUpdate>();
+  for (const held of pending.values()) {
+    const seriesId = resolver.resolve(held);
+    for (const [minute, values] of held.minutes) {
+      const rollup = { seriesId, bucketStart: minute, ...rollupOf(values) };
+      windowUpdate(updates, "Minute", minute).rollups.push(rollup);
+      windowUpdate(updates, "Hour", minute).rollups.push({ ...rollup, bucketStart: floorTo(minute, HOUR_MS) });
+    }
+    for (const turn of held.turns) windowUpdate(updates, "Minute", turn.at).turns.push({ seriesId, ...turn });
+  }
+  const { catalog: resolved, changed } = resolver.result(now);
+  return { catalog: resolved, changed, updates: mergeUpdates([], [...updates.values()]) };
+};
+
+export const declareInstruments = (sql: MetricsSql, instruments: MetricBatch["instruments"], now: number): void => {
   for (const { metric, unit, kind, description } of instruments) {
     sql.exec(
       "INSERT INTO metric (metric, unit, kind, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric) DO UPDATE SET unit = excluded.unit, kind = excluded.kind, description = excluded.description, updated_at = excluded.updated_at WHERE unit IS NOT excluded.unit OR kind IS NOT excluded.kind OR description IS NOT excluded.description",
@@ -107,7 +363,7 @@ const declareInstruments = (sql: MetricsSql, instruments: MetricBatch["instrumen
   }
 };
 
-const checkKinds = (sql: MetricsSql, batch: MetricBatch): void => {
+export const checkKinds = (sql: MetricsSql, batch: MetricBatch): void => {
   const wanted = new Map<string, string>();
   for (const { metric } of batch.samples) wanted.set(metric, "Sample");
   for (const { metric } of batch.turns) {
@@ -130,218 +386,3 @@ const checkKinds = (sql: MetricsSql, batch: MetricBatch): void => {
     }
   }
 };
-
-interface SeriesCounts {
-  tenant: number | undefined;
-  perMetric: Map<string, number>;
-}
-
-const insertSeries = (sql: MetricsSql, metric: string, dimensions: NormalisedDimensions, at: number): number => {
-  const [inserted] = sql
-    .exec<{ series_id: number }>(
-      "INSERT INTO series (metric, dimensions, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?) RETURNING series_id",
-      metric,
-      dimensions.canonical,
-      at,
-      at,
-    )
-    .toArray();
-  if (inserted === undefined) throw new Error(`the series insert for metric ${metric} returned no series_id`);
-  for (const [dimension, value] of dimensions.entries) {
-    sql.exec(
-      "INSERT INTO series_dimension (dimension, value, series_id) VALUES (?, ?, ?)",
-      dimension,
-      value,
-      inserted.series_id,
-    );
-  }
-  return inserted.series_id;
-};
-
-const existingSeries = (sql: MetricsSql, metric: string, canonical: string): number | undefined =>
-  sql
-    .exec<{ series_id: number }>("SELECT series_id FROM series WHERE metric = ? AND dimensions = ?", metric, canonical)
-    .toArray()[0]?.series_id;
-
-type SeriesResolver = (metric: string, dimensions: NormalisedDimensions, at: number) => number;
-
-const seriesResolver = (sql: MetricsSql, limits: MetricsLimits): SeriesResolver => {
-  const counts: SeriesCounts = { tenant: undefined, perMetric: new Map() };
-  const overflow = normaliseDimensions(OVERFLOW_DIMENSIONS, limits);
-  const tenantCount = (): number => {
-    counts.tenant ??= sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM series").toArray()[0]?.count ?? 0;
-    return counts.tenant;
-  };
-  const metricCount = (metric: string): number => {
-    const known = counts.perMetric.get(metric);
-    if (known !== undefined) return known;
-    const counted =
-      sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM series WHERE metric = ?", metric).toArray()[0]
-        ?.count ?? 0;
-    counts.perMetric.set(metric, counted);
-    return counted;
-  };
-  const created = (metric: string, dimensions: NormalisedDimensions, at: number): number => {
-    const seriesId = insertSeries(sql, metric, dimensions, at);
-    counts.tenant = tenantCount() + 1;
-    counts.perMetric.set(metric, metricCount(metric) + 1);
-    return seriesId;
-  };
-  return (metric: string, dimensions: NormalisedDimensions, at: number): number => {
-    const existing = existingSeries(sql, metric, dimensions.canonical);
-    if (existing !== undefined) return existing;
-    if (tenantCount() < limits.seriesPerTenant && metricCount(metric) < limits.seriesPerMetric) {
-      return created(metric, dimensions, at);
-    }
-    return existingSeries(sql, metric, overflow.canonical) ?? created(metric, overflow, at);
-  };
-};
-
-interface RecordedPoint {
-  seriesId: number;
-  atMs: number;
-}
-
-interface Aggregate {
-  resolution: Resolution;
-  seriesId: number;
-  bucketStart: number;
-  values: number[];
-}
-
-interface Rollup {
-  count: number;
-  sum: number;
-  min: number;
-  max: number;
-  histogram: ExponentialHistogram;
-}
-
-type RollupRow = { count: number; sum: number; min: number; max: number; histogram: string };
-
-const rollupOf = (values: readonly number[]): Rollup => ({
-  count: values.length,
-  sum: values.reduce((sum, value) => sum + value, 0),
-  min: Math.min(...values),
-  max: Math.max(...values),
-  histogram: histogramOf(values),
-});
-
-const combined = (stored: RollupRow, fresh: Rollup): Rollup => ({
-  count: stored.count + fresh.count,
-  sum: stored.sum + fresh.sum,
-  min: Math.min(stored.min, fresh.min),
-  max: Math.max(stored.max, fresh.max),
-  histogram: mergeHistograms(parseHistogram(stored.histogram), fresh.histogram),
-});
-
-const writeRollup = (sql: MetricsSql, { resolution, seriesId, bucketStart, values }: Aggregate): void => {
-  const [stored] = sql
-    .exec<RollupRow>(
-      "SELECT count, sum, min, max, histogram FROM rollup WHERE resolution = ? AND series_id = ? AND bucket_start = ?",
-      resolution,
-      seriesId,
-      bucketStart,
-    )
-    .toArray();
-  const fresh = rollupOf(values);
-  const rollup = stored === undefined ? fresh : combined(stored, fresh);
-  sql.exec(
-    "INSERT INTO rollup (resolution, series_id, bucket_start, count, sum, min, max, histogram) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (resolution, series_id, bucket_start) DO UPDATE SET count = excluded.count, sum = excluded.sum, min = excluded.min, max = excluded.max, histogram = excluded.histogram",
-    resolution,
-    seriesId,
-    bucketStart,
-    rollup.count,
-    rollup.sum,
-    rollup.min,
-    rollup.max,
-    JSON.stringify(rollup.histogram),
-  );
-};
-
-export const recordBatch = (sql: MetricsSql, batch: MetricBatch, now: number, limits: MetricsLimits): void => {
-  expire(sql, now, limits);
-  declareInstruments(sql, batch.instruments, now);
-  checkKinds(sql, batch);
-  const resolve = seriesResolver(sql, limits);
-  const lastSeen = new Map<number, number>();
-  const aggregates = new Map<string, Aggregate>();
-  const point = (
-    metric: string,
-    dimensions: Readonly<Record<string, string>>,
-    at: string,
-    value: number,
-  ): RecordedPoint => {
-    const atMs = Date.parse(at);
-    const seriesId = resolve(metric, normaliseDimensions(dimensions, limits), atMs);
-    lastSeen.set(seriesId, Math.max(lastSeen.get(seriesId) ?? atMs, atMs));
-    for (const resolution of ["Minute", "Hour"] as const) {
-      const bucketStart = Math.floor(atMs / BUCKET_MS[resolution]) * BUCKET_MS[resolution];
-      const key = `${resolution} ${seriesId} ${bucketStart}`;
-      const aggregate = aggregates.get(key);
-      if (aggregate === undefined) aggregates.set(key, { resolution, seriesId, bucketStart, values: [value] });
-      else aggregate.values.push(value);
-    }
-    return { seriesId, atMs };
-  };
-  for (const { metric, dimensions, at, value } of batch.samples) point(metric, dimensions, at, value);
-  for (const { metric, dimensions, at, value, turnId, sessionId } of batch.turns) {
-    const { seriesId, atMs } = point(metric, dimensions, at, value);
-    sql.exec(
-      "INSERT OR IGNORE INTO turn_point (series_id, at, turn_id, session_id, value) VALUES (?, ?, ?, ?, ?)",
-      seriesId,
-      atMs,
-      turnId,
-      sessionId,
-      value,
-    );
-  }
-  for (const [seriesId, at] of lastSeen) {
-    sql.exec("UPDATE series SET last_seen_at = MAX(last_seen_at, ?) WHERE series_id = ?", at, seriesId);
-  }
-  for (const aggregate of aggregates.values()) writeRollup(sql, aggregate);
-};
-
-export interface RollupPoint {
-  dimensions: string;
-  bucketStart: number;
-  count: number;
-  sum: number;
-  min: number;
-  max: number;
-  p50: number;
-  p90: number;
-  p99: number;
-}
-
-export const readRollups = (
-  sql: MetricsSql,
-  metric: string,
-  resolution: Resolution,
-  from: number,
-  to: number,
-): RollupPoint[] =>
-  sql
-    .exec<RollupRow & { dimensions: string; bucket_start: number }>(
-      "SELECT s.dimensions, r.bucket_start, r.count, r.sum, r.min, r.max, r.histogram FROM series s JOIN rollup r ON r.resolution = ? AND r.series_id = s.series_id AND r.bucket_start >= ? AND r.bucket_start < ? WHERE s.metric = ? ORDER BY s.dimensions, r.bucket_start",
-      resolution,
-      from,
-      to,
-      metric,
-    )
-    .toArray()
-    .map((row) => {
-      const histogram = parseHistogram(row.histogram);
-      const bounds = { min: row.min, max: row.max };
-      return {
-        dimensions: row.dimensions,
-        bucketStart: row.bucket_start,
-        count: row.count,
-        sum: row.sum,
-        min: row.min,
-        max: row.max,
-        p50: histogramQuantile(histogram, 0.5, bounds),
-        p90: histogramQuantile(histogram, 0.9, bounds),
-        p99: histogramQuantile(histogram, 0.99, bounds),
-      };
-    });

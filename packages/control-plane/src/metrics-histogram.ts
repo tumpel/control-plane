@@ -8,7 +8,7 @@ const BucketsSchema = z.object({
   bucketCounts: z.array(z.number().int().nonnegative()),
 });
 
-const ExponentialHistogramSchema = z.object({
+export const ExponentialHistogramSchema = z.object({
   scale: z.number().int(),
   zeroCount: z.number().int().nonnegative(),
   positive: BucketsSchema,
@@ -17,14 +17,6 @@ const ExponentialHistogramSchema = z.object({
 
 type Buckets = z.infer<typeof BucketsSchema>;
 export type ExponentialHistogram = z.infer<typeof ExponentialHistogramSchema>;
-
-export const parseHistogram = (stored: string): ExponentialHistogram => {
-  const parsed = ExponentialHistogramSchema.safeParse(JSON.parse(stored));
-  if (parsed.success) return parsed.data;
-  throw new Error(
-    `a stored rollup histogram is not an exponential histogram: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}; the metrics store wrote it, so its rollup row is corrupt`,
-  );
-};
 
 const bucketIndex = (magnitude: number, scale: number): number => Math.ceil(Math.log2(magnitude) * 2 ** scale) - 1;
 

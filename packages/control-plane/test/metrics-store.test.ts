@@ -1,39 +1,28 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
   HISTOGRAM_MAX_BUCKETS,
   HISTOGRAM_START_SCALE,
   histogramOf,
+  histogramQuantile,
   mergeHistograms,
 } from "../src/metrics-histogram.ts";
 import {
+  bufferBatch,
+  EMPTY_CATALOG,
+  EMPTY_WINDOW,
   METRICS_LIMITS,
   type MetricBatch,
   type MetricsLimits,
-  type MetricsSql,
+  mergeWindow,
   normaliseDimensions,
-  readRollups,
-  recordBatch,
+  type Pending,
+  resolvePending,
 } from "../src/metrics-store.ts";
 
-const DDL = readFileSync(new URL("../migrations/metrics/0001_metrics.sql", import.meta.url), "utf8");
 const T0 = Date.parse("2026-11-16T10:00:00+00:00");
 const MINUTE = 60_000;
-const HOUR = 3_600_000;
 const DAY = 86_400_000;
-
-const store = (): MetricsSql => {
-  const db = new DatabaseSync(":memory:");
-  db.exec(DDL);
-  return {
-    exec: <T>(query: string, ...bindings: (string | number | null)[]) => {
-      const rows = db.prepare(query).all(...bindings) as T[];
-      return { toArray: () => rows };
-    },
-  };
-};
 
 const INSTRUMENTS: MetricBatch["instruments"] = [
   { metric: "host.cpu.busy", unit: "1", kind: "Sample", description: "Share of CPU time the host spent busy" },
@@ -58,62 +47,61 @@ const exactQuantile = (values: readonly number[], quantile: number): number => {
   return sorted[Math.max(1, Math.ceil(quantile * sorted.length)) - 1] ?? Number.NaN;
 };
 
-test("rollups add count, sum, min and max across batches into minute and hour rows", () => {
-  const sql = store();
-  recordBatch(
-    sql,
+test("one flush holds one rollup per series and window however many batches fed it, and a later flush merges into it", () => {
+  const first: Pending = new Map();
+  bufferBatch(
+    first,
     samples([
       { at: T0 + 1_000, value: 0.5 },
       { at: T0 + 2_000, value: 0.25 },
     ]),
-    T0,
     METRICS_LIMITS,
   );
-  recordBatch(
-    sql,
-    samples([
-      { at: T0 + 30_000, value: 0.75 },
-      { at: T0 + MINUTE + 5_000, value: 1 },
-    ]),
-    T0,
-    METRICS_LIMITS,
-  );
+  bufferBatch(first, samples([{ at: T0 + 30_000, value: 0.75 }]), METRICS_LIMITS);
+  const flushed = resolvePending(EMPTY_CATALOG, first, T0, METRICS_LIMITS);
+  const second: Pending = new Map();
+  bufferBatch(second, samples([{ at: T0 + MINUTE + 5_000, value: 1 }]), METRICS_LIMITS);
+  const again = resolvePending(flushed.catalog, second, T0, METRICS_LIMITS);
 
-  const minutes = readRollups(sql, "host.cpu.busy", "Minute", T0, T0 + HOUR);
-  assert.deepEqual(
-    minutes.map(({ bucketStart, count, sum, min, max }) => ({ bucketStart, count, sum, min, max })),
-    [
-      { bucketStart: T0, count: 3, sum: 1.5, min: 0.25, max: 0.75 },
-      { bucketStart: T0 + MINUTE, count: 1, sum: 1, min: 1, max: 1 },
-    ],
-  );
-  const hours = readRollups(sql, "host.cpu.busy", "Hour", T0, T0 + HOUR);
-  assert.deepEqual(
-    hours.map(({ bucketStart, count, sum, min, max }) => ({ bucketStart, count, sum, min, max })),
-    [{ bucketStart: T0, count: 4, sum: 2.5, min: 0.25, max: 1 }],
-  );
+  const stored = (resolution: "Minute" | "Hour") =>
+    [...flushed.updates, ...again.updates]
+      .filter((update) => update.resolution === resolution)
+      .reduce(mergeWindow, EMPTY_WINDOW)
+      .rollups.map(({ seriesId, bucketStart, count, sum, min, max }) => ({
+        seriesId,
+        bucketStart,
+        count,
+        sum,
+        min,
+        max,
+      }));
+  assert.deepEqual(stored("Minute"), [
+    { seriesId: 1, bucketStart: T0, count: 3, sum: 1.5, min: 0.25, max: 0.75 },
+    { seriesId: 1, bucketStart: T0 + MINUTE, count: 1, sum: 1, min: 1, max: 1 },
+  ]);
+  assert.deepEqual(stored("Hour"), [{ seriesId: 1, bucketStart: T0, count: 4, sum: 2.5, min: 0.25, max: 1 }]);
+  assert.equal(flushed.changed, true);
+  assert.equal(again.changed, false);
 });
 
 test("percentiles from merged rollup histograms stay within 5 % of the exact value", () => {
-  const sql = store();
   const values = Array.from({ length: 3_000 }, (_, index) => 1.5 ** ((index * 7919) % 28) * (1 + (index % 13) / 13));
+  const pending: Pending = new Map();
   for (let start = 0; start < values.length; start += 500) {
-    recordBatch(
-      sql,
+    bufferBatch(
+      pending,
       samples(values.slice(start, start + 500).map((value, offset) => ({ at: T0 + (start + offset) * 1_000, value }))),
-      T0,
       METRICS_LIMITS,
     );
   }
 
-  const [hour] = readRollups(sql, "host.cpu.busy", "Hour", T0, T0 + HOUR);
+  const hour = resolvePending(EMPTY_CATALOG, pending, T0, METRICS_LIMITS)
+    .updates.filter((update) => update.resolution === "Hour")
+    .reduce(mergeWindow, EMPTY_WINDOW).rollups[0];
   assert.ok(hour);
   assert.equal(hour.count, values.length);
-  for (const [quantile, estimate] of [
-    [0.5, hour.p50],
-    [0.9, hour.p90],
-    [0.99, hour.p99],
-  ] as const) {
+  for (const quantile of [0.5, 0.9, 0.99]) {
+    const estimate = histogramQuantile(hour.histogram, quantile, hour);
     const exact = exactQuantile(values, quantile);
     assert.ok(
       Math.abs(estimate - exact) / exact <= 0.05,
@@ -123,10 +111,10 @@ test("percentiles from merged rollup histograms stay within 5 % of the exact val
 });
 
 test("past the series caps, points land in the metric's overflow series", () => {
-  const sql = store();
   const limits: MetricsLimits = { ...METRICS_LIMITS, seriesPerMetric: 2 };
-  recordBatch(
-    sql,
+  const pending: Pending = new Map();
+  bufferBatch(
+    pending,
     samples(
       ["host-1", "host-2", "host-3", "host-4", "host-1"].map((hostId) => ({
         at: T0,
@@ -134,13 +122,14 @@ test("past the series caps, points land in the metric's overflow series", () => 
         dimensions: { hostId },
       })),
     ),
-    T0,
     limits,
   );
 
-  const busy = readRollups(sql, "host.cpu.busy", "Minute", T0, T0 + MINUTE);
+  const { catalog, updates } = resolvePending(EMPTY_CATALOG, pending, T0, limits);
+  const minute = updates.filter((update) => update.resolution === "Minute").reduce(mergeWindow, EMPTY_WINDOW);
+  const dimensionsOf = new Map(catalog.series.map((each) => [each.seriesId, each.dimensions]));
   assert.deepEqual(
-    busy.map(({ dimensions, count }) => ({ dimensions, count })),
+    minute.rollups.map(({ seriesId, count }) => ({ dimensions: dimensionsOf.get(seriesId), count })),
     [
       { dimensions: '{"hostId":"host-1"}', count: 2 },
       { dimensions: '{"hostId":"host-2"}', count: 1 },
@@ -150,11 +139,13 @@ test("past the series caps, points land in the metric's overflow series", () => 
 });
 
 test("a metric whose first series would pass the tenant cap starts in its overflow series", () => {
-  const sql = store();
   const limits: MetricsLimits = { ...METRICS_LIMITS, seriesPerTenant: 1 };
-  recordBatch(sql, samples([{ at: T0, value: 1 }]), T0, limits);
-  recordBatch(
-    sql,
+  const first: Pending = new Map();
+  bufferBatch(first, samples([{ at: T0, value: 1 }]), limits);
+  const { catalog } = resolvePending(EMPTY_CATALOG, first, T0, limits);
+  const second: Pending = new Map();
+  bufferBatch(
+    second,
     {
       instruments: INSTRUMENTS,
       samples: [],
@@ -169,66 +160,32 @@ test("a metric whose first series would pass the tenant cap starts in its overfl
         },
       ],
     },
-    T0,
     limits,
   );
 
+  const resolved = resolvePending(catalog, second, T0, limits);
   assert.deepEqual(
-    readRollups(sql, "turn.cost", "Minute", T0, T0 + MINUTE).map(({ dimensions, sum }) => ({ dimensions, sum })),
-    [{ dimensions: '{"otel.metric.overflow":"true"}', sum: 7 }],
+    resolved.catalog.series.map(({ metric, dimensions }) => [metric, dimensions]),
+    [
+      ["host.cpu.busy", '{"hostId":"host-1"}'],
+      ["turn.cost", '{"otel.metric.overflow":"true"}'],
+    ],
   );
 });
 
-test("each write deletes a bounded number of expired rows per table", () => {
-  const sql = store();
-  const limits: MetricsLimits = { ...METRICS_LIMITS, expiredRowsPerWrite: 2 };
-  recordBatch(sql, samples([0, 1, 2].map((minute) => ({ at: T0 + minute * MINUTE, value: 1 }))), T0, limits);
-  const later = T0 + limits.minuteRetentionMs + HOUR;
-  const minutes = (): number => readRollups(sql, "host.cpu.busy", "Minute", T0, T0 + HOUR).length;
-  const hours = (): number => readRollups(sql, "host.cpu.busy", "Hour", T0, T0 + HOUR).length;
+test("a series unseen past its retention leaves the catalog at the next flush", () => {
+  const first: Pending = new Map();
+  bufferBatch(first, samples([{ at: T0, value: 1, dimensions: { hostId: "host-1" } }]), METRICS_LIMITS);
+  const { catalog } = resolvePending(EMPTY_CATALOG, first, T0, METRICS_LIMITS);
+  const later = T0 + METRICS_LIMITS.seriesRetentionMs + DAY;
+  const second: Pending = new Map();
+  bufferBatch(second, samples([{ at: later, value: 1, dimensions: { hostId: "host-2" } }]), METRICS_LIMITS);
 
-  recordBatch(sql, samples([]), later, limits);
-  assert.equal(minutes(), 1);
-  recordBatch(sql, samples([]), later, limits);
-  assert.equal(minutes(), 0);
-  assert.equal(hours(), 1);
-
-  recordBatch(sql, samples([]), T0 + limits.hourRetentionMs + HOUR, limits);
-  assert.equal(hours(), 0);
-});
-
-test("turn points expire after their retention and unseen series after theirs", () => {
-  const sql = store();
-  recordBatch(
-    sql,
-    {
-      instruments: INSTRUMENTS,
-      samples: [],
-      turns: [
-        {
-          metric: "turn.cost",
-          at: new Date(T0).toISOString(),
-          value: 3,
-          dimensions: { harness: "Pi" },
-          turnId: "turn-1",
-          sessionId: "session-1",
-        },
-      ],
-    },
-    T0,
-    METRICS_LIMITS,
+  const resolved = resolvePending(catalog, second, later, METRICS_LIMITS);
+  assert.deepEqual(
+    resolved.catalog.series.map(({ seriesId, dimensions }) => [seriesId, dimensions]),
+    [[2, '{"hostId":"host-2"}']],
   );
-  const count = (query: string): number => sql.exec<{ count: number }>(query).toArray()[0]?.count ?? -1;
-
-  recordBatch(sql, samples([]), T0 + METRICS_LIMITS.turnPointRetentionMs - DAY, METRICS_LIMITS);
-  assert.equal(count("SELECT COUNT(*) AS count FROM turn_point"), 1);
-  recordBatch(sql, samples([]), T0 + METRICS_LIMITS.turnPointRetentionMs + DAY, METRICS_LIMITS);
-  assert.equal(count("SELECT COUNT(*) AS count FROM turn_point"), 0);
-  assert.equal(count("SELECT COUNT(*) AS count FROM series"), 1);
-
-  recordBatch(sql, samples([]), T0 + METRICS_LIMITS.seriesRetentionMs + DAY, METRICS_LIMITS);
-  assert.equal(count("SELECT COUNT(*) AS count FROM series"), 0);
-  assert.equal(count("SELECT COUNT(*) AS count FROM series_dimension"), 0);
 });
 
 test("dimensions are sorted by key and bounded in count and length", () => {

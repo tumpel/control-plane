@@ -132,28 +132,12 @@
       "SELECT role FROM memberships WHERE tenant_id = ? AND principal_id = ?"
     ],
     "packages/control-plane/src/metrics-query.ts": [
-      "SELECT m.metric, m.unit, m.kind, m.description FROM metric m WHERE m.metric IN (SELECT s.metric ${seen}) ORDER BY m.metric",
-      "SELECT metric, unit, kind, description FROM metric WHERE metric = ?",
-      "SELECT s.dimensions, r.bucket_start, r.count, r.sum, r.min, r.max, r.histogram FROM series s JOIN rollup r ON r.resolution = ? AND r.series_id = s.series_id AND r.bucket_start >= ? AND r.bucket_start < ? WHERE s.metric = ?${clause.sql}",
-      "SELECT s.metric, d.dimension, d.value, COUNT(*) AS series_count FROM series_dimension d JOIN series s ON s.series_id = d.series_id WHERE s.series_id IN (SELECT s.series_id ${seen}) GROUP BY s.metric, d.dimension, d.value ORDER BY s.metric, d.dimension, d.value",
-      "SELECT t.series_id, t.at, t.turn_id, t.session_id, t.value, s.dimensions FROM turn_point t JOIN series s ON s.series_id = t.series_id WHERE s.metric = ? AND t.at >= ? AND t.at < ?${session.sql}${position.sql}${clause.sql} ORDER BY t.at, t.series_id, t.turn_id LIMIT ?"
+      "SELECT metric, unit, kind, description FROM metric",
+      "SELECT metric, unit, kind, description FROM metric WHERE metric = ?"
     ],
     "packages/control-plane/src/metrics-store.ts": [
-      "DELETE FROM rollup WHERE (resolution, series_id, bucket_start) IN (SELECT resolution, series_id, bucket_start FROM rollup WHERE resolution = ? AND bucket_start < ? LIMIT ?)",
-      "DELETE FROM series WHERE series_id IN (SELECT s.series_id FROM metric m CROSS JOIN series s ON s.metric = m.metric AND s.last_seen_at < ? LIMIT ?)",
-      "DELETE FROM turn_point WHERE (series_id, at, turn_id) IN (SELECT series_id, at, turn_id FROM turn_point WHERE at < ? LIMIT ?)",
       "INSERT INTO metric (metric, unit, kind, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric) DO UPDATE SET unit = excluded.unit, kind = excluded.kind, description = excluded.description, updated_at = excluded.updated_at WHERE unit IS NOT excluded.unit OR kind IS NOT excluded.kind OR description IS NOT excluded.description",
-      "INSERT INTO rollup (resolution, series_id, bucket_start, count, sum, min, max, histogram) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (resolution, series_id, bucket_start) DO UPDATE SET count = excluded.count, sum = excluded.sum, min = excluded.min, max = excluded.max, histogram = excluded.histogram",
-      "INSERT INTO series (metric, dimensions, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?) RETURNING series_id",
-      "INSERT INTO series_dimension (dimension, value, series_id) VALUES (?, ?, ?)",
-      "INSERT OR IGNORE INTO turn_point (series_id, at, turn_id, session_id, value) VALUES (?, ?, ?, ?, ?)",
-      "SELECT COUNT(*) AS count FROM series",
-      "SELECT COUNT(*) AS count FROM series WHERE metric = ?",
-      "SELECT count, sum, min, max, histogram FROM rollup WHERE resolution = ? AND series_id = ? AND bucket_start = ?",
-      "SELECT kind FROM metric WHERE metric = ?",
-      "SELECT s.dimensions, r.bucket_start, r.count, r.sum, r.min, r.max, r.histogram FROM series s JOIN rollup r ON r.resolution = ? AND r.series_id = s.series_id AND r.bucket_start >= ? AND r.bucket_start < ? WHERE s.metric = ? ORDER BY s.dimensions, r.bucket_start",
-      "SELECT series_id FROM series WHERE metric = ? AND dimensions = ?",
-      "UPDATE series SET last_seen_at = MAX(last_seen_at, ?) WHERE series_id = ?"
+      "SELECT kind FROM metric WHERE metric = ?"
     ],
     "packages/control-plane/src/oauth.ts": [
       "DELETE FROM oauth_clients WHERE created_at <= ? AND first_party = 0 AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id AND t.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM oauth_requests r WHERE r.client_id = oauth_clients.client_id AND r.expires_at > ?)",
@@ -269,6 +253,13 @@
       "SELECT MIN(event_id) AS oldest FROM events",
       "SELECT events.event_id, events.payload, events.created_at FROM events WHERE events.event_id > ?1 AND (?2 = 0 OR json_extract(events.payload, '$.event') IN (SELECT value FROM json_each(?3))) AND (?4 IS NULL OR EXISTS (SELECT 1 FROM event_sessions WHERE event_sessions.event_id = events.event_id AND event_sessions.session_id = ?4)) AND (?6 IS NULL OR json_extract(events.payload, '$.triggerId') = ?6) ORDER BY events.event_id LIMIT ?5",
       "SELECT seq FROM sqlite_sequence WHERE name = 'events'"
+    ],
+    "packages/control-plane/src/tenant-metrics.ts": [
+      "DELETE FROM metric_window WHERE resolution = ? AND window_start = ?",
+      "INSERT INTO metric_catalog (catalog_id, storage_key, digest, bytes, series_count) VALUES (1, ?, ?, ?, ?) ON CONFLICT (catalog_id) DO UPDATE SET storage_key = excluded.storage_key, digest = excluded.digest, bytes = excluded.bytes, series_count = excluded.series_count",
+      "INSERT INTO metric_window (resolution, window_start, storage_key, digest, bytes, rollup_count, turn_count) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (resolution, window_start) DO UPDATE SET storage_key = excluded.storage_key, digest = excluded.digest, bytes = excluded.bytes, rollup_count = excluded.rollup_count, turn_count = excluded.turn_count",
+      "SELECT storage_key FROM metric_window WHERE resolution = ? AND window_start > ? AND window_start < ? AND turn_count >= ? ORDER BY window_start",
+      "SELECT window_start, storage_key FROM metric_window WHERE resolution = ? AND window_start <= ? ORDER BY window_start LIMIT ?"
     ],
     "packages/control-plane/src/tenant-openrouter-authorizations.ts": [
       "DELETE FROM ${from} WHERE openrouter_authorization_id = ?",

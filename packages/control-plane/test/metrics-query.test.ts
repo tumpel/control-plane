@@ -1,32 +1,54 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { register } from "node:module";
+import { type TestContext, test } from "node:test";
 import {
   MAX_GROUPS,
+  type MetricCatalog,
+  type MetricSeriesQuery,
+  type MetricSeriesSet,
+  type MetricTurnPage,
+  type MetricTurnQuery,
+  type MetricWindow,
   OTHER_GROUP,
   type Outcome,
   planBuckets,
-  querySeries,
-  readCatalog,
-  readTurns,
+  TURN_PAGE_SIZE,
 } from "../src/metrics-query.ts";
-import { METRICS_LIMITS, type MetricBatch, type MetricsSql, recordBatch } from "../src/metrics-store.ts";
+import { METRICS_LIMITS, type MetricBatch } from "../src/metrics-store.ts";
+import { R2Bucket, Runtime } from "./scenarios/harness/runtime.ts";
 
-const DDL = readFileSync(new URL("../migrations/metrics/0001_metrics.sql", import.meta.url), "utf8");
+register("./scenarios/harness/hooks.mjs", import.meta.url);
+
+type Metrics = {
+  record(batch: MetricBatch): Promise<void>;
+  catalog(query: MetricWindow): Promise<Outcome<MetricCatalog>>;
+  query(metric: string, query: MetricSeriesQuery): Promise<Outcome<MetricSeriesSet>>;
+  turns(metric: string, query: MetricTurnQuery): Promise<Outcome<MetricTurnPage>>;
+};
+
+const { TenantMetrics, METRICS_FLUSH_MS } = (await import(
+  new URL("../src/tenant-metrics.ts", import.meta.url).href
+)) as {
+  TenantMetrics: new (ctx: never, env: never) => Metrics;
+  METRICS_FLUSH_MS: number;
+};
+
 const T0 = Date.parse("2026-11-16T10:00:00+00:00");
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
-const store = (): MetricsSql => {
-  const db = new DatabaseSync(":memory:");
-  db.exec(DDL);
+const open = (t: TestContext) => {
+  const runtime = new Runtime(T0);
+  t.after(() => runtime.close());
+  const store = new R2Bucket();
+  const tenants = runtime.namespace(TenantMetrics, () => ({ STORE: store }));
   return {
-    exec: <T>(query: string, ...bindings: (string | number | null)[]) => {
-      const rows = db.prepare(query).all(...bindings) as T[];
-      return { toArray: () => rows };
-    },
+    metrics: tenants.getByName("tenant-1"),
+    other: tenants.getByName("tenant-2"),
+    flushed: () => runtime.advance(METRICS_FLUSH_MS),
+    runtime,
+    store,
   };
 };
 
@@ -43,24 +65,19 @@ interface Cost {
   sessionId?: string;
 }
 
-const costs = (sql: MetricsSql, points: readonly Cost[]): void =>
-  recordBatch(
-    sql,
-    {
-      instruments: INSTRUMENTS,
-      samples: [],
-      turns: points.map(({ at, value, dimensions, turnId, sessionId }, index) => ({
-        metric: "turn.cost",
-        at: new Date(at).toISOString(),
-        value,
-        dimensions,
-        turnId: turnId ?? `turn-${index}`,
-        sessionId: sessionId ?? "session-1",
-      })),
-    },
-    T0,
-    METRICS_LIMITS,
-  );
+const costs = (metrics: Metrics, points: readonly Cost[]): Promise<void> =>
+  metrics.record({
+    instruments: INSTRUMENTS,
+    samples: [],
+    turns: points.map(({ at, value, dimensions, turnId, sessionId }, index) => ({
+      metric: "turn.cost",
+      at: new Date(at).toISOString(),
+      value,
+      dimensions,
+      turnId: turnId ?? `turn-${index}`,
+      sessionId: sessionId ?? "session-1",
+    })),
+  });
 
 const iso = (at: number): string => new Date(at).toISOString();
 
@@ -76,21 +93,17 @@ const FLEET: readonly Cost[] = [
   { at: T0 + 3 * MINUTE, value: 80, dimensions: { harness: "OpenCode", model: "a" } },
 ];
 
-test("the catalog lists the metrics seen in the window with each dimension's values and series counts", () => {
-  const sql = store();
-  costs(sql, FLEET);
-  recordBatch(
-    sql,
-    {
-      instruments: INSTRUMENTS,
-      samples: [{ metric: "host.cpu.busy", at: iso(T0 - 2 * DAY), value: 0.5, dimensions: { hostId: "host-1" } }],
-      turns: [],
-    },
-    T0,
-    METRICS_LIMITS,
-  );
+test("the catalog lists the metrics seen in the window with each dimension's values and series counts", async (t) => {
+  const { metrics, flushed } = open(t);
+  await costs(metrics, FLEET);
+  await metrics.record({
+    instruments: INSTRUMENTS,
+    samples: [{ metric: "host.cpu.busy", at: iso(T0 - 2 * DAY), value: 0.5, dimensions: { hostId: "host-1" } }],
+    turns: [],
+  });
+  await flushed();
 
-  const catalog = value(readCatalog(sql, { from: iso(T0 - HOUR), to: iso(T0 + HOUR) }));
+  const catalog = value(await metrics.catalog({ from: iso(T0 - HOUR), to: iso(T0 + HOUR) }));
   assert.deepEqual(catalog.metrics, [
     {
       metric: "turn.cost",
@@ -117,7 +130,7 @@ test("the catalog lists the metrics seen in the window with each dimension's val
     },
   ]);
 
-  const filtered = value(readCatalog(sql, { from: iso(T0 - HOUR), to: iso(T0 + HOUR), filter: ["model:b"] }));
+  const filtered = value(await metrics.catalog({ from: iso(T0 - HOUR), to: iso(T0 + HOUR), filter: ["model:b"] }));
   assert.deepEqual(
     filtered.metrics[0]?.facets.map(({ dimension, values }) => [dimension, values.map((entry) => entry.value)]),
     [
@@ -127,28 +140,38 @@ test("the catalog lists the metrics seen in the window with each dimension's val
   );
 });
 
-test("a filter ORs the values of one dimension and ANDs different dimensions", () => {
-  const sql = store();
-  costs(sql, FLEET);
+test("a filter ORs the values of one dimension and ANDs different dimensions", async (t) => {
+  const { metrics, flushed } = open(t);
+  await costs(metrics, FLEET);
+  await flushed();
   const window = { from: iso(T0), to: iso(T0 + HOUR), bucket: "Hour" as const };
-  const sum = (filter: string[]): number | undefined =>
-    value(querySeries(sql, "turn.cost", { ...window, filter }, T0, METRICS_LIMITS)).series[0]?.points[0]?.sum;
+  const sum = async (filter: string[]): Promise<number | undefined> =>
+    value(await metrics.query("turn.cost", { ...window, filter })).series[0]?.points[0]?.sum;
 
-  assert.equal(sum([]), 150);
-  assert.equal(sum(["harness:Pi", "harness:Codex"]), 70);
-  assert.equal(sum(["harness:Pi", "harness:Codex", "model:a"]), 50);
-  assert.equal(sum(["harness:Nope"]), undefined);
-  const refused = querySeries(sql, "turn.cost", { ...window, filter: ["harness"] }, T0, METRICS_LIMITS);
+  assert.equal(await sum([]), 150);
+  assert.equal(await sum(["harness:Pi", "harness:Codex"]), 70);
+  assert.equal(await sum(["harness:Pi", "harness:Codex", "model:a"]), 50);
+  assert.equal(await sum(["harness:Nope"]), undefined);
+  const refused = await metrics.query("turn.cost", { ...window, filter: ["harness"] });
   assert.ok(!refused.ok);
   assert.equal(refused.problem.code, "InvalidRequest");
 });
 
-test("group-by keys each series by its dimension values and folds groups past the cap into Other", () => {
-  const sql = store();
-  costs(sql, FLEET);
+test("group-by keys each series by its dimension values and folds groups past the cap into Other", async (t) => {
+  const { metrics, other, flushed } = open(t);
+  await costs(metrics, FLEET);
+  await costs(
+    other,
+    Array.from({ length: MAX_GROUPS + 5 }, (_, index) => ({
+      at: T0,
+      value: 1,
+      dimensions: { model: `m${String(index).padStart(2, "0")}` },
+    })),
+  );
+  await flushed();
   const window = { from: iso(T0), to: iso(T0 + HOUR), bucket: "Hour" as const };
 
-  const byHarness = value(querySeries(sql, "turn.cost", { ...window, groupBy: ["harness"] }, T0, METRICS_LIMITS));
+  const byHarness = value(await metrics.query("turn.cost", { ...window, groupBy: ["harness"] }));
   assert.deepEqual(
     byHarness.series.map(({ group, points }) => ({ group, count: points[0]?.count, sum: points[0]?.sum })),
     [
@@ -157,40 +180,30 @@ test("group-by keys each series by its dimension values and folds groups past th
       { group: { harness: "OpenCode" }, count: 1, sum: 80 },
     ],
   );
-  const byBoth = value(querySeries(sql, "turn.cost", { ...window, groupBy: ["harness", "model"] }, T0, METRICS_LIMITS));
+  const byBoth = value(await metrics.query("turn.cost", { ...window, groupBy: ["harness", "model"] }));
   assert.equal(byBoth.series.length, 4);
 
-  const crowd = store();
-  costs(
-    crowd,
-    Array.from({ length: MAX_GROUPS + 5 }, (_, index) => ({
-      at: T0,
-      value: 1,
-      dimensions: { model: `m${String(index).padStart(2, "0")}` },
-    })),
-  );
-  const folded = value(querySeries(crowd, "turn.cost", { ...window, groupBy: ["model"] }, T0, METRICS_LIMITS));
+  const folded = value(await other.query("turn.cost", { ...window, groupBy: ["model"] }));
   assert.equal(folded.series.length, MAX_GROUPS + 1);
   assert.deepEqual(folded.series.at(-1)?.group, { model: OTHER_GROUP });
   assert.equal(folded.series.at(-1)?.points[0]?.count, 5);
 });
 
-test("Day buckets start at midnight in the offset of from and sum hour rollups", () => {
-  const sql = store();
-  costs(sql, [
+test("Day buckets start at midnight in the offset of from and sum hour rollups", async (t) => {
+  const { metrics, flushed } = open(t);
+  await costs(metrics, [
     { at: Date.parse("2026-11-15T23:30:00+02:00"), value: 1, dimensions: { harness: "Pi" } },
     { at: Date.parse("2026-11-16T00:30:00+02:00"), value: 2, dimensions: { harness: "Pi" } },
     { at: Date.parse("2026-11-16T23:59:00+02:00"), value: 4, dimensions: { harness: "Pi" } },
   ]);
+  await flushed();
 
   const days = value(
-    querySeries(
-      sql,
-      "turn.cost",
-      { from: "2026-11-15T12:00:00+02:00", to: "2026-11-17T00:00:00+02:00", bucket: "Day" },
-      T0,
-      METRICS_LIMITS,
-    ),
+    await metrics.query("turn.cost", {
+      from: "2026-11-15T12:00:00+02:00",
+      to: "2026-11-17T00:00:00+02:00",
+      bucket: "Day",
+    }),
   );
   assert.deepEqual(
     days.series[0]?.points.map(({ bucketStart, count, sum }) => ({ bucketStart, count, sum })),
@@ -201,12 +214,12 @@ test("Day buckets start at midnight in the offset of from and sum hour rollups",
   );
 });
 
-test("percentiles of a group come from its merged rollup histograms within 5 % of the exact value", () => {
-  const sql = store();
+test("percentiles of a group come from its merged rollup histograms within 5 % of the exact value", async (t) => {
+  const { metrics, flushed } = open(t);
   const values = Array.from({ length: 1_000 }, (_, index) => 1.3 ** (index % 40) * (1 + (index % 7) / 7));
   for (let start = 0; start < values.length; start += 250) {
-    costs(
-      sql,
+    await costs(
+      metrics,
       values.slice(start, start + 250).map((cost, offset) => ({
         at: T0 + (start + offset) * 3_000,
         value: cost,
@@ -215,9 +228,10 @@ test("percentiles of a group come from its merged rollup histograms within 5 % o
     );
   }
 
+  await flushed();
   const [point] =
-    value(querySeries(sql, "turn.cost", { from: iso(T0), to: iso(T0 + 2 * HOUR), bucket: "Day" }, T0, METRICS_LIMITS))
-      .series[0]?.points ?? [];
+    value(await metrics.query("turn.cost", { from: iso(T0), to: iso(T0 + 2 * HOUR), bucket: "Day" })).series[0]
+      ?.points ?? [];
   assert.ok(point);
   assert.equal(point.count, values.length);
   const sorted = [...values].sort((left, right) => left - right);
@@ -252,19 +266,19 @@ test("a range past 500 buckets or Minute buckets past retention is refused with 
   assert.equal(backwards.problem.code, "InvalidRequest");
 });
 
-test("a metric the store lacks is refused MetricNotFound", () => {
-  const sql = store();
+test("a metric the store lacks is refused MetricNotFound", async (t) => {
+  const { metrics } = open(t);
   const window = { from: iso(T0), to: iso(T0 + HOUR) };
-  const series = querySeries(sql, "turn.nope", { ...window, bucket: "Hour" }, T0, METRICS_LIMITS);
-  const turns = readTurns(sql, "turn.nope", window);
+  const series = await metrics.query("turn.nope", { ...window, bucket: "Hour" });
+  const turns = await metrics.turns("turn.nope", window);
   assert.ok(!series.ok && !turns.ok);
   assert.equal(series.problem.code, "MetricNotFound");
   assert.equal(turns.problem.code, "MetricNotFound");
 });
 
-test("turns page through a metric's turn points in order, by session and filter", () => {
-  const sql = store();
-  costs(sql, [
+test("turns page through a metric's turn points in order across windows, by session and filter", async (t) => {
+  const { metrics, other, flushed } = open(t);
+  await costs(metrics, [
     ...FLEET,
     {
       at: T0 + 4 * MINUTE,
@@ -274,26 +288,32 @@ test("turns page through a metric's turn points in order, by session and filter"
       sessionId: "session-2",
     },
   ]);
-  const window = { from: "2026-11-16T11:00:00+01:00", to: iso(T0 + HOUR) };
-
-  const first = value(readTurns(sql, "turn.cost", window, 3));
-  assert.deepEqual(
-    first.points.map(({ turnId, at }) => [turnId, at]),
-    [
-      ["turn-0", "2026-11-16T11:00:00+01:00"],
-      ["turn-1", "2026-11-16T11:01:00+01:00"],
-      ["turn-2", "2026-11-16T11:02:00+01:00"],
-    ],
+  await costs(
+    other,
+    Array.from({ length: TURN_PAGE_SIZE + 2 }, (_, index) => ({
+      at: T0 + index * 30_000,
+      value: index,
+      dimensions: { harness: "Pi" },
+    })),
   );
+  await flushed();
+  const window = { from: "2026-11-16T11:00:00+01:00", to: iso(T0 + 3 * HOUR) };
+
+  const first = value(await other.turns("turn.cost", window));
+  assert.equal(first.points.length, TURN_PAGE_SIZE);
+  assert.equal(first.points[0]?.at, "2026-11-16T11:00:00+01:00");
   assert.equal(first.finished, false);
-  const second = value(readTurns(sql, "turn.cost", { ...window, cursor: first.cursor }, 3));
+  const second = value(await other.turns("turn.cost", { ...window, cursor: first.cursor }));
   assert.deepEqual(
-    second.points.map(({ turnId }) => turnId),
-    ["turn-3", "turn-9"],
+    second.points.map(({ turnId, at }) => [turnId, at]),
+    [
+      [`turn-${TURN_PAGE_SIZE}`, "2026-11-16T12:40:00+01:00"],
+      [`turn-${TURN_PAGE_SIZE + 1}`, "2026-11-16T12:40:30+01:00"],
+    ],
   );
   assert.equal(second.finished, true);
 
-  const session = value(readTurns(sql, "turn.cost", { ...window, sessionId: "session-2" }));
+  const session = value(await metrics.turns("turn.cost", { ...window, sessionId: "session-2" }));
   assert.deepEqual(session.points, [
     {
       turnId: "turn-9",
@@ -303,13 +323,34 @@ test("turns page through a metric's turn points in order, by session and filter"
       dimensions: { harness: "Pi", model: "a" },
     },
   ]);
-  const filtered = value(readTurns(sql, "turn.cost", { ...window, filter: ["harness:Codex"] }));
+  const filtered = value(await metrics.turns("turn.cost", { ...window, filter: ["harness:Codex"] }));
   assert.deepEqual(
     filtered.points.map(({ turnId }) => turnId),
     ["turn-2"],
   );
 
-  const garbled = readTurns(sql, "turn.cost", { ...window, cursor: "not-a-cursor" });
+  const garbled = await metrics.turns("turn.cost", { ...window, cursor: "not-a-cursor" });
   assert.ok(!garbled.ok);
   assert.equal(garbled.problem.code, "InvalidRequest");
+});
+
+test("a flush deletes a bounded number of expired windows together with their objects", async (t) => {
+  const { metrics, flushed, runtime, store } = open(t);
+  const minuteWindows = async (): Promise<number> =>
+    (await store.list({ prefix: "tenant-1/metrics/minute/" })).objects.length;
+  await costs(
+    metrics,
+    Array.from({ length: 6 }, (_, hour) => ({ at: T0 + hour * HOUR, value: 1, dimensions: { harness: "Pi" } })),
+  );
+  await flushed();
+  assert.equal(await minuteWindows(), 6);
+
+  await runtime.advance(METRICS_LIMITS.turnPointRetentionMs + 7 * HOUR);
+  await costs(metrics, [{ at: Date.now(), value: 1, dimensions: { harness: "Pi" } }]);
+  await flushed();
+  assert.equal(await minuteWindows(), 6 - METRICS_LIMITS.expiredWindowsPerFlush + 1);
+
+  await costs(metrics, [{ at: Date.now(), value: 1, dimensions: { harness: "Pi" } }]);
+  await flushed();
+  assert.equal(await minuteWindows(), 1);
 });
