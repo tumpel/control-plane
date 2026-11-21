@@ -1,7 +1,7 @@
 import { TenantEventSchema } from "@tumpel/schemas";
 
 export const DELIVERY_BATCH = 100;
-export const DELIVERY_PROMPT_LIMIT = 4000;
+export const DELIVERY_PROMPT_LIMIT = 100000;
 const SESSION_ID_MAX = 64;
 
 export type DeliveryEvent = { event_id: number; payload: string; created_at: number };
