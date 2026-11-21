@@ -23,6 +23,7 @@ const HELD_BYTES = 1_000_000;
 export class HostLedger implements LedgerStore<StoredControlMessage> {
   readonly #sql: LedgerSql;
   #held: Held[] = [];
+  #stalled = { seq: 0, tries: 0 };
 
   constructor(sql: LedgerSql) {
     this.#sql = sql;
@@ -100,6 +101,14 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
   take(): Frame<unknown>[] {
     const held = this.#held.map((each) => each.frame);
     this.#held = [];
+    this.#stalled = { seq: 0, tries: 0 };
     return held;
+  }
+
+  stalled(): number {
+    const first = this.first();
+    if (first === null) return 0;
+    this.#stalled = { seq: first, tries: this.#stalled.seq === first ? this.#stalled.tries + 1 : 1 };
+    return this.#stalled.tries;
   }
 }

@@ -35,7 +35,7 @@ import {
 import type { z } from "zod";
 import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
-import { linesLost, linesNotStored } from "./channel/failure.ts";
+import { linesLost } from "./channel/failure.ts";
 import type {
   BootImage,
   DispatchConnector,
@@ -354,7 +354,6 @@ type HeldLines = { tenantId: string; sessionId: string; hostId: string; lines: T
 type ReportedUsage = { usage: HostUsage; now: number; persisted: HostUsage; persistedAt: number };
 
 const USAGE_PERSIST_MS = 60_000;
-const STORE_RETRY_MS = 1000;
 
 const placedAlike = (left: HostUsage, right: HostUsage): boolean =>
   left.boxesWarm === right.boxesWarm &&
@@ -657,7 +656,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly heldLines = new Map<string, HeldLines>();
   private readonly resentTurns = new Set<string>();
   private readonly heardHosts = new Set<string>();
-  private readonly unstoredTurns = new Map<string, { retry: number; retryAt: number }>();
+  private readonly unstoredTurns = new Map<string, Omit<HeldLines, "lines">>();
   private readonly reportedUsage = new Map<string, ReportedUsage>();
 
   protected abstract failPrebuild(
@@ -1736,28 +1735,62 @@ export abstract class TenantSessions extends DurableObject<Env> {
           `host ${hostId} runs a turn, and this tenant restarted since it last heard from the host, so lines it held for that turn may be gone; the host resends them`,
         );
     }
-    const held = [...this.heldLines].filter(([, lines]) => lines.hostId === hostId);
-    for (const [turnId, lines] of held) await this.storeLines(lines.tenantId, lines.sessionId, turnId, 1);
+    const held = [...this.heldLines]
+      .filter(([, lines]) => lines.hostId === hostId)
+      .map(([turnId, lines]) => ({ tenantId: lines.tenantId, sessionId: lines.sessionId, turnId }));
+    const spilled = [...this.unstoredTurns]
+      .filter(([turnId, turn]) => turn.hostId === hostId && !this.heldLines.has(turnId))
+      .map(([turnId, turn]) => ({ tenantId: turn.tenantId, sessionId: turn.sessionId, turnId }));
+    for (const turn of [...held, ...spilled]) await this.storeLines(turn.tenantId, turn.sessionId, turn.turnId, 1);
   }
 
   private async storeLines(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
-    const failed = this.unstoredTurns.get(turnId);
-    const now = Date.now();
-    if (failed !== undefined && now < failed.retryAt) {
-      throw linesNotStored(
-        `the transcript store refused the lines of turn ${turnId}; the next try is at ${iso(failed.retryAt)}`,
-      );
-    }
     await this.chunks.write(tenantId, sessionId, turnId, minLines).then(
       () => {
         this.unstoredTurns.delete(turnId);
       },
       (error: unknown) => {
-        const retry = Math.min((failed?.retry ?? 0) + 1, RETRY_LIMIT);
-        this.unstoredTurns.set(turnId, { retry, retryAt: now + backoffMs(retry, STORE_RETRY_MS) });
-        throw linesNotStored(`the transcript store refused the lines of turn ${turnId}: ${errorOf(error).message}`);
+        const spilled = this.spillLines(turnId);
+        console.error(
+          `TranscriptNotStored: the transcript store refused the lines of turn ${turnId}, so tenant storage keeps ${spilled} more of them and the next heartbeat tries again: ${errorOf(error).message}`,
+        );
       },
     );
+  }
+
+  private spillLines(turnId: string): number {
+    const held = this.heldLines.get(turnId);
+    if (held === undefined) return 0;
+    const last = held.lines.at(-1);
+    if (last === undefined) return 0;
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      for (const line of held.lines)
+        sql.exec(
+          "INSERT OR IGNORE INTO transcript_pending (session_id, line_seq, turn_id, text, created_at) VALUES (?, ?, ?, ?, ?)",
+          line.sessionId,
+          line.lineSeq,
+          line.turnId,
+          line.text,
+          line.createdAt,
+        );
+      sql.exec(
+        "UPDATE turns SET line_count = line_count + ?, updated_at = ? WHERE turn_id = ?",
+        held.lines.length,
+        now,
+        turnId,
+      );
+      sql.exec(
+        "UPDATE sessions SET last_line_seq = MAX(last_line_seq, ?), updated_at = ? WHERE session_id = ?",
+        last.lineSeq,
+        now,
+        held.sessionId,
+      );
+    });
+    this.heldLines.delete(turnId);
+    this.unstoredTurns.set(turnId, { tenantId: held.tenantId, sessionId: held.sessionId, hostId: held.hostId });
+    return held.lines.length;
   }
 
   protected async reconcileHeldBoxes(

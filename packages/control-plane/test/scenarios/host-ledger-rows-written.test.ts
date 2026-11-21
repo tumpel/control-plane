@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
+import { RETRY_LIMIT } from "../../src/backoff.ts";
 import * as control from "../../src/channel/control.ts";
 import { HostLedger } from "../../src/channel/ledger.ts";
 import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
@@ -86,4 +87,17 @@ test("a frame refused while lines wait for their checkpoint is acked with them, 
   assert.deepEqual(closed, []);
   control.acknowledge(context, ledger.take());
   assert.equal(ledger.load().received, 4);
+});
+
+test("the channel counts failed checkpoints of the same first held frame up to the retry limit, and a stored checkpoint starts the count over", async () => {
+  const { ledger, context, line } = channel();
+  for (let seq = 1; seq <= 2; seq++) await line(seq);
+  const tries = Array.from({ length: RETRY_LIMIT }, () => ledger.stalled());
+  assert.deepEqual(
+    tries,
+    Array.from({ length: RETRY_LIMIT }, (_, retry) => retry + 1),
+  );
+  control.acknowledge(context, ledger.take());
+  await line(3);
+  assert.equal(ledger.stalled(), 1);
 });

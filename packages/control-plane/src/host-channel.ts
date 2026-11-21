@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode } from "@tumpel/schemas";
-import { errorOf } from "./backoff.ts";
+import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import * as control from "./channel/control.ts";
 import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
 import { HostLedger } from "./channel/ledger.ts";
@@ -194,7 +194,11 @@ export class HostChannel extends DurableObject<Env> {
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.flush(host.host_id, event.usage, now, attachment, context);
+      if (
+        !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
+        this.ledger.stalled() >= RETRY_LIMIT
+      )
+        return this.giveUp(socket, attachment, context);
       await this.sendDeferredOffers(host.host_id, attachment, context);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
@@ -222,13 +226,13 @@ export class HostChannel extends DurableObject<Env> {
     context: control.ControlContext,
   ): Promise<void> {
     const bytes = JSON.stringify(frame.message).length;
-    if (this.ledger.queued().length > 0) return this.queue(frame, bytes, context);
+    if (this.ledger.queued().length > 0) return this.queue(frame, bytes, attachment, context);
     if (frame.message.type !== "TurnLine" && this.ledger.holding()) {
       if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context)))
-        return this.queue(frame, bytes, context);
+        return this.queue(frame, bytes, attachment, context);
     }
     const delivered = await this.reply(hostId, frame);
-    if (!delivered.ok) return this.queue(frame, bytes, context);
+    if (!delivered.ok) return this.queue(frame, bytes, attachment, context);
     if (frame.message.type !== "TurnLine") {
       control.acknowledge(context, [frame]);
       return this.answer(hostId, frame, delivered.reply, attachment, context);
@@ -236,22 +240,40 @@ export class HostChannel extends DurableObject<Env> {
     await this.answer(hostId, frame, delivered.reply, attachment, context);
     this.ledger.hold(frame, true, bytes);
     if (!this.ledger.full()) return;
-    if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context))) this.overflow(context);
+    if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context))) this.overflow(attachment, context);
   }
 
-  private queue(frame: Frame<HostMessage>, bytes: number, context: control.ControlContext): void {
+  private queue(
+    frame: Frame<HostMessage>,
+    bytes: number,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): void {
     this.ledger.hold(frame, false, bytes);
-    if (this.ledger.full()) this.overflow(context);
+    if (this.ledger.full()) this.overflow(attachment, context);
   }
 
-  private overflow(context: control.ControlContext): void {
+  private overflow(attachment: Attachment, context: control.ControlContext): void {
     const first = this.ledger.first();
     this.ledger.take();
+    attachment.heldFrom = null;
     control.close(
       context.port,
       CloseCode.ProtocolError,
       `the control plane could not store frames ${first ?? "none"} onward in time; reconnect and resend them`,
     );
+  }
+
+  private giveUp(socket: WebSocket, attachment: Attachment, context: control.ControlContext): Promise<void> {
+    const first = this.ledger.first();
+    this.ledger.take();
+    attachment.heldFrom = null;
+    control.close(
+      context.port,
+      CloseCode.ProtocolError,
+      `the control plane failed to store frames ${first ?? "none"} onward on ${RETRY_LIMIT} heartbeats in a row; reconnect and resend them`,
+    );
+    return this.refreshPresence(socket);
   }
 
   private async flush(
@@ -273,6 +295,7 @@ export class HostChannel extends DurableObject<Env> {
     );
     if (!reported) return false;
     const held = this.ledger.take();
+    attachment.heldFrom = this.ledger.first();
     if (held.length > 0) control.acknowledge(context, held);
     return true;
   }
