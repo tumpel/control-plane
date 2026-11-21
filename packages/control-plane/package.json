@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
-    "test": "node --test --test-timeout=90000 test/*.test.ts",
+    "test": "node --test --test-timeout=90000 test/*.test.ts test/scenarios/*.test.ts",
     "test:integration": "node ../../npm-scripts/release-fetch.mjs && TMPDIR=/dev/shm node --test --test-timeout=90000 test/integration/*.test.ts"
   },
   "devDependencies": {
