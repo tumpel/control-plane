@@ -3,6 +3,7 @@ import type { Authenticate } from "./github-handlers.ts";
 import { json, noContent, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
+import { pushSenderName } from "./push-sender.ts";
 import { tenantApi } from "./tenant-api.ts";
 
 const PUSH_SUBSCRIPTIONS_PATH = "/v1/push-subscriptions";
@@ -65,7 +66,9 @@ const remove = async (env: Env, caller: Caller, raw: string): Promise<Response> 
     principalId: caller.principalId,
     pushSubscriptionId,
   });
-  return deleted ? noContent() : notFound(pushSubscriptionId);
+  if (!deleted) return notFound(pushSubscriptionId);
+  await env.PUSHES.getByName(pushSenderName(caller.tenantId, pushSubscriptionId)).stop();
+  return noContent();
 };
 
 export const handlePushSubscriptions = async (

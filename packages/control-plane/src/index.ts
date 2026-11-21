@@ -202,6 +202,7 @@ import { handlePrebuildTemplates } from "./prebuild-templates.ts";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
+import type { PushSender } from "./push-sender.ts";
 import { handlePushSubscriptions } from "./push-subscriptions.ts";
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
@@ -221,6 +222,7 @@ import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryToken
 
 export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
+export { PushSender } from "./push-sender.ts";
 export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 export { TenantMetrics } from "./tenant-metrics";
@@ -236,6 +238,7 @@ export interface Env extends SignerEnv {
   DB: D1Database;
   TENANT: DurableObjectNamespace<Tenant>;
   EVENTS: DurableObjectNamespace<EventChannel>;
+  PUSHES: DurableObjectNamespace<PushSender>;
   WEBHOOKS: DurableObjectNamespace<WebhookSender>;
   HOST: DurableObjectNamespace<HostChannel>;
   SESSION_TIMER: DurableObjectNamespace<SessionTimer>;

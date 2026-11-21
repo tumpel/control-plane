@@ -3,7 +3,7 @@ import worker, { Tenant as BaseTenant, WebhookSender as BaseWebhookSender, type 
 import type { NewTenantEvent } from "../../src/tenant-events.ts";
 import { webhookSenderName } from "../../src/webhook-sender.ts";
 
-export { EventChannel, HostChannel, SessionTimer, TenantMetrics } from "../../src/index.ts";
+export { EventChannel, HostChannel, PushSender, SessionTimer, TenantMetrics } from "../../src/index.ts";
 
 export class Tenant extends BaseTenant {
   async emit(event: NewTenantEvent, now: number): Promise<void> {
@@ -12,7 +12,8 @@ export class Tenant extends BaseTenant {
         `INSERT OR IGNORE INTO sessions
           (session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version,
             model, state, last_line_seq, endpoint, created_at, updated_at)
-          VALUES (?, 'principal', 'host', 'box', 'persona', 'repository', 'codex', '1', 'model', 'Idle', 0, '', ?, ?)`,
+          VALUES (?, 'principal', 'host', 'box', 'persona', 'https://github.com/tumpel/control-plane.git',
+            'codex', '1', 'model', 'Idle', 0, '', ?, ?)`,
         event.sessionId,
         now,
         now,
@@ -94,6 +95,30 @@ export default {
       }>(request);
       await tenant(env, tenantId).emit(event, now);
       return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/__fixture/push/create") {
+      const { tenantId, subscription, now } = await requestBody<{
+        tenantId: string;
+        subscription: { endpoint: string; keys: { p256dh: string; auth: string }; events: NewTenantEvent["event"][] };
+        now: number;
+      }>(request);
+      return Response.json(
+        await tenant(env, tenantId).handle({
+          tenantApiVersion: TenantApiProtocol.Version,
+          operation: "createPushSubscription",
+          input: { tenantId, principalId: "principal", subscription, now },
+        }),
+      );
+    }
+    if (url.pathname === "/__fixture/push/list") {
+      const { tenantId } = await requestBody<{ tenantId: string }>(request);
+      return Response.json(
+        await tenant(env, tenantId).handle({
+          tenantApiVersion: TenantApiProtocol.Version,
+          operation: "listPushSubscriptions",
+          input: { tenantId, principalId: "principal" },
+        }),
+      );
     }
     const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/fail-since|\/alarm)?$/.exec(url.pathname);
     if (senderMatch !== null) {

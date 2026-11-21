@@ -82,6 +82,7 @@ import tenant0081 from "../migrations/tenant/0081_webhooks.sql";
 import tenant0082 from "../migrations/tenant/0082_box_eviction_blocks.sql";
 import tenant0083 from "../migrations/tenant/0083_turn_capacity_waits.sql";
 import tenant0084 from "../migrations/tenant/0084_push_subscriptions.sql";
+import tenant0085 from "../migrations/tenant/0085_push_delivery.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -169,4 +170,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0082_box_eviction_blocks", sql: tenant0082 },
   { name: "0083_turn_capacity_waits", sql: tenant0083 },
   { name: "0084_push_subscriptions", sql: tenant0084 },
+  { name: "0085_push_delivery", sql: tenant0085 },
 ];

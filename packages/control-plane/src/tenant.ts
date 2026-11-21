@@ -18,6 +18,7 @@ import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import { pushSenderName } from "./push-sender.ts";
 import {
   type MemberUpdate,
   memberWith,
@@ -196,6 +197,7 @@ export class Tenant extends TenantConnectors {
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
+    await this.wakePushes();
     this.drainObjects();
     return response;
   }
@@ -205,6 +207,7 @@ export class Tenant extends TenantConnectors {
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
+    await this.wakePushes();
     await this.armExpiry();
     this.drainObjects();
   }
@@ -242,6 +245,17 @@ export class Tenant extends TenantConnectors {
         cursorEventId: wake.start_event_id,
       });
       this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+    }
+    await this.armExpiry();
+  }
+
+  private async wakePushes(): Promise<void> {
+    const deliveries = await this.pendingPushDeliveries(this.tenantName());
+    if (deliveries.length === 0) return;
+    await this.ctx.storage.setAlarm(Date.now());
+    for (const delivery of deliveries) {
+      await this.env.PUSHES.getByName(pushSenderName(delivery.tenantId, delivery.pushSubscriptionId)).wake(delivery);
+      this.completePushWake(delivery.eventId, delivery.pushSubscriptionId);
     }
     await this.armExpiry();
   }

@@ -6,7 +6,7 @@ import { createServer, type Server } from "node:https";
 import { after, before, test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { TenantEventSchema, WebhookEndpointSchema } from "@tumpel/schemas";
+import { PushSubscriptionSchema, TenantEventSchema, WebhookEndpointSchema } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
 import { workersSecretKeyStore } from "../src/key-store.ts";
@@ -44,6 +44,12 @@ EwEB/wQFMAMBAf8wDwYDVR0RBAgwBocEfwAAATAKBggqhkjOPQQDAgNJADBGAiEA
 icmobc7N6CfhV5Zoy5g7X1GcKv/IABtcO7f9330MS94CIQCmwmmPGX5nxtw6e7Yc
 ZskS6IATrUKTfTeyDuTha9kNZQ==
 -----END CERTIFICATE-----`;
+const VAPID_JWK = createPrivateKey(RECEIVER_KEY).export({ format: "jwk" });
+const VAPID_PUBLIC_KEY = Buffer.concat([
+  Buffer.from([4]),
+  Buffer.from(VAPID_JWK.x ?? "", "base64url"),
+  Buffer.from(VAPID_JWK.y ?? "", "base64url"),
+]).toString("base64url");
 const SenderStateSchema = z.object({
   tenantId: z.string(),
   webhookEndpointId: z.string(),
@@ -63,7 +69,13 @@ let receiverOrigin: string;
 let receiverStatus = 204;
 let holdReceiver = false;
 const blockedResponses: ServerResponse[] = [];
-const received: { body: string; eventId: string | undefined; signature: string | undefined }[] = [];
+const received: {
+  body: string;
+  eventId: string | undefined;
+  signature: string | undefined;
+  authorization: string | undefined;
+  contentEncoding: string | undefined;
+}[] = [];
 
 const post = (path: string, body: unknown): ReturnType<TestHarness["fetch"]> =>
   server.fetch(`${origin}${path}`, {
@@ -104,6 +116,10 @@ before(async () => {
         signature: Array.isArray(request.headers["tumpel-signature"])
           ? request.headers["tumpel-signature"][0]
           : request.headers["tumpel-signature"],
+        authorization: request.headers.authorization,
+        contentEncoding: Array.isArray(request.headers["content-encoding"])
+          ? request.headers["content-encoding"][0]
+          : request.headers["content-encoding"],
       });
       if (holdReceiver) blockedResponses.push(response);
       else finishReceiver(response);
@@ -123,7 +139,13 @@ before(async () => {
         config: {
           ...config,
           main: "./test/fixtures/webhook-worker.ts",
-          vars: { ...config.vars, SECRETS_KEK: KEK },
+          vars: {
+            ...config.vars,
+            SECRETS_KEK: KEK,
+            VAPID_PRIVATE_KEY: RECEIVER_KEY.toString(),
+            VAPID_PUBLIC_KEY,
+            VAPID_SUBJECT: "mailto:notifications@example.test",
+          },
         },
       },
     ],
@@ -286,4 +308,60 @@ test("the sender signs ordered events, retries its cursor, fails after three day
   });
   await wait(100);
   assert.equal(received.length, 4);
+});
+
+test("push delivery drops subscriptions the push service no longer knows", async () => {
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  const endpoint = `${receiverOrigin}/push/subscription`;
+  const list = async (): Promise<number> => {
+    const response = await post("/__fixture/push/list", { tenantId: TENANT_ID });
+    return z
+      .object({ result: z.object({ subscriptions: z.array(PushSubscriptionSchema) }) })
+      .parse(await response.json()).result.subscriptions.length;
+  };
+
+  for (const [index, status] of [404, 410].entries()) {
+    const created = await post("/__fixture/push/create", {
+      tenantId: TENANT_ID,
+      subscription: {
+        endpoint,
+        keys: { p256dh, auth },
+        events: ["SubscriptionPaused", "SubscriptionEnded"],
+      },
+      now: 6 + index * 2,
+    });
+    assert.equal(created.status, 200);
+    assert.equal(await list(), 1);
+    receiverStatus = status;
+    const receivedBefore = received.length;
+    await post("/__fixture/emit", {
+      tenantId: TENANT_ID,
+      event:
+        status === 404
+          ? {
+              event: "SubscriptionPaused",
+              subscriptionId: "subscription-4",
+              sessionId: "session-4",
+              reason: { kind: "ByRequest", message: "Choose a release." },
+            }
+          : {
+              event: "SubscriptionEnded",
+              subscriptionId: "subscription-4",
+              sessionId: "session-4",
+              reason: "GoalMet",
+            },
+      now: 7 + index * 2,
+    });
+    await until(
+      `the push service's HTTP ${status} response`,
+      async () => ({ received: received.length, subscriptions: await list() }),
+      (state) => state.received === receivedBefore + 1 && state.subscriptions === 0,
+    );
+    const delivery = received.at(-1);
+    assert.equal(delivery?.contentEncoding, "aes128gcm");
+    assert.match(delivery?.authorization ?? "", /^vapid t=.+, k=.+$/);
+  }
+  receiverStatus = 204;
 });
