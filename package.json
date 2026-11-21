@@ -9,7 +9,7 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "biome check . && node npm-scripts/sql-check.mjs",
+    "lint": "biome check . && node npm-scripts/sql-check.mjs && node npm-scripts/db-schema.mjs --check",
     "sql:update": "node npm-scripts/sql-check.mjs --update && biome format --write npm-scripts/sql-allowlist.json",
     "fix": "biome check --write .",
     "build": "npm run build --workspaces --if-present",
@@ -37,7 +37,8 @@
     "harness:layer": "node npm-scripts/harness-layer.mjs",
     "smoke:pi": "node npm-scripts/pi-smoke.mjs",
     "release:publish": "node npm-scripts/release-publish.mjs",
-    "release:secrets": "node npm-scripts/release-secrets.mjs"
+    "release:secrets": "node npm-scripts/release-secrets.mjs",
+    "db:schema": "node npm-scripts/db-schema.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.0",
