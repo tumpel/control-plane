@@ -59,7 +59,8 @@
       { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
       { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
       { "name": "EVENTS", "class_name": "EventChannel" },
-      { "name": "WEBHOOKS", "class_name": "WebhookSender" }
+      { "name": "WEBHOOKS", "class_name": "WebhookSender" },
+      { "name": "PUSHES", "class_name": "PushSender" }
     ]
   },
   "migrations": [
@@ -68,7 +69,8 @@
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
     { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+    { "tag": "v7", "new_sqlite_classes": ["PushSender"] }
   ],
   "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
@@ -127,7 +129,8 @@
           { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
           { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
           { "name": "EVENTS", "class_name": "EventChannel" },
-          { "name": "WEBHOOKS", "class_name": "WebhookSender" }
+          { "name": "WEBHOOKS", "class_name": "WebhookSender" },
+          { "name": "PUSHES", "class_name": "PushSender" }
         ]
       },
       "migrations": [
@@ -136,7 +139,8 @@
         { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
         { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
         { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+        { "tag": "v7", "new_sqlite_classes": ["PushSender"] }
       ]
     }
   }

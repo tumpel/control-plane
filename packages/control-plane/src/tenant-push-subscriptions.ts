@@ -1,8 +1,12 @@
-import { type CreatePushSubscriptionInputSchema, PushSubscriptionSchema } from "@tumpel/schemas";
+import { type CreatePushSubscriptionInputSchema, PushSubscriptionSchema, TenantEventSchema } from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
-import { seal } from "./envelope.ts";
+import { seal, unseal } from "./envelope.ts";
+import { pushNotification, pushSessionName } from "./push-notification.ts";
+import type { PushDelivery } from "./push-sender.ts";
+import type { NewTenantEvent } from "./tenant-events.ts";
 import { TenantTriggers } from "./tenant-triggers.ts";
+import { pushRequest } from "./web-push.ts";
 
 export type PushSubscription = z.infer<typeof PushSubscriptionSchema>;
 type PushSubscriptionCreate = z.infer<typeof CreatePushSubscriptionInputSchema>["subscription"];
@@ -13,6 +17,18 @@ type PushSubscriptionRow = {
   endpoint: string;
   created_at: number;
   events: string;
+};
+
+type PushWakeRow = {
+  event_id: number;
+  principal_id: string;
+  push_subscription_id: string;
+  endpoint: string;
+  p256dh: string;
+  auth_sealed: string;
+  payload: string;
+  event_created_at: number;
+  repository: string;
 };
 
 const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id, p.endpoint, p.created_at,
@@ -87,6 +103,79 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         pushSubscriptionId,
       ).rowsWritten > 0
     );
+  }
+
+  protected async pendingPushDeliveries(tenantId: string): Promise<PushDelivery[]> {
+    const rows = this.ctx.storage.sql
+      .exec<PushWakeRow>(
+        `SELECT w.event_id, p.principal_id, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed,
+          e.payload, e.created_at AS event_created_at, s.repository FROM push_wakes AS w
+          JOIN push_subscriptions AS p USING (push_subscription_id)
+          JOIN events AS e USING (event_id)
+          JOIN event_sessions AS es USING (event_id)
+          JOIN sessions AS s USING (session_id)
+          ORDER BY w.event_id, p.push_subscription_id`,
+      )
+      .toArray();
+    if (rows.length === 0) return [];
+    const dataKey = await this.dataKey();
+    return Promise.all(
+      rows.map(async (row) => {
+        const event = TenantEventSchema.parse({
+          ...JSON.parse(row.payload),
+          eventId: row.event_id,
+          tenantId,
+          createdAt: row.event_created_at,
+        });
+        if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
+          throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
+        }
+        const request = await pushRequest(
+          row.endpoint,
+          JSON.stringify(pushNotification(event, pushSessionName(row.repository))),
+          row.p256dh,
+          await unseal(
+            dataKey,
+            row.auth_sealed,
+            authContext(row.push_subscription_id),
+            "turn notifications off and on again for this browser",
+          ),
+          this.env.VAPID_PRIVATE_KEY,
+          this.env.VAPID_PUBLIC_KEY,
+          this.env.VAPID_SUBJECT,
+          Date.now(),
+        );
+        return {
+          eventId: row.event_id,
+          tenantId,
+          principalId: row.principal_id,
+          pushSubscriptionId: row.push_subscription_id,
+          endpoint: row.endpoint,
+          headers: [...request.headers.entries()],
+          body: new Uint8Array(await request.arrayBuffer()),
+        };
+      }),
+    );
+  }
+
+  protected completePushWake(eventId: number, pushSubscriptionId: string): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
+      eventId,
+      pushSubscriptionId,
+    );
+  }
+
+  protected override appendEvent(event: NewTenantEvent, now: number): number {
+    const eventId = super.appendEvent(event, now);
+    if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") return eventId;
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO push_wakes (event_id, push_subscription_id)
+        SELECT ?, push_subscription_id FROM push_subscription_events WHERE event = ?`,
+      eventId,
+      event.event,
+    );
+    return eventId;
   }
 
   private pushSubscription(tenantId: string, pushSubscriptionId: string): PushSubscription {
