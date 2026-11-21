@@ -77,12 +77,13 @@ interface Timers {
 const TIMERS_KEY = "timers";
 const RETRIES_KEY = "retries";
 const RETRY_AT_KEY = "retryAt";
+const HELD_KEY = "held";
 const FIRST_RETRY_MS = 2_000;
 
 export class SessionTimer extends DurableObject<Env> {
   async set(tenantId: string, changes: DeadlineChanges): Promise<void> {
     const timers = (await this.ctx.storage.get<Timers>(TIMERS_KEY)) ?? { tenantId, deadlines: {} };
-    Object.assign(timers.deadlines, changes);
+    timers.deadlines = { ...(await this.takeHeld()), ...timers.deadlines, ...changes };
     for (const [name, deadline] of Object.entries(timers.deadlines) as [DeadlineName, { at: number } | null][]) {
       if (deadline === null) delete timers.deadlines[name];
     }
@@ -116,16 +117,28 @@ export class SessionTimer extends DurableObject<Env> {
       if ((await this.ctx.storage.get<number>(RETRIES_KEY)) !== undefined) {
         await this.ctx.storage.delete([RETRIES_KEY, RETRY_AT_KEY]);
       }
+      const held = await this.takeHeld();
+      if (Object.keys(held).length > 0)
+        await this.restore(Object.entries(held).map(([name, deadline]) => ({ name, deadline }) as DueDeadline));
     }
+  }
+
+  private async takeHeld(): Promise<Deadlines> {
+    const held = (await this.ctx.storage.get<Deadlines>(HELD_KEY)) ?? {};
+    await this.ctx.storage.delete(HELD_KEY);
+    return held;
   }
 
   private async retry(tenantId: string, unreached: DueDeadline[], error: Error): Promise<void> {
     const retries = (await this.ctx.storage.get<number>(RETRIES_KEY)) ?? 0;
     const names = unreached.map(({ name, deadline }) => `${name} ${JSON.stringify(deadline)}`).join(", ");
     if (retries >= RETRY_LIMIT) {
+      const held = (await this.ctx.storage.get<Deadlines>(HELD_KEY)) ?? {};
+      for (const { name, deadline } of unreached) held[name] = deadline as never;
       await this.ctx.storage.delete([RETRIES_KEY, RETRY_AT_KEY]);
+      await this.ctx.storage.put(HELD_KEY, held);
       console.error(
-        `SessionTimerFailed: tenant ${tenantId} dropped the deadlines ${names} after ${RETRY_LIMIT} retries: ${error.message}`,
+        `SessionTimerFailed: tenant ${tenantId} stopped retrying the deadlines ${names} after ${RETRY_LIMIT} retries; the next call between the tenant and this timer reaches them: ${error.message}`,
       );
       return;
     }

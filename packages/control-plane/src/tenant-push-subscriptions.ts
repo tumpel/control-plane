@@ -46,6 +46,14 @@ const PUSH_BATCH_SIZE = 20;
 const PUSH_TTL_MS = 86_400 * 1000;
 const PUSH_FIRST_RETRY_MS = 60_000;
 
+export const PUSH_WAKES_DUE = `FROM push_wakes AS w
+  JOIN push_subscriptions AS p USING (push_subscription_id)
+  JOIN events AS e USING (event_id)
+  JOIN event_sessions AS es USING (event_id)
+  JOIN sessions AS s USING (session_id)
+  WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
+    WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)`;
+
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
 export const importP256dh = (p256dh: string): Promise<CryptoKey> =>
@@ -152,13 +160,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     const rows = this.ctx.storage.sql
       .exec<PushWakeRow>(
         `SELECT w.event_id, w.failures, w.next_attempt_at, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed,
-          e.payload, e.created_at AS event_created_at, s.repository FROM push_wakes AS w
-          JOIN push_subscriptions AS p USING (push_subscription_id)
-          JOIN events AS e USING (event_id)
-          JOIN event_sessions AS es USING (event_id)
-          JOIN sessions AS s USING (session_id)
-          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)
+          e.payload, e.created_at AS event_created_at, s.repository ${PUSH_WAKES_DUE}
             AND w.next_attempt_at <= ?
           ORDER BY w.event_id, p.push_subscription_id
           LIMIT ?`,

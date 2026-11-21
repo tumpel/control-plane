@@ -10,7 +10,7 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
+import { backoffMs, errorOf, forgetDeadlineFailures, RETRY_LIMIT } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
@@ -39,6 +39,7 @@ import { serveTenantRequest, type TenantHandlers, type TenantRequest, type Tenan
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
+import { PUSH_WAKES_DUE } from "./tenant-push-subscriptions.ts";
 import { memberRows, sealContext } from "./tenant-sessions";
 import { webhookSenderName } from "./webhook-sender.ts";
 
@@ -59,10 +60,14 @@ export type SecretSetPatch = z.infer<typeof SecretSetPatchSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
 
-const ALARM_RETRIES_KEY = "alarmRetries";
+const ALARM_RETRY_KEY = "alarmRetry";
 const ALARM_FAILED_AT_KEY = "alarmFailedAt";
 const ALARM_FIRST_RETRY_MS = 2_000;
 const WEBHOOK_WAKE_FIRST_RETRY_MS = 2_000;
+const WEBHOOK_WAKE_RETRIES = `FROM webhook_wake_retries AS r
+  JOIN webhook_wakes USING (webhook_endpoint_id) JOIN webhook_endpoints USING (webhook_endpoint_id)`;
+
+type AlarmRetry = { retries: number; at: number };
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
@@ -215,22 +220,21 @@ export class Tenant extends TenantConnectors {
       await this.followUp(),
     ].includes(true);
     if (!failed) {
-      await this.ctx.storage.delete([ALARM_RETRIES_KEY, ALARM_FAILED_AT_KEY]);
+      await this.ctx.storage.delete([ALARM_RETRY_KEY, ALARM_FAILED_AT_KEY]);
       return this.armAlarm();
     }
-    const retry = ((await this.ctx.storage.get<number>(ALARM_RETRIES_KEY)) ?? 0) + 1;
+    const retry = ((await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY))?.retries ?? 0) + 1;
     if (retry <= RETRY_LIMIT) {
-      await this.ctx.storage.put(ALARM_RETRIES_KEY, retry);
+      const pending: AlarmRetry = { retries: retry, at: now + backoffMs(retry, ALARM_FIRST_RETRY_MS) };
+      await this.ctx.storage.put(ALARM_RETRY_KEY, pending);
       console.error(`TenantAlarmRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} after a failed alarm step`);
       return this.armAlarm();
     }
-    const firstFailure = (await this.ctx.storage.get<number>(ALARM_FAILED_AT_KEY)) === undefined;
+    await this.ctx.storage.delete(ALARM_RETRY_KEY);
     await this.ctx.storage.put(ALARM_FAILED_AT_KEY, now);
-    if (firstFailure) {
-      console.error(
-        `TenantAlarmFailed: tenant ${tenantId} stopped retrying its overdue alarm work after ${RETRY_LIMIT} retries; work that falls due later still runs`,
-      );
-    }
+    console.error(
+      `TenantAlarmFailed: tenant ${tenantId} stopped retrying the alarm work overdue now after ${RETRY_LIMIT} retries; work that falls due later still runs`,
+    );
     await this.armAlarm();
   }
 
@@ -256,28 +260,30 @@ export class Tenant extends TenantConnectors {
   }
 
   private async reachDeadline(
+    timer: string | null,
     due: DueDeadline,
     reach: () => Promise<void>,
     abandon: (detail: string) => Promise<void>,
   ): Promise<void> {
-    const deadline = `${due.name} ${JSON.stringify(due.deadline)}`;
+    if (timer === null) return reach();
     const sql = this.ctx.storage.sql;
     const failed = await reach().then(() => null, errorOf);
-    if (failed === null) {
-      sql.exec("DELETE FROM deadline_failures WHERE deadline = ?", deadline);
-      return;
-    }
+    if (failed === null) return forgetDeadlineFailures(sql, timer, [due.name]);
     const { failures } = sql
       .exec<{ failures: number }>(
-        `INSERT INTO deadline_failures (deadline, failures) VALUES (?, 1)
-        ON CONFLICT (deadline) DO UPDATE SET failures = failures + 1 RETURNING failures`,
-        deadline,
+        `INSERT INTO deadline_failures (timer, name, at, failures) VALUES (?, ?, ?, 1)
+        ON CONFLICT (timer, name) DO UPDATE SET failures = CASE WHEN at = excluded.at THEN failures + 1 ELSE 1 END,
+          at = excluded.at
+        RETURNING failures`,
+        timer,
+        due.name,
+        due.deadline.at,
       )
       .one();
     if (failures <= RETRY_LIMIT) throw failed;
-    sql.exec("DELETE FROM deadline_failures WHERE deadline = ?", deadline);
+    forgetDeadlineFailures(sql, timer, [due.name]);
     const detail = `the ${due.name} deadline failed ${failures} times, so it was dropped: ${failed.message}`;
-    console.error(`DeadlineDropped: tenant ${this.tenantName()} ${deadline}: ${detail}`);
+    console.error(`DeadlineDropped: tenant ${this.tenantName()} ${timer} ${due.name}: ${detail}`);
     await abandon(detail);
   }
 
@@ -315,6 +321,7 @@ export class Tenant extends TenantConnectors {
         .then(() => null, errorOf);
       const retry = wake.failures + 1;
       if (failed === null || retry > RETRY_LIMIT) {
+        sql.exec("DELETE FROM webhook_wake_retries WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
         sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
       }
       if (failed === null) continue;
@@ -337,27 +344,24 @@ export class Tenant extends TenantConnectors {
   }
 
   private async armAlarm(): Promise<void> {
-    const retries = (await this.ctx.storage.get<number>(ALARM_RETRIES_KEY)) ?? 0;
+    const retry = await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY);
     const failedAt = await this.ctx.storage.get<number>(ALARM_FAILED_AT_KEY);
     const [next] = this.ctx.storage.sql
       .exec<{ at: number | null }>(
         `SELECT MIN(at) AS at FROM (
-        SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
+        SELECT s.expires_at_ms AS at FROM subscriptions AS s
           WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
         UNION ALL
-        SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
-          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)
+        SELECT w.next_attempt_at AS at ${PUSH_WAKES_DUE}
         UNION ALL
-        SELECT MIN(retry_at) AS at FROM subscription_delivery_retries
+        SELECT retry_at AS at FROM subscription_delivery_retries
         UNION ALL
-        SELECT MIN(retry_at) AS at FROM webhook_wake_retries) WHERE at > ?`,
+        SELECT r.retry_at AS at ${WEBHOOK_WAKE_RETRIES}) WHERE at > ?`,
         failedAt ?? Number.MIN_SAFE_INTEGER,
       )
       .toArray();
     if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
-    const floor = retries > 0 && failedAt === undefined ? Date.now() + backoffMs(retries, ALARM_FIRST_RETRY_MS) : 0;
-    return this.ctx.storage.setAlarm(Math.max(next.at, floor));
+    return this.ctx.storage.setAlarm(Math.max(next.at, retry?.at ?? next.at));
   }
 
   private readonly operations: TenantHandlers = {
@@ -522,6 +526,7 @@ export class Tenant extends TenantConnectors {
     },
     prebuildDeadlineReached: async ({ tenantId, due }) => {
       await this.reachDeadline(
+        due.deadline.prebuildId,
         due,
         () => this.prebuildDeadlineReached(tenantId, due),
         (detail) => this.abandonPrebuildDeadline(tenantId, due, detail),
@@ -724,6 +729,7 @@ export class Tenant extends TenantConnectors {
     }),
     deadlineReached: async ({ tenantId, due }) => {
       await this.reachDeadline(
+        this.deadlineTimer(due),
         due,
         () => this.deadlineReached(tenantId, due),
         (detail) => this.abandonDeadline(tenantId, due, detail),

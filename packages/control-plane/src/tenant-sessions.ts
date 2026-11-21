@@ -33,6 +33,7 @@ import {
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { forgetDeadlineFailures } from "./backoff.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import type {
   BootImage,
@@ -1174,6 +1175,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
+    forgetDeadlineFailures(this.ctx.storage.sql, sessionId, Object.keys(changes));
     return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, changes);
   }
 
@@ -2501,6 +2503,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
           .toArray()
           .map((row) => row.storage_key),
       );
+      sql.exec(
+        "DELETE FROM push_wakes WHERE event_id IN (SELECT event_id FROM event_sessions WHERE session_id = ?)",
+        sessionId,
+      );
+      sql.exec("DELETE FROM deadline_failures WHERE timer = ?", sessionId);
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
     return { kind: "Deleted" };
@@ -3786,21 +3793,43 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
   }
 
+  protected deadlineTimer(due: SessionDueDeadline): string | null {
+    return this.turnRow(due.deadline.turnId)?.session_id ?? null;
+  }
+
   protected async abandonDeadline(tenantId: string, due: SessionDueDeadline, detail: string): Promise<void> {
     const turn = this.turnRow(due.deadline.turnId);
     if (turn === null) return;
-    const now = Date.now();
-    if (IN_FLIGHT.includes(turn.state)) {
-      return this.failTurn(tenantId, turn.turn_id, "TurnTimedOut", detail, iso(now), "Failed");
+    const failedAt = iso(Date.now());
+    if (due.name === "FirstLine" && turn.state === "Running" && turn.line_count === 0) {
+      return this.failTurn(tenantId, turn.turn_id, "NoFirstOutput", detail, failedAt);
+    }
+    if (due.name === "HostOffline" && turn.state === "Running" && this.lastSeenOffline(turn.host_id)) {
+      return this.failTurn(tenantId, turn.turn_id, "HostOffline", detail, failedAt);
+    }
+    if (due.name === "Total" && turn.state === "Running") {
+      return this.failTurn(tenantId, turn.turn_id, "TurnTimedOut", detail, failedAt);
+    }
+    if (due.name === "Total" && turn.state === "Offered") {
+      return this.failTurn(tenantId, turn.turn_id, "Undelivered", detail, failedAt);
     }
     const session = this.sessionRow(turn.session_id);
-    if (session === null || !["Starting", "Running", "Stopping"].includes(session.state)) return;
-    this.ctx.storage.sql.exec(
-      "UPDATE sessions SET state = 'Failed', updated_at = ? WHERE session_id = ?",
-      now,
-      turn.session_id,
-    );
-    this.sessionEntered(turn.session_id, "Failed", now);
+    if (due.name !== "TeardownAnswer" || session?.state !== "Stopping") return;
+    if (this.latestTurn(session.session_id, null)?.turn_id !== turn.turn_id) return;
+    this.recordStopFailure(session.session_id, "NotAnswered", detail, failedAt);
+    return this.returnToIdle(tenantId, session.session_id);
+  }
+
+  private lastSeenOffline(hostId: string): boolean {
+    const [last] = this.ctx.storage.sql
+      .exec<{ event: string }>(
+        `SELECT json_extract(payload, '$.event') AS event FROM events
+        WHERE json_extract(payload, '$.hostId') = ? AND json_extract(payload, '$.event') IN ('HostOnline', 'HostOffline')
+        ORDER BY event_id DESC LIMIT 1`,
+        hostId,
+      )
+      .toArray();
+    return last?.event === "HostOffline";
   }
 
   protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {

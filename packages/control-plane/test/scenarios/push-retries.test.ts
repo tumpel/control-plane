@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SubscriptionSchema } from "@tumpel/schemas";
 import { z } from "zod";
-import { PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
+import { PRINCIPAL_ID, SETTINGS, TENANT_ID, World } from "./harness/world.ts";
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -103,4 +103,35 @@ test("a push no retry can send is dropped at once, and the subscription still ex
   assert.equal(posts.length, 0);
   await world.passes(7 * DAY);
   assert.equal(pushLines(logged).length, 2);
+});
+
+test("deleting a session drops its pending pushes, so the tenant alarm does not refire for them", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  t.mock.method(console, "error", () => undefined);
+  const posts: number[] = [];
+  t.mock.method(globalThis, "fetch", async () => {
+    posts.push(Date.now());
+    return new Response(null, { status: 500 });
+  });
+  const subscription = await subscribedForPushes(world, 7 * DAY);
+  await world.call("pauseSubscription", {
+    tenantId: TENANT_ID,
+    subscriptionId: subscription.subscriptionId,
+    message: "Choose a release.",
+    now: Date.now(),
+  });
+  await world.passes(SETTINGS.turnTotalBudgetSeconds * 1000);
+  assert.equal((await world.session(subscription.sessionId)).state, "Stopped");
+
+  const { deleted } = z
+    .object({ deleted: z.object({ kind: z.string() }) })
+    .parse(await world.call("deleteSession", { tenantId: TENANT_ID, sessionId: subscription.sessionId }));
+  assert.equal(deleted.kind, "Deleted");
+  const sent = posts.length;
+  await world.passes(DAY);
+
+  assert.equal(posts.length, sent, "no push for the deleted session is tried again");
+  const alarm = await world.tenantAlarm();
+  assert.ok(alarm === null || alarm > Date.now() + MINUTE, "the tenant alarm is not left overdue");
 });

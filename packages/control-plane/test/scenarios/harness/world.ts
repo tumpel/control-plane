@@ -135,6 +135,8 @@ export class Host {
   }
 }
 
+type TenantSteps = { expireSubscriptions(now: number): void };
+
 export class World {
   readonly store = new R2Bucket();
   readonly releases = new R2Bucket();
@@ -314,6 +316,10 @@ export class World {
 
   tenantOperations(): TenantOperations {
     return (this.tenants.instance(TENANT_ID).object as { operations: TenantOperations }).operations;
+  }
+
+  tenantSteps(): TenantSteps {
+    return this.tenants.instance(TENANT_ID).object as TenantSteps;
   }
 
   tenantAlarm(): Promise<number | null> {

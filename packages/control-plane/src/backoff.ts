@@ -1,5 +1,13 @@
 export const RETRY_LIMIT = 10;
 
+export const forgetDeadlineFailures = (sql: SqlStorage, timer: string, names: string[]): void => {
+  sql.exec(
+    "DELETE FROM deadline_failures WHERE timer = ? AND name IN (SELECT value FROM json_each(?))",
+    timer,
+    JSON.stringify(names),
+  );
+};
+
 export const backoffMs = (retry: number, firstMs: number, random: () => number = Math.random): number => {
   const ceiling = firstMs * 2 ** (retry - 1);
   return Math.round(ceiling / 2 + (random() * ceiling) / 2);

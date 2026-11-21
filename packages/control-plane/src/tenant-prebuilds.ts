@@ -10,6 +10,7 @@ import {
   PrebuildSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { forgetDeadlineFailures } from "./backoff.ts";
 import {
   CIRCLECI_WORKFLOW,
   type PipelineRun,
@@ -437,6 +438,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
   }
 
   private prebuildTimers(tenantId: string, prebuildId: string, changes: DeadlineChanges): Promise<void> {
+    forgetDeadlineFailures(this.ctx.storage.sql, prebuildId, Object.keys(changes));
     return this.env.SESSION_TIMER.getByName(prebuildId).set(tenantId, changes);
   }
 
@@ -621,7 +623,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     await this.failPrebuild(
       tenantId,
       due.deadline.prebuildId,
-      ["Dispatched", "Building"],
+      [due.name === "PrebuildDispatch" ? "Dispatched" : "Building"],
       {
         phase: due.name === "PrebuildDispatch" ? "Dispatch" : "Build",
         detail,
