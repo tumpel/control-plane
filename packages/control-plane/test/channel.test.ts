@@ -206,11 +206,33 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.equal(link.closed, null);
 });
 
+test("Welcome acks the host frames an earlier connection delivered, so the host stops counting them as undelivered", async () => {
+  const channel = setup();
+  const first = channel.connect();
+  await first.hello();
+  await first.deliver(frame(1, 0, snapshotDone("snap-1")));
+  await first.deliver(frame(2, 0, snapshotDone("snap-2")));
+
+  const second = channel.connect();
+  await second.hello();
+  assert.deepEqual(second.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Version,
+    ack: 2,
+  });
+});
+
 test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () => {
   const link = setup().connect();
   await link.hello(undefined, ChannelProtocol.Oldest);
   assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Oldest });
+  assert.deepEqual(link.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Oldest,
+    ack: 0,
+  });
   assert.deepEqual(link.events.at(-1), {
     kind: "Welcomed",
     boxCapacity: 8,
@@ -226,7 +248,12 @@ test("a Hello on ChannelProtocol.Version is welcomed on that version", async () 
   const link = setup().connect();
   await link.hello(undefined, ChannelProtocol.Version);
   assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Version });
+  assert.deepEqual(link.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Version,
+    ack: 0,
+  });
 });
 
 test("a Hello one below ChannelProtocol.Oldest is refused as an unsupported version", async () => {

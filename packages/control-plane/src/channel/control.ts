@@ -251,7 +251,12 @@ const hello = async (
     if (refused !== null) return refused;
   }
   const resent = await resend(ledger, (stored) => outbound(stored, envelope.protocolVersion, context));
-  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: envelope.protocolVersion });
+  context.port.send({
+    type: "Welcome",
+    hostId: context.host.hostId,
+    protocolVersion: envelope.protocolVersion,
+    ack: ledger.received,
+  });
   for (const frame of resent) context.port.send(frame);
   return {
     connection: { phase: "Open", protocolVersion: envelope.protocolVersion, heldReported: false },
