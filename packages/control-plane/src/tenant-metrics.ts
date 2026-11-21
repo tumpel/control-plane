@@ -64,8 +64,10 @@ export class TenantMetrics extends DurableObject<Env> {
   async catalog(query: MetricWindow): Promise<Outcome<MetricCatalog>> {
     const planned = planCatalog(this.table(), query, METRICS_LIMITS);
     if (!planned.ok) return planned;
+    const instruments = instrumentsOf(this.ctx.storage.sql);
+    if (instruments.length === 0) return readCatalog(instruments, [], query, METRICS_LIMITS);
     const rows = await queryAnalytics(this.env, planned.value.sql);
-    return readCatalog(instrumentsOf(this.ctx.storage.sql), rows, query, METRICS_LIMITS);
+    return readCatalog(instruments, rows, query, METRICS_LIMITS);
   }
 
   async query(metric: string, query: MetricSeriesQuery): Promise<Outcome<MetricSeriesSet>> {
