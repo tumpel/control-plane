@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { HostFrameSchema } from "@tumpel/schemas";
+import { ChannelProtocol, HostFrameSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { type Host, PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
@@ -219,6 +219,13 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
+  await world.call("hostHello", {
+    hostId: host.hostId,
+    boxCapacity: 64,
+    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+    now: Date.now(),
+    channelProtocol: ChannelProtocol.Version,
+  });
   const lineSeqs = new Map<string, number>();
   const runTurn = async (sessionId: string, lines: number, chunks: Placement[] | null): Promise<void> => {
     const offer = host.takeOffer();
