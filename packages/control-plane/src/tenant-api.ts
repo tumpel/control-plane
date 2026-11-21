@@ -494,6 +494,14 @@ const invalid = (operation: string, error: z.ZodError): TenantRefusal => ({
   issues: error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`),
 });
 
+const DEADLINE_RETRIES_VERSION = 10;
+
+const upgrade = (tenantApiVersion: number, operation: TenantOperation, input: unknown): unknown => {
+  if (tenantApiVersion >= DEADLINE_RETRIES_VERSION) return input;
+  if (operation !== "deadlineReached" && operation !== "prebuildDeadlineReached") return input;
+  return typeof input === "object" && input !== null ? { retries: 0, ...input } : input;
+};
+
 const run = <O extends TenantOperation>(handlers: TenantHandlers, operation: O, input: unknown) => {
   const parsed = TENANT_OPERATIONS[operation].input.safeParse(input);
   if (!parsed.success) return invalid(operation, parsed.error);
@@ -519,7 +527,7 @@ export const serveTenantRequest = async (
     };
   }
   if (!known(operation)) return { refusal: "TenantOperationUnknown", operation };
-  return run(handlers, operation, input);
+  return run(handlers, operation, upgrade(tenantApiVersion, operation, input));
 };
 
 type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };

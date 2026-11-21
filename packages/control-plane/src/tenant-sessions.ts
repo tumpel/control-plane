@@ -33,7 +33,6 @@ import {
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { forgetDeadlineFailures } from "./backoff.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
 import type {
   BootImage,
@@ -1175,7 +1174,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
-    forgetDeadlineFailures(this.ctx.storage.sql, sessionId, Object.keys(changes));
     return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, changes);
   }
 
@@ -2507,7 +2505,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         "DELETE FROM push_wakes WHERE event_id IN (SELECT event_id FROM event_sessions WHERE session_id = ?)",
         sessionId,
       );
-      sql.exec("DELETE FROM deadline_failures WHERE timer = ?", sessionId);
       sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     });
     return { kind: "Deleted" };
@@ -3791,10 +3788,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       Snapshot: { turnId: turn.turn_id, at: now + delay },
     });
     if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
-  }
-
-  protected deadlineTimer(due: SessionDueDeadline): string | null {
-    return this.turnRow(due.deadline.turnId)?.session_id ?? null;
   }
 
   protected async abandonDeadline(tenantId: string, due: SessionDueDeadline, detail: string): Promise<void> {

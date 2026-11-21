@@ -10,7 +10,7 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { backoffMs, errorOf, forgetDeadlineFailures, RETRY_LIMIT, retriesElapsedMs } from "./backoff.ts";
+import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
@@ -27,7 +27,7 @@ import {
   storedKeys,
   type UnreadableSecretSet,
 } from "./secret-members.ts";
-import { type DueDeadline, SESSION_TIMER_FIRST_RETRY_MS } from "./session-timer.ts";
+import type { DueDeadline } from "./session-timer.ts";
 import { checkStart } from "./sessions.ts";
 import {
   recordSupervisorUpdate,
@@ -260,31 +260,18 @@ export class Tenant extends TenantConnectors {
   }
 
   private async reachDeadline(
-    timer: string | null,
     due: DueDeadline,
+    retries: number,
     reach: () => Promise<void>,
     abandon: (detail: string) => Promise<void>,
   ): Promise<void> {
-    if (timer === null) return reach();
-    const sql = this.ctx.storage.sql;
     const failed = await reach().then(() => null, errorOf);
-    if (failed === null) return forgetDeadlineFailures(sql, timer, [due.name]);
-    const { failures } = sql
-      .exec<{ failures: number }>(
-        `INSERT INTO deadline_failures (timer, name, at, failures) VALUES (?, ?, ?, 1)
-        ON CONFLICT (timer, name) DO UPDATE SET failures = CASE WHEN at = excluded.at THEN failures + 1 ELSE 1 END,
-          at = excluded.at
-        RETURNING failures`,
-        timer,
-        due.name,
-        due.deadline.at,
-      )
-      .one();
-    const retried = Date.now() - due.deadline.at >= retriesElapsedMs(SESSION_TIMER_FIRST_RETRY_MS);
-    if (failures <= RETRY_LIMIT && !retried) throw failed;
-    forgetDeadlineFailures(sql, timer, [due.name]);
+    if (failed === null) return;
+    if (retries < RETRY_LIMIT) throw failed;
     const detail = `the ${due.name} deadline still failed after ${RETRY_LIMIT} retries, so it was dropped: ${failed.message}`;
-    console.error(`DeadlineDropped: tenant ${this.tenantName()} ${timer} ${due.name}: ${detail}`);
+    console.error(
+      `DeadlineDropped: tenant ${this.tenantName()} ${due.name} ${JSON.stringify(due.deadline)}: ${detail}`,
+    );
     await abandon(detail);
   }
 
@@ -525,10 +512,10 @@ export class Tenant extends TenantConnectors {
       await this.workflowRunReported(tenantId, event, now);
       return {};
     },
-    prebuildDeadlineReached: async ({ tenantId, due }) => {
+    prebuildDeadlineReached: async ({ tenantId, due, retries }) => {
       await this.reachDeadline(
-        due.deadline.prebuildId,
         due,
+        retries,
         () => this.prebuildDeadlineReached(tenantId, due),
         (detail) => this.abandonPrebuildDeadline(tenantId, due, detail),
       );
@@ -728,10 +715,10 @@ export class Tenant extends TenantConnectors {
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),
-    deadlineReached: async ({ tenantId, due }) => {
+    deadlineReached: async ({ tenantId, due, retries }) => {
       await this.reachDeadline(
-        this.deadlineTimer(due),
         due,
+        retries,
         () => this.deadlineReached(tenantId, due),
         (detail) => this.abandonDeadline(tenantId, due, detail),
       );

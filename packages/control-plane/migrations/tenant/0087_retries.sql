@@ -17,11 +17,3 @@ CREATE TABLE webhook_wake_retries (
 );
 
 CREATE INDEX webhook_wake_retries_due ON webhook_wake_retries (retry_at);
-
-CREATE TABLE deadline_failures (
-  timer TEXT NOT NULL,
-  name TEXT NOT NULL,
-  at INTEGER NOT NULL,
-  failures INTEGER NOT NULL,
-  PRIMARY KEY (timer, name)
-);

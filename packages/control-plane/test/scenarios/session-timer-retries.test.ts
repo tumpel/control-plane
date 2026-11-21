@@ -87,7 +87,7 @@ test("stale deadlines dropped during a D1 outage fail nothing while the turn is 
   }
 });
 
-test("a timer whose tenant stays unreachable makes one final attempt, then drops the deadline loudly and arms nothing", async (t) => {
+test("a timer whose tenant stays unreachable drops the deadline loudly after 10 retries and arms nothing", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -103,11 +103,11 @@ test("a timer whose tenant stays unreachable makes one final attempt, then drops
   });
 
   await world.passes(SETTINGS.turnTotalBudgetSeconds * SECOND + DAY);
-  assert.equal(unreachable.mock.callCount(), 12, "the first try, 10 retries and the final attempt");
+  assert.equal(unreachable.mock.callCount(), 11, "the first try and 10 retries");
   assert.equal(failed.length, 1);
   assert.match(
     failed[0] ?? "",
-    /^SessionTimerFailed: tenant tenant-scenario dropped the deadlines Total \S+ after 10 retries and a final attempt, because the tenant stayed unreachable/,
+    /^SessionTimerFailed: tenant tenant-scenario dropped the deadlines Total \S+ after 10 retries, because the tenant stayed unreachable/,
   );
   assert.equal(await world.sessionTimer(session.sessionId).alarm(), null);
 });
