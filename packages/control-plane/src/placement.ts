@@ -38,8 +38,6 @@ type Candidate = { kind: "Candidate"; host: Host; usage: ReportedHostUsage };
 
 export type Placement = { kind: "Placed"; host: Host; evict: HeldBox[] } | { kind: "Refused"; hosts: Unplaceable[] };
 
-export type StartPlacement = Placement | { kind: "Waiting"; host: Host };
-
 const MIB = 1024 ** 2;
 
 const freeSlots = (usage: ReportedHostUsage): number => usage.boxCapacity - usage.boxesRunning - usage.boxesWarm;
@@ -131,19 +129,6 @@ const evicting = (
     if (freed.kind === "Candidate") return evict;
   }
   return null;
-};
-
-const SHORT_OF_ROOM: readonly Unplaceable["reason"][] = ["Full", "MemoryFull", "NoMemory", "NoDisk"];
-
-const capacityHost = (hosts: readonly Unplaceable[]): Host | undefined =>
-  hosts.find(({ reason }) => SHORT_OF_ROOM.includes(reason))?.host ??
-  hosts.find(({ reason, host }) => reason === "NotOnline" && host.state === "Offline")?.host ??
-  hosts.find(({ reason, host }) => reason === "NotHealthy" && host.health !== "Unhealthy")?.host;
-
-export const waitForCapacity = (placement: Placement): StartPlacement => {
-  if (placement.kind !== "Refused") return placement;
-  const host = capacityHost(placement.hosts);
-  return host === undefined ? placement : { kind: "Waiting", host };
 };
 
 export const placeSession = (

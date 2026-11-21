@@ -414,13 +414,15 @@ const counted = (state: LiveState, storageKey: string, packs: ReadonlySet<string
   for (const packDigest of packs) state.counts.set(packDigest, (state.counts.get(packDigest) ?? 0) + 1);
 };
 
-const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): void => {
+const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): string[] => {
   state.members.delete(storageKey);
+  const freed: string[] = [];
   for (const packDigest of packs) {
     const count = (state.counts.get(packDigest) ?? 0) - 1;
     if (count > 0) state.counts.set(packDigest, count);
-    else state.counts.delete(packDigest);
+    else if (state.counts.delete(packDigest)) freed.push(packDigest);
   }
+  return freed;
 };
 
 export class LivePacks {
@@ -449,28 +451,31 @@ export class LivePacks {
     });
   }
 
-  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
+  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
     return this.turn(() =>
       this.released(store, tenantId, storageKeys).catch((error: unknown) => {
         this.state = null;
         console.error(
           `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
         );
+        return [];
       }),
     );
   }
 
-  private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
+  private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
     const state = await this.loaded(store, tenantId);
+    const freed: string[] = [];
     let changed = false;
     for (const storageKey of storageKeys) {
       if (state.unreadable.delete(storageKey) || !state.members.has(storageKey)) continue;
       const read = await this.manifests.packs(store, tenantId, storageKey);
       if (read.kind !== "Read") throw new Error(`snapshot ${storageKey} has no readable pack list: ${read.detail}`);
-      uncounted(state, storageKey, read.value);
+      freed.push(...uncounted(state, storageKey, read.value));
       changed = true;
     }
     if (changed) await this.persist(store, tenantId, state);
+    return freed;
   }
 
   private async loaded(store: R2Bucket, tenantId: string): Promise<LiveState> {

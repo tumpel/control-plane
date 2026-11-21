@@ -22,7 +22,12 @@ export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number)
     .toArray();
   if (row === undefined) throw new Error(`the events table returned no id for a ${event.event} event`);
   if ("sessionId" in event) {
-    sql.exec("INSERT INTO event_sessions (event_id, session_id) VALUES (?, ?)", row.event_id, event.sessionId);
+    sql.exec(
+      "INSERT INTO event_sessions (event_id, session_id, tags) VALUES (?, ?, (SELECT json_group_array(tag) FROM session_tags WHERE session_id = ?))",
+      row.event_id,
+      event.sessionId,
+      event.sessionId,
+    );
   }
   sql.exec("DELETE FROM events WHERE created_at < ?", now - EVENT_RETENTION_MS);
   return row.event_id;
