@@ -260,6 +260,10 @@ export class World {
     return this.host(hostId);
   }
 
+  restartTenant(): void {
+    this.tenants.restart(TENANT_ID);
+  }
+
   tenantRowsWritten(): number {
     const { ctx } = this.tenants.instance(TENANT_ID) as { ctx: DurableObjectState };
     return ctx.storage.sql.totalRowsWritten();

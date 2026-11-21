@@ -5,8 +5,10 @@ import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../src/channel/control.ts";
 import { refusedOrResent } from "../src/channel/failure.ts";
 import {
+  accept,
   type ControlEnvelope,
   emptyLedger,
+  type Frame,
   HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
@@ -32,6 +34,11 @@ const memoryLedger = <M>(): LedgerStore<M> & { current: Ledger<M> } => {
     load: () => structuredClone(store.current),
     save: (ledger: Ledger<M>) => {
       store.current = structuredClone(ledger);
+    },
+    heard: () => store.current.received,
+    skip: (frame: Frame<unknown>) => {
+      const outcome = accept(store.current, frame);
+      if (outcome.kind === "Accepted") store.current = structuredClone(outcome.ledger);
     },
   };
   return store;
@@ -136,7 +143,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
       deliver: async (envelope: HostEnvelope) => {
         const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
         link.connection = received.connection;
-        if (received.event.kind === "Message") control.acknowledge(link.context, received.event.frame);
+        if (received.event.kind === "Message") control.acknowledge(link.context, [received.event.frame]);
         if (received.event.kind !== "None") link.events.push(received.event);
       },
       hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
@@ -351,7 +358,7 @@ test("a frame whose handling fails retryably stays unrecorded for the host to re
     link.connection = received.connection;
     if (received.event.kind !== "Message") return received.event.kind;
     const reply = refusedOrResent(received.event.frame.message.type, error);
-    control.acknowledge(link.context, received.event.frame);
+    control.acknowledge(link.context, [received.event.frame]);
     control.refuseFrame(link.context.port, received.event.frame.seq, reply.reason);
     return reply.reason;
   };
@@ -507,7 +514,7 @@ test("a frame whose handling failed stays unacknowledged, so its resend is handl
   );
   assert.deepEqual(resent.event, { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
   assert.ok(resent.event.kind === "Message");
-  control.acknowledge(link.context, resent.event.frame);
+  control.acknowledge(link.context, [resent.event.frame]);
   assert.equal(channel.ledger.current.received, 1);
   assert.equal(link.closed, null);
 });
