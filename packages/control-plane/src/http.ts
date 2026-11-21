@@ -31,7 +31,26 @@ export const seeOther = (location: string): Response =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-export const readJson = async (request: Request): Promise<unknown> => request.json().catch(() => null);
+export const MAX_BODY_BYTES = 4_000_000;
+export const MAX_CONFIG_BODY_BYTES = 16_000_000;
+
+export type BoundedBody = { ok: true; value: unknown } | { ok: false; detail: string };
+
+export const readBoundedJson = async (request: Request, maxBytes = MAX_BODY_BYTES): Promise<BoundedBody> => {
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength > maxBytes) {
+    return {
+      ok: false,
+      detail: `the body is ${bytes.byteLength} bytes, over the ${maxBytes}-byte bound on this request body`,
+    };
+  }
+  return { ok: true, value: await new Response(bytes).json().catch(() => null) };
+};
+
+export const readJson = async (request: Request): Promise<unknown> => {
+  const body = await readBoundedJson(request);
+  return body.ok ? body.value : null;
+};
 
 export const readParams = async (request: Request): Promise<Record<string, unknown>> => {
   if ((request.headers.get("content-type") ?? "").startsWith("application/x-www-form-urlencoded")) {
@@ -46,8 +65,25 @@ export const issues = (error: z.ZodError): string =>
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; response: Response };
 
-export const parseBody = async <T>(request: Request, schema: z.ZodType<T>, operation: string): Promise<Parsed<T>> => {
-  const parsed = schema.safeParse(await readJson(request));
+export const parseBody = async <T>(
+  request: Request,
+  schema: z.ZodType<T>,
+  operation: string,
+  maxBytes = MAX_BODY_BYTES,
+): Promise<Parsed<T>> => {
+  const body = await readBoundedJson(request, maxBytes);
+  if (!body.ok) {
+    return {
+      ok: false,
+      response: problem(400, {
+        code: "InvalidRequest",
+        title: "Request body too large",
+        detail: `${operation} refused the body: ${body.detail}`,
+        fix: "Send a smaller body",
+      }),
+    };
+  }
+  const parsed = schema.safeParse(body.value);
   if (parsed.success) return { ok: true, value: parsed.data };
   return {
     ok: false,

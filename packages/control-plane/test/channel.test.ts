@@ -3,6 +3,7 @@ import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { test } from "node:test";
 import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../src/channel/control.ts";
+import { refusedOrResent } from "../src/channel/failure.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
@@ -313,6 +314,51 @@ test("a frame whose message no schema reads is refused once in order, and the ne
   const closed = closure(link);
   assert.equal(closed?.code, CloseCode.ProtocolError);
   assert.match(closed?.reason ?? "", /expected seq 3, got 4/);
+});
+
+test("a frame whose handling fails retryably stays unrecorded for the host to resend, and a deterministic failure refuses it", async () => {
+  const link = setup().connect();
+  await link.hello();
+  const handle = async (envelope: HostEnvelope, error: unknown) => {
+    const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
+    link.connection = received.connection;
+    if (received.event.kind !== "Message") return received.event.kind;
+    const reply = refusedOrResent(received.event.frame.message.type, error);
+    control.acknowledge(link.context, received.event.frame);
+    control.refuseFrame(link.context.port, received.event.frame.seq, reply.reason);
+    return reply.reason;
+  };
+  const retryable = Object.assign(new Error("Network connection lost."), { retryable: true });
+  await assert.rejects(handle(frame(1, 0, snapshotDone("snap-1")), retryable), /Network connection lost/);
+  const deterministic = new Error("string or blob too big: SQLITE_TOOBIG");
+  assert.match(
+    String(await handle(frame(1, 0, snapshotDone("snap-1")), deterministic)),
+    /failed to handle SnapshotDone: string or blob too big/,
+  );
+  assert.equal(await handle(frame(1, 0, snapshotDone("snap-1")), deterministic), "None");
+  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
+  assert.equal(link.closed, null);
+  assert.equal(link.events.at(-1)?.kind, "Message");
+});
+
+test("a frame over the host frame bound is refused before it is read, and the next frame follows it", async () => {
+  const link = setup().connect();
+  await link.hello();
+  const line: HostMessage = {
+    type: "TurnLine",
+    turnId: "turn-1",
+    lineSeq: 1,
+    text: "x".repeat(control.MAX_HOST_FRAME_BYTES),
+  };
+  const received = await control.receive(link.connection, JSON.stringify(frame(1, 0, line)), link.context);
+  link.connection = received.connection;
+  assert.equal(received.event.kind, "FrameRefused");
+  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
+  assert.equal(link.closed, null);
+  const refusals = link.sent.filter((envelope) => envelope.type === "FrameRefused");
+  assert.equal(refusals[0]?.type === "FrameRefused" && refusals[0].seq, 1);
+  assert.match((refusals[0]?.type === "FrameRefused" && refusals[0].reason) || "", /over the 4000000-byte bound/);
+  assert.equal(link.events.at(-1)?.kind, "Message");
 });
 
 test("a frame and message carrying fields this control plane does not know are read for the fields it knows", async () => {

@@ -94,7 +94,7 @@ import {
 } from "@tumpel/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
-import { issues, type Problem } from "./http";
+import { issues, type Problem, readBoundedJson } from "./http";
 import { MCP_PATH } from "./oauth";
 
 const MODERN_VERSION = "2026-07-28";
@@ -1358,7 +1358,9 @@ const answer = async (request: Request, authorize: Authorize): Promise<Response>
   const dispatch = await authorize();
   if (dispatch instanceof Response) return dispatch;
   const run: Bound = { dispatch, origin: new URL(request.url).origin };
-  const body: unknown = await request.json().catch(() => null);
+  const bounded = await readBoundedJson(request);
+  if (!bounded.ok) return refuse(null, INVALID_REQUEST, bounded.detail, 400);
+  const body = bounded.value;
   if (body === null) return refuse(null, PARSE_ERROR, "the request body is not JSON", 400);
   if (Array.isArray(body)) {
     return refuse(null, INVALID_REQUEST, "this endpoint takes one JSON-RPC message per request", 400);

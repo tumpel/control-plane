@@ -3,6 +3,7 @@ import { CloseCode } from "@tumpel/schemas";
 import host0001 from "../migrations/host/0001_host.sql";
 import host0002 from "../migrations/host/0002_host_without_tenant.sql";
 import * as control from "./channel/control.ts";
+import { refusedOrResent } from "./channel/failure.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
@@ -192,7 +193,9 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    const reply = await this.forward(hostId, frame.message);
+    const reply = await this.forward(hostId, frame.message).catch((error: unknown) =>
+      refusedOrResent(frame.message.type, error),
+    );
     control.acknowledge(context, frame);
     if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;
