@@ -37,8 +37,13 @@ const generate = (schema: unknown, known: Known, key: string): unknown => {
     case "string":
       return first(STRINGS);
     case "number":
-    case "int":
-      return first([1, 0, 1000, Date.now()]);
+    case "int": {
+      const limits = ((def.checks ?? []) as { _zod: { def: { value?: unknown } } }[]).flatMap((check) => {
+        const value = check._zod.def.value;
+        return typeof value === "number" ? [value, value + 1, value - 1] : [];
+      });
+      return first([...limits, 1, 0, 2, 8, 100, 1024, 4096, 65536, Date.now()]);
+    }
     case "boolean":
       return first([true, false]);
     case "enum":
@@ -112,28 +117,68 @@ const world_ = async (t: { after(fn: () => void): void }) => {
   return { world, known };
 };
 
+const settle = async (
+  world: World,
+  name: string,
+  build: () => unknown,
+  over: [string, number][],
+  broken: string[],
+  label = name,
+): Promise<void> => {
+  const failed = (error: unknown) => broken.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+  let input: unknown;
+  try {
+    input = build();
+  } catch (error) {
+    failed(error);
+    return;
+  }
+  const ms = await measured(() => world.computeMs(name, input)).catch((error: unknown) => {
+    failed(error);
+    return 0;
+  });
+  if (ms > BUDGET_MS) over.push([label, ms]);
+};
+
 test("every Tenant API operation computes within the 30 ms budget", async (t) => {
   const { world, known } = await world_(t);
   const over: [string, number][] = [];
+  const broken: string[] = [];
   for (const [name, operation] of Object.entries(TENANT_OPERATIONS)) {
     if (name === "hostMessage") continue;
-    const input = generate(operation.input, known, name);
-    const ms = await measured(() => world.computeMs(name, input));
-    if (ms > BUDGET_MS) over.push([name, ms]);
+    await settle(world, name, () => generate(operation.input, known, name), over, broken);
   }
+  assert.deepEqual(broken, [], `operations the test could not run:\n${broken.join("\n")}`);
   assert.deepEqual(over, [], `operations over ${BUDGET_MS} ms of compute:\n${report(over)}`);
 });
 
 test("every host channel frame computes within the 30 ms budget", async (t) => {
   const { world, known } = await world_(t);
   const over: [string, number][] = [];
+  const broken: string[] = [];
   const members = HostFrameSchema.shape.message as unknown as z.ZodType as unknown;
   for (const option of defOf(members).options as unknown[]) {
-    const message = generate(option, known, "message") as { type: string };
-    const ms = await measured(() =>
-      world.computeMs("hostMessage", { tenantId: TENANT_ID, hostId: known.hostId, message }),
+    const type = String((defOf((defOf(option).shape as Record<string, unknown>).type).values as unknown[])[0]);
+    const operation =
+      type === "SupervisorUpdateStep" || type === "SupervisorUpdateFailed"
+        ? "supervisorUpdate"
+        : type === "TelemetryBatch"
+          ? "turnMetricDimensions"
+          : "hostMessage";
+    await settle(
+      world,
+      operation,
+      () => {
+        const message = generate(option, known, "message");
+        if (operation === "supervisorUpdate") return { hostId: known.hostId, message };
+        if (operation === "turnMetricDimensions") return { turnIds: [] };
+        return { tenantId: TENANT_ID, hostId: known.hostId, message };
+      },
+      over,
+      broken,
+      type,
     );
-    if (ms > BUDGET_MS) over.push([message.type, ms]);
   }
+  assert.deepEqual(broken, [], `frames the test could not run:\n${broken.join("\n")}`);
   assert.deepEqual(over, [], `frames over ${BUDGET_MS} ms of compute:\n${report(over)}`);
 });
