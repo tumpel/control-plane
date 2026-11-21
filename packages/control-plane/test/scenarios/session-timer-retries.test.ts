@@ -16,8 +16,8 @@ test("a deadline whose handler always throws is retried 10 times with growing ga
   const retries: number[] = [];
   const dropped: string[] = [];
   t.mock.method(console, "error", (line: string) => {
-    if (line.startsWith("SessionTimerRetry:")) retries.push(Date.now());
-    if (line.startsWith("DeadlineDropped:") || line.startsWith("SessionTimerFailed:")) dropped.push(line);
+    if (line.startsWith("SessionTimerRetry:") && line.includes(" for Total ")) retries.push(Date.now());
+    if (/^(DeadlineDropped|SessionTimerFailed):.* Total[: ]/.test(line)) dropped.push(line);
   });
 
   await world.passes(SETTINGS.turnTotalBudgetSeconds * SECOND);
