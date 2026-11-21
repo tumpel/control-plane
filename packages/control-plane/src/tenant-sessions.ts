@@ -1394,6 +1394,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state !== "Stopped") return;
     const hosts = await listHosts(this.env.DB, tenantId);
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
+    if (this.turnRow(turnId)?.state !== "Offered" || this.sessionRow(session.session_id)?.state !== "Stopped") return;
     if (image.kind === "ReleaseUnreadable") {
       return this.failTurn(tenantId, turnId, "ImageNotReleased", image.detail, iso(now), "Stopped");
     }
@@ -2238,13 +2239,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.offerSent(turnId);
       return null;
     }
-    if (session.state === "Stopped") {
-      await this.runQueued(tenantId, turnId);
-      return null;
-    }
     this.offering.add(turnId);
     try {
-      return await this.placeOffered(tenantId, session, turn, true, hosts);
+      if (session.state !== "Stopped") return await this.placeOffered(tenantId, session, turn, true, hosts);
+      await this.runQueued(tenantId, turnId);
+      return null;
     } finally {
       this.offering.delete(turnId);
     }
