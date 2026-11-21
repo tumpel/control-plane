@@ -9,6 +9,7 @@ import {
   SubscriptionSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { backoffMs } from "./backoff.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
 import { type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
@@ -25,6 +26,7 @@ type Completed = z.infer<typeof CompleteSubscriptionResultSchema>["completed"];
 
 export const DELIVERY_FAILURE_LIMIT = 3;
 export const CREW_FAILURE_LIMIT = 10;
+const DELIVERY_FIRST_RETRY_MS = 60_000;
 
 type SubscriptionRow = {
   subscription_id: string;
@@ -248,6 +250,20 @@ export abstract class TenantSubscriptions extends TenantSessions {
     }
   }
 
+  protected retryDeliveries(now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      const due = this.ctx.storage.sql
+        .exec<{ subscription_id: string }>(
+          "DELETE FROM subscription_delivery_retries WHERE retry_at <= ? RETURNING subscription_id",
+          now,
+        )
+        .toArray();
+      for (const { subscription_id: subscriptionId } of due) {
+        if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
+      }
+    });
+  }
+
   protected override appendEvent(event: NewTenantEvent, now: number): number {
     const eventId = super.appendEvent(event, now);
     if (!("sessionId" in event)) return eventId;
@@ -337,6 +353,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
     );
   }
 
+  private deliveryRetryPending(subscriptionId: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec("SELECT 1 FROM subscription_delivery_retries WHERE subscription_id = ?", subscriptionId)
+        .toArray().length > 0
+    );
+  }
+
   private waitingDelivery(subscriptionId: string): string | null {
     const [row] = this.ctx.storage.sql
       .exec<{ turn_id: string }>(
@@ -350,7 +374,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
   }
 
   private ensureDelivery(subscriptionId: string, now: number): void {
-    if (this.waitingDelivery(subscriptionId) !== null) return;
+    if (this.waitingDelivery(subscriptionId) !== null || this.deliveryRetryPending(subscriptionId)) return;
     const sql = this.ctx.storage.sql;
     const [row] = sql
       .exec<{ session_id: string; host_id: string; box_id: string; prompt: string }>(
@@ -476,7 +500,16 @@ export abstract class TenantSubscriptions extends TenantSessions {
       this.pause(row, { kind: "DeliveryFailed", turnId: event.turnId }, now);
       return;
     }
-    if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
+    if (!this.undelivered(subscriptionId)) return;
+    if (row.delivery_failures_in_a_row === 0) {
+      this.ensureDelivery(subscriptionId, now);
+      return;
+    }
+    sql.exec(
+      "INSERT OR REPLACE INTO subscription_delivery_retries (subscription_id, retry_at) VALUES (?, ?)",
+      subscriptionId,
+      now + backoffMs(row.delivery_failures_in_a_row, DELIVERY_FIRST_RETRY_MS),
+    );
   }
 
   private matchCrew(event: NewTenantEvent & { sessionId: string }, eventId: number, now: number): void {

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { ListEventsResultSchema, TenantEventSchema } from "@tumpel/schemas";
 import type { z } from "zod";
+import { backoffMs, errorOf, RETRY_LIMIT, retryableStatus } from "./backoff.ts";
 import type { Env } from "./index.ts";
 import { keyStoreOf } from "./key-store.ts";
 import { tenantApi } from "./tenant-api.ts";
@@ -8,8 +9,6 @@ import { signWebhook } from "./webhook-signing.ts";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const FIRST_RETRY_MS = 60_000;
-const MAX_RETRY_MS = 60 * 60 * 1000;
-const FAILING_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 
 type SenderState = {
   tenantId: string;
@@ -65,7 +64,7 @@ export class WebhookSender extends DurableObject<Env> {
   }
 
   private deliver(retry: boolean): Promise<void> {
-    const send = (): Promise<void> => this.sendPending(retry);
+    const send = (): Promise<void> => this.sendPending(retry).catch((error: unknown) => this.crashed(error));
     this.delivering = this.delivering.then(send, send);
     return this.delivering;
   }
@@ -97,9 +96,12 @@ export class WebhookSender extends DurableObject<Env> {
       });
       const listed: Listed = result.listed;
       if (listed.kind === "CursorExpired") {
-        throw new Error(
-          `webhook endpoint ${state.webhookEndpointId} fell behind event ${listed.oldestEventId} before its three-day failure window ended`,
+        await this.failed(
+          state,
+          `the endpoint fell behind event ${listed.oldestEventId}, which the event log no longer keeps`,
+          false,
         );
+        return;
       }
       const events: TenantEvent[] = listed.page.events;
       for (const event of events) {
@@ -123,7 +125,7 @@ export class WebhookSender extends DurableObject<Env> {
               : response instanceof Error
                 ? response.message
                 : String(response);
-          await this.failed(state, detail);
+          await this.failed(state, detail, !(response instanceof Response) || retryableStatus(response.status));
           return;
         }
         await this.ctx.storage.delete("failure");
@@ -150,32 +152,37 @@ export class WebhookSender extends DurableObject<Env> {
     });
   }
 
-  private async failed(state: SenderState, detail: string): Promise<void> {
+  private async crashed(error: unknown): Promise<void> {
+    const state = await this.ctx.storage.get<SenderState>("state");
+    if (state === undefined) throw error;
+    await this.failed(state, errorOf(error).message, true);
+  }
+
+  private async failed(state: SenderState, detail: string, retryable: boolean): Promise<void> {
     const now = Date.now();
     const failure = await this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<Failure>("failure");
-      const failingSince = stored?.failingSince ?? now;
-      const failures = (stored?.failures ?? 0) + 1;
-      const next = { failures, failingSince };
+      const next = { failures: (stored?.failures ?? 0) + 1, failingSince: stored?.failingSince ?? now };
+      if (!retryable || next.failures > RETRY_LIMIT) return next;
       await transaction.put("failure", next);
-      if (now - failingSince < FAILING_AFTER_MS) {
-        const delay = Math.min(FIRST_RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
-        await transaction.setAlarm(Math.min(now + delay, failingSince + FAILING_AFTER_MS));
-      }
-      return next;
+      await transaction.setAlarm(now + backoffMs(next.failures, FIRST_RETRY_MS));
+      return null;
     });
-    const { failingSince } = failure;
-    if (now - failingSince >= FAILING_AFTER_MS) {
-      await tenantApi(this.env.TENANT, state.tenantId).call("setWebhookEndpointStatus", {
-        tenantId: state.tenantId,
-        webhookEndpointId: state.webhookEndpointId,
-        status: { delivery: "Failing", detail, failingSince: new Date(failingSince).toISOString() },
-      });
-      await this.ctx.storage.transaction(async (transaction) => {
-        await transaction.delete("failure");
-        await transaction.deleteAlarm();
-      });
-      return;
-    }
+    if (failure === null) return;
+    await tenantApi(this.env.TENANT, state.tenantId).call("setWebhookEndpointStatus", {
+      tenantId: state.tenantId,
+      webhookEndpointId: state.webhookEndpointId,
+      status: {
+        delivery: "Failing",
+        detail: retryable
+          ? `${detail}; still failing after ${RETRY_LIMIT} retries`
+          : `${detail}; retrying cannot fix this`,
+        failingSince: new Date(failure.failingSince).toISOString(),
+      },
+    });
+    await this.ctx.storage.transaction(async (transaction) => {
+      await transaction.delete("failure");
+      await transaction.deleteAlarm();
+    });
   }
 }

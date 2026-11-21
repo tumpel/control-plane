@@ -7,6 +7,7 @@ import {
 } from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
+import { backoffMs, RETRY_LIMIT, retryableStatus } from "./backoff.ts";
 import { fromBase64, seal, unseal } from "./envelope.ts";
 import { githubRepository } from "./github.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
@@ -43,6 +44,7 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
 const PUSH_BATCH_SIZE = 20;
 const PUSH_TTL_MS = 86_400 * 1000;
+const PUSH_FIRST_RETRY_MS = 60_000;
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
@@ -187,7 +189,13 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
       }
       const repository = githubRepository(row.repository);
-      if (repository === null) throw new Error(`session repository ${row.repository} is not a GitHub repository`);
+      if (repository === null) {
+        this.dropPushWake(
+          row,
+          `session repository ${row.repository} is not a GitHub repository, which no retry changes`,
+        );
+        continue;
+      }
       const validKey = await importP256dh(row.p256dh).then(
         () => true,
         () => false,
@@ -266,10 +274,25 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         continue;
       }
       if (!(response instanceof Response) || !response.ok) {
-        const delay = Math.min(60_000 * 2 ** Math.min(row.failures, 6), 60 * 60 * 1000);
+        const reason =
+          response instanceof Response
+            ? `HTTP ${response.status}`
+            : response instanceof Error
+              ? response.message
+              : String(response);
+        const retry = row.failures + 1;
+        if (response instanceof Response && !retryableStatus(response.status)) {
+          this.dropPushWake(row, `the push service answered ${reason}, which no retry changes`);
+          continue;
+        }
+        if (retry > RETRY_LIMIT) {
+          this.dropPushWake(row, `the push service still failed after ${RETRY_LIMIT} retries: ${reason}`);
+          continue;
+        }
         this.ctx.storage.sql.exec(
-          "UPDATE push_wakes SET failures = failures + 1, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-          Math.min(now + delay, expiresAt),
+          "UPDATE push_wakes SET failures = ?, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
+          retry,
+          Math.min(now + backoffMs(retry, PUSH_FIRST_RETRY_MS), expiresAt),
           row.event_id,
           row.push_subscription_id,
         );
@@ -294,7 +317,17 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         );
       }
     }
-    if (rows.length === PUSH_BATCH_SIZE) await this.ctx.storage.setAlarm(now);
+  }
+
+  private dropPushWake(row: PushWakeRow, reason: string): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
+      row.event_id,
+      row.push_subscription_id,
+    );
+    console.error(
+      `PushDeliveryFailed: push subscription ${row.push_subscription_id} dropped event ${row.event_id}: ${reason}`,
+    );
   }
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {

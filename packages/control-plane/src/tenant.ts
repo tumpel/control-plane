@@ -10,6 +10,7 @@ import {
   type SecretSetUpdateSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
@@ -56,6 +57,9 @@ export type PersonaPatch = z.infer<typeof PersonaPatchChangeSchema>;
 export type SecretSetPatch = z.infer<typeof SecretSetPatchSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
+
+const FOLLOW_UP_RETRIES_KEY = "followUpRetries";
+const FOLLOW_UP_FIRST_RETRY_MS = 2_000;
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
@@ -193,25 +197,54 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.ctx.storage.setAlarm(Date.now());
-    await this.startDeliveries(this.tenantName());
-    this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
-    await this.armAlarm();
+    const retries = await this.followUpRetries();
+    const failed = await this.followUp().then(() => null, errorOf);
+    if (failed !== null) await this.followUpFailed(retries, failed);
+    else if (retries === 0) await this.armAlarm();
     return response;
   }
 
   override async alarm(): Promise<void> {
+    const retries = await this.followUpRetries();
+    const failed = await this.alarmWork().then(() => null, errorOf);
+    if (failed !== null) return this.followUpFailed(retries, failed);
+    if (retries > 0) await this.ctx.storage.delete(FOLLOW_UP_RETRIES_KEY);
+    await this.armAlarm();
+  }
+
+  private async alarmWork(): Promise<void> {
     const now = Date.now();
-    await this.ctx.storage.setAlarm(now);
     await this.deliverPushes(this.tenantName(), now);
     this.expireSubscriptions(now);
+    this.retryDeliveries(now);
+    await this.followUp();
+  }
+
+  private async followUp(): Promise<void> {
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
     this.drainObjects();
-    await this.armAlarm();
+  }
+
+  private async followUpRetries(): Promise<number> {
+    return (await this.ctx.storage.get<number>(FOLLOW_UP_RETRIES_KEY)) ?? 0;
+  }
+
+  private async followUpFailed(retries: number, error: Error): Promise<void> {
+    const tenantId = this.tenantName();
+    if (retries >= RETRY_LIMIT) {
+      await this.ctx.storage.delete(FOLLOW_UP_RETRIES_KEY);
+      await this.ctx.storage.deleteAlarm();
+      console.error(
+        `TenantAlarmFailed: tenant ${tenantId} stopped retrying its alarm work after ${RETRY_LIMIT} retries; the next request starts it again: ${error.message}`,
+      );
+      return;
+    }
+    const retry = retries + 1;
+    await this.ctx.storage.put(FOLLOW_UP_RETRIES_KEY, retry);
+    await this.ctx.storage.setAlarm(Date.now() + backoffMs(retry, FOLLOW_UP_FIRST_RETRY_MS));
+    console.error(`TenantAlarmRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT}: ${error.message}`);
   }
 
   private drainObjects(): void {
@@ -257,7 +290,9 @@ export class Tenant extends TenantConnectors {
         UNION ALL
         SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
           WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id))`)
+            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)
+        UNION ALL
+        SELECT MIN(retry_at) AS at FROM subscription_delivery_retries)`)
       .toArray();
     if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
     return this.ctx.storage.setAlarm(next.at);
