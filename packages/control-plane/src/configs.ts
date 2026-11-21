@@ -101,7 +101,6 @@ export type Step =
       kind: "UpdatePersona";
       personaId: string;
       persona: ConfigPersona;
-      tumpelMcp: boolean;
       files: PlannedFile[];
       removed: string[];
     }
@@ -367,12 +366,14 @@ const planPersonas = (
     const files = local.map((file) => ({ file, held: held.get(file.path) === file.digest }));
     const wanted = new Set(local.map((file) => file.path));
     const removed = [...held.keys()].filter((path) => !wanted.has(path)).sort();
+    const tumpelMcp = persona.tumpelMcp ?? false;
     const unchanged =
       setIds.get(persona.secretSetName) === current.secretSetId &&
       persona.connectorNames.map((name) => connectorIds.get(name)).join() === current.connectorIds.join() &&
       (persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib) === current.boxMemoryMib &&
       (persona.boxDiskMib ?? BoxDiskLimit.DefaultMib) === current.boxDiskMib &&
       (persona.boxRetention ?? "Auto") === current.boxRetention &&
+      tumpelMcp === current.tumpelMcp &&
       removed.length === 0 &&
       files.every((file) => file.held);
     if (!unchanged) {
@@ -380,7 +381,6 @@ const planPersonas = (
         kind: "UpdatePersona",
         personaId: current.personaId,
         persona,
-        tumpelMcp: current.tumpelMcp,
         files,
         removed,
       });

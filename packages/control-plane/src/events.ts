@@ -1,6 +1,6 @@
 import { type EventPageSchema, EventQuerySchema } from "@tumpel/schemas";
 import type { z } from "zod";
-import { channelUrl, type Subscription } from "./event-channel.ts";
+import { channelUrl, eventCursorExpired, type Subscription } from "./event-channel.ts";
 import type { Authenticate } from "./github-handlers.ts";
 import { issues, json, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
@@ -26,12 +26,7 @@ const read = async (env: Env, caller: Caller, query: EventQuery, afterEventId: n
   if (listed.kind === "Read") return { kind: "Read", page: listed.page };
   return {
     kind: "Expired",
-    response: problem(410, {
-      code: "EventCursorExpired",
-      title: "Event cursor expired",
-      detail: `event ${afterEventId} is older than the oldest event kept, ${listed.oldestEventId}; the log keeps 7 days`,
-      fix: "Read the current state of what you follow, then read events again without afterEventId",
-    }),
+    response: eventCursorExpired(afterEventId ?? 0, listed.oldestEventId),
   };
 };
 
@@ -79,9 +74,10 @@ export const listEvents = async (env: Env, caller: Caller, query: EventQuery): P
 };
 
 const followEvents = async (env: Env, caller: Caller, query: EventQuery): Promise<Response> => {
+  if (query.afterEventId !== undefined) return openChannel(env, subscriptionOf(caller, query, query.afterEventId));
   const start = await read(env, caller, query, query.afterEventId ?? null);
   if (start.kind === "Expired") return start.response;
-  return openChannel(env, subscriptionOf(caller, query, query.afterEventId ?? start.page.lastEventId));
+  return openChannel(env, subscriptionOf(caller, query, start.page.lastEventId));
 };
 
 const subprotocolBearer = (request: Request): string | null => {

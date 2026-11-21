@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import { TenantEventTypeSchema } from "@tumpel/schemas";
+import { EventCursorExpiredProblemSchema, TenantEventTypeSchema } from "@tumpel/schemas";
 import { z } from "zod";
+import { json } from "./http.ts";
 import type { Env } from "./index.ts";
 import { tenantApi } from "./tenant-api.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
@@ -27,6 +28,18 @@ export const matches = (subscription: Subscription, event: NewTenantEvent): bool
   (subscription.sessionId === null || ("sessionId" in event && event.sessionId === subscription.sessionId)) &&
   (subscription.triggerId === null || ("triggerId" in event && event.triggerId === subscription.triggerId));
 
+export const eventCursorExpired = (afterEventId: number, oldestEventId: number): Response =>
+  json(
+    EventCursorExpiredProblemSchema.parse({
+      code: "EventCursorExpired",
+      title: "Event cursor expired",
+      detail: `event ${afterEventId} is older than the oldest event kept, ${oldestEventId}; the log keeps 7 days`,
+      fix: "Read the current state of what you follow, then read events again without afterEventId",
+      oldestEventId,
+    }),
+    410,
+  );
+
 export class EventChannel extends DurableObject<Env> {
   private delivering: Promise<void> = Promise.resolve();
 
@@ -37,8 +50,19 @@ export class EventChannel extends DurableObject<Env> {
     const subscription = SubscriptionSchema.parse(
       JSON.parse(new URL(request.url).searchParams.get("subscription") ?? "null"),
     );
+    const { listed } = await tenantApi(this.env.TENANT, subscription.tenantId).call("listEvents", {
+      tenantId: subscription.tenantId,
+      afterEventId: subscription.cursor,
+      events: subscription.events,
+      sessionId: subscription.sessionId,
+      triggerId: subscription.triggerId,
+      waitSeconds: 0,
+    });
+    if (listed.kind === "CursorExpired") return eventCursorExpired(subscription.cursor, listed.oldestEventId);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
+    for (const event of listed.page.events) server.send(JSON.stringify(event));
+    subscription.cursor = Math.max(subscription.cursor, listed.page.lastEventId);
     server.serializeAttachment(subscription);
     await this.deliver();
     return new Response(null, { status: 101, webSocket: client });
