@@ -51,11 +51,11 @@ test("a delivery turn that cannot be composed fails Undelivered while the turn q
       .toArray(),
   );
   assert.ok(stored !== undefined);
-  sql.exec("INSERT INTO event_sessions (event_id, session_id) VALUES (?, ?)", stored.event_id, crewTurn?.sessionId);
   sql.exec(
-    "INSERT INTO subscription_matches (subscription_id, event_id) VALUES (?, ?)",
-    subscription.subscriptionId,
+    "INSERT INTO event_sessions (event_id, session_id, tags) VALUES (?, ?, ?)",
     stored.event_id,
+    crewTurn?.sessionId,
+    JSON.stringify(["crew:epic"]),
   );
 
   await healthIs(world, host, "RateLimited", "host sent more than 600 frames a minute");

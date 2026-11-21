@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GetTurnFailureResultSchema, ListEventsResultSchema, SubscriptionSchema } from "@tumpel/schemas";
+import {
+  ChannelProtocol,
+  GetTurnFailureResultSchema,
+  ListEventsResultSchema,
+  SubscriptionSchema,
+} from "@tumpel/schemas";
 import { z } from "zod";
 import { DELIVERY_PROMPT_LIMIT } from "../../src/delivery-prompt.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
@@ -43,6 +48,13 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   world.restartTenant();
   await world.runtime.settle();
   assert.equal(world.tenantRowsWritten() - before, 0, "the restart rewrites no stored event");
+  await world.call("hostHello", {
+    hostId: host.hostId,
+    boxCapacity: 8,
+    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+    now: Date.now(),
+    channelProtocol: ChannelProtocol.Version,
+  });
 
   const resumed = await world.fetch(world.owner, "POST", `${path}/resume`);
   assert.equal(resumed.status, 200);

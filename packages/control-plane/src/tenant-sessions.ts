@@ -2393,20 +2393,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray()
       .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
+    const freed = await this.live.release(
+      this.env.STORE,
+      tenantId,
+      stored.map((snapshot) => snapshot.storage_key),
+    );
     await this.deleteObjects([...keys, ...this.objectKeys(stored)]);
+    await this.deleteFreedPacks(tenantId, freed);
     this.ctx.storage.transactionSync(() => {
       this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
     });
-    await this.deleteFreedPacks(
-      tenantId,
-      await this.live.release(
-        this.env.STORE,
-        tenantId,
-        stored.map((snapshot) => snapshot.storage_key),
-      ),
-    );
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -2440,16 +2438,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
       stored.session_id,
       stored.snapshot_seq,
     );
-    await this.deleteObjects([...this.objectKeys(older), ...failed]);
-    this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
-    await this.deleteFreedPacks(
+    const freed = await this.live.release(
+      this.env.STORE,
       tenantId,
-      await this.live.release(
-        this.env.STORE,
-        tenantId,
-        older.map((snapshot) => snapshot.storage_key),
-      ),
+      older.map((snapshot) => snapshot.storage_key),
     );
+    await this.deleteObjects([...this.objectKeys(older), ...failed]);
+    await this.deleteFreedPacks(tenantId, freed);
+    this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
     await this.archiveSupersededPrebuilds(tenantId, now);
   }
 
@@ -3986,7 +3982,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     request: SnapshotRequestRow,
-  ): Promise<{ kind: "Rejected"; detail: string } | { kind: "Checked"; packs: ReadonlySet<string> }> {
+  ): Promise<
+    | { kind: "Rejected"; detail: string }
+    | { kind: "Checked"; packs: ReadonlySet<string>; rootPacks: ReadonlySet<string> }
+  > {
     const rejected = async (detail: string) => ({
       kind: "Rejected" as const,
       detail: `host ${await this.hostName(tenantId, hostId)} ${detail}`,
@@ -4020,7 +4019,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `stored snapshot ${request.snapshot_id} with chunks in ${named.value.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the session keeps its previous snapshot`,
       );
     }
-    return { kind: "Checked", packs: named.value };
+    return {
+      kind: "Checked",
+      packs: named.value,
+      rootPacks: new Set(parsed.data.manifest.map((placement) => placement.packDigest)),
+    };
   }
 
   private async snapshotOutcome(
@@ -4040,7 +4043,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
     if (checked.kind === "Rejected") return checked;
     const uploaded = this.uploadedPacks.get(request.snapshot_id) ?? new Set<string>();
-    const reused = new Set([...checked.packs].filter((packDigest) => !uploaded.has(packDigest)));
+    const reused = new Set(
+      [...checked.packs].filter((packDigest) => !uploaded.has(packDigest) && !checked.rootPacks.has(packDigest)),
+    );
     const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs, reused).then(
       (gone) => ({ gone }),
       (error: unknown) => ({ failed: storageFailed(error) }),

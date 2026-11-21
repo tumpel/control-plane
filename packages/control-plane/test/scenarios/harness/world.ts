@@ -176,6 +176,13 @@ export class Host {
     if (request.sessionId !== sessionId) throw new Error(`the snapshot asked for is of ${request.sessionId}`);
     const manifest = JSON.stringify({ entries: [] });
     const digest = createHash("sha256").update(manifest).digest("hex");
+    await this.says({
+      type: "SnapshotPacks",
+      snapshotId: request.snapshotId,
+      part: 1,
+      packs: [{ packDigest: digest, sizeBytes: manifest.length }],
+      chunks: [{ digest, packDigest: digest, offset: 0, length: manifest.length }],
+    });
     await this.world.store.put(`${request.storageKey.split("/")[0]}/packs/${digest}`, manifest);
     await this.world.store.put(
       request.storageKey,
