@@ -9,6 +9,12 @@
     "ignoreUnknown": true,
     "includes": ["**", "!packages/control-plane/templates/**/devcontainer.jsonc"]
   },
+  "plugins": [
+    {
+      "path": "./npm-scripts/biome-plugins/prose.grit",
+      "includes": ["packages/control-plane/src/**/*.ts", "!packages/control-plane/src/**/*.test.ts"]
+    }
+  ],
   "formatter": {
     "enabled": true,
     "indentStyle": "space",

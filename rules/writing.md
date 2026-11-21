@@ -8,7 +8,7 @@ This covers the dashboard, CLI output, error messages, emails and docs pages.
 2. Never show internal references: no requirement, gap, EDD, ADR or RFC ids, no issue numbers, no migration or operation names.
 3. Never turn a limit of the implementation into an instruction for the user. Fix the product instead.
 4. Write short sentences, with no hedging and no jargon the user did not bring.
-5. `npm run prose:check` catches internal ids and "until X is built" caveats in user-facing code.
+5. `npm run lint` catches internal ids and "until X is built" caveats in user-facing code.
 
 ## Docs, issues and PR bodies
 
