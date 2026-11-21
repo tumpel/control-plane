@@ -99,7 +99,6 @@ import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
-import { why } from "./sessions.ts";
 import { settingsOf, turnCredentialSeconds } from "./settings";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import {
@@ -1408,8 +1407,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const stays = place(hosts.filter((host) => host.hostId === session.host_id && host.state === "Online"));
     const placement = stays.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") {
-      const detail = `the session's box was released while the turn waited, and no host has room for a new one: ${placement.hosts.map(why).join(", ")}`;
-      return this.failTurn(tenantId, turnId, "PoolExhausted", detail, iso(now), "Stopped");
+      this.deferOffer(session, turn, now);
+      return this.timers(tenantId, session.session_id, {
+        Total: { turnId, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
+      });
     }
     await this.offerAfter(tenantId, move(placement.host.hostId, crypto.randomUUID()), turn, placement.evict);
   }
@@ -2225,6 +2226,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || turn.state !== "Offered") {
       this.offerSent(turnId);
+      return null;
+    }
+    if (session.state === "Stopped") {
+      await this.runQueued(tenantId, turnId);
       return null;
     }
     this.offering.add(turnId);
@@ -3814,6 +3819,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
         "Undelivered",
         `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
         failedAt,
+      );
+    }
+    if (name === "Total" && turn.state === "Offered" && session.state === "Stopped") {
+      return this.failTurn(
+        tenantId,
+        turnId,
+        "Undelivered",
+        `no host of your tenant had room for the session's new box within ${settings.turnTotalBudgetSeconds} seconds of the turn's start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
+        failedAt,
+        "Stopped",
       );
     }
     if (name === "Total" && turn.state === "Offered") {
