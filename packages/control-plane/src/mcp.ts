@@ -342,6 +342,13 @@ export const TOOLS: ToolDefinition[] = [
     "Revoke a host: its channel closes and it cannot connect again.",
   ),
   rest(
+    "tumpel_host_restore_health",
+    "POST",
+    "/v1/hosts/{hostId}/restore-health",
+    HostPathSchema,
+    "Restore an Unhealthy or RateLimited host to Healthy, so it gets turn offers again. A host goes Unhealthy after it passes its frame limit three times within an hour.",
+  ),
+  rest(
     "tumpel_host_set_labels",
     "PUT",
     "/v1/hosts/{hostId}/labels",

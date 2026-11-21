@@ -1246,7 +1246,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.offering.add(turn.turn_id);
     await this.armOffer(tenantId, session, turn)
       .then((offer) => this.host(session.host_id).send(offer))
-      .then(() => this.offerSent(turn.turn_id))
+      .then((sent) => {
+        if (sent === "Sent") this.offerSent(turn.turn_id);
+      })
       .catch((error: unknown) => {
         console.error(
           `OfferQueued: turn ${turn.turn_id} did not reach host ${session.host_id} and waits for its next heartbeat: ${error instanceof Error ? error.message : String(error)}`,
@@ -3500,6 +3502,31 @@ export abstract class TenantSessions extends DurableObject<Env> {
       });
     }
     return snapshots;
+  }
+
+  protected async failHostWork(tenantId: string, hostId: string, detail: string, now: number): Promise<void> {
+    const running = this.ctx.storage.sql
+      .exec<{ turn_id: string }>("SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running'", hostId)
+      .toArray();
+    for (const { turn_id } of running) {
+      await this.failTurn(tenantId, turn_id, "RateLimited", detail, iso(now));
+      if (this.channelProtocol(hostId) >= TURN_CANCEL_VERSION)
+        await this.host(hostId).send({ type: "TurnCancel", turnId: turn_id });
+    }
+    const requests = this.ctx.storage.sql
+      .exec<SnapshotRequestRow>(
+        `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
+        FROM snapshot_requests r JOIN sessions s ON s.session_id = r.session_id WHERE s.host_id = ?`,
+        hostId,
+      )
+      .toArray();
+    for (const request of requests) {
+      this.recordSnapshotFailure(request, "RateLimited", detail, iso(now));
+      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
+      await this.snapshotNotStored(tenantId, request, detail);
+      if (this.sessionRow(request.session_id)?.state === "Stopping")
+        this.setSessionState(request.session_id, "Idle", Date.now());
+    }
   }
 
   protected async hostPresence(

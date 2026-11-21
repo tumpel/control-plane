@@ -133,6 +133,10 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
+  if (refused.reason === "NotHealthy") {
+    if (refused.host.health !== "Healthy") return `${named} is ${refused.host.health}`;
+    return `${named} reports itself ${refused.host.reportedHealth}`;
+  }
   if (refused.reason === "NoImage") {
     const { harness, harnessVersion, architectures } = refused.image;
     const carried =

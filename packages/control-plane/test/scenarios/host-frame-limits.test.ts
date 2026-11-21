@@ -3,6 +3,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
 import * as control from "../../src/channel/control.ts";
+import { HostFrameMeter, rateLimitDetail } from "../../src/channel/host-health.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
@@ -11,12 +12,14 @@ import {
   type Ledger,
   type StoredControlMessage,
 } from "../../src/channel/protocol.ts";
-import { RateLimiter } from "./harness/runtime.ts";
 
 const HOST_ID = "host-1";
-const FRAMES_PER_MINUTE = 3;
+const FRAMES_PER_MINUTE = 600;
+const START = Date.parse("2026-11-21T11:00:00Z");
 
-const openChannel = async (rate: RateLimiter) => {
+const openChannel = async (meter: HostFrameMeter) => {
+  const clock = { now: START };
+  const trips: string[] = [];
   const pair = generateKeyPairSync("ed25519");
   const publicKey = Buffer.from(pair.publicKey.export({ format: "jwk" }).x ?? "", "base64url").toString("base64");
   let ledger: Ledger<StoredControlMessage> = emptyLedger();
@@ -50,11 +53,17 @@ const openChannel = async (rate: RateLimiter) => {
       message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
     }),
     messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-    admitFrame: async () => {
-      const { success } = await rate.limit({ key: HOST_ID });
-      return success ? null : `host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`;
+    admitFrame: () => {
+      const admission = meter.admit(clock.now);
+      if (admission.kind === "Admitted") return null;
+      if (admission.changed !== null) trips.push(admission.changed);
+      return {
+        reason: rateLimitDetail(HOST_ID, admission.framesPerMinute),
+        framesPerMinute: admission.framesPerMinute,
+        retryAfter: new Date(admission.retryAfter),
+      };
     },
-    now: () => new Date("2026-11-21T11:00:00Z"),
+    now: () => new Date(clock.now),
   };
   const receive = async (envelope: unknown) => {
     const received = await control.receive(channel.connection, JSON.stringify(envelope), context);
@@ -82,13 +91,15 @@ const openChannel = async (rate: RateLimiter) => {
     channel.sent.flatMap((envelope) =>
       envelope.type === "FrameRefused" ? [`${envelope.seq}: ${envelope.reason}`] : [],
     );
-  return { channel, frame, refusals };
+  const rateLimited = () =>
+    channel.sent.flatMap((envelope) => (envelope.type === "FrameRateLimited" ? [envelope] : []));
+  return { channel, clock, trips, frame, refusals, rateLimited, received: () => ledger.received };
 };
 
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
 
 test("a host frame over the 4 MB bound is refused and the channel stays open for the next frame", async () => {
-  const { channel, frame, refusals } = await openChannel(new RateLimiter(100));
+  const { channel, frame, refusals } = await openChannel(new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy"));
 
   const oversize = await frame(1, {
     type: "TurnLine",
@@ -105,24 +116,77 @@ test("a host frame over the 4 MB bound is refused and the channel stays open for
 });
 
 const turnLine = (lineSeq: number): HostMessage => ({ type: "TurnLine", turnId: "turn-1", lineSeq, text: "line" });
-const telemetryBatch: HostMessage = {
-  type: "TelemetryBatch",
-  instruments: [{ metric: "host.load.1m", unit: "1", kind: "Sample", description: "one-minute load average" }],
-  samples: [{ metric: "host.load.1m", at: "2026-11-17T10:00:00+01:00", value: 0.5, dimensions: {} }],
-  turns: [],
+const stream = async (frame: (seq: number, message: HostMessage) => Promise<unknown>, from: number, count: number) => {
+  for (let seq = from; seq < from + count; seq++) await frame(seq, turnLine(seq));
 };
 
-test("a host sending telemetry past its per-minute rate has each extra batch refused, while its turn lines and outcome frames still land", async () => {
-  const { channel, frame, refusals } = await openChannel(new RateLimiter(FRAMES_PER_MINUTE));
+test("a host streaming 700 lines in a minute has the 100 past the limit refused with the limit and the next window, every one acked so none replays, and the channel stays open", async () => {
+  const { channel, trips, frame, rateLimited, received } = await openChannel(
+    new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy"),
+  );
 
-  for (const seq of [1, 2, 3, 4, 5]) await frame(seq, telemetryBatch);
-  await frame(6, turnLine(1));
-  await frame(7, snapshotDone("snap-7"));
+  await stream(frame, 1, 700);
 
-  assert.deepEqual(channel.delivered, [1, 2, 3, 6, 7]);
-  assert.deepEqual(refusals(), [
-    `4: host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`,
-    `5: host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`,
-  ]);
+  assert.equal(channel.delivered.length, 600);
+  const refused = rateLimited();
+  assert.equal(refused.length, 100);
+  assert.deepEqual(refused[0], {
+    type: "FrameRateLimited",
+    seq: 601,
+    reason: `host ${HOST_ID} sent more than 600 frames a minute`,
+    framesPerMinute: 600,
+    retryAfter: "2026-11-21T11:01:00.000Z",
+  });
+  assert.equal(received(), 700);
+  assert.deepEqual(trips, ["RateLimited"]);
   assert.equal(channel.closed, null);
+});
+
+test("a host under the limit has every frame delivered and stays Healthy", async () => {
+  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy");
+  const { channel, clock, trips, frame, rateLimited } = await openChannel(meter);
+
+  await stream(frame, 1, 600);
+  clock.now += 60_000;
+  await stream(frame, 601, 600);
+
+  assert.equal(channel.delivered.length, 1200);
+  assert.deepEqual(rateLimited(), []);
+  assert.deepEqual(trips, []);
+  assert.equal(meter.health(), "Healthy");
+});
+
+test("a RateLimited host recovers after a full minute under the limit, and its next frames land", async () => {
+  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy");
+  const { channel, clock, frame } = await openChannel(meter);
+  await stream(frame, 1, 700);
+
+  clock.now += 60_000;
+  assert.equal(meter.recovered(clock.now), false, "the minute after the trip is not yet a full clean window");
+  await stream(frame, 701, 10);
+  clock.now += 60_000;
+
+  assert.equal(meter.recovered(clock.now), true);
+  assert.equal(meter.health(), "Healthy");
+  await stream(frame, 711, 10);
+  assert.equal(channel.delivered.length, 620);
+});
+
+test("a host tripping the limit a third time within an hour stays Unhealthy until a person or a restart restores it", async () => {
+  const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy");
+  const { clock, trips, frame } = await openChannel(meter);
+  let seq = 1;
+  for (let trip = 0; trip < 3; trip++) {
+    await stream(frame, seq, 601);
+    seq += 601;
+    clock.now += 2 * 60_000;
+    meter.recovered(clock.now);
+    clock.now += 10 * 60_000;
+  }
+
+  assert.deepEqual(trips, ["RateLimited", "RateLimited", "Unhealthy"]);
+  assert.equal(meter.recovered(clock.now + 3_600_000), false);
+  assert.equal(meter.health(), "Unhealthy");
+  assert.equal(meter.restore(), true);
+  assert.equal(meter.health(), "Healthy");
 });

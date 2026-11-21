@@ -107,6 +107,7 @@ import {
   mintEnrolmentToken,
   patchHostLabels,
   type Refused,
+  restoreHostHealth,
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
@@ -254,7 +255,6 @@ export interface Env extends SignerEnv {
   TENANT_READ_RATE: RateLimit;
   TENANT_WRITE_RATE: RateLimit;
   WEBHOOK_RATE: RateLimit;
-  HOST_FRAME_RATE: RateLimit;
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
   ACCESS_PROOF_COMMON_NAME?: string;
@@ -1152,7 +1152,7 @@ const handleReleaseDownload = async (request: Request, url: URL, env: Env): Prom
   return new Response(null, { status: 302, headers: { location: found.downloadUrl, "cache-control": "no-store" } });
 };
 
-const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/labels)?$/;
+const HOST_PATH = /^\/v1\/hosts\/([^/]+)(\/revoke|\/restore-health|\/labels)?$/;
 
 const handleHost = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
   const channel = CHANNEL_PATH.exec(url.pathname);
@@ -1163,7 +1163,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   const hostId = matched?.[1] === undefined ? "" : decodeURIComponent(matched[1]);
   const action = matched?.[2];
   const revoking = action === "/revoke";
-  const method = { "/revoke": "POST", "/labels": "PUT" }[action ?? ""] ?? "GET";
+  const method = { "/revoke": "POST", "/restore-health": "POST", "/labels": "PUT" }[action ?? ""] ?? "GET";
   if (hostId === "" || request.method !== method) return null;
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
@@ -1174,6 +1174,10 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
     if (!labelled.ok) return refusal(labelled);
     const [host] = await hostReads(env, caller.tenantId, [labelled.value]);
     return json(host);
+  }
+  if (action === "/restore-health") {
+    const restored = await restoreHostHealth(env, caller.tenantId, hostId, caller.principalId, Date.now());
+    return restored.ok ? json(restored.value) : refusal(restored);
   }
   if (revoking) {
     const revoked = await revokeHost(env, caller.tenantId, hostId, Date.now());

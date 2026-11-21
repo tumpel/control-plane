@@ -123,6 +123,8 @@ import {
   GitHubActionsConnectionResultSchema,
   HeldPrebuildInputSchema,
   HeldPrebuildResultSchema,
+  HostHealthInputSchema,
+  HostHealthResultSchema,
   HostHelloInputSchema,
   HostHelloResultSchema,
   HostMessageInputSchema,
@@ -472,6 +474,7 @@ export const TENANT_OPERATIONS = {
   turnMetricDimensions: { input: TurnMetricDimensionsInputSchema, result: TurnMetricDimensionsResultSchema },
   prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
   hostPresence: { input: HostPresenceInputSchema, result: HostPresenceResultSchema },
+  hostHealth: { input: HostHealthInputSchema, result: HostHealthResultSchema },
   hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
   deadlineReached: { input: DeadlineReachedInputSchema, result: DeadlineReachedResultSchema },
 } as const;

@@ -1,13 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
-import { CloseCode } from "@tumpel/schemas";
+import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
 import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import * as control from "./channel/control.ts";
 import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
+import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
 import { HostLedger } from "./channel/ledger.ts";
 import type {
   ControlEnvelope,
   Frame,
   HostMessage,
+  HostReportedHealth,
   HostUsage,
   StoredControlMessage,
   TelemetryBatch,
@@ -65,6 +67,9 @@ export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
   private inbound: Promise<void> = Promise.resolve();
   private readonly ledger: HostLedger;
+  private meter: HostFrameMeter | null = null;
+  private tripped: HostHealth | null = null;
+  private reported: HostReportedHealth | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -101,9 +106,10 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
-  async send(message: StoredControlMessage): Promise<void> {
+  async send(message: StoredControlMessage): Promise<"Sent" | "Deferred"> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
+    if (message.type === "TurnOffer" && (await this.offersPaused(host.host_id))) return "Deferred";
     const open = this.ctx
       .getWebSockets()
       .find(
@@ -112,11 +118,19 @@ export class HostChannel extends DurableObject<Env> {
       );
     if (open === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null));
-      return;
+      return "Sent";
     }
     const attachment = this.attachment(open);
     await control.send(attachment.connection, message, this.context(open, host, attachment));
     open.serializeAttachment(attachment);
+    return "Sent";
+  }
+
+  async restoreHealth(detail: string): Promise<void> {
+    const host = this.host();
+    if (host === null) throw new Error("a health restore reached a host object that was never registered");
+    (await this.frameMeter(host.host_id)).restore();
+    await this.setHealth(host.host_id, "Healthy", detail);
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -181,6 +195,7 @@ export class HostChannel extends DurableObject<Env> {
     }
     const now = Date.now();
     attachment.lastReceivedAt = now;
+    const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
     if (event.kind === "Welcomed") {
@@ -189,6 +204,18 @@ export class HostChannel extends DurableObject<Env> {
     }
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
     this.keep(socket, attachment);
+    if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
+    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
+      await this.reportHealth(host.host_id, event.health);
+      if (meter.recovered(now))
+        await this.setHealth(
+          host.host_id,
+          "Healthy",
+          `host ${host.host_id} sent no more than ${meter.framesPerMinute} frames a minute for a full minute`,
+        );
+    }
+    if (event.kind === "Welcomed" && meter.health() === "Unhealthy" && meter.restore())
+      await this.setHealth(host.host_id, "Healthy", `host ${host.host_id} restarted and said Hello again`);
     if (event.kind === "Message") await this.take(host.host_id, event.frame, now, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
@@ -327,8 +354,10 @@ export class HostChannel extends DurableObject<Env> {
   ): Promise<void> {
     if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;
-    if (reply.type === "TurnHandoff")
-      return this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
+    if (reply.type === "TurnHandoff") {
+      await this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
+      return;
+    }
     if (reply.type === "Refused") {
       console.error(`FrameRefused: host ${hostId} frame ${frame.seq}: ${reply.reason}`);
       return control.refuseFrame(context.port, frame.seq, reply.reason);
@@ -341,12 +370,15 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
+    if (await this.offersPaused(hostId)) return;
     const tenantId = await this.tenantOf(hostId);
     const tenant = tenantApi(this.env.TENANT, tenantId);
     for (const handoff of (await tenant.call("deferredOffers", { tenantId, hostId })).handoffs) {
-      if (handoff.hostId === hostId) await control.send(attachment.connection, handoff.offer, context);
-      else await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
-      await tenant.call("offerSent", { turnId: handoff.offer.turnId });
+      const sent =
+        handoff.hostId === hostId
+          ? await control.send(attachment.connection, handoff.offer, context).then(() => "Sent")
+          : await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
+      if (sent === "Sent") await tenant.call("offerSent", { turnId: handoff.offer.turnId });
     }
   }
 
@@ -428,6 +460,53 @@ export class HostChannel extends DurableObject<Env> {
       now,
       channelProtocol: welcomed.protocolVersion,
     });
+  }
+
+  private async frameMeter(hostId: string): Promise<HostFrameMeter> {
+    if (this.meter !== null) return this.meter;
+    const row = await this.env.DB.prepare("SELECT health FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ health: string }>();
+    if (row === null) throw new Error(`host ${hostId} has a channel but no row in the hosts table; enrol it again`);
+    this.meter ??= new HostFrameMeter(limitsOf(this.env).hostFramesPerMinute, HostHealthSchema.parse(row.health));
+    return this.meter;
+  }
+
+  private async offersPaused(hostId: string): Promise<boolean> {
+    return (await this.frameMeter(hostId)).health() !== "Healthy" || this.reported === "RateLimited";
+  }
+
+  private async trip(hostId: string, health: HostHealth, framesPerMinute: number): Promise<void> {
+    this.tripped = null;
+    const over = rateLimitDetail(hostId, framesPerMinute);
+    const detail =
+      health === "Unhealthy"
+        ? `${over} three times within an hour, so it gets no offers until a person restores its health or its supervisor restarts`
+        : `${over}, so the control plane failed its running work and offers it nothing until a full minute passes under the limit`;
+    console.error(`Host${health}: ${detail}`);
+    await this.setHealth(hostId, health, detail);
+  }
+
+  private async setHealth(hostId: string, health: HostHealth, detail: string): Promise<void> {
+    const now = Date.now();
+    const changed = await this.env.DB.prepare(
+      "UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1",
+    )
+      .bind(health, now, hostId)
+      .run();
+    if (changed.meta.changes === 0) return;
+    const tenantId = await this.tenantOf(hostId);
+    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", { tenantId, hostId, health, detail, now });
+  }
+
+  private async reportHealth(hostId: string, health: HostReportedHealth): Promise<void> {
+    if (this.reported === health) return;
+    this.reported = health;
+    await this.env.DB.prepare(
+      "UPDATE hosts SET reported_health = ?1, updated_at = ?2 WHERE host_id = ?3 AND reported_health IS NOT ?1",
+    )
+      .bind(health, Date.now(), hostId)
+      .run();
   }
 
   private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
@@ -549,10 +628,17 @@ export class HostChannel extends DurableObject<Env> {
         return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-      admitFrame: async () => {
-        const { success } = await this.env.HOST_FRAME_RATE.limit({ key: host.host_id });
-        if (success) return null;
-        return `host ${host.host_id} sent more than ${limitsOf(this.env).hostFramesPerMinute} frames in a minute, so the control plane recorded nothing of this one; send fewer frames a minute`;
+      admitFrame: () => {
+        if (this.meter === null) throw new Error("a frame reached the host channel before its frame meter loaded");
+        const admission = this.meter.admit(Date.now());
+        if (admission.kind === "Admitted") return null;
+        if (admission.changed !== null) this.tripped = admission.changed;
+        const retryAfter = new Date(admission.retryAfter);
+        return {
+          reason: `${rateLimitDetail(host.host_id, admission.framesPerMinute)}, so the control plane recorded nothing of this frame; send no frames until ${retryAfter.toISOString()}`,
+          framesPerMinute: admission.framesPerMinute,
+          retryAfter,
+        };
       },
       now: () => new Date(),
     };

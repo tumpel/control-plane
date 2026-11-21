@@ -12,6 +12,7 @@ import {
   HostEnvelopeBeforeHeldSessionsSchema,
   HostEnvelopeSchema,
   type HostMessage,
+  type HostReportedHealth,
   type HostUsage,
   heartbeat,
   helloBytes,
@@ -38,7 +39,7 @@ export type ControlConnection =
 
 export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
-const RATE_LIMITED_MESSAGES: ReadonlySet<HostMessage["type"]> = new Set(["TelemetryBatch"]);
+export const FRAME_RATE_LIMITED_VERSION = 32;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -99,8 +100,14 @@ export interface ControlContext {
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
   messageVersions: MessageVersions;
-  admitFrame(): Promise<string | null>;
+  admitFrame(): FrameRateRefusal | null;
   now(): Date;
+}
+
+export interface FrameRateRefusal {
+  reason: string;
+  framesPerMinute: number;
+  retryAfter: Date;
 }
 
 export type ControlEvent =
@@ -114,10 +121,11 @@ export type ControlEvent =
       channelProtocolOldest: Hello["channelProtocolOldest"];
       guestProtocol: Hello["guestProtocol"];
     }
-  | { kind: "Heartbeat"; usage: HostUsage }
-  | { kind: "FirstHeartbeat"; usage: HostUsage; heldSessionIds: string[] }
+  | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
+  | { kind: "FirstHeartbeat"; usage: HostUsage; health: HostReportedHealth; heldSessionIds: string[] }
   | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
+  | { kind: "FrameRateLimited"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
 
 export type Welcomed = Extract<ControlEvent, { kind: "Welcomed" }>;
@@ -217,6 +225,19 @@ export const send = async (
 
 export const refuseFrame = (port: Port<ControlEnvelope>, seq: number, reason: string): void =>
   port.send({ type: "FrameRefused", seq, reason });
+
+const refuseOverRate = (
+  port: Port<ControlEnvelope>,
+  protocolVersion: number,
+  seq: number,
+  { reason, framesPerMinute, retryAfter }: FrameRateRefusal,
+): void => {
+  if (protocolVersion < FRAME_RATE_LIMITED_VERSION) {
+    refuseFrame(port, seq, reason);
+    return;
+  }
+  port.send({ type: "FrameRateLimited", seq, reason, framesPerMinute, retryAfter: retryAfter.toISOString() });
+};
 
 export const revoke = (context: ControlContext, reason: string): Received =>
   close(context.port, CloseCode.Revoked, `host ${context.host.hostId} is revoked: ${reason}`);
@@ -333,12 +354,13 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") {
+    const health = envelope.health ?? "Healthy";
     if (connection.heldReported || !reportsHeldSessions(envelope)) {
-      return { connection, event: { kind: "Heartbeat", usage: envelope.usage } };
+      return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
     }
     return {
       connection: { ...connection, heldReported: true },
-      event: { kind: "FirstHeartbeat", usage: envelope.usage, heldSessionIds: envelope.heldSessionIds },
+      event: { kind: "FirstHeartbeat", usage: envelope.usage, health, heldSessionIds: envelope.heldSessionIds },
     };
   }
   const needed = HOST_MESSAGE_VERSIONS[envelope.message.type];
@@ -359,11 +381,11 @@ export const receive = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  const overRate = RATE_LIMITED_MESSAGES.has(envelope.message.type) ? await context.admitFrame() : null;
+  const overRate = context.admitFrame();
   if (overRate !== null) {
     context.ledger.skip(envelope);
-    refuseFrame(context.port, envelope.seq, overRate);
-    return { connection, event: { kind: "FrameRefused", seq: envelope.seq, reason: overRate } };
+    refuseOverRate(context.port, connection.protocolVersion, envelope.seq, overRate);
+    return { connection, event: { kind: "FrameRateLimited", seq: envelope.seq, reason: overRate.reason } };
   }
   return {
     connection,

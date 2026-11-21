@@ -5,6 +5,7 @@ import {
   HostEnvelopeSchema,
   HostFrameSchema,
   HostHeartbeatSchema,
+  type HostReportedHealthSchema,
   type HostUsageSchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
@@ -28,6 +29,7 @@ export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
 export const reportsHeldSessions = (heartbeat: Omit<HostHeartbeat, "heldSessionIds">): heartbeat is HostHeartbeat =>
   "heldSessionIds" in heartbeat;
 export type HostUsage = z.infer<typeof HostUsageSchema>;
+export type HostReportedHealth = z.infer<typeof HostReportedHealthSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];

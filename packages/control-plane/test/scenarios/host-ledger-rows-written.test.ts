@@ -19,7 +19,7 @@ const channel = () => {
     prepareOffer: () => Promise.reject(new Error("this channel offers no turns")),
     prepareClaudeSetup: () => Promise.reject(new Error("this channel offers no Claude setup")),
     messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-    admitFrame: async () => null,
+    admitFrame: () => null,
     now: () => new Date(),
   };
   let connection: control.ControlConnection = {

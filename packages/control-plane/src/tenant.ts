@@ -830,6 +830,13 @@ export class Tenant extends TenantConnectors {
       await this.hostPresence(tenantId, hostId, presence, now);
       return {};
     },
+    hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
+      this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
+      if (health === "Healthy") return {};
+      await this.failHostWork(tenantId, hostId, detail, now);
+      await this.failHostClaudeSetups(tenantId, hostId, detail, now);
+      return {};
+    },
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),
