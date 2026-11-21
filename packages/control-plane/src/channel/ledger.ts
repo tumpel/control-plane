@@ -24,6 +24,7 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
   readonly #sql: LedgerSql;
   #held: Held[] = [];
   #stalled = { seq: 0, tries: 0 };
+  #refused: Set<number> | null = null;
 
   constructor(sql: LedgerSql) {
     this.#sql = sql;
@@ -41,11 +42,17 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
 
   save(ledger: Ledger<StoredControlMessage>): void {
     const first = this.first();
+    const received = first === null ? ledger.received : Math.min(ledger.received, first - 1);
+    const refused = this.refused();
+    if ([...refused].some((seq) => seq <= received)) {
+      this.#sql.exec("DELETE FROM refused_frames WHERE seq <= ?", received);
+      for (const seq of refused) if (seq <= received) refused.delete(seq);
+    }
     this.#sql.exec(
       `INSERT INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)
       ON CONFLICT (ledger_id) DO UPDATE SET received = excluded.received, sent = excluded.sent, unacked = excluded.unacked
       WHERE ledger.received IS NOT excluded.received OR ledger.sent IS NOT excluded.sent OR ledger.unacked IS NOT excluded.unacked`,
-      first === null ? ledger.received : Math.min(ledger.received, first - 1),
+      received,
       ledger.sent,
       JSON.stringify(ledger.unacked),
     );
@@ -59,13 +66,24 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
 
   skip(frame: Frame<unknown>): void {
     if (this.#held.length > 0) {
-      this.#held.push({ frame, message: null, forwarded: true, bytes: 0 });
+      this.#sql.exec("INSERT INTO refused_frames (seq) VALUES (?) ON CONFLICT (seq) DO NOTHING", frame.seq);
+      this.refused().add(frame.seq);
       return;
     }
-    const outcome = accept(this.load(), frame);
+    const outcome = accept(this.load(), frame, this.refused());
     if (outcome.kind !== "Accepted")
       throw new Error(`frame ${frame.seq} was skipped but the ledger no longer takes it`);
     this.save(outcome.ledger);
+  }
+
+  refused(): Set<number> {
+    this.#refused ??= new Set(
+      this.#sql
+        .exec<{ seq: number }>("SELECT seq FROM refused_frames")
+        .toArray()
+        .map((row) => row.seq),
+    );
+    return this.#refused;
   }
 
   hold(frame: Frame<HostMessage>, forwarded: boolean, bytes: number): void {

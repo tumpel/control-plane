@@ -296,7 +296,7 @@ const refuse = async (
 ): Promise<Received> => {
   const stored = parseEnvelope(StoredHostFrameSchema, text);
   if (!stored.ok) return close(context.port, CloseCode.ProtocolError, reason);
-  const outcome = accept(inbound(context), stored.value);
+  const outcome = accept(inbound(context), stored.value, context.ledger.refused());
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -367,7 +367,7 @@ export const receive = async (
       context,
     );
   }
-  const outcome = accept(inbound(context), envelope);
+  const outcome = accept(inbound(context), envelope, context.ledger.refused());
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -400,8 +400,9 @@ export const receive = async (
 
 export const acknowledge = (context: ControlContext, frames: Frame<unknown>[]): void => {
   let ledger = context.ledger.load();
+  const refused = context.ledger.refused();
   for (const frame of frames) {
-    const outcome = accept(ledger, frame);
+    const outcome = accept(ledger, frame, refused);
     if (outcome.kind !== "Accepted") {
       throw new Error(`frame ${frame.seq} was handled but the ledger no longer takes it (${outcome.kind})`);
     }

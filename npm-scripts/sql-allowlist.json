@@ -7,8 +7,11 @@
   },
   "sites": {
     "packages/control-plane/src/channel/ledger.ts": [
+      "DELETE FROM refused_frames WHERE seq <= ?",
       "INSERT INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?) ON CONFLICT (ledger_id) DO UPDATE SET received = excluded.received, sent = excluded.sent, unacked = excluded.unacked WHERE ledger.received IS NOT excluded.received OR ledger.sent IS NOT excluded.sent OR ledger.unacked IS NOT excluded.unacked",
-      "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1"
+      "INSERT INTO refused_frames (seq) VALUES (?) ON CONFLICT (seq) DO NOTHING",
+      "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
+      "SELECT seq FROM refused_frames"
     ],
     "packages/control-plane/src/circleci-events.ts": ["SELECT 1 FROM tenants WHERE tenant_id = ?"],
     "packages/control-plane/src/claude-setups.ts": ["SELECT 1 FROM tenants WHERE tenant_id = ?"],

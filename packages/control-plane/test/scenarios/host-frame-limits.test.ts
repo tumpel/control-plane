@@ -61,6 +61,7 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = Chan
       skip: (frame) => {
         ledger = { ...ledger, received: frame.seq };
       },
+      refused: () => new Set<number>(),
     },
     prepareOffer: async () => ({ kind: "Withdrawn" }),
     prepareClaudeSetup: async (stored) => ({

@@ -3833,6 +3833,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async turnClaim(tenantId: string, hostId: string, message: TurnClaim): Promise<HostReply> {
+    const elsewhere = this.turnRow(message.turnId);
+    if (elsewhere !== null && elsewhere.host_id !== hostId) return { type: "TurnWithdrawn", turnId: elsewhere.turn_id };
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;

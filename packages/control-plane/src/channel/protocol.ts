@@ -83,6 +83,7 @@ export interface LedgerStore<M> {
   save(ledger: Ledger<M>): void;
   heard(): number;
   skip(frame: Frame<unknown>): void;
+  refused(): ReadonlySet<number>;
 }
 
 export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });
@@ -112,9 +113,15 @@ export type Accepted<Own, Theirs> =
   | { kind: "Duplicate" }
   | { kind: "Gap"; expected: number; got: number };
 
-export const accept = <Own, Theirs>(ledger: Ledger<Own>, frame: Frame<Theirs>): Accepted<Own, Theirs> => {
-  if (frame.seq <= ledger.received) return { kind: "Duplicate" };
-  if (frame.seq !== ledger.received + 1) return { kind: "Gap", expected: ledger.received + 1, got: frame.seq };
+export const accept = <Own, Theirs>(
+  ledger: Ledger<Own>,
+  frame: Frame<Theirs>,
+  refused: ReadonlySet<number> = new Set(),
+): Accepted<Own, Theirs> => {
+  if (frame.seq <= ledger.received || refused.has(frame.seq)) return { kind: "Duplicate" };
+  let expected = ledger.received + 1;
+  while (refused.has(expected)) expected += 1;
+  if (frame.seq !== expected) return { kind: "Gap", expected, got: frame.seq };
   return {
     kind: "Accepted",
     ledger: {

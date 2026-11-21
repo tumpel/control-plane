@@ -40,6 +40,7 @@ const memoryLedger = <M>(): LedgerStore<M> & { current: Ledger<M> } => {
       const outcome = accept(store.current, frame);
       if (outcome.kind === "Accepted") store.current = structuredClone(outcome.ledger);
     },
+    refused: () => new Set<number>(),
   };
   return store;
 };
