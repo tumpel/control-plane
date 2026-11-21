@@ -12,7 +12,6 @@ const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
 
 export const GOAL_TURN_CAP = 20;
-export const DELIVERY_GOAL_ROUNDS = 5;
 
 const ANTHROPIC_MODELS = [
   "claude-fable-5-2",

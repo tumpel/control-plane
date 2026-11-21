@@ -1909,16 +1909,28 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("a foreman subscribed to its crew gets each crew turn as a delivery turn until its goal is met, and a turn token dies with its turn", async () => {
-    const { bearer, host, getJson, tool, storedSnapshot, sessionStart } = await tenant();
-    const [defaults] = await getJson("/v1/personas", PersonaSchema.array());
+  test("a Codex foreman dispatches crew and ends its event turn while the subscription goal is unmet", async () => {
+    const { bearer, host, github, tool, storedSnapshot, sessionStart } = await tenant();
+    const secrets = await postJson(
+      "/v1/secret-sets",
+      {
+        name: "Foreman secrets",
+        secrets: [
+          { kind: "ApiKey", name: "OPENAI", provider: "OpenAi", value: "sk-proj-foreman-test" },
+          { kind: "Variable", name: "GITHUB_TOKEN", value: github },
+        ],
+      },
+      bearer,
+    );
+    assert.equal(secrets.status, 200, await secrets.clone().text());
+    const { secretSetId } = SecretSetSchema.parse(await secrets.json());
     const created = await postJson(
       "/v1/personas",
-      { name: "Foreman", harness: "ClaudeCode", secretSetId: defaults?.secretSetId, connectorIds: [], tumpelMcp: true },
+      { name: "Foreman", harness: "Codex", secretSetId, connectorIds: [], tumpelMcp: true },
       bearer,
     );
     assert.equal(created.status, 200, await created.clone().text());
-    const start = await sessionStart("Foreman");
+    const start = { ...(await sessionStart("Foreman")), model: "gpt-5.6-sol" };
     const asTurn = async (token: string, name: string, args: Record<string, unknown>) => {
       mcpId += 1;
       const response = await postJson(
@@ -1939,7 +1951,7 @@ suite("sessions", { concurrency: 8 }, () => {
       return z.object({ accessToken: z.string() }).parse(await served.json()).accessToken;
     };
     const finish = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<void> => {
-      const result = '{"type":"result","subtype":"success","is_error":false}';
+      const result = '{"type":"turn.completed"}';
       host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: offer.lastLineSeq + 1, text: result });
       host.send({
         type: "TurnComplete",
@@ -2025,8 +2037,14 @@ suite("sessions", { concurrency: 8 }, () => {
 
     const delivery = await host.next("TurnOffer");
     assert.equal(delivery.sessionId, foremanId);
+    assert.equal(delivery.harness, "Codex");
     assert.ok(delivery.credential.connectors.some((connector) => connector.connectorId === "tumpel"));
-    assert.match(delivery.prompt, /^\/goal start a crew session per open issue and review what it did\n\n/);
+    assert.match(delivery.prompt, /^start a crew session per open issue and review what it did\n\n/);
+    assert.match(delivery.prompt, /every open issue has a merged pull request/);
+    assert.match(delivery.prompt, /Call tumpel_subscription_complete when the goal holds\./);
+    const deliveryTurn = await tool("tumpel_turn_get", { turnId: delivery.turnId }, TurnSchema);
+    assert.equal(deliveryTurn.goal, undefined);
+    assert.equal(deliveryTurn.prompt, delivery.prompt);
     const events = delivery.prompt
       .split("\n")
       .filter((line) => line.startsWith("{"))
@@ -2043,6 +2061,7 @@ suite("sessions", { concurrency: 8 }, () => {
       SubscriptionSchema,
     );
     assert.equal(delivered.cursorEventId, events[0]?.eventId);
+    assert.equal(delivered.state, "Active");
 
     const completed = await tool(
       "tumpel_subscription_complete",

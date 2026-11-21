@@ -9,8 +9,7 @@ import {
   SubscriptionSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt } from "./delivery-prompt.ts";
-import { DELIVERY_GOAL_ROUNDS, GOAL_FOLDS } from "./harness-catalog.ts";
+import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
 import { type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
@@ -269,25 +268,16 @@ export abstract class TenantSubscriptions extends TenantSessions {
         turn.turn_id,
       )
       .toArray();
-    if (delivery === undefined || turn.goal === null) return super.offeredPrompt(harness, turn);
-    const goalFold = GOAL_FOLDS.get(harness);
-    if (goalFold === undefined)
-      throw new Error(`delivery turn ${turn.turn_id} carries a goal, and ${harness} takes none`);
-    const fold = (prompt: string, goal: string) => goalFold.fold(prompt, goal, DELIVERY_GOAL_ROUNDS);
-    if (delivery.last_event_id !== null) return fold(turn.prompt, turn.goal);
-    const prompt = this.compose(delivery.subscription_id, turn, fold, goalFold.limit);
-    return fold(prompt, turn.goal);
+    if (delivery === undefined) return super.offeredPrompt(harness, turn);
+    if (delivery.last_event_id !== null) return turn.prompt;
+    const row = this.subscriptionRow(delivery.subscription_id);
+    if (row === null) throw new Error(`delivery turn ${turn.turn_id} lost its subscription`);
+    return this.compose(row, turn);
   }
 
-  private compose(
-    subscriptionId: string,
-    turn: TurnRow,
-    fold: (prompt: string, goal: string) => string,
-    limit: number,
-  ): string {
+  private compose(row: SubscriptionRow, turn: TurnRow): string {
     const sql = this.ctx.storage.sql;
-    const row = this.subscriptionRow(subscriptionId);
-    if (row === null) return turn.prompt;
+    const subscriptionId = row.subscription_id;
     const events = sql
       .exec<DeliveryEvent>(
         `SELECT e.event_id, e.payload, e.created_at FROM subscription_matches AS m JOIN events AS e ON e.event_id = m.event_id
@@ -299,8 +289,9 @@ export abstract class TenantSubscriptions extends TenantSessions {
       .toArray();
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) throw new Error("the tenant Durable Object composes a delivery turn but has no name");
-    const batch = deliveryPrompt(row.prompt, row.goal, tenantId, events, fold, limit);
-    const prompt = batch?.prompt ?? row.prompt;
+    const plan = subscriptionPrompt(row.prompt, row.goal);
+    const batch = deliveryPrompt(plan, tenantId, events);
+    const prompt = batch?.prompt ?? plan;
     const lastEventId = batch?.lastEventId ?? row.cursor_event_id;
     sql.exec("UPDATE turns SET prompt = ? WHERE turn_id = ?", prompt, turn.turn_id);
     sql.exec("INSERT INTO subscription_turn_batches (turn_id, last_event_id) VALUES (?, ?)", turn.turn_id, lastEventId);
@@ -362,14 +353,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (this.waitingDelivery(subscriptionId) !== null) return;
     const sql = this.ctx.storage.sql;
     const [row] = sql
-      .exec<{ session_id: string; host_id: string; box_id: string; prompt: string; goal: string }>(
-        `SELECT s.session_id, x.host_id, x.box_id, s.prompt, s.goal FROM subscriptions AS s
+      .exec<{ session_id: string; host_id: string; box_id: string; prompt: string }>(
+        `SELECT s.session_id, x.host_id, x.box_id, s.prompt FROM subscriptions AS s
         JOIN sessions AS x ON x.session_id = s.session_id WHERE s.subscription_id = ?`,
         subscriptionId,
       )
       .toArray();
     if (row === undefined) throw new Error(`subscription ${subscriptionId} lost its session while it queued a turn`);
-    const turn = this.newTurn(row.session_id, row.host_id, row.box_id, { prompt: row.prompt, goal: row.goal }, now);
+    const turn = this.newTurn(row.session_id, row.host_id, row.box_id, { prompt: row.prompt }, now);
     sql.exec("INSERT INTO turn_session_waits (turn_id, session_id) VALUES (?, ?)", turn.turn_id, row.session_id);
     sql.exec("INSERT INTO subscription_turns (turn_id, subscription_id) VALUES (?, ?)", turn.turn_id, subscriptionId);
   }
