@@ -291,7 +291,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (tenantId === undefined) throw new Error("the tenant Durable Object composes a delivery turn but has no name");
     const plan = subscriptionPrompt(row.prompt, row.goal);
     const batch = deliveryPrompt(plan, tenantId, events);
-    if (batch?.kind === "Malformed") return { kind: "Uncomposable", cause: batch.cause };
+    if (batch?.kind === "Malformed") {
+      if (row.state === "Active") this.pause(row, { kind: "DeliveryFailed", turnId: turn.turn_id }, Date.now());
+      return { kind: "Uncomposable", cause: batch.cause };
+    }
     const prompt = batch?.prompt ?? plan;
     const lastEventId = batch?.lastEventId ?? row.cursor_event_id;
     sql.exec("UPDATE turns SET prompt = ? WHERE turn_id = ?", prompt, turn.turn_id);
