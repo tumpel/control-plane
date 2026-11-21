@@ -515,6 +515,15 @@ export class Tenant extends TenantConnectors {
     getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
     waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
+    listPushSubscriptions: ({ tenantId, principalId }) => ({
+      subscriptions: this.listPushSubscriptions(tenantId, principalId),
+    }),
+    createPushSubscription: async ({ tenantId, principalId, subscription, now }) => ({
+      subscription: await this.createPushSubscription(tenantId, principalId, subscription, now),
+    }),
+    deletePushSubscription: ({ principalId, pushSubscriptionId }) => ({
+      deleted: this.deletePushSubscription(principalId, pushSubscriptionId),
+    }),
     listWebhookEndpoints: ({ tenantId }) => ({ endpoints: this.listWebhookEndpoints(tenantId) }),
     createWebhookEndpoint: ({ tenantId, endpoint, now }) => ({
       endpoint: this.createWebhookEndpoint(tenantId, endpoint, now),
