@@ -451,6 +451,24 @@ export class LivePacks {
     });
   }
 
+  claim(
+    store: R2Bucket,
+    tenantId: string,
+    storageKey: string,
+    packs: ReadonlySet<string>,
+    reused: ReadonlySet<string>,
+  ): Promise<string | null> {
+    return this.turn(async () => {
+      const state = await this.loaded(store, tenantId);
+      const gone = [...reused].sort().find((packDigest) => !state.counts.has(packDigest));
+      if (gone !== undefined) return gone;
+      if (state.members.has(storageKey)) return null;
+      counted(state, storageKey, packs);
+      await this.persist(store, tenantId, state);
+      return null;
+    });
+  }
+
   release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
     return this.turn(() =>
       this.released(store, tenantId, storageKeys).catch((error: unknown) => {

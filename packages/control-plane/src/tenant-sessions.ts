@@ -637,6 +637,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly liveHosts = new Map<string, LiveHost>();
   private readonly unreportedBoxes = new Map<string, { hostId: string; boxMemoryMib: number }>();
   private readonly imageFetches = new Map<string, number>();
+  private readonly uploadedPacks = new Map<string, Set<string>>();
   private readonly claims = new Map<string, number>();
 
   protected abstract failPrebuild(
@@ -3367,6 +3368,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const named = await this.live.names(this.env.STORE, tenantId);
     const missing = message.packs.filter((pack) => !named.has(pack.packDigest));
+    const uploading = this.uploadedPacks.get(message.snapshotId) ?? new Set<string>();
+    for (const pack of missing) uploading.add(pack.packDigest);
+    this.uploadedPacks.set(message.snapshotId, uploading);
     const signer = signerOf(
       this.env,
       this.env.R2_BUCKET_NAME,
@@ -4035,13 +4039,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
       (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
     );
     if (checked.kind === "Rejected") return checked;
-    const [pending] = this.ctx.storage.sql
+    const uploaded = this.uploadedPacks.get(request.snapshot_id) ?? new Set<string>();
+    const reused = new Set([...checked.packs].filter((packDigest) => !uploaded.has(packDigest)));
+    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs, reused).then(
+      (gone) => ({ gone }),
+      (error: unknown) => ({ failed: storageFailed(error) }),
+    );
+    if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
+    if (claimed.gone !== null) {
+      return {
+        kind: "Rejected",
+        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which no stored snapshot names any longer, so the session keeps its previous snapshot`,
+      };
+    }
+    const [stillPending] = this.ctx.storage.sql
       .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
       .toArray();
-    if (pending === undefined) return { kind: "Answered" };
-    const stored = this.storeSnapshot(request, uploadedBytes);
-    await this.live.add(this.env.STORE, tenantId, request.storage_key, checked.packs);
-    return { kind: "Stored", ...stored };
+    if (stillPending === undefined) {
+      await this.live.release(this.env.STORE, tenantId, [request.storage_key]);
+      return { kind: "Answered" };
+    }
+    return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes) };
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -4084,6 +4102,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (message.type === "SnapshotFailed") {
+      this.uploadedPacks.delete(request.snapshot_id);
       await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
@@ -4097,6 +4116,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return null;
     }
     const outcome = await this.snapshotOutcome(tenantId, hostId, request, message.uploadedBytes);
+    this.uploadedPacks.delete(request.snapshot_id);
     if (outcome.kind === "Answered") return null;
     if (outcome.kind === "Rejected") {
       await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });

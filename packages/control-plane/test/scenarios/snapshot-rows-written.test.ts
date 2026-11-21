@@ -413,6 +413,52 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
   });
 });
 
+test("a snapshot that reuses a pack another session's archive frees while it is in flight is rejected, naming the pack", async () => {
+  await inWorld(async (world, host) => {
+    const shared = tree(DIGESTS_PER_PART, "shared");
+    const sharedPack = shared[0]?.packDigest ?? "";
+    const first = await world.startSession({ prompt: "build the shared tree", tags: [] });
+    const firstOffer = host.takeOffer();
+    await host.claims(firstOffer);
+    await host.completes(firstOffer);
+    await storesSnapshot(world, host, first.sessionId, shared);
+    await world.passes(2 * 60_000);
+
+    const second = await world.startSession({ prompt: "build on the shared tree", tags: [] });
+    const secondOffer = host.takeOffer();
+    await host.claims(secondOffer);
+    await host.completes(secondOffer);
+    const request = snapshotAsked(host, second.sessionId);
+    const reused = PackUploadsSchema.parse(
+      await host.says({
+        type: "SnapshotPacks",
+        snapshotId: request.snapshotId,
+        part: 1,
+        packs: [{ packDigest: sharedPack, sizeBytes: shared.length * CHUNK_BYTES }],
+        chunks: shared,
+      }),
+    );
+    assert.deepEqual(reused.reply.uploads, [], "the first session's live snapshot names the pack");
+
+    await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: first.sessionId, now: Date.now() });
+    assert.equal(await world.store.get(`${TENANT_ID}/packs/${sharedPack}`), null, "the archive freed the pack");
+    await storesRoot(world, request.storageKey, shared);
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: shared.length * CHUNK_BYTES,
+    });
+
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: second.sessionId }),
+    );
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0]?.outcome.state, "Failed");
+    assert.equal(snapshots[0]?.outcome.reason, "UploadRejected");
+    assert.match(snapshots[0]?.outcome.detail ?? "", new RegExp(sharedPack));
+  });
+});
+
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
   const world = await World.open();
   try {
