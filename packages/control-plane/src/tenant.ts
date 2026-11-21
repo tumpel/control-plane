@@ -201,6 +201,7 @@ export class Tenant extends TenantConnectors {
   private meter: UsageMeter | undefined;
   private readonly tierRead: TierRead = { settled: false, retries: 0, retryAt: 0, reading: null };
   private readonly opened: Promise<void>;
+  private armedAlarmAt: number | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     const cursors: { readonly rowsRead: number; readonly rowsWritten: number }[] = [];
@@ -212,6 +213,7 @@ export class Tenant extends TenantConnectors {
       await this.holdDataKey();
       await this.sealPlaintext();
       await this.openMeter();
+      this.armedAlarmAt = await this.ctx.storage.getAlarm();
     });
   }
 
@@ -310,6 +312,7 @@ export class Tenant extends TenantConnectors {
 
   override async alarm(): Promise<void> {
     await this.opened;
+    this.armedAlarmAt = null;
     const now = Date.now();
     await this.meterUsage(null, false);
     const queued = this.queuedAt();
@@ -377,8 +380,9 @@ export class Tenant extends TenantConnectors {
     const flushAt = this.meter?.flushAt() ?? null;
     const queued = this.queuedAt();
     const at = queued === null || flushAt === null ? (queued ?? flushAt) : Math.min(queued, flushAt);
-    if (at === null) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(at);
+    if (at === this.armedAlarmAt) return;
+    await (at === null ? this.ctx.storage.deleteAlarm() : this.ctx.storage.setAlarm(at));
+    this.armedAlarmAt = at;
   }
 
   private readonly operations: TenantHandlers = {

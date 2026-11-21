@@ -569,6 +569,10 @@ export class World {
     return this.tenants.instance(TENANT_ID).ctx.storage.sql;
   }
 
+  tenantStorage(): DurableObjectState["storage"] {
+    return this.tenants.instance(TENANT_ID).ctx.storage;
+  }
+
   tenantAlarm(): Promise<number | null> {
     return this.tenants.instance(TENANT_ID).ctx.storage.getAlarm();
   }
