@@ -43,8 +43,6 @@ const NOUNS = {
   OAuthConnectors: "connector",
   Subscriptions: "subscription",
   Triggers: "trigger",
-  PushKeys: "push-key",
-  PushSubscriptions: "push-subscription",
 };
 const VERBS = {
   Identity_listTenants: "tenants",
@@ -88,7 +86,6 @@ const DEVICE_WIRE = "device-code wire the CLI signs in with before it holds a to
 const RELEASE_DOWNLOAD = "release download the installer and the supervisor fetch without sign-in";
 const BUILD_JOB = "build job wire, signed by the provider's OIDC job token, never by a principal";
 const DELIVERY_CHANNEL = "delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19";
-const BROWSER_NOTIFICATION = "browser notification setup; the pinned CLI has no command";
 
 const ALLOWLIST = {
   DeviceFlow_approve: BROWSER_ONLY,
@@ -125,13 +122,10 @@ const ALLOWLIST = {
   WebhookEndpoints_get: DELIVERY_CHANNEL,
   WebhookEndpoints_list: DELIVERY_CHANNEL,
   WebhookSigningKeys_get: DELIVERY_CHANNEL,
-};
-
-const MCP_ONLY = {
-  PushKeys_get: BROWSER_NOTIFICATION,
-  PushSubscriptions_create: BROWSER_NOTIFICATION,
-  PushSubscriptions_delete: BROWSER_NOTIFICATION,
-  PushSubscriptions_list: BROWSER_NOTIFICATION,
+  PushKeys_get: DELIVERY_CHANNEL,
+  PushSubscriptions_create: DELIVERY_CHANNEL,
+  PushSubscriptions_delete: DELIVERY_CHANNEL,
+  PushSubscriptions_list: DELIVERY_CHANNEL,
 };
 
 const CLI_ONLY = {
@@ -199,21 +193,13 @@ const render = (rows) =>
     ...table([
       ["Operation", "MCP tool", "CLI command"],
       ...rows.map((row) =>
-        [
-          row.operationId,
-          row.operationId in CLI_ONLY ? "(none)" : row.tool,
-          row.operationId in MCP_ONLY ? "(none)" : row.command,
-        ].map((cell) => `\`${cell}\``),
+        [row.operationId, row.operationId in CLI_ONLY ? "(none)" : row.tool, row.command].map((cell) => `\`${cell}\``),
       ),
     ]),
     "",
     "CLI only: tenant operations with a CLI command and no MCP tool:",
     "",
     ...Object.entries(CLI_ONLY).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
-    "",
-    "MCP only: browser notification operations with no CLI command:",
-    "",
-    ...Object.entries(MCP_ONLY).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
     "",
     "Allowlist: operations that are not tenant operations, with no tool or command:",
     "",
@@ -244,14 +230,11 @@ const failures = [
     .map(
       (operationId) => `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the CLI-only list`,
     ),
-  ...Object.keys(MCP_ONLY)
-    .filter((operationId) => !all.some((op) => op.operationId === operationId))
-    .map((operationId) => `the MCP-only list names ${operationId}, which is no operation`),
   ...rows
     .filter((row) => !(row.operationId in CLI_ONLY) && !toolNames.has(row.tool))
     .map((row) => `${row.operationId} has no MCP tool ${row.tool}`),
   ...rows
-    .filter((row) => !(row.operationId in MCP_ONLY) && !commandNames.has(row.command))
+    .filter((row) => !commandNames.has(row.command))
     .map((row) => `${row.operationId} has no CLI command ${row.command}`),
   ...[...toolNames]
     .filter((tool) => !rows.some((row) => row.tool === tool))
@@ -268,5 +251,5 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log(
-  `surface: ${rows.length} operations have a tool and command except ${Object.keys(CLI_ONLY).length} CLI-only and ${Object.keys(MCP_ONLY).length} MCP-only; ${Object.keys(ALLOWLIST).length} allowlisted`,
+  `surface: ${rows.length} operations each have a CLI command and all but ${Object.keys(CLI_ONLY).length} an MCP tool; ${Object.keys(ALLOWLIST).length} allowlisted`,
 );

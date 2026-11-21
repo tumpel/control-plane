@@ -58,7 +58,6 @@ import {
   PrebuildTemplatePullRequestQuerySchema,
   PrebuildTemplateVersionPathSchema,
   ProblemSchema,
-  PushSubscriptionPathSchema,
   PutPersonaFilePatchSchema,
   RemovePersonaFilePatchSchema,
   SecretMemberPathSchema,
@@ -133,13 +132,7 @@ interface ToolDefinition {
   description: string;
   input: z.ZodObject;
   request: { method: Method; path: string; query?: string[] } | null;
-  answer:
-    | "rest"
-    | "configSecretSet"
-    | "memberCommand"
-    | "circleCIStartCommand"
-    | "connectorTokenCommand"
-    | "pushSubscriptionSetup";
+  answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand" | "connectorTokenCommand";
 }
 
 const DONE: Record<string, string> = {
@@ -149,7 +142,6 @@ const DONE: Record<string, string> = {
   tumpel_host_revoke_token: "Enrolment token revoked",
   tumpel_harness_unpin: "Pin removed",
   tumpel_persona_delete: "Persona deleted",
-  tumpel_push_subscription_delete: "Notification subscription deleted",
   tumpel_subscription_delete: "Subscription deleted",
   tumpel_trigger_delete: "Trigger deleted",
   tumpel_github_delete: "GitHub installation removed",
@@ -955,35 +947,6 @@ export const TOOLS: ToolDefinition[] = [
     "End a subscription because its goal holds: it ends with reason GoalMet, its waiting turn is cancelled and the person is told. The subscribed session calls it from inside its box once the goal holds; a person can call it too. Returns the Ended subscription.",
   ),
   rest(
-    "tumpel_push_key_get",
-    "GET",
-    "/v1/push-key",
-    NO_ARGUMENTS,
-    "Read the public application server key a browser uses when it turns notifications on.",
-  ),
-  rest(
-    "tumpel_push_subscription_list",
-    "GET",
-    "/v1/push-subscriptions",
-    NO_ARGUMENTS,
-    "List the browsers that receive your notifications, without their encryption keys.",
-  ),
-  {
-    name: "tumpel_push_subscription_create",
-    description:
-      "Tell the person how to subscribe this browser to notifications. The browser creates secret encryption keys that never pass through MCP, so this tool writes nothing.",
-    input: NO_ARGUMENTS,
-    request: null,
-    answer: "pushSubscriptionSetup",
-  },
-  rest(
-    "tumpel_push_subscription_delete",
-    "DELETE",
-    "/v1/push-subscriptions/{pushSubscriptionId}",
-    PushSubscriptionPathSchema,
-    "Delete one of your browser notification subscriptions. That browser receives no later notification.",
-  ),
-  rest(
     "tumpel_trigger_create",
     "POST",
     "/v1/triggers",
@@ -1214,12 +1177,6 @@ const runTool = async (
   if (tool.answer === "memberCommand") return { ok: true, text: memberCommand(MEMBER_WITHOUT_VALUE.parse(args)) };
   if (tool.answer === "circleCIStartCommand") {
     return { ok: true, text: circleCIStartCommand(CIRCLECI_START_WITHOUT_TOKEN.parse(args)) };
-  }
-  if (tool.answer === "pushSubscriptionSetup") {
-    return {
-      ok: true,
-      text: "Open Account in the Tumpel dashboard on the browser that must receive notifications, then turn on Notifications. The browser keeps its encryption keys out of MCP.",
-    };
   }
   const entry = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "secretSetId"));
   return { ok: true, text: JSON.stringify(ConfigSecretSetSchema.parse(entry)) };

@@ -1,7 +1,7 @@
 CREATE TABLE push_subscriptions (
   push_subscription_id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
-  endpoint TEXT NOT NULL,
+  endpoint TEXT NOT NULL UNIQUE,
   p256dh TEXT NOT NULL,
   auth_sealed TEXT NOT NULL,
   created_at INTEGER NOT NULL
