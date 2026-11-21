@@ -352,6 +352,11 @@ export class SnapshotManifests {
     const sink = new IndexSink(Math.floor(needed / BYTES_PER_PLACEMENT));
     const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
     if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
+    for (const placement of root.value) {
+      const failure = sink.add(placement);
+      if (failure !== undefined)
+        return { kind: "Unreadable", detail: `the manifest of ${storageKey} holds ${failure}` };
+    }
     return { kind: "Read", value: remember(this.indexes, storageKey, sink.index()) };
   }
 
