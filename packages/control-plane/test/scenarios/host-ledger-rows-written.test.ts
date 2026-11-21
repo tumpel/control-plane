@@ -34,10 +34,21 @@ const channel = () => {
     });
     const received = await control.receive(connection, text, context);
     connection = received.connection;
-    if (received.event.kind === "Message") ledger.hold(received.event.frame, text.length);
+    if (received.event.kind === "Message") ledger.hold(received.event.frame, true, text.length);
     return received.event.kind;
   };
-  return { sql, ledger, context, closed, line };
+  const oversized = async (seq: number) => {
+    const text = JSON.stringify({
+      type: "Frame",
+      seq,
+      ack: 0,
+      message: { type: "TurnLine", turnId: "turn-1", lineSeq: seq, text: "x".repeat(control.MAX_HOST_FRAME_BYTES) },
+    });
+    const received = await control.receive(connection, text, context);
+    connection = received.connection;
+    return received.event.kind;
+  };
+  return { sql, ledger, context, closed, line, oversized };
 };
 
 const rowsFor = async (lines: number) => {
@@ -65,4 +76,14 @@ test("lines the channel lost before their checkpoint turn the next frame into a 
   ledger.take();
   assert.equal(await line(4), "Closed");
   assert.match(closed[0] ?? "", /frame gap: expected seq 1, got 4/);
+});
+
+test("a frame refused while lines wait for their checkpoint is acked with them, and the stream carries on", async () => {
+  const { ledger, context, closed, line, oversized } = channel();
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await oversized(3), "FrameRefused");
+  assert.equal(await line(4), "Message");
+  assert.deepEqual(closed, []);
+  control.acknowledge(context, ledger.take());
+  assert.equal(ledger.load().received, 4);
 });

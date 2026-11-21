@@ -80,6 +80,7 @@ export interface LedgerStore<M> {
   load(): Ledger<M>;
   save(ledger: Ledger<M>): void;
   heard(): number;
+  skip(frame: Frame<unknown>): void;
 }
 
 export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });

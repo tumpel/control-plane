@@ -35,7 +35,7 @@ import {
 import type { z } from "zod";
 import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
-import { linesLost } from "./channel/failure.ts";
+import { linesLost, linesNotStored } from "./channel/failure.ts";
 import type {
   BootImage,
   DispatchConnector,
@@ -354,6 +354,7 @@ type HeldLines = { tenantId: string; sessionId: string; hostId: string; lines: T
 type ReportedUsage = { usage: HostUsage; now: number; persisted: HostUsage; persistedAt: number };
 
 const USAGE_PERSIST_MS = 60_000;
+const STORE_RETRY_MS = 1000;
 
 const placedAlike = (left: HostUsage, right: HostUsage): boolean =>
   left.boxesWarm === right.boxesWarm &&
@@ -656,6 +657,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly heldLines = new Map<string, HeldLines>();
   private readonly resentTurns = new Set<string>();
   private readonly heardHosts = new Set<string>();
+  private readonly unstoredTurns = new Map<string, { retry: number; retryAt: number }>();
   private readonly reportedUsage = new Map<string, ReportedUsage>();
 
   protected abstract failPrebuild(
@@ -1735,7 +1737,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
         );
     }
     const held = [...this.heldLines].filter(([, lines]) => lines.hostId === hostId);
-    for (const [turnId, lines] of held) await this.chunks.write(lines.tenantId, lines.sessionId, turnId, 1);
+    for (const [turnId, lines] of held) await this.storeLines(lines.tenantId, lines.sessionId, turnId, 1);
+  }
+
+  private async storeLines(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
+    const failed = this.unstoredTurns.get(turnId);
+    const now = Date.now();
+    if (failed !== undefined && now < failed.retryAt) {
+      throw linesNotStored(
+        `the transcript store refused the lines of turn ${turnId}; the next try is at ${iso(failed.retryAt)}`,
+      );
+    }
+    await this.chunks.write(tenantId, sessionId, turnId, minLines).then(
+      () => {
+        this.unstoredTurns.delete(turnId);
+      },
+      (error: unknown) => {
+        const retry = Math.min((failed?.retry ?? 0) + 1, RETRY_LIMIT);
+        this.unstoredTurns.set(turnId, { retry, retryAt: now + backoffMs(retry, STORE_RETRY_MS) });
+        throw linesNotStored(`the transcript store refused the lines of turn ${turnId}: ${errorOf(error).message}`);
+      },
+    );
   }
 
   protected async reconcileHeldBoxes(
@@ -3902,7 +3924,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (this.snapshotAsked(turn.turn_id)) return;
-    await this.chunks.write(tenantId, session.session_id, turn.turn_id, 1);
+    await this.storeLines(tenantId, session.session_id, turn.turn_id, 1);
     if (message.warning !== undefined)
       sql.exec(
         "INSERT INTO turn_warnings (turn_id, warning, created_at) VALUES (?, ?, ?)",
@@ -3940,7 +3962,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
-    await this.chunks.write(tenantId, turn.session_id, turn.turn_id, 1);
+    await this.storeLines(tenantId, turn.session_id, turn.turn_id, 1);
     const next = this.ctx.storage.transactionSync(() => {
       record();
       this.ctx.storage.sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", turn.turn_id);
@@ -4145,6 +4167,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
     }
+    const chunkLines = settingsOf(this.env).transcriptChunkLines;
+    if ((held?.lines.length ?? 0) >= chunkLines)
+      await this.storeLines(tenantId, session.session_id, turn.turn_id, chunkLines);
     const line = toLine(tenantId, {
       session_id: session.session_id,
       line_seq: lineSeq,
@@ -4152,14 +4177,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
       text,
       created_at: now,
     });
-    const lines = held?.lines ?? [];
-    lines.push(line);
-    if (held === undefined) {
-      this.heldLines.set(turn.turn_id, { tenantId, sessionId: session.session_id, hostId: turn.host_id, lines });
-      if (turn.line_count === 0) await this.timers(tenantId, session.session_id, { FirstLine: null });
-    }
-    const chunkLines = settingsOf(this.env).transcriptChunkLines;
-    if (lines.length >= chunkLines) await this.chunks.write(tenantId, session.session_id, turn.turn_id, chunkLines);
+    const holding = this.heldLines.get(turn.turn_id);
+    if (holding !== undefined) holding.lines.push(line);
+    else
+      this.heldLines.set(turn.turn_id, {
+        tenantId,
+        sessionId: session.session_id,
+        hostId: turn.host_id,
+        lines: [line],
+      });
+    if (holding === undefined && turn.line_count === 0)
+      await this.timers(tenantId, session.session_id, { FirstLine: null });
+    if ((this.heldLines.get(turn.turn_id)?.lines.length ?? 0) >= chunkLines)
+      await this.storeLines(tenantId, session.session_id, turn.turn_id, chunkLines);
   }
 
   private async failTurn(

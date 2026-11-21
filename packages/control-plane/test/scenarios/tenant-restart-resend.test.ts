@@ -28,3 +28,32 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
   assert.equal(turn.state, "Running");
   assert.equal(turn.lineCount, 4);
 });
+
+test("a tenant that restarts with nothing held asks for the next frame again, and the resent TurnComplete completes the turn", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const session = await world.startSession({ prompt: "answer once", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.says({
+    type: "TurnLine",
+    turnId: offer.turnId,
+    lineSeq: 1,
+    text: '{"type":"result","subtype":"success","is_error":false}',
+  });
+  await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+
+  world.restartTenant();
+  const complete = () =>
+    host.says({
+      type: "TurnComplete",
+      turnId: offer.turnId,
+      lastLineSeq: 1,
+      completedAt: new Date(Date.now()).toISOString(),
+    });
+  await assert.rejects(complete(), /TranscriptLinesLost/);
+  await complete();
+  await host.answersSnapshot(session.sessionId);
+  assert.equal((await world.turn(offer.turnId)).state, "Completed");
+});

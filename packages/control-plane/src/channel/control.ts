@@ -287,7 +287,7 @@ const refuse = async (
       `frame gap: expected seq ${outcome.expected}, got ${outcome.got}`,
     );
   }
-  context.ledger.save(outcome.ledger);
+  context.ledger.skip(stored.value);
   refuseFrame(context.port, stored.value.seq, reason);
   return { connection, event: { kind: "FrameRefused", seq: stored.value.seq, reason } };
 };
@@ -366,7 +366,7 @@ export const receive = async (
   };
 };
 
-export const acknowledge = (context: ControlContext, frames: Frame<HostMessage>[]): void => {
+export const acknowledge = (context: ControlContext, frames: Frame<unknown>[]): void => {
   let ledger = context.ledger.load();
   for (const frame of frames) {
     const outcome = accept(ledger, frame);

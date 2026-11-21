@@ -1,7 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode } from "@tumpel/schemas";
+import { errorOf } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { refusedOrResent } from "./channel/failure.ts";
+import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
 import { HostLedger } from "./channel/ledger.ts";
 import type {
   ControlEnvelope,
@@ -34,9 +35,12 @@ interface Attachment {
   lastReceivedAt: number;
   lastSentAt: number;
   usage: HostUsage | null;
+  heldFrom: number | null;
 }
 
 type Presence = "Online" | "Offline";
+
+type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
 
 const usageOf = (attachment: Attachment): HostUsage => {
   if (attachment.usage === null)
@@ -52,7 +56,8 @@ const isAttachment = (value: unknown): value is Attachment =>
   typeof value.lastReceivedAt === "number" &&
   "lastSentAt" in value &&
   typeof value.lastSentAt === "number" &&
-  "usage" in value;
+  "usage" in value &&
+  "heldFrom" in value;
 
 export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
@@ -138,6 +143,7 @@ export class HostChannel extends DurableObject<Env> {
       lastReceivedAt: now,
       lastSentAt: now,
       usage: null,
+      heldFrom: null,
     };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
@@ -163,6 +169,14 @@ export class HostChannel extends DurableObject<Env> {
       control.close(context.port, CloseCode.ProtocolError, "channel messages are JSON text, not binary");
       return this.refreshPresence(socket);
     }
+    if (attachment.heldFrom !== null && !this.ledger.holding()) {
+      control.close(
+        context.port,
+        CloseCode.ProtocolError,
+        `the control plane slept and lost frames ${attachment.heldFrom} onward before it stored them; reconnect and resend them`,
+      );
+      return this.refreshPresence(socket);
+    }
     const now = Date.now();
     attachment.lastReceivedAt = now;
     const { connection, event } = await control.receive(attachment.connection, message, context);
@@ -180,7 +194,7 @@ export class HostChannel extends DurableObject<Env> {
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.flush(host.host_id, event.usage, now, context);
+      await this.flush(host.host_id, event.usage, now, attachment, context);
       await this.sendDeferredOffers(host.host_id, attachment, context);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
@@ -207,37 +221,76 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    if (frame.message.type !== "TurnLine" && this.ledger.holding())
-      await this.flush(hostId, usageOf(attachment), now, context);
-    const reply = await this.reply(hostId, frame).catch((error: unknown) => this.unstored(error, context));
+    const bytes = JSON.stringify(frame.message).length;
+    if (this.ledger.queued().length > 0) return this.queue(frame, bytes, context);
+    if (frame.message.type !== "TurnLine" && this.ledger.holding()) {
+      if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context)))
+        return this.queue(frame, bytes, context);
+    }
+    const delivered = await this.reply(hostId, frame);
+    if (!delivered.ok) return this.queue(frame, bytes, context);
     if (frame.message.type !== "TurnLine") {
       control.acknowledge(context, [frame]);
-      return this.answer(hostId, frame, reply, attachment, context);
+      return this.answer(hostId, frame, delivered.reply, attachment, context);
     }
-    await this.answer(hostId, frame, reply, attachment, context);
-    if (this.ledger.hold(frame, frame.message.text.length)) await this.flush(hostId, usageOf(attachment), now, context);
+    await this.answer(hostId, frame, delivered.reply, attachment, context);
+    this.ledger.hold(frame, true, bytes);
+    if (!this.ledger.full()) return;
+    if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context))) this.overflow(context);
   }
 
-  private async flush(hostId: string, usage: HostUsage, now: number, context: control.ControlContext): Promise<void> {
-    await this.report(hostId, usage, now).catch((error: unknown) => this.unstored(error, context));
+  private queue(frame: Frame<HostMessage>, bytes: number, context: control.ControlContext): void {
+    this.ledger.hold(frame, false, bytes);
+    if (this.ledger.full()) this.overflow(context);
+  }
+
+  private overflow(context: control.ControlContext): void {
+    const first = this.ledger.first();
+    this.ledger.take();
+    control.close(
+      context.port,
+      CloseCode.ProtocolError,
+      `the control plane could not store frames ${first ?? "none"} onward in time; reconnect and resend them`,
+    );
+  }
+
+  private async flush(
+    hostId: string,
+    usage: HostUsage,
+    now: number,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<boolean> {
+    for (const frame of this.ledger.queued()) {
+      const delivered = await this.reply(hostId, frame);
+      if (!delivered.ok) return false;
+      this.ledger.forwarded(frame.seq);
+      await this.answer(hostId, frame, delivered.reply, attachment, context);
+    }
+    const reported = await this.report(hostId, usage, now).then(
+      () => true,
+      (error: unknown) => this.undelivered("Heartbeat", error),
+    );
+    if (!reported) return false;
     const held = this.ledger.take();
     if (held.length > 0) control.acknowledge(context, held);
+    return true;
   }
 
-  private unstored(error: unknown, context: control.ControlContext): never {
-    const held = this.ledger.take();
-    const first = held[0];
-    if (first !== undefined)
-      control.close(
-        context.port,
-        CloseCode.ProtocolError,
-        `the control plane did not store frames ${first.seq} onward; reconnect and resend them`,
-      );
-    throw error;
+  private undelivered(type: string, error: unknown): false {
+    console.error(`FrameQueued: ${type} was not stored and waits for the next heartbeat: ${errorOf(error).message}`);
+    if (lost(error)) this.ledger.requeue();
+    return false;
   }
 
-  private reply(hostId: string, frame: Frame<HostMessage>): Promise<HostReply | null> {
-    return this.forward(hostId, frame.message).catch((error: unknown) => refusedOrResent(frame.message.type, error));
+  private reply(hostId: string, frame: Frame<HostMessage>): Promise<Delivered> {
+    return this.forward(hostId, frame.message).then(
+      (reply): Delivered => ({ ok: true, reply }),
+      (error: unknown): Delivered =>
+        resendable(error)
+          ? { ok: this.undelivered(frame.message.type, error) }
+          : { ok: true, reply: refusedOrResent(frame.message.type, error) },
+    );
   }
 
   private async answer(
@@ -297,6 +350,7 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private keep(socket: WebSocket, attachment: Attachment): void {
+    attachment.heldFrom = this.ledger.first();
     attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
     socket.serializeAttachment(attachment);
   }

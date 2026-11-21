@@ -1,4 +1,5 @@
 import {
+  accept,
   emptyLedger,
   type Frame,
   type HostMessage,
@@ -14,13 +15,14 @@ type LedgerSql = {
   ): { toArray(): T[] };
 };
 
+type Held = { frame: Frame<unknown>; message: HostMessage | null; forwarded: boolean; bytes: number };
+
 const HELD_FRAMES = 1000;
 const HELD_BYTES = 1_000_000;
 
 export class HostLedger implements LedgerStore<StoredControlMessage> {
   readonly #sql: LedgerSql;
-  #held: Frame<HostMessage>[] = [];
-  #heldBytes = 0;
+  #held: Held[] = [];
 
   constructor(sql: LedgerSql) {
     this.#sql = sql;
@@ -37,12 +39,12 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
   }
 
   save(ledger: Ledger<StoredControlMessage>): void {
-    const first = this.#held[0];
+    const first = this.first();
     this.#sql.exec(
       `INSERT INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)
       ON CONFLICT (ledger_id) DO UPDATE SET received = excluded.received, sent = excluded.sent, unacked = excluded.unacked
       WHERE ledger.received IS NOT excluded.received OR ledger.sent IS NOT excluded.sent OR ledger.unacked IS NOT excluded.unacked`,
-      first === undefined ? ledger.received : Math.min(ledger.received, first.seq - 1),
+      first === null ? ledger.received : Math.min(ledger.received, first - 1),
       ledger.sent,
       JSON.stringify(ledger.unacked),
     );
@@ -50,25 +52,54 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
 
   heard(): number {
     const last = this.#held.at(-1);
-    if (last !== undefined) return last.seq;
-    const [row] = this.#sql.exec<{ received: number }>("SELECT received FROM ledger WHERE ledger_id = 1").toArray();
-    return row?.received ?? 0;
+    if (last !== undefined) return last.frame.seq;
+    return this.load().received;
   }
 
-  hold(frame: Frame<HostMessage>, bytes: number): boolean {
-    this.#held.push(frame);
-    this.#heldBytes += bytes;
-    return this.#held.length >= HELD_FRAMES || this.#heldBytes >= HELD_BYTES;
+  skip(frame: Frame<unknown>): void {
+    if (this.#held.length > 0) {
+      this.#held.push({ frame, message: null, forwarded: true, bytes: 0 });
+      return;
+    }
+    const outcome = accept(this.load(), frame);
+    if (outcome.kind !== "Accepted")
+      throw new Error(`frame ${frame.seq} was skipped but the ledger no longer takes it`);
+    this.save(outcome.ledger);
+  }
+
+  hold(frame: Frame<HostMessage>, forwarded: boolean, bytes: number): void {
+    this.#held.push({ frame, message: frame.message, forwarded, bytes });
   }
 
   holding(): boolean {
     return this.#held.length > 0;
   }
 
-  take(): Frame<HostMessage>[] {
-    const held = this.#held;
+  queued(): Frame<HostMessage>[] {
+    return this.#held.flatMap((held) =>
+      held.message === null || held.forwarded ? [] : [{ ...held.frame, message: held.message }],
+    );
+  }
+
+  forwarded(seq: number): void {
+    for (const held of this.#held) if (held.frame.seq === seq) held.forwarded = true;
+  }
+
+  requeue(): void {
+    for (const held of this.#held) if (held.message !== null) held.forwarded = false;
+  }
+
+  full(): boolean {
+    return this.#held.length >= HELD_FRAMES || this.#held.reduce((bytes, held) => bytes + held.bytes, 0) >= HELD_BYTES;
+  }
+
+  first(): number | null {
+    return this.#held[0]?.frame.seq ?? null;
+  }
+
+  take(): Frame<unknown>[] {
+    const held = this.#held.map((each) => each.frame);
     this.#held = [];
-    this.#heldBytes = 0;
     return held;
   }
 }

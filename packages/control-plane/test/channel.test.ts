@@ -5,8 +5,10 @@ import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../src/channel/control.ts";
 import { refusedOrResent } from "../src/channel/failure.ts";
 import {
+  accept,
   type ControlEnvelope,
   emptyLedger,
+  type Frame,
   HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
@@ -34,6 +36,10 @@ const memoryLedger = <M>(): LedgerStore<M> & { current: Ledger<M> } => {
       store.current = structuredClone(ledger);
     },
     heard: () => store.current.received,
+    skip: (frame: Frame<unknown>) => {
+      const outcome = accept(store.current, frame);
+      if (outcome.kind === "Accepted") store.current = structuredClone(outcome.ledger);
+    },
   };
   return store;
 };
