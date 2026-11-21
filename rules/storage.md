@@ -7,7 +7,7 @@
 3. Write only the rows an operation needs. Every storage path has a rows-written bound, and a scenario test asserts it.
 4. Every retry backs off exponentially and fails hard after 10 retries.
 5. Every endpoint has a limit. Every write endpoint caps what one request writes.
-6. Cost is a signal (tenet 8). A rising bill is a design fault to fix.
+6. Cost is a signal (tenet 9). A rising bill is a design fault to fix.
 
 ## Hand-written SQL
 

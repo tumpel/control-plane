@@ -1,6 +1,6 @@
 # Agent rules
 
-Read `doc/adr/000-tenets.md` first. Its tenets bind every change.
+Read `doc/adr/000-tenets.md` first. Its tenets bind every change. Tenet 1, fail fast, is the primary tenet.
 
 Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architecture.md`.
 
