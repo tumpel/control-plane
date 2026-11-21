@@ -135,13 +135,14 @@ class Storage {
 }
 
 export class DurableObjectState {
-  readonly storage = new Storage();
+  readonly storage: Storage;
   readonly id: { name: string; toString(): string };
   private readonly pending: Promise<unknown>[] = [];
   private blocking: Promise<unknown> = Promise.resolve();
 
-  constructor(name: string) {
+  constructor(name: string, storage: Storage = new Storage()) {
     this.id = { name, toString: () => name };
+    this.storage = storage;
   }
 
   blockConcurrencyWhile<T>(run: () => Promise<T>): Promise<T> {
@@ -226,6 +227,15 @@ export class Namespace<T extends object> {
     this.runtime.track(created);
     return created;
   }
+
+  restart(name: string): void {
+    const held = this.instances.get(name);
+    if (held === undefined) throw new Error(`the Durable Object ${name} never started, so it cannot restart`);
+    const ctx = new DurableObjectState(name, held.ctx.storage);
+    const restarted = { object: this.create(ctx), ctx };
+    this.instances.set(name, restarted);
+    this.runtime.replace(held, restarted);
+  }
 }
 
 export class Runtime {
@@ -245,6 +255,11 @@ export class Runtime {
 
   track(held: { object: object; ctx: DurableObjectState }): void {
     this.objects.push(held);
+  }
+
+  replace(held: { object: object; ctx: DurableObjectState }, next: { object: object; ctx: DurableObjectState }): void {
+    const index = this.objects.findIndex((object) => object.ctx === held.ctx);
+    this.objects.splice(index, 1, next);
   }
 
   now(): number {

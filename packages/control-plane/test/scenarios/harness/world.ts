@@ -334,6 +334,11 @@ export class World {
     return held.ctx.storage;
   }
 
+  async restart(member: Member): Promise<void> {
+    (this.env.TENANT as Namespace<object>).restart(member.tenantId);
+    await this.runtime.settle();
+  }
+
   rowsWritten(member: Member): number {
     return this.storageOf(member).sql.rowsWritten;
   }

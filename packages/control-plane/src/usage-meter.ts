@@ -43,6 +43,8 @@ const counts = (counter: Counter, operation: string | null): boolean => {
 
 const MINUTE_MS = 60_000;
 
+const sameCounter = (a: SavedCounter, b: SavedCounter): boolean => a.measure === b.measure && a.window === b.window;
+
 const countersOf = (limits: TenantLimit[], saved: SavedCounter[], now: number): Counter[] =>
   limits.map((limit) => {
     const start = windowStart(limit.window, now);
@@ -56,29 +58,36 @@ export class UsageMeter {
   private tier: TenantTier;
   private counters: Counter[];
   private readonly cursors: Rows[];
+  private stored: SavedCounter[];
   private savedMinute: number | null = null;
   private unsaved = false;
 
-  constructor(tier: TenantTier, limits: TenantLimit[], saved: SavedCounter[], cursors: Rows[], now: number) {
+  constructor(tier: TenantTier, limits: TenantLimit[], stored: SavedCounter[], cursors: Rows[], now: number) {
     this.tier = tier;
     this.cursors = cursors;
-    this.counters = countersOf(limits, saved, now);
+    this.stored = stored;
+    this.counters = countersOf(limits, stored, now);
   }
 
   retier(tier: TenantTier, limits: TenantLimit[], now: number): void {
     this.roll(now);
     this.tier = tier;
-    this.counters = countersOf(limits, this.saved(), now);
+    this.counters = countersOf(limits, this.saved(now), now);
   }
 
-  private saved(): SavedCounter[] {
-    return this.counters.map(({ measure, window, start, used, signalled }) => ({
+  private saved(now: number): SavedCounter[] {
+    const held = this.counters.map(({ measure, window, start, used, signalled }) => ({
       measure,
       window,
       start,
       used,
       signalled,
     }));
+    const kept = this.stored.filter(
+      (counter) =>
+        counter.start === windowStart(counter.window, now) && !held.some((current) => sameCounter(current, counter)),
+    );
+    return [...held, ...kept];
   }
 
   private roll(now: number): void {
@@ -108,7 +117,6 @@ export class UsageMeter {
 
   count(operation: string | null, now: number, requested: boolean): UsageSignal[] {
     this.roll(now);
-    if (requested || this.savedMinute === null) this.unsaved = true;
     const drained = this.cursors.splice(0);
     const added: Record<Measure, number> = {
       Requests: operation === null ? 0 : 1,
@@ -116,6 +124,7 @@ export class UsageMeter {
       RowsWritten: drained.reduce((sum, cursor) => sum + cursor.rowsWritten, 0),
       RowsRead: drained.reduce((sum, cursor) => sum + cursor.rowsRead, 0),
     };
+    if (requested || this.savedMinute === null || added.RowsWritten > 0) this.unsaved = true;
     const signals: UsageSignal[] = [];
     for (const counter of this.counters) {
       counter.used += added[counter.measure];
@@ -156,7 +165,8 @@ export class UsageMeter {
     if (minute === this.savedMinute) return null;
     this.savedMinute = minute;
     this.unsaved = false;
-    return this.saved();
+    this.stored = this.saved(now);
+    return this.stored;
   }
 
   flushAt(): number | null {

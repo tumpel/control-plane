@@ -328,6 +328,7 @@ export class Tenant extends TenantConnectors {
       await this.step("subscription delivery retries", () => this.retryDeliveries(now)),
       await this.followUp(),
     ].includes(true);
+    await this.meterUsage(null, false);
     if (!failed) {
       await this.ctx.storage.delete([ALARM_RETRY_KEY, ALARM_FAILED_AT_KEY]);
       return this.armAlarm();

@@ -112,6 +112,38 @@ test("a free-tier tenant past its daily allowance is refused and nothing past it
   assert.equal(world.rowsWritten(free), written);
 });
 
+test("a free-tier tenant restarted mid-day keeps its day's counts", async (t) => {
+  const world = await World.open({ limits: { ...LIMITS, freeTenantsPerAccount: FREE_TENANTS_PER_ACCOUNT } });
+  t.after(() => world.close());
+  const free = await world.tenant("free", "Free");
+  const churn = new Churn(world, free);
+  for (let sent = 0; sent < 20; sent += 1) {
+    await world.passes(freePace(sent));
+    assert.ok((await churn.write()).ok);
+  }
+  await world.passes(MINUTE);
+  const day = (usage: Awaited<ReturnType<World["usage"]>>) =>
+    usage.counters.filter((counter) => counter.window === "Day").map(({ measure, used }) => ({ measure, used }));
+  const before = day(await world.usage(free));
+  assert.ok(before.some(({ measure, used }) => measure === "Requests" && used >= 20));
+
+  await world.restart(free);
+
+  const after = await world.usage(free);
+  assert.equal(after.tier, "Free");
+  assert.deepEqual(
+    day(after).map(({ measure, used }) => ({
+      measure,
+      kept: used >= (before.find((held) => held.measure === measure)?.used ?? 0),
+    })),
+    before.map(({ measure }) => ({ measure, kept: true })),
+  );
+  assert.deepEqual(
+    day(after).find(({ measure }) => measure === "Requests"),
+    before.find(({ measure }) => measure === "Requests"),
+  );
+});
+
 test("a free and a configured tenant on one deployment get different limits, the free one is refused at its allowance, and both are warned near their limits", async (t) => {
   const world = await World.open({
     limits: {

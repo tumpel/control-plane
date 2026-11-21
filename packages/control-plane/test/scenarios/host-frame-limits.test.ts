@@ -96,14 +96,21 @@ test("a host frame over the 4 MB bound is refused and the channel stays open for
 });
 
 const turnLine = (lineSeq: number): HostMessage => ({ type: "TurnLine", turnId: "turn-1", lineSeq, text: "line" });
+const telemetryBatch: HostMessage = {
+  type: "TelemetryBatch",
+  instruments: [{ metric: "host.load.1m", unit: "1", kind: "Sample", description: "one-minute load average" }],
+  samples: [{ metric: "host.load.1m", at: "2026-11-17T10:00:00+01:00", value: 0.5, dimensions: {} }],
+  turns: [],
+};
 
-test("a host sending turn lines past its per-minute rate has each extra line refused, while its outcome frames still land", async () => {
+test("a host sending telemetry past its per-minute rate has each extra batch refused, while its turn lines and outcome frames still land", async () => {
   const { channel, frame, refusals } = await openChannel(new RateLimiter(FRAMES_PER_MINUTE));
 
-  for (const seq of [1, 2, 3, 4, 5]) await frame(seq, turnLine(seq));
-  await frame(6, snapshotDone("snap-6"));
+  for (const seq of [1, 2, 3, 4, 5]) await frame(seq, telemetryBatch);
+  await frame(6, turnLine(1));
+  await frame(7, snapshotDone("snap-7"));
 
-  assert.deepEqual(channel.delivered, [1, 2, 3, 6]);
+  assert.deepEqual(channel.delivered, [1, 2, 3, 6, 7]);
   assert.deepEqual(refusals(), [
     `4: host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`,
     `5: host ${HOST_ID} sent more than ${FRAMES_PER_MINUTE} frames in a minute`,

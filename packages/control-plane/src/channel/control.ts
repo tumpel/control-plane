@@ -38,7 +38,7 @@ export type ControlConnection =
 
 export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
-const RATE_LIMITED_MESSAGES: ReadonlySet<HostMessage["type"]> = new Set(["TurnLine", "TelemetryBatch"]);
+const RATE_LIMITED_MESSAGES: ReadonlySet<HostMessage["type"]> = new Set(["TelemetryBatch"]);
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
