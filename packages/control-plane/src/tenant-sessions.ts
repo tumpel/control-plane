@@ -1702,7 +1702,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
   protected runningTurnsByHost(): RunningTurns[] {
     return this.ctx.storage.sql
       .exec<{ host_id: string; running: number }>(
-        `SELECT host_id, COUNT(DISTINCT session_id) AS running FROM turns WHERE state IN (${IN_FLIGHT.map(() => "?").join(", ")}) GROUP BY host_id`,
+        `SELECT t.host_id, COUNT(DISTINCT t.session_id) AS running FROM turns t JOIN sessions s ON s.session_id = t.session_id
+        WHERE t.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND s.state != 'Stopped' GROUP BY t.host_id`,
         ...IN_FLIGHT,
       )
       .toArray()
