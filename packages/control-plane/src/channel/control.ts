@@ -15,6 +15,7 @@ import {
   type HostUsage,
   heartbeat,
   helloBytes,
+  type Ledger,
   type LedgerStore,
   type Port,
   type PreparedClaudeSetup,
@@ -262,6 +263,11 @@ const hello = async (
   };
 };
 
+const inbound = (context: ControlContext): Ledger<StoredControlMessage> => ({
+  ...context.ledger.load(),
+  received: context.ledger.heard(),
+});
+
 const spoken = (version: number): boolean => version >= ChannelProtocol.Oldest && version <= ChannelProtocol.Version;
 
 const refuse = async (
@@ -272,7 +278,7 @@ const refuse = async (
 ): Promise<Received> => {
   const stored = parseEnvelope(StoredHostFrameSchema, text);
   if (!stored.ok) return close(context.port, CloseCode.ProtocolError, reason);
-  const outcome = accept(context.ledger.load(), stored.value);
+  const outcome = accept(inbound(context), stored.value);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -342,7 +348,7 @@ export const receive = async (
       context,
     );
   }
-  const outcome = accept(context.ledger.load(), envelope);
+  const outcome = accept(inbound(context), envelope);
   if (outcome.kind === "Duplicate") return { connection, event: { kind: "None" } };
   if (outcome.kind === "Gap") {
     return close(
@@ -360,12 +366,16 @@ export const receive = async (
   };
 };
 
-export const acknowledge = (context: ControlContext, frame: Frame<HostMessage>): void => {
-  const outcome = accept(context.ledger.load(), frame);
-  if (outcome.kind !== "Accepted") {
-    throw new Error(`frame ${frame.seq} was handled but the ledger no longer takes it (${outcome.kind})`);
+export const acknowledge = (context: ControlContext, frames: Frame<HostMessage>[]): void => {
+  let ledger = context.ledger.load();
+  for (const frame of frames) {
+    const outcome = accept(ledger, frame);
+    if (outcome.kind !== "Accepted") {
+      throw new Error(`frame ${frame.seq} was handled but the ledger no longer takes it (${outcome.kind})`);
+    }
+    ledger = outcome.ledger;
   }
-  context.ledger.save(outcome.ledger);
+  context.ledger.save(ledger);
 };
 
 export const beat = (context: ControlContext): void => context.port.send(heartbeat(context.now()));

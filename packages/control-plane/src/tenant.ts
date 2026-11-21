@@ -689,8 +689,8 @@ export class Tenant extends TenantConnectors {
       this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
       return {};
     },
-    hostUsage: ({ hostId, usage, now }) => {
-      this.hostUsage(hostId, usage, now);
+    hostUsage: async ({ hostId, usage, now }) => {
+      await this.hostUsage(hostId, usage, now);
       return {};
     },
     reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, now }) => {

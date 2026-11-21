@@ -1,21 +1,18 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode } from "@tumpel/schemas";
-import host0001 from "../migrations/host/0001_host.sql";
-import host0002 from "../migrations/host/0002_host_without_tenant.sql";
 import * as control from "./channel/control.ts";
 import { refusedOrResent } from "./channel/failure.ts";
-import {
-  type ControlEnvelope,
-  emptyLedger,
-  type Frame,
-  type HostMessage,
-  type HostUsage,
-  type Ledger,
-  type LedgerStore,
-  type StoredControlMessage,
-  type TelemetryBatch,
+import { HostLedger } from "./channel/ledger.ts";
+import type {
+  ControlEnvelope,
+  Frame,
+  HostMessage,
+  HostUsage,
+  StoredControlMessage,
+  TelemetryBatch,
 } from "./channel/protocol.ts";
 import { migrateDurableObject } from "./durable-migrate";
+import { HOST_MIGRATIONS } from "./host-migrations.ts";
 import { problem } from "./http";
 import type { Env } from "./index";
 import { settingsOf } from "./settings";
@@ -24,10 +21,6 @@ import { tenantApi } from "./tenant-api.ts";
 import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
-const HOST_MIGRATIONS = [
-  { name: "0001_host", sql: host0001 },
-  { name: "0002_host_without_tenant", sql: host0002 },
-];
 const CLOSE_REASON_LIMIT = 120;
 
 interface HostRow {
@@ -40,9 +33,16 @@ interface Attachment {
   connection: control.ControlConnection;
   lastReceivedAt: number;
   lastSentAt: number;
+  usage: HostUsage | null;
 }
 
 type Presence = "Online" | "Offline";
+
+const usageOf = (attachment: Attachment): HostUsage => {
+  if (attachment.usage === null)
+    throw new Error("a host channel holds transcript lines from a connection that sent no usage");
+  return attachment.usage;
+};
 
 const isAttachment = (value: unknown): value is Attachment =>
   typeof value === "object" &&
@@ -51,14 +51,17 @@ const isAttachment = (value: unknown): value is Attachment =>
   "lastReceivedAt" in value &&
   typeof value.lastReceivedAt === "number" &&
   "lastSentAt" in value &&
-  typeof value.lastSentAt === "number";
+  typeof value.lastSentAt === "number" &&
+  "usage" in value;
 
 export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
   private inbound: Promise<void> = Promise.resolve();
+  private readonly ledger: HostLedger;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.ledger = new HostLedger(ctx.storage.sql);
     void ctx.blockConcurrencyWhile(async () => {
       await migrateDurableObject(ctx.storage, HOST_MIGRATIONS);
     });
@@ -130,10 +133,15 @@ export class HostChannel extends DurableObject<Env> {
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
     const now = Date.now();
-    const attachment: Attachment = { connection: { phase: "Closed" }, lastReceivedAt: now, lastSentAt: now };
+    const attachment: Attachment = {
+      connection: { phase: "Closed" },
+      lastReceivedAt: now,
+      lastSentAt: now,
+      usage: null,
+    };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
-    await this.ctx.storage.setAlarm(now + this.deadlineMs());
+    await this.armAlarm(now + this.deadlineMs());
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -159,15 +167,20 @@ export class HostChannel extends DurableObject<Env> {
     attachment.lastReceivedAt = now;
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
+    if (event.kind === "Welcomed") {
+      this.ledger.take();
+      attachment.usage = event.usage;
+    }
+    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
     this.keep(socket, attachment);
-    if (event.kind === "Message") await this.deliver(host.host_id, event.frame, attachment, context);
+    if (event.kind === "Message") await this.take(host.host_id, event.frame, now, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.report(host.host_id, event.usage, now);
+      await this.flush(host.host_id, event.usage, now, attachment, context);
       await this.sendDeferredOffers(host.host_id, attachment, context);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
@@ -177,7 +190,7 @@ export class HostChannel extends DurableObject<Env> {
     )
       control.beat(context);
     this.keep(socket, attachment);
-    await this.ctx.storage.setAlarm(attachment.lastReceivedAt + this.deadlineMs());
+    await this.armAlarm(attachment.lastReceivedAt + this.deadlineMs());
     if (event.kind !== "Welcomed") return;
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
@@ -187,16 +200,47 @@ export class HostChannel extends DurableObject<Env> {
     this.keep(socket, attachment);
   }
 
-  private async deliver(
+  private async take(
     hostId: string,
     frame: Frame<HostMessage>,
+    now: number,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    const reply = await this.forward(hostId, frame.message).catch((error: unknown) =>
-      refusedOrResent(frame.message.type, error),
-    );
-    control.acknowledge(context, frame);
+    if (frame.message.type === "TurnLine") {
+      if (!this.ledger.hold(frame, frame.message.text.length)) return;
+      return this.flush(hostId, usageOf(attachment), now, attachment, context);
+    }
+    if (this.ledger.holding()) await this.flush(hostId, usageOf(attachment), now, attachment, context);
+    const reply = await this.reply(hostId, frame);
+    control.acknowledge(context, [frame]);
+    return this.answer(hostId, frame, reply, attachment, context);
+  }
+
+  private async flush(
+    hostId: string,
+    usage: HostUsage,
+    now: number,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
+    const held = this.ledger.take();
+    for (const frame of held) await this.answer(hostId, frame, await this.reply(hostId, frame), attachment, context);
+    await this.report(hostId, usage, now);
+    if (held.length > 0) control.acknowledge(context, held);
+  }
+
+  private reply(hostId: string, frame: Frame<HostMessage>): Promise<HostReply | null> {
+    return this.forward(hostId, frame.message).catch((error: unknown) => refusedOrResent(frame.message.type, error));
+  }
+
+  private async answer(
+    hostId: string,
+    frame: Frame<HostMessage>,
+    reply: HostReply | null,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
     if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;
     if (reply.type === "TurnHandoff")
@@ -251,6 +295,10 @@ export class HostChannel extends DurableObject<Env> {
     socket.serializeAttachment(attachment);
   }
 
+  private async armAlarm(at: number): Promise<void> {
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(at);
+  }
+
   private deadlineMs(): number {
     return settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
   }
@@ -260,20 +308,30 @@ export class HostChannel extends DurableObject<Env> {
     const { channelProtocolOldest, guestProtocol } = welcomed;
     await db.batch([
       db
-        .prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?")
+        .prepare(
+          "UPDATE hosts SET supervisor_version = ?1, updated_at = ?2 WHERE host_id = ?3 AND supervisor_version IS NOT ?1",
+        )
         .bind(welcomed.supervisorVersion, now, hostId),
       channelProtocolOldest === undefined
         ? db.prepare("DELETE FROM host_channel_protocols WHERE host_id = ?").bind(hostId)
         : db
             .prepare(
-              "INSERT OR REPLACE INTO host_channel_protocols (host_id, channel_protocol_oldest, channel_protocol_version) VALUES (?, ?, ?)",
+              `INSERT INTO host_channel_protocols (host_id, channel_protocol_oldest, channel_protocol_version) VALUES (?, ?, ?)
+              ON CONFLICT (host_id) DO UPDATE SET channel_protocol_oldest = excluded.channel_protocol_oldest,
+                channel_protocol_version = excluded.channel_protocol_version
+              WHERE host_channel_protocols.channel_protocol_oldest IS NOT excluded.channel_protocol_oldest
+                OR host_channel_protocols.channel_protocol_version IS NOT excluded.channel_protocol_version`,
             )
             .bind(hostId, channelProtocolOldest, welcomed.protocolVersion),
       guestProtocol === undefined
         ? db.prepare("DELETE FROM host_guest_protocols WHERE host_id = ?").bind(hostId)
         : db
             .prepare(
-              "INSERT OR REPLACE INTO host_guest_protocols (host_id, guest_protocol_oldest, guest_protocol_version) VALUES (?, ?, ?)",
+              `INSERT INTO host_guest_protocols (host_id, guest_protocol_oldest, guest_protocol_version) VALUES (?, ?, ?)
+              ON CONFLICT (host_id) DO UPDATE SET guest_protocol_oldest = excluded.guest_protocol_oldest,
+                guest_protocol_version = excluded.guest_protocol_version
+              WHERE host_guest_protocols.guest_protocol_oldest IS NOT excluded.guest_protocol_oldest
+                OR host_guest_protocols.guest_protocol_version IS NOT excluded.guest_protocol_version`,
             )
             .bind(hostId, guestProtocol.guestProtocolOldest, guestProtocol.guestProtocolVersion),
     ]);
@@ -378,34 +436,11 @@ export class HostChannel extends DurableObject<Env> {
     };
   }
 
-  private ledger(): LedgerStore<StoredControlMessage> {
-    const sql = this.ctx.storage.sql;
-    return {
-      load: (): Ledger<StoredControlMessage> => {
-        const [row] = sql
-          .exec<{ received: number; sent: number; unacked: string }>(
-            "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
-          )
-          .toArray();
-        if (row === undefined) return emptyLedger();
-        return { received: row.received, sent: row.sent, unacked: JSON.parse(row.unacked) };
-      },
-      save: (ledger: Ledger<StoredControlMessage>): void => {
-        sql.exec(
-          "INSERT OR REPLACE INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)",
-          ledger.received,
-          ledger.sent,
-          JSON.stringify(ledger.unacked),
-        );
-      },
-    };
-  }
-
   private context(socket: WebSocket | null, host: HostRow, attachment: Attachment | null): control.ControlContext {
     return {
       port: this.port(socket, attachment),
       host: { hostId: host.host_id, publicKey: host.public_key, revoked: host.revoked === 1 },
-      ledger: this.ledger(),
+      ledger: this.ledger,
       prepareOffer: async (offer) => {
         const tenantId = await this.tenantOf(host.host_id);
         const { prepared } = await tenantApi(this.env.TENANT, tenantId).call("prepareOffer", {
