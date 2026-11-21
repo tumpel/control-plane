@@ -1452,7 +1452,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
-    this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
+    if (this.waitsForCapacity(turn.turn_id)) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
+        this.deferOffer(session, turn, Date.now());
+      });
+    }
     await this.timers(tenantId, session.session_id, {
       FirstLine: null,
       Total: { turnId: turn.turn_id, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
