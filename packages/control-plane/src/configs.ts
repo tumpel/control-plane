@@ -101,7 +101,6 @@ export type Step =
       kind: "UpdatePersona";
       personaId: string;
       persona: ConfigPersona;
-      tumpelMcp: boolean;
       files: PlannedFile[];
       removed: string[];
     }
@@ -382,7 +381,6 @@ const planPersonas = (
         kind: "UpdatePersona",
         personaId: current.personaId,
         persona,
-        tumpelMcp,
         files,
         removed,
       });

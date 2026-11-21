@@ -213,7 +213,7 @@ const writeOf = async (step: Step, prepare: Prepare): Promise<Outcome<ConfigWrit
             boxMemoryMib: step.persona.boxMemoryMib ?? BoxMemoryLimit.DefaultMib,
             boxDiskMib: step.persona.boxDiskMib ?? BoxDiskLimit.DefaultMib,
             boxRetention: step.persona.boxRetention ?? "Auto",
-            tumpelMcp: step.tumpelMcp,
+            tumpelMcp: step.persona.tumpelMcp ?? false,
             files: files.value,
           },
         },

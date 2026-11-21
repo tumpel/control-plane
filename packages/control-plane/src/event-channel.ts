@@ -53,15 +53,15 @@ export class EventChannel extends DurableObject<Env> {
     const { listed } = await tenantApi(this.env.TENANT, subscription.tenantId).call("listEvents", {
       tenantId: subscription.tenantId,
       afterEventId: subscription.cursor,
-      events: [],
-      sessionId: null,
-      triggerId: null,
+      events: subscription.events,
+      sessionId: subscription.sessionId,
+      triggerId: subscription.triggerId,
       waitSeconds: 0,
     });
     if (listed.kind === "CursorExpired") return eventCursorExpired(subscription.cursor, listed.oldestEventId);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
-    for (const event of listed.page.events) if (matches(subscription, event)) server.send(JSON.stringify(event));
+    for (const event of listed.page.events) server.send(JSON.stringify(event));
     subscription.cursor = Math.max(subscription.cursor, listed.page.lastEventId);
     server.serializeAttachment(subscription);
     await this.deliver();

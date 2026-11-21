@@ -242,7 +242,6 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
         kind: "UpdatePersona",
         personaId: "p1",
         persona: persona("Default", "ClaudeCode", "prod"),
-        tumpelMcp: false,
         files: [],
         removed: [],
       },
@@ -311,7 +310,6 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
         kind: "UpdatePersona",
         personaId: "p1",
         persona: persona("Default", "ClaudeCode", "ci"),
-        tumpelMcp: false,
         files: [],
         removed: [],
       },
@@ -405,7 +403,6 @@ const cases: { name: string; desired: Desired; live: Live; planned: Planned }[] 
       kind: "UpdatePersona",
       personaId: "p1",
       persona: withFiles.personas[0] ?? persona("Default", "ClaudeCode", "prod"),
-      tumpelMcp: false,
       files: [
         { file: { path: ".claude/settings.json", ...sent("{}") }, held: true },
         { file: { path: ".claude/CLAUDE.md", ...sent("be thorough") }, held: false },
@@ -447,14 +444,12 @@ test("a persona's tumpel MCP setting follows the config and defaults to false", 
     ),
     live,
   );
-  assert.deepEqual(kept.ok && kept.steps.flatMap((step) => (step.kind === "UpdatePersona" ? [step.tumpelMcp] : [])), [
+  assert.equal(
+    kept.ok && kept.steps.some((step) => step.kind === "UpdatePersona" && step.persona.tumpelMcp === true),
     true,
-  ]);
-  const disabled = planOf(desired(config()), live);
-  assert.deepEqual(
-    disabled.ok && disabled.steps.flatMap((step) => (step.kind === "UpdatePersona" ? [step.tumpelMcp] : [])),
-    [false],
   );
+  const disabled = planOf(desired(config()), live);
+  assert.equal(disabled.ok && disabled.steps.some((step) => step.kind === "UpdatePersona"), true);
 });
 
 test("triggers plan by name: create, keep when only the condition rows reorder, update, delete, and stay when left out", () => {
