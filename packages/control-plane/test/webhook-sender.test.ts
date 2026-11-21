@@ -354,6 +354,7 @@ test("push delivery drops subscriptions the push service no longer knows", async
             },
       now: 7 + index * 2,
     });
+    await post("/__fixture/push/alarm", { tenantId: TENANT_ID });
     await until(
       `the push service's HTTP ${status} response`,
       async () => ({ received: received.length, subscriptions: await list() }),

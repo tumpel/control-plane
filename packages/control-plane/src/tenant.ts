@@ -18,7 +18,6 @@ import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
-import { pushSenderName } from "./push-sender.ts";
 import {
   type MemberUpdate,
   memberWith,
@@ -197,18 +196,18 @@ export class Tenant extends TenantConnectors {
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
-    await this.wakePushes();
+    await this.armPushes();
     this.drainObjects();
     return response;
   }
 
   override async alarm(): Promise<void> {
+    await this.deliverPushes(this.tenantName());
     this.expireSubscriptions(Date.now());
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     await this.wakeWebhooks();
-    await this.wakePushes();
-    await this.armExpiry();
+    if (!(await this.armPushes())) await this.armExpiry();
     this.drainObjects();
   }
 
@@ -249,15 +248,11 @@ export class Tenant extends TenantConnectors {
     await this.armExpiry();
   }
 
-  private async wakePushes(): Promise<void> {
-    const deliveries = await this.pendingPushDeliveries(this.tenantName());
-    if (deliveries.length === 0) return;
+  private async armPushes(): Promise<boolean> {
+    const [wake] = this.ctx.storage.sql.exec("SELECT 1 FROM push_wakes LIMIT 1").toArray();
+    if (wake === undefined) return false;
     await this.ctx.storage.setAlarm(Date.now());
-    for (const delivery of deliveries) {
-      await this.env.PUSHES.getByName(pushSenderName(delivery.tenantId, delivery.pushSubscriptionId)).wake(delivery);
-      this.completePushWake(delivery.eventId, delivery.pushSubscriptionId);
-    }
-    await this.armExpiry();
+    return true;
   }
 
   private readonly operations: TenantHandlers = {

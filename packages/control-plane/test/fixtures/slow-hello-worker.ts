@@ -2,7 +2,7 @@ import worker, { type Env } from "../../src/index";
 import { Tenant as BaseTenant } from "../../src/tenant";
 import { TenantMetrics as BaseTenantMetrics } from "../../src/tenant-metrics";
 
-export { EventChannel, HostChannel, PushSender, SessionTimer, WebhookSender } from "../../src/index";
+export { EventChannel, HostChannel, SessionTimer, WebhookSender } from "../../src/index";
 
 export class Tenant extends BaseTenant {
   override async hostHello(...args: Parameters<BaseTenant["hostHello"]>): Promise<void> {

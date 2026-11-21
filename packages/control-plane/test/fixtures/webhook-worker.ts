@@ -3,7 +3,7 @@ import worker, { Tenant as BaseTenant, WebhookSender as BaseWebhookSender, type 
 import type { NewTenantEvent } from "../../src/tenant-events.ts";
 import { webhookSenderName } from "../../src/webhook-sender.ts";
 
-export { EventChannel, HostChannel, PushSender, SessionTimer, TenantMetrics } from "../../src/index.ts";
+export { EventChannel, HostChannel, SessionTimer, TenantMetrics } from "../../src/index.ts";
 
 export class Tenant extends BaseTenant {
   async emit(event: NewTenantEvent, now: number): Promise<void> {
@@ -32,6 +32,10 @@ export class Tenant extends BaseTenant {
         waitSeconds: 0,
       },
     });
+  }
+
+  runAlarm(): Promise<void> {
+    return super.alarm();
   }
 }
 
@@ -119,6 +123,11 @@ export default {
           input: { tenantId, principalId: "principal" },
         }),
       );
+    }
+    if (url.pathname === "/__fixture/push/alarm") {
+      const { tenantId } = await requestBody<{ tenantId: string }>(request);
+      await tenant(env, tenantId).runAlarm();
+      return new Response(null, { status: 204 });
     }
     const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/fail-since|\/alarm)?$/.exec(url.pathname);
     if (senderMatch !== null) {

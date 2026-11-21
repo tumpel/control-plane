@@ -1,12 +1,12 @@
+import { buildPushPayload } from "@block65/webcrypto-web-push";
 import { type CreatePushSubscriptionInputSchema, PushSubscriptionSchema, TenantEventSchema } from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
-import { seal, unseal } from "./envelope.ts";
-import { pushNotification, pushSessionName } from "./push-notification.ts";
-import type { PushDelivery } from "./push-sender.ts";
+import { fromBase64, seal, unseal } from "./envelope.ts";
+import { githubRepository } from "./github.ts";
+import { pushNotification } from "./push-notification.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
 import { TenantTriggers } from "./tenant-triggers.ts";
-import { pushRequest } from "./web-push.ts";
 
 export type PushSubscription = z.infer<typeof PushSubscriptionSchema>;
 type PushSubscriptionCreate = z.infer<typeof CreatePushSubscriptionInputSchema>["subscription"];
@@ -21,7 +21,6 @@ type PushSubscriptionRow = {
 
 type PushWakeRow = {
   event_id: number;
-  principal_id: string;
   push_subscription_id: string;
   endpoint: string;
   p256dh: string;
@@ -38,6 +37,30 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
+
+let loadedVapidPrivateKey: { pem: string; key: string } | undefined;
+
+const vapidPrivateKey = async (pem: string): Promise<string> => {
+  if (loadedVapidPrivateKey?.pem === pem) return loadedVapidPrivateKey.key;
+  const body = pem.match(
+    new RegExp(`^-----BEGIN ${"PRIVATE KEY"}-----\\s+([A-Za-z0-9+/=\\s]+)-----END ${"PRIVATE KEY"}-----\\s*$`),
+  )?.[1];
+  if (body === undefined)
+    throw new Error("VAPID_PRIVATE_KEY is not a PKCS#8 PEM private key; replace the VAPID configuration");
+  const privateKey = await crypto.subtle.importKey(
+    "pkcs8",
+    fromBase64(body.replaceAll(/\s/g, "")),
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign"],
+  );
+  const exported = await crypto.subtle.exportKey("jwk", privateKey);
+  if (exported instanceof ArrayBuffer || exported.d === undefined) {
+    throw new Error("VAPID_PRIVATE_KEY does not hold a P-256 private key; replace the VAPID configuration");
+  }
+  loadedVapidPrivateKey = { pem, key: exported.d };
+  return exported.d;
+};
 
 const toPushSubscription = (tenantId: string, row: PushSubscriptionRow): PushSubscription =>
   PushSubscriptionSchema.parse({
@@ -105,10 +128,10 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     );
   }
 
-  protected async pendingPushDeliveries(tenantId: string): Promise<PushDelivery[]> {
+  protected async deliverPushes(tenantId: string): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<PushWakeRow>(
-        `SELECT w.event_id, p.principal_id, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed,
+        `SELECT w.event_id, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed,
           e.payload, e.created_at AS event_created_at, s.repository FROM push_wakes AS w
           JOIN push_subscriptions AS p USING (push_subscription_id)
           JOIN events AS e USING (event_id)
@@ -117,53 +140,71 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
           ORDER BY w.event_id, p.push_subscription_id`,
       )
       .toArray();
-    if (rows.length === 0) return [];
+    if (rows.length === 0) return;
     const dataKey = await this.dataKey();
-    return Promise.all(
-      rows.map(async (row) => {
-        const event = TenantEventSchema.parse({
-          ...JSON.parse(row.payload),
-          eventId: row.event_id,
-          tenantId,
-          createdAt: row.event_created_at,
-        });
-        if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
-          throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
-        }
-        const request = await pushRequest(
-          row.endpoint,
-          JSON.stringify(pushNotification(event, pushSessionName(row.repository))),
-          row.p256dh,
-          await unseal(
-            dataKey,
-            row.auth_sealed,
-            authContext(row.push_subscription_id),
-            "turn notifications off and on again for this browser",
-          ),
-          this.env.VAPID_PRIVATE_KEY,
-          this.env.VAPID_PUBLIC_KEY,
-          this.env.VAPID_SUBJECT,
-          Date.now(),
-        );
-        return {
-          eventId: row.event_id,
-          tenantId,
-          principalId: row.principal_id,
-          pushSubscriptionId: row.push_subscription_id,
+    const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
+    const dropped = new Set<string>();
+    for (const row of rows) {
+      if (dropped.has(row.push_subscription_id)) continue;
+      const event = TenantEventSchema.parse({
+        ...JSON.parse(row.payload),
+        eventId: row.event_id,
+        tenantId,
+        createdAt: row.event_created_at,
+      });
+      if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
+        throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
+      }
+      const repository = githubRepository(row.repository);
+      if (repository === null) throw new Error(`session repository ${row.repository} is not a GitHub repository`);
+      const payload = await buildPushPayload(
+        { data: pushNotification(event, repository.name), options: { ttl: 86_400 } },
+        {
           endpoint: row.endpoint,
-          headers: [...request.headers.entries()],
-          body: new Uint8Array(await request.arrayBuffer()),
-        };
-      }),
-    );
-  }
-
-  protected completePushWake(eventId: number, pushSubscriptionId: string): void {
-    this.ctx.storage.sql.exec(
-      "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
-      eventId,
-      pushSubscriptionId,
-    );
+          expirationTime: null,
+          keys: {
+            p256dh: row.p256dh,
+            auth: await unseal(
+              dataKey,
+              row.auth_sealed,
+              authContext(row.push_subscription_id),
+              "turn notifications off and on again for this browser",
+            ),
+          },
+        },
+        {
+          privateKey,
+          publicKey: this.env.VAPID_PUBLIC_KEY,
+          subject: this.env.VAPID_SUBJECT,
+        },
+      );
+      const response = await fetch(row.endpoint, { ...payload, signal: AbortSignal.timeout(10_000) });
+      if (response.status === 404 || response.status === 410) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
+          row.push_subscription_id,
+          row.p256dh,
+          row.auth_sealed,
+        );
+        this.ctx.storage.sql.exec(
+          "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
+          row.event_id,
+          row.push_subscription_id,
+        );
+        dropped.add(row.push_subscription_id);
+        continue;
+      }
+      if (!response.ok) {
+        throw new Error(
+          `push service ${new URL(row.endpoint).origin} refused subscription ${row.push_subscription_id} with HTTP ${response.status}`,
+        );
+      }
+      this.ctx.storage.sql.exec(
+        "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
+        row.event_id,
+        row.push_subscription_id,
+      );
+    }
   }
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
