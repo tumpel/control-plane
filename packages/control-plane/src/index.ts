@@ -202,6 +202,7 @@ import { handlePrebuildTemplates } from "./prebuild-templates.ts";
 import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
+import { handlePushSubscriptions } from "./push-subscriptions.ts";
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
 import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
@@ -256,6 +257,9 @@ export interface Env extends SignerEnv {
   CIRCLECI_OIDC_ORIGIN: string;
   CIRCLECI_APP_ORIGIN: string;
   OPENROUTER_ORIGIN: string;
+  VAPID_PUBLIC_KEY: string;
+  VAPID_PRIVATE_KEY: string;
+  VAPID_SUBJECT: string;
 }
 
 let verifier: { key: string; verify: Verify } | undefined;
@@ -1719,6 +1723,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const sessions =
     (await handleSessions(request, url, env, deviceCaller)) ??
     (await handleSubscriptions(request, url, env, deviceCaller)) ??
+    (await handlePushSubscriptions(request, url, env, deviceCaller)) ??
     (await handleTriggers(request, url, env, deviceCaller)) ??
     (await handleWebhooks(request, url, env, deviceCaller)) ??
     (await handleEvents(request, url, env, deviceCaller));
