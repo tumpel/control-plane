@@ -9,7 +9,7 @@ const TENANT_ID = "tenant-scenario";
 const LARGE = 100_000;
 const DIGESTS_PER_PART = 500;
 const CHUNK_BYTES = 65_536;
-const ROWS_PER_FAILED_SNAPSHOT = 11;
+const ROWS_PER_FAILED_SNAPSHOT = 10;
 const ROWS_PER_STORED_SNAPSHOT = 8;
 const ROWS_PER_FORK = 12;
 const CONCURRENT_SESSIONS = 4;
@@ -17,6 +17,7 @@ const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_PADDING = 120 * 1024 * 1024;
+const COLLECTION_RUNS = 10;
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 type ManifestsModule = {
@@ -76,9 +77,10 @@ const parts = (chunks: Placement[]): Placement[][] =>
   );
 
 const snapshotAsked = (host: Host, sessionId: string): z.infer<typeof SnapshotRequestSchema> => {
-  const request = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
-  assert.equal(request.sessionId, sessionId);
-  return request;
+  for (;;) {
+    const request = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
+    if (request.sessionId === sessionId) return request;
+  }
 };
 
 const uploadsChunks = async (world: World, host: Host, snapshotId: string, chunks: Placement[]): Promise<void> => {
@@ -146,13 +148,14 @@ const insertsSnapshot = (
   snapshotId: string,
   request: z.infer<typeof SnapshotRequestSchema>,
   storageKey: string,
+  sessionId = request.sessionId,
 ): void => {
   world
     .tenantSql()
     .exec(
       "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?)",
       snapshotId,
-      request.sessionId,
+      sessionId,
       request.boxId,
       request.turnId,
       storageKey,
@@ -340,23 +343,13 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     await host.claims(offer);
     await host.completes(offer);
     const request = snapshotAsked(host, session.sessionId);
-    await uploadsChunks(world, host, request.snapshotId, chunks);
-
     const storedBefore = `${TENANT_ID}/${session.sessionId}/snapshots/stored-before`;
     const manifestPack = await storesRoot(world, storedBefore, chunks, [unknownEntry]);
-    world
-      .tenantSql()
-      .exec(
-        "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
-        "stored-before",
-        session.sessionId,
-        request.boxId,
-        request.turnId,
-        storedBefore,
-        chunks.length * CHUNK_BYTES,
-        Date.now(),
-        Date.now(),
-      );
+    for (const packDigest of new Set(chunks.map((chunk) => chunk.packDigest))) {
+      await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
+    }
+    insertsSnapshot(world, "stored-before", request, storedBefore);
+    await uploadsChunks(world, host, request.snapshotId, chunks);
 
     await storesRoot(world, request.storageKey, chunks, [unknownEntry]);
     await host.says({
@@ -428,7 +421,7 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
   });
 });
 
-test("an object storage failure while SnapshotDone checks the packs fails only that snapshot, and the next one is stored", async () => {
+test("an object storage failure while SnapshotDone reads the root fails only that snapshot, and the next one is stored", async () => {
   await inWorld(async (world, host) => {
     const chunks = tree(DIGESTS_PER_PART, "flaky storage");
     const session = await world.startSession({ prompt: "build while storage fails", tags: [] });
@@ -438,13 +431,17 @@ test("an object storage failure while SnapshotDone checks the packs fails only t
     const request = snapshotAsked(host, session.sessionId);
     await uploadsChunks(world, host, request.snapshotId, chunks);
     await storesRoot(world, request.storageKey, chunks);
-    world.store.headFailure = new Error("object storage timed out");
+    world.store.failure = {
+      operation: "get",
+      prefix: request.storageKey,
+      error: new Error("object storage timed out"),
+    };
     await host.says({
       type: "SnapshotDone",
       snapshotId: request.snapshotId,
       uploadedBytes: chunks.length * CHUNK_BYTES,
     });
-    world.store.headFailure = null;
+    world.store.failure = null;
 
     const failed = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -493,16 +490,16 @@ test("a stored snapshot whose index would pass the cap keeps its packs without s
     await host.claims(firstOffer);
     await host.completes(firstOffer);
     const firstRequest = snapshotAsked(host, first.sessionId);
-    const firstChunks = tree(1, "first");
-    await uploadsChunks(world, host, firstRequest.snapshotId, firstChunks);
-    await storesRoot(world, firstRequest.storageKey, firstChunks);
-    await host.says({ type: "SnapshotDone", snapshotId: firstRequest.snapshotId, uploadedBytes: CHUNK_BYTES });
     const storageKey = `${TENANT_ID}/${first.sessionId}/snapshots/over-the-cap`;
     const manifestPack = await putsRoot(world.store, storageKey, old, [], OVER_CAP_PADDING);
     for (const packDigest of new Set(old.map((chunk) => chunk.packDigest))) {
       await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
     }
-    insertsSnapshot(world, "over-the-cap", firstRequest, storageKey);
+    insertsSnapshot(world, "over-the-cap", firstRequest, storageKey, "an-older-session");
+    const firstChunks = tree(1, "first");
+    await uploadsChunks(world, host, firstRequest.snapshotId, firstChunks);
+    await storesRoot(world, firstRequest.storageKey, firstChunks);
+    await host.says({ type: "SnapshotDone", snapshotId: firstRequest.snapshotId, uploadedBytes: CHUNK_BYTES });
     const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
     await world.store.put(junk, "junk");
     await world.passes(2 * 60_000);
@@ -518,5 +515,50 @@ test("a stored snapshot whose index would pass the cap keeps its packs without s
     for (const packDigest of new Set([manifestPack, ...old.map((chunk) => chunk.packDigest)])) {
       assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
     }
+  });
+});
+
+test("a pack delete that object storage keeps refusing backs retention off and stops it after 10 runs, and snapshots keep working", async () => {
+  await inWorld(async (world, host) => {
+    const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
+    await world.store.put(junk, "junk");
+    await world.passes(2 * 60_000);
+    world.store.failure = {
+      operation: "delete",
+      prefix: `${TENANT_ID}/packs/`,
+      error: new Error("object storage refused the delete"),
+    };
+    const failures = (): unknown =>
+      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures;
+    const failedRun = async (prompt: string): Promise<void> => {
+      const session = await world.startSession({ prompt, tags: [] });
+      const offer = host.takeOffer();
+      await host.claims(offer);
+      await host.completes(offer);
+      await failsSnapshot(host, snapshotAsked(host, session.sessionId).snapshotId);
+      await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: session.sessionId, now: Date.now() });
+    };
+
+    await failedRun("the first run");
+    assert.equal(failures(), 1);
+    await failedRun("a run inside the backoff");
+    assert.equal(failures(), 1, "a run inside the backoff does not collect");
+    for (let run = 2; run <= COLLECTION_RUNS + 1; run++) {
+      await world.passes(2 ** run * 1000);
+      await failedRun(`run ${run}`);
+      assert.equal(failures(), Math.min(run, COLLECTION_RUNS));
+    }
+    assert.notEqual(await world.store.get(junk), null, "the refused pack stays");
+
+    world.store.failure = null;
+    const session = await world.startSession({ prompt: "build after retention stopped", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    await storesSnapshot(world, host, session.sessionId, tree(1, "after"));
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+    );
+    assert.equal(snapshots[0]?.outcome.state, "Stored");
   });
 });

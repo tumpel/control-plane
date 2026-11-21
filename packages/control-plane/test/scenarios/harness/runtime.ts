@@ -371,7 +371,7 @@ class R2Object {
 export class R2Bucket {
   private readonly objects = new Map<string, { body: Uint8Array; uploaded: Date }>();
   gets = 0;
-  headFailure: Error | null = null;
+  failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
 
   async put(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
@@ -382,11 +382,12 @@ export class R2Bucket {
 
   async get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2Object | null> {
     this.gets += 1;
+    this.fails("get", key);
     return this.read(key, options?.range);
   }
 
   async head(key: string): Promise<R2Object | null> {
-    if (this.headFailure !== null) throw this.headFailure;
+    this.fails("head", key);
     return this.read(key, undefined);
   }
 
@@ -397,7 +398,12 @@ export class R2Bucket {
     return new R2Object(key, object.body.subarray(range.offset, range.offset + range.length), object.uploaded);
   }
 
+  private fails(operation: "get" | "head" | "delete", key: string): void {
+    if (this.failure?.operation === operation && key.startsWith(this.failure.prefix)) throw this.failure.error;
+  }
+
   async delete(keys: string | string[]): Promise<void> {
+    for (const key of Array.isArray(keys) ? keys : [keys]) this.fails("delete", key);
     for (const key of Array.isArray(keys) ? keys : [keys]) this.objects.delete(key);
   }
 

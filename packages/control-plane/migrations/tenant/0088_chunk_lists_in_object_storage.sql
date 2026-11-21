@@ -24,3 +24,5 @@ CREATE TABLE pack_collection (
 );
 
 INSERT INTO pack_collection (singleton, list_cursor, failures, retry_at, deletions) VALUES (1, '', 0, 0, 0);
+
+ALTER TABLE snapshot_requests ADD COLUMN deletions INTEGER NOT NULL DEFAULT 0;

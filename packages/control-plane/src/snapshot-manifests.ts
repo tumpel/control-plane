@@ -15,7 +15,9 @@ const ENTRY_FIELDS = ["kind", "path", "mode", "uid", "gid", "mtimeSeconds", "mti
 const DIGEST_BYTES = 32;
 const SMALLEST_PLACEMENT_JSON = '{"digest":"","packDigest":"","offset":0,"length":1}'.length + 4 * DIGEST_BYTES;
 const BYTES_PER_PLACEMENT = DIGEST_BYTES + 8 + 4 + 4 + 4;
-const CACHED_PACK_LISTS = 1000;
+const PACK_NAME_BYTES = 128;
+const LIVE_PAGE = 100;
+export const MAX_PACKS_PER_MANIFEST = 16_384;
 export const MAX_INDEX_BYTES = 32 * 1024 * 1024;
 
 export const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
@@ -24,7 +26,8 @@ export const packListKey = (storageKey: string): string => `${storageKey}.packs`
 
 export const indexBytesOf = (root: Placement[]): number =>
   Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) *
-  BYTES_PER_PLACEMENT;
+    BYTES_PER_PLACEMENT +
+  MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
 
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -37,13 +40,9 @@ const parsedJson = (text: string): unknown => {
   }
 };
 
-const remember = <T>(cache: Map<string, T>, key: string, value: T, limit: number): T => {
+const remember = <T>(cache: Map<string, T>, key: string, value: T): T => {
   cache.delete(key);
   cache.set(key, value);
-  for (const oldest of cache.keys()) {
-    if (cache.size <= limit) break;
-    cache.delete(oldest);
-  }
   return value;
 };
 
@@ -98,6 +97,7 @@ class IndexSink implements PlacementSink {
       return `more chunk placements than ${this.offsets.length}, the most its byte size can hold`;
     }
     const pack = this.packAt.get(placement.packDigest) ?? this.packAt.size;
+    if (pack === MAX_PACKS_PER_MANIFEST) return `chunks in more than ${MAX_PACKS_PER_MANIFEST} packs`;
     this.packAt.set(placement.packDigest, pack);
     hexInto(placement.digest, this.digests, this.count * DIGEST_BYTES);
     this.offsets[this.count] = placement.offset;
@@ -165,7 +165,8 @@ export class SnapshotIndex {
       this.packOf.byteLength +
       this.offsets.byteLength +
       this.lengths.byteLength +
-      this.order.byteLength
+      this.order.byteLength +
+      this.packs.length * PACK_NAME_BYTES
     );
   }
 
@@ -276,12 +277,11 @@ class ManifestStream {
 export class SnapshotManifests {
   private readonly indexes = new Map<string, SnapshotIndex>();
   private readonly loading = new Map<string, Promise<ManifestRead<SnapshotIndex>>>();
-  private readonly packLists = new Map<string, ReadonlySet<string>>();
   private parsing: Promise<unknown> = Promise.resolve();
 
   async index(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<SnapshotIndex>> {
     const held = this.indexes.get(storageKey);
-    if (held !== undefined) return { kind: "Read", value: remember(this.indexes, storageKey, held, Infinity) };
+    if (held !== undefined) return { kind: "Read", value: remember(this.indexes, storageKey, held) };
     const loading = this.loading.get(storageKey);
     if (loading !== undefined) return loading;
     const load = this.oneAtATime(() => this.load(store, tenantId, storageKey)).finally(() =>
@@ -292,16 +292,13 @@ export class SnapshotManifests {
   }
 
   async packs(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<ReadonlySet<string>>> {
-    const held = this.packLists.get(storageKey);
-    if (held !== undefined)
-      return { kind: "Read", value: remember(this.packLists, storageKey, held, CACHED_PACK_LISTS) };
     const listed = await store.get(packListKey(storageKey));
     if (listed !== null) {
       const parsed = PackListSchema.safeParse(parsedJson(await listed.text()));
       if (!parsed.success) {
         return { kind: "Unreadable", detail: `the pack list of ${storageKey} is no list: ${issues(parsed.error)}` };
       }
-      return { kind: "Read", value: remember(this.packLists, storageKey, new Set(parsed.data), CACHED_PACK_LISTS) };
+      return { kind: "Read", value: new Set(parsed.data) };
     }
     const read = await this.oneAtATime(async (): Promise<ManifestRead<ReadonlySet<string>>> => {
       const root = await this.root(store, storageKey);
@@ -319,12 +316,11 @@ export class SnapshotManifests {
     });
     if (read.kind !== "Read") return read;
     await store.put(packListKey(storageKey), JSON.stringify([...read.value].sort()));
-    return { kind: "Read", value: remember(this.packLists, storageKey, read.value, CACHED_PACK_LISTS) };
+    return read;
   }
 
   forget(storageKey: string): void {
     this.indexes.delete(storageKey);
-    this.packLists.delete(storageKey);
   }
 
   private oneAtATime<T>(run: () => Promise<T>): Promise<T> {
@@ -355,7 +351,7 @@ export class SnapshotManifests {
     const sink = new IndexSink(Math.floor(needed / BYTES_PER_PLACEMENT));
     const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
     if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
-    return { kind: "Read", value: remember(this.indexes, storageKey, sink.index(), Infinity) };
+    return { kind: "Read", value: remember(this.indexes, storageKey, sink.index()) };
   }
 
   private async root(store: R2Bucket, storageKey: string): Promise<ManifestRead<Placement[]>> {
@@ -394,5 +390,91 @@ export class SnapshotManifests {
     }
     const failure = manifest.end();
     return failure === undefined ? undefined : `the manifest of ${storageKey} is unreadable: ${failure}`;
+  }
+}
+
+export type LiveNames = { has(packDigest: string): boolean; unreadable: string | undefined };
+
+export class LivePacks {
+  private readonly manifests: SnapshotManifests;
+  private readonly livePage: (after: string, limit: number) => string[];
+  private readonly counts = new Map<string, number>();
+  private readonly members = new Set<string>();
+  private readonly unreadable = new Map<string, string>();
+  private built = false;
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(manifests: SnapshotManifests, livePage: (after: string, limit: number) => string[]) {
+    this.manifests = manifests;
+    this.livePage = livePage;
+  }
+
+  async names(store: R2Bucket, tenantId: string): Promise<LiveNames> {
+    await this.turn(async () => {
+      if (!this.built) await this.build(store, tenantId);
+    });
+    const [unreadable] = this.unreadable.values();
+    return { has: (packDigest) => this.counts.has(packDigest), unreadable };
+  }
+
+  add(storageKey: string, packs: ReadonlySet<string>): Promise<void> {
+    return this.turn(async () => {
+      if (this.built) this.count(storageKey, packs);
+    });
+  }
+
+  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
+    return this.turn(async () => {
+      if (!this.built) return;
+      for (const storageKey of storageKeys) {
+        this.unreadable.delete(storageKey);
+        if (!this.members.has(storageKey)) continue;
+        const read = await this.manifests.packs(store, tenantId, storageKey);
+        this.members.delete(storageKey);
+        if (read.kind !== "Read") {
+          console.error(
+            `released snapshot ${storageKey} has no readable pack list, so its packs stay counted as live until the control plane restarts: ${read.detail}`,
+          );
+          continue;
+        }
+        for (const packDigest of read.value) {
+          const count = (this.counts.get(packDigest) ?? 0) - 1;
+          if (count > 0) this.counts.set(packDigest, count);
+          else this.counts.delete(packDigest);
+        }
+      }
+    });
+  }
+
+  private async build(store: R2Bucket, tenantId: string): Promise<void> {
+    for (let page = this.livePage("", LIVE_PAGE); page.length > 0; ) {
+      for (const storageKey of page) {
+        const read = await this.manifests.packs(store, tenantId, storageKey);
+        if (read.kind === "Read") this.count(storageKey, read.value);
+        if (read.kind === "Unreadable") {
+          this.unreadable.set(
+            storageKey,
+            `snapshot ${storageKey} is live but its packs cannot be read, so retention keeps every pack until it can: ${read.detail}`,
+          );
+        }
+      }
+      page = this.livePage(page.at(-1) ?? "", LIVE_PAGE);
+    }
+    this.built = true;
+  }
+
+  private count(storageKey: string, packs: ReadonlySet<string>): void {
+    if (this.members.has(storageKey)) return;
+    this.members.add(storageKey);
+    for (const packDigest of packs) this.counts.set(packDigest, (this.counts.get(packDigest) ?? 0) + 1);
+  }
+
+  private turn<T>(run: () => Promise<T>): Promise<T> {
+    const turn = this.queue.then(run);
+    this.queue = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return turn;
   }
 }
