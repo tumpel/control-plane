@@ -2577,7 +2577,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     if (failed !== undefined) return;
     await this.timers(tenantId, sessionId, {
-      Snapshot: { turnId: latest.turn_id, at: Date.now() + settingsOf(this.env).snapshotDelaySeconds * 1000 },
+      Snapshot: { turnId: latest.turn_id, at: latest.updated_at + settingsOf(this.env).snapshotDelaySeconds * 1000 },
     });
   }
 
