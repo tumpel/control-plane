@@ -21,7 +21,7 @@ import { migrateDurableObject } from "./durable-migrate";
 import { HOST_MIGRATIONS } from "./host-migrations.ts";
 import { problem } from "./http";
 import type { Env } from "./index";
-import { limitsOf } from "./limits.ts";
+import { hostLimitsOf, limitsOf } from "./limits.ts";
 import { METRICS_LIMITS, metricBatches } from "./metrics-store.ts";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
@@ -166,6 +166,7 @@ export class HostChannel extends DurableObject<Env> {
         fix: "Connect with tumpel-supervisor run",
       });
     }
+    await this.relimitFrames(host.host_id);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
     const now = Date.now();
@@ -456,28 +457,27 @@ export class HostChannel extends DurableObject<Env> {
     });
   }
 
+  private async relimitFrames(hostId: string): Promise<void> {
+    if (this.meter === null) return;
+    const limits = await hostLimitsOf(this.env.DB, limitsOf(this.env), hostId);
+    if (limits !== null) this.meter.relimit(limits.hostFramesPerMinute);
+  }
+
   private async frameMeter(hostId: string): Promise<HostFrameMeter> {
     if (this.meter !== null) return this.meter;
-    const row = await this.env.DB.prepare("SELECT health FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ health: string }>();
+    const row = await hostLimitsOf(this.env.DB, limitsOf(this.env), hostId);
     if (row === null) throw new Error(`host ${hostId} has a channel but no row in the hosts table; enrol it again`);
     const sql = this.ctx.storage.sql;
     const [saved] = sql.exec<{ trips: string }>("SELECT trips FROM frame_trips WHERE frame_trips_id = 1").toArray();
     const trips = z.array(z.number()).parse(saved === undefined ? [] : JSON.parse(saved.trips));
-    this.meter ??= new HostFrameMeter(
-      limitsOf(this.env).hostFramesPerMinute,
-      HostHealthSchema.parse(row.health),
-      trips,
-      {
-        save: (next) =>
-          sql.exec(
-            "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
-            JSON.stringify(next),
-          ),
-        clear: () => sql.exec("DELETE FROM frame_trips WHERE frame_trips_id = 1"),
-      },
-    );
+    this.meter ??= new HostFrameMeter(row.hostFramesPerMinute, HostHealthSchema.parse(row.health), trips, {
+      save: (next) =>
+        sql.exec(
+          "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
+          JSON.stringify(next),
+        ),
+      clear: () => sql.exec("DELETE FROM frame_trips WHERE frame_trips_id = 1"),
+    });
     return this.meter;
   }
 

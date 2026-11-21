@@ -5,6 +5,7 @@ import {
   SessionSchema,
   StartedSessionSchema,
   SubscriptionSchema,
+  type TenantLimitsProfileSchema,
   TenantUsageSchema,
   TurnSchema,
 } from "@tumpel/schemas";
@@ -41,6 +42,7 @@ export type ScenarioLimits = {
   readsPerMinute: number;
   writesPerMinute: number;
   hostFramesPerMinute: number;
+  ceiling: z.infer<typeof TenantLimitsProfileSchema>;
 };
 export type Member = { tenantId: string; token: string };
 
@@ -92,6 +94,11 @@ export const LIMITS: ScenarioLimits = {
   readsPerMinute: 600,
   writesPerMinute: 120,
   hostFramesPerMinute: 600,
+  ceiling: {
+    writesPerMinute: 120,
+    hostFramesPerMinute: 600,
+    usage: [{ measure: "RowsWritten", window: "Hour", limit: 1_000_000 }],
+  },
 };
 
 export class Host {

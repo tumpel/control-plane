@@ -40,7 +40,15 @@
       ],
       "readsPerMinute": 600,
       "writesPerMinute": 120,
-      "hostFramesPerMinute": 600
+      "hostFramesPerMinute": 600,
+      "ceiling": {
+        "writesPerMinute": 120,
+        "hostFramesPerMinute": 600,
+        "usage": [
+          { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+          { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+        ]
+      }
     },
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
@@ -126,7 +134,15 @@
           ],
           "readsPerMinute": 600,
           "writesPerMinute": 120,
-          "hostFramesPerMinute": 600
+          "hostFramesPerMinute": 600,
+          "ceiling": {
+            "writesPerMinute": 120,
+            "hostFramesPerMinute": 600,
+            "usage": [
+              { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+              { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+            ]
+          }
         },
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,

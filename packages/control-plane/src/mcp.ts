@@ -84,6 +84,7 @@ import {
   SubscriptionTokenUpdateSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
+  TenantLimitsSetSchema,
   TranscriptQuerySchema,
   TriggerCreateSchema,
   TriggerPatchSchema,
@@ -130,7 +131,7 @@ type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 interface ToolDefinition {
   name: string;
   description: string;
-  input: z.ZodObject;
+  input: z.ZodType<Record<string, unknown>>;
   request: { method: Method; path: string; query?: string[] } | null;
   answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand" | "connectorTokenCommand";
 }
@@ -231,7 +232,13 @@ const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
     ),
 });
 
-const rest = (name: string, method: Method, path: string, input: z.ZodObject, description: string): ToolDefinition => ({
+const rest = (
+  name: string,
+  method: Method,
+  path: string,
+  input: z.ZodType<Record<string, unknown>>,
+  description: string,
+): ToolDefinition => ({
   name,
   description,
   input,
@@ -389,6 +396,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/harnesses/pins/{harness}",
     HarnessPathSchema,
     "Remove the tenant's pin for a harness.",
+  ),
+  rest(
+    "tumpel_limits_get",
+    "GET",
+    "/v1/limits",
+    NO_ARGUMENTS,
+    "Read the limits the tenant runs under. Returns {source, profile}: source is Free or Configured for the preset of the tenant's tier, or Custom for a profile of its own; profile has writesPerMinute, hostFramesPerMinute and usage, its budgets of {measure, window, limit}; a request rate is a Requests per Minute budget.",
+  ),
+  rest(
+    "tumpel_limits_set",
+    "PUT",
+    "/v1/limits",
+    TenantLimitsSetSchema,
+    "Set the limits the tenant runs under, Owner only: pass {reset: true} to drop the tenant's own profile and run under the preset of its tier, or every field of a profile (writesPerMinute, hostFramesPerMinute, usage). Refused InvalidRequest past the deployment's ceiling. A Free tenant may set values at or below the Free preset only; anything higher is refused AboveFreeTier. This tool never changes the tier; only the operator of the deployment moves a tenant between tiers. A host takes a new frame limit when it next connects.",
   ),
   rest(
     "tumpel_release_current",
@@ -1252,7 +1273,7 @@ const listResult = (): unknown => ({
   tools: TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: z.toJSONSchema(tool.input),
+    inputSchema: { type: "object", ...z.toJSONSchema(tool.input) },
   })),
 });
 
