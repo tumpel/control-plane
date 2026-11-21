@@ -38,7 +38,14 @@ export type DispatchGrant = TurnOffer["credential"];
 export type SnapshotDownload = TurnOffer["snapshots"][number];
 export type OfferParts = Pick<
   TurnOffer,
-  "credential" | "lastLineSeq" | "snapshots" | "personaFiles" | "image" | "gitAuthorName" | "gitAuthorEmail"
+  | "credential"
+  | "lastLineSeq"
+  | "snapshots"
+  | "personaFiles"
+  | "image"
+  | "gitAuthorName"
+  | "gitAuthorEmail"
+  | "turnTotalBudgetSeconds"
 >;
 export type PersonaFileDownload = TurnOffer["personaFiles"][number];
 export type DispatchConnector = TurnOffer["credential"]["connectors"][number];

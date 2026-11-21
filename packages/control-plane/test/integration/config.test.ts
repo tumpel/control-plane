@@ -37,6 +37,8 @@ const SECRET = "sk-ant-e2e-never-printed";
 const SECRETS_KEK = Buffer.alloc(32, 7).toString("base64");
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const TUMPEL = join(ROOT, ".tmp", "release-binaries", "tumpel");
+const CliPersonaSchema = PersonaSchema.omit({ turnTotalBudgetSeconds: true });
+
 const FIXTURE = fileURLToPath(new URL("../fixtures/tenant-config.json", import.meta.url));
 const REVIEWER_MEMORY = "Review the diff for correctness.\n";
 const REVIEWER_SETTINGS = '{"permissions":{"defaultMode":"bypassPermissions"}}\n';
@@ -515,7 +517,7 @@ test("tumpel persona get output without its server fields creates a copy with th
 
   const read = await tumpel(["persona", "get", personaId]);
   assert.equal(read.code, 0, read.stderr);
-  const original = PersonaSchema.parse(JSON.parse(read.stdout));
+  const original = CliPersonaSchema.parse(JSON.parse(read.stdout));
   const [memory] = original.files;
   assert.ok(memory?.source === "Inline");
   assert.equal(Buffer.from(memory.content, "base64").toString(), REVIEWER_MEMORY);
@@ -535,7 +537,7 @@ test("tumpel persona get output without its server fields creates a copy with th
   const copied = await tumpel(["persona", "create", "--file", copyFile]);
   assert.equal(copied.code, 0, copied.stderr);
   assert.deepEqual(
-    PersonaSchema.parse(JSON.parse(copied.stdout)).files.map((file) => [file.source, file.path, file.digest]),
+    CliPersonaSchema.parse(JSON.parse(copied.stdout)).files.map((file) => [file.source, file.path, file.digest]),
     [
       ["Inline", ".claude/CLAUDE.md", sha256(REVIEWER_MEMORY)],
       ["Stored", ".claude/settings.json", largeDigest],
@@ -545,7 +547,7 @@ test("tumpel persona get output without its server fields creates a copy with th
   const listed = await tumpel(["persona", "list"]);
   assert.equal(listed.code, 0, listed.stderr);
   const [listedMemory] =
-    PersonaSchema.array()
+    CliPersonaSchema.array()
       .parse(JSON.parse(listed.stdout))
       .find((persona) => persona.personaId === personaId)?.files ?? [];
   assert.deepEqual(listedMemory, memory);
@@ -590,10 +592,10 @@ test("secret-set set-member writes one member from stdin and keeps the rest, and
     "--no-connectors",
   ]);
   assert.equal(persona.code, 0, persona.stderr);
-  const { personaId } = PersonaSchema.parse(JSON.parse(persona.stdout));
+  const { personaId } = CliPersonaSchema.parse(JSON.parse(persona.stdout));
   const renamed = await tumpel(["persona", "update", personaId, "--name", "Piped again"]);
   assert.equal(renamed.code, 0, renamed.stderr);
-  const kept = PersonaSchema.parse(JSON.parse(renamed.stdout));
+  const kept = CliPersonaSchema.parse(JSON.parse(renamed.stdout));
   assert.deepEqual(
     [kept.name, kept.secretSetId, kept.files.map((held) => [held.path, held.digest])],
     ["Piped again", secretSetId, [[".claude/CLAUDE.md", sha256(REVIEWER_MEMORY)]]],

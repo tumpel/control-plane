@@ -146,6 +146,7 @@ test("a read returns a file at the inline cap as an Inline write with its bytes,
       secretSetId: "set-1",
       boxRetention: "Auto",
       tumpelMcp: false,
+      turnTotalBudgetSeconds: 3600,
       files: [
         { path: ".claude/CLAUDE.md", digest: smallDigest, sizeBytes: small.byteLength, createdAt: now, updatedAt: now },
         {
