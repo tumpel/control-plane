@@ -57,6 +57,11 @@ export class SqlStorage {
     return new Cursor(rows, written);
   }
 
+  totalRowsWritten(): number {
+    const { written } = this.db.prepare("SELECT total_changes() AS written").get() as { written: number };
+    return written;
+  }
+
   inTransaction<T>(run: () => T): T {
     this.savepoint += 1;
     const name = `sp${this.savepoint}`;
@@ -82,6 +87,10 @@ class Storage {
 
   transactionSync<T>(run: () => T): T {
     return this.sql.inTransaction(run);
+  }
+
+  sync(): Promise<void> {
+    return Promise.resolve();
   }
 
   async transaction<T>(run: (transaction: Storage) => Promise<T>): Promise<T> {
@@ -124,15 +133,28 @@ export class DurableObjectState {
   readonly storage = new Storage();
   readonly id: { name: string; toString(): string };
   private readonly pending: Promise<unknown>[] = [];
+  private blocking: Promise<unknown> = Promise.resolve();
 
   constructor(name: string) {
     this.id = { name, toString: () => name };
   }
 
   blockConcurrencyWhile<T>(run: () => Promise<T>): Promise<T> {
-    const running = run();
+    const running = this.blocking.then(run);
     this.pending.push(running);
+    this.blocking = running.then(
+      () => undefined,
+      () => undefined,
+    );
     return running;
+  }
+
+  async unblocked(): Promise<void> {
+    let blocking: Promise<unknown> | undefined;
+    while (blocking !== this.blocking) {
+      blocking = this.blocking;
+      await blocking;
+    }
   }
 
   waitUntil(promise: Promise<unknown>): void {
@@ -162,7 +184,17 @@ export class Namespace<T extends object> {
   }
 
   getByName(name: string): T {
-    return this.instance(name).object;
+    const { object, ctx } = this.instance(name);
+    return new Proxy(object, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return async (...args: unknown[]) => {
+          await ctx.unblocked();
+          return value.apply(target, args);
+        };
+      },
+    });
   }
 
   idFromName(name: string): string {
@@ -296,19 +328,35 @@ export class D1Database {
 
 class R2Object {
   readonly key: string;
-  private readonly body: Uint8Array;
+  readonly uploaded: Date;
+  private readonly bytes: Uint8Array;
 
-  constructor(key: string, body: Uint8Array) {
+  constructor(key: string, bytes: Uint8Array, uploaded: Date) {
     this.key = key;
-    this.body = body;
+    this.bytes = bytes;
+    this.uploaded = uploaded;
   }
 
   get size(): number {
-    return this.body.byteLength;
+    return this.bytes.byteLength;
+  }
+
+  get body(): ReadableStream<Uint8Array> {
+    let at = 0;
+    return new ReadableStream<Uint8Array>({
+      pull: (controller) => {
+        if (at >= this.bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(this.bytes.slice(at, at + 65536));
+        at += 65536;
+      },
+    });
   }
 
   async text(): Promise<string> {
-    return new TextDecoder().decode(this.body);
+    return new TextDecoder().decode(this.bytes);
   }
 
   async json(): Promise<unknown> {
@@ -316,37 +364,61 @@ class R2Object {
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    return this.body.slice().buffer;
+    return this.bytes.slice().buffer;
   }
 }
 
 export class R2Bucket {
-  private readonly objects = new Map<string, Uint8Array>();
+  private readonly objects = new Map<string, { body: Uint8Array; uploaded: Date }>();
+  gets = 0;
+  failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
 
   async put(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
-    this.objects.set(key, body);
-    return new R2Object(key, body);
+    const uploaded = new Date(Date.now());
+    this.objects.set(key, { body, uploaded });
+    return new R2Object(key, body, uploaded);
   }
 
-  async get(key: string): Promise<R2Object | null> {
-    const body = this.objects.get(key);
-    return body === undefined ? null : new R2Object(key, body);
+  async get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2Object | null> {
+    this.gets += 1;
+    this.fails("get", key);
+    return this.read(key, options?.range);
   }
 
   async head(key: string): Promise<R2Object | null> {
-    return this.get(key);
+    this.fails("head", key);
+    return this.read(key, undefined);
+  }
+
+  private read(key: string, range: { offset: number; length: number } | undefined): R2Object | null {
+    const object = this.objects.get(key);
+    if (object === undefined) return null;
+    if (range === undefined) return new R2Object(key, object.body, object.uploaded);
+    return new R2Object(key, object.body.subarray(range.offset, range.offset + range.length), object.uploaded);
+  }
+
+  private fails(operation: "get" | "head" | "delete", key: string): void {
+    if (this.failure?.operation === operation && key.startsWith(this.failure.prefix)) throw this.failure.error;
   }
 
   async delete(keys: string | string[]): Promise<void> {
+    for (const key of Array.isArray(keys) ? keys : [keys]) this.fails("delete", key);
     for (const key of Array.isArray(keys) ? keys : [keys]) this.objects.delete(key);
   }
 
-  async list(options?: { prefix?: string }): Promise<{ objects: R2Object[]; truncated: false }> {
+  async list(options?: {
+    prefix?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false }> {
     const prefix = options?.prefix ?? "";
-    const objects = [...this.objects.entries()]
-      .filter(([key]) => key.startsWith(prefix))
-      .map(([key, body]) => new R2Object(key, body));
+    const after = options?.cursor ?? "";
+    const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && key > after).sort();
+    const page = keys.slice(0, options?.limit ?? 1000);
+    const objects = page.flatMap((key) => this.read(key, undefined) ?? []);
+    const last = page.at(-1);
+    if (page.length < keys.length && last !== undefined) return { objects, truncated: true, cursor: last };
     return { objects, truncated: false };
   }
 }

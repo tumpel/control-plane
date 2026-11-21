@@ -5,7 +5,15 @@ import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
-import { D1Database, migratedDatabase, type Namespace, R2Bucket, Runtime, type SqlStorage } from "./runtime.ts";
+import {
+  D1Database,
+  type DurableObjectState,
+  migratedDatabase,
+  type Namespace,
+  R2Bucket,
+  Runtime,
+  type SqlStorage,
+} from "./runtime.ts";
 
 register("./hooks.mjs", import.meta.url);
 
@@ -52,6 +60,7 @@ const VAPID_PUBLIC_KEY = Buffer.concat([
 
 type SessionTimer = { set(tenantId: string, changes: Record<string, unknown>): Promise<void> };
 type TenantOperations = Record<string, (input: never) => unknown>;
+const REPOSITORY = "https://github.com/acme/app";
 
 export const SETTINGS = TEST_SETTINGS;
 
@@ -99,6 +108,11 @@ export class Host {
   }
 
   async finishes(offer: TurnOffer): Promise<void> {
+    await this.completes(offer);
+    await this.answersSnapshot(offer.sessionId);
+  }
+
+  async completes(offer: TurnOffer): Promise<void> {
     const lineSeq = (this.lineSeqs.get(offer.sessionId) ?? 0) + 1;
     this.lineSeqs.set(offer.sessionId, lineSeq);
     const result = '{"type":"result","subtype":"success","is_error":false}';
@@ -109,7 +123,6 @@ export class Host {
       lastLineSeq: lineSeq,
       completedAt: new Date(Date.now()).toISOString(),
     });
-    await this.answersSnapshot(offer.sessionId);
   }
 
   async answersSnapshot(sessionId: string): Promise<void> {
@@ -190,6 +203,8 @@ export class World {
       R2_SECRET_ACCESS_KEY: "scenario",
       R2_ACCOUNT_ID: "scenario",
       RELEASES_BUCKET_NAME: "releases",
+      RELEASES_ACCESS_KEY_ID: "scenario",
+      RELEASES_SECRET_ACCESS_KEY: "scenario",
       API_ORIGIN: "https://api.scenario.test",
       GITHUB_API_ORIGIN: "https://github.scenario.test",
       VAPID_PRIVATE_KEY:
@@ -245,13 +260,81 @@ export class World {
     return this.host(hostId);
   }
 
-  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+  tenantRowsWritten(): number {
+    const { ctx } = this.tenants.instance(TENANT_ID) as { ctx: DurableObjectState };
+    return ctx.storage.sql.totalRowsWritten();
+  }
+
+  private async defaultPersona(): Promise<string> {
     const personas = z
       .object({ personas: z.array(z.object({ personaId: z.string() })) })
       .parse(await this.call("listPersonas", { tenantId: TENANT_ID }));
     const [persona] = personas.personas;
     if (persona === undefined) throw new Error("the tenant opened without a default persona");
+    return persona.personaId;
+  }
+
+  async holdsAgentCredentials(): Promise<void> {
+    const personas = z
+      .object({ personas: z.array(z.object({ secretSetId: z.string() })) })
+      .parse(await this.call("listPersonas", { tenantId: TENANT_ID }));
+    const [persona] = personas.personas;
+    if (persona === undefined) throw new Error("the tenant opened without a default persona");
+    const members = [
+      { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: "sk-ant-scenario" },
+      { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-scenario" },
+    ];
+    for (const member of members) {
+      await this.call("setSecretMember", {
+        tenantId: TENANT_ID,
+        secretSetId: persona.secretSetId,
+        member,
+        githubUser: member.kind === "Variable" ? { githubUserId: 1, login: "scenario" } : null,
+        now: Date.now(),
+      });
+    }
+  }
+
+  async startPrebuild(): Promise<void> {
+    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const personaId = await this.defaultPersona();
+    const prebuildId = randomUUID();
+    const [base] = CLAUDE_CODE_AMD64_RELEASE.bases;
+    if (base === undefined) throw new Error("the release fixture carries no base image");
+    await this.call("startHostPrebuild", {
+      tenantId: TENANT_ID,
+      commit: {
+        prebuildId,
+        personaId,
+        key: { repository: REPOSITORY, inputDigest: "7".repeat(64), guestImageDigest: base.imageDigest },
+        configSource: "RepositoryFile",
+        defaultBranch: "main",
+        headSha: "8".repeat(40),
+        rootfsKey: "rootfs/scenario",
+      },
+      provider: "Namespace",
+      input: {
+        principalId: PRINCIPAL_ID,
+        startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
+        hosts: await listHosts(this.db, TENANT_ID),
+        harness: "ClaudeCode",
+        harnessVersion: CLAUDE_CODE_VERSION,
+        endpoint: "https://api.scenario.test",
+        start: {
+          personaId,
+          repository: REPOSITORY,
+          model: "prebuild",
+          prompt: `Run the setup step for prebuild ${prebuildId}`,
+        },
+      },
+      apiOrigin: "https://api.scenario.test",
+      now: Date.now(),
+    });
+  }
+
+  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
+    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const personaId = await this.defaultPersona();
     const answer = z.object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) }).parse(
       await this.call("startSession", {
         tenantId: TENANT_ID,
@@ -264,9 +347,9 @@ export class World {
           harnessVersion: CLAUDE_CODE_VERSION,
           endpoint: "https://api.scenario.test",
           start: {
-            personaId: persona.personaId,
-            repository: "https://github.com/acme/app",
-            model: "claude-opus",
+            personaId,
+            repository: REPOSITORY,
+            model: "opus",
             prompt: start.prompt,
             boxRetention: "Auto",
             tags: start.tags,
@@ -275,6 +358,19 @@ export class World {
       }),
     );
     return answer.started.started.session;
+  }
+
+  async sendTurn(sessionId: string, prompt: string): Promise<void> {
+    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    z.object({ sent: z.object({ kind: z.literal("Sent") }) }).parse(
+      await this.call("sendTurn", {
+        tenantId: TENANT_ID,
+        sessionId,
+        send: { prompt },
+        hosts: await listHosts(this.db, TENANT_ID),
+        now: Date.now(),
+      }),
+    );
   }
 
   async session(sessionId: string): Promise<Session> {

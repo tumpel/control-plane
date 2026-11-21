@@ -195,7 +195,7 @@ export class Tenant extends TenantConnectors {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
-      migrateDurableObject(ctx.storage.sql, TENANT_MIGRATIONS);
+      await migrateDurableObject(ctx.storage, TENANT_MIGRATIONS);
       await this.holdDataKey();
       await this.sealPlaintext();
     });

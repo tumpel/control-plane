@@ -18,7 +18,11 @@ const applied = (sql: SqlStorage): Set<string> => {
   );
 };
 
-export const migrateDurableObject = (sql: SqlStorage, migrations: readonly Migration[]): void => {
+export const migrateDurableObject = async (
+  storage: { sql: SqlStorage; sync(): Promise<void> },
+  migrations: readonly Migration[],
+): Promise<void> => {
+  const { sql } = storage;
   const latest = migrations.at(-1);
   if (latest === undefined) return;
   const done = applied(sql);
@@ -28,5 +32,6 @@ export const migrateDurableObject = (sql: SqlStorage, migrations: readonly Migra
     if (done.has(migration.name)) continue;
     sql.exec(migration.sql);
     sql.exec(`INSERT INTO ${MIGRATIONS_TABLE} (name, applied_at) VALUES (?, ?)`, migration.name, Date.now());
+    await storage.sync();
   }
 };

@@ -23,7 +23,7 @@ export class TenantMetrics extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
-      migrateDurableObject(ctx.storage.sql, METRICS_MIGRATIONS);
+      await migrateDurableObject(ctx.storage, METRICS_MIGRATIONS);
     });
   }
 

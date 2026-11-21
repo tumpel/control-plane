@@ -60,7 +60,7 @@ export class HostChannel extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
-      migrateDurableObject(ctx.storage.sql, HOST_MIGRATIONS);
+      await migrateDurableObject(ctx.storage, HOST_MIGRATIONS);
     });
   }
 
