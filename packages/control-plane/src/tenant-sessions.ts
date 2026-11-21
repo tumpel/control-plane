@@ -1387,7 +1387,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const place = (candidates: HostRecord[]) =>
       placeSession(
         candidates,
-        this.listHostUsage(tenantId, session.session_id),
+        this.listHostUsage(tenantId),
         image.image,
         boxSizeOf(session),
         connectors,
@@ -1699,12 +1699,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
-  protected runningTurnsByHost(placing: string | null = null): RunningTurns[] {
+  protected runningTurnsByHost(): RunningTurns[] {
     return this.ctx.storage.sql
       .exec<{ host_id: string; running: number }>(
-        `SELECT host_id, COUNT(DISTINCT session_id) AS running FROM turns WHERE state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND session_id IS NOT ? GROUP BY host_id`,
+        `SELECT t.host_id, COUNT(DISTINCT t.session_id) AS running FROM turns t JOIN sessions s ON s.session_id = t.session_id
+        WHERE t.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND s.state != 'Stopped' GROUP BY t.host_id`,
         ...IN_FLIGHT,
-        placing,
       )
       .toArray()
       .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
@@ -1753,9 +1753,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       }));
   }
 
-  protected listHostUsage(tenantId: string, placing: string | null = null): ReportedHostUsage[] {
+  protected listHostUsage(tenantId: string): ReportedHostUsage[] {
     const sql = this.ctx.storage.sql;
-    const running = new Map(this.runningTurnsByHost(placing).map((each) => [each.hostId, each.runningTurns]));
+    const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
     return sql
       .exec<HostUsageRow>(
         `SELECT u.host_id, u.box_capacity, u.boxes_warm, u.load_average, u.memory_available_mib, u.channel_protocol,
