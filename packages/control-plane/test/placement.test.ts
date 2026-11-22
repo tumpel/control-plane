@@ -163,7 +163,7 @@ test("a tenant whose hosts all run a turn in every slot is refused with each hos
     createdAt: 0,
     updatedAt: 0,
   };
-  const placement = placeSession(hosts, [full], AMD64_IMAGES, BOX, []);
+  const placement = placeSession(hosts, [full, { ...full, hostId: "arm" }], AMD64_IMAGES, BOX, []);
   assert.deepEqual(placement.kind === "Refused" ? placement.hosts.map(({ host, reason }) => [host.name, reason]) : [], [
     ["full", "Full"],
     ["arm", "NoImage"],
@@ -321,7 +321,11 @@ test("a placement refusal captures each host's name and reason: Full, NoDisk, No
     { ...HOST, hostId: "arm", name: "arm-box", architecture: "Arm64" },
     { ...HOST, hostId: "gone", name: "offline-box", state: "Offline" },
   ];
-  const usages = [usage("big", 7, 7, 43000, 330000, 65536), usage("small", 1, 0, 4000, 21000, 19000)];
+  const usages = [
+    usage("big", 7, 7, 43000, 330000, 65536),
+    usage("small", 1, 0, 4000, 21000, 19000),
+    usage("arm", 4, 0, 4000, 21000, 0),
+  ];
   const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, []);
   assert.equal(placement.kind, "Refused");
   if (placement.kind !== "Refused") return;
