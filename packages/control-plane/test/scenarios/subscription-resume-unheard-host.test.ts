@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ListEventsResultSchema, SubscriptionSchema } from "@tumpel/schemas";
+import { ChannelProtocol, ListEventsResultSchema, SubscriptionSchema } from "@tumpel/schemas";
 import { TENANT_ID, World } from "./harness/world.ts";
 
 type EventLog = { appendEvent(event: Record<string, unknown>, now: number): number };
 
-test("a resumed subscription whose stopped session needs a box, after a tenant restart no host has said hello to, fails its delivery and leaves the tenant serving", async (t) => {
+test("a resumed subscription whose stopped session needs a box, after a tenant restart no host has said hello to, fails its delivery, leaves the tenant serving, and refuses the host's heartbeat until it says hello again", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -63,4 +63,18 @@ test("a resumed subscription whose stopped session needs a box, after a tenant r
   assert.equal(failed?.event, "TurnFailed");
   assert.equal(failed.reason, "PoolExhausted");
   assert.match(failed.detail, /host-1 has not said hello since your tenant restarted/);
+
+  const usage = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
+  const heartbeat = () => world.call("hostUsage", { hostId: host.hostId, usage, now: Date.now() });
+  await assert.rejects(heartbeat(), /HostUnheard/);
+  await world.call("hostHello", {
+    hostId: host.hostId,
+    boxCapacity: 8,
+    usage,
+    now: Date.now(),
+    channelProtocol: ChannelProtocol.Version,
+  });
+  await heartbeat();
+  const next = await world.startSession({ prompt: "build part two", tags: [] });
+  assert.equal(host.takeOffer().sessionId, next.sessionId);
 });

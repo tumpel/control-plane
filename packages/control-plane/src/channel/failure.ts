@@ -1,12 +1,17 @@
 import { TenantSkew } from "../tenant-api.ts";
 
 const LINES_LOST = "TranscriptLinesLost";
+const HOST_UNHEARD = "HostUnheard";
 
 export const linesLost = (detail: string): Error => new Error(`${LINES_LOST}: ${detail}`);
 
 const carries = (error: unknown, marker: string): boolean => error instanceof Error && error.message.includes(marker);
 
 export const lost = (error: unknown): boolean => carries(error, LINES_LOST);
+
+export const hostUnheard = (detail: string): Error => new Error(`${HOST_UNHEARD}: ${detail}`);
+
+export const unheard = (error: unknown): boolean => carries(error, HOST_UNHEARD);
 
 export const resendable = (error: unknown): boolean =>
   error instanceof TenantSkew ||

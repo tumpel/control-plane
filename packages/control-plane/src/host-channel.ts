@@ -3,7 +3,7 @@ import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
+import { lost, refusedOrResent, resendable, unheard } from "./channel/failure.ts";
 import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
 import { HostLedger } from "./channel/ledger.ts";
 import type {
@@ -275,6 +275,7 @@ export class HostChannel extends DurableObject<Env> {
         this.ledger.stalled() >= RETRY_LIMIT
       )
         return this.giveUp(socket, attachment, context);
+      if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -363,13 +364,25 @@ export class HostChannel extends DurableObject<Env> {
     }
     const reported = await this.report(hostId, usage, now).then(
       () => true,
-      (error: unknown) => this.undelivered("Heartbeat", error),
+      (error: unknown) => this.unreported(error, attachment, context),
     );
     if (!reported) return false;
     const held = this.ledger.take();
     attachment.heldFrom = this.ledger.first();
     if (held.length > 0) control.acknowledge(context, held);
     return true;
+  }
+
+  private unreported(error: unknown, attachment: Attachment, context: control.ControlContext): false {
+    if (!unheard(error)) return this.undelivered("Heartbeat", error);
+    this.ledger.take();
+    attachment.heldFrom = null;
+    attachment.connection = control.close(
+      context.port,
+      CloseCode.ProtocolError,
+      "the tenant restarted and lost this host's Hello; reconnect so the Hello carries its usage again",
+    ).connection;
+    return false;
   }
 
   private undelivered(type: string, error: unknown): false {
