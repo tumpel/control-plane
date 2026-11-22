@@ -1,3 +1,6 @@
+import { eq, lte, sql } from "drizzle-orm";
+import type { DurableDb } from "../db/client.ts";
+import * as hostSchema from "../db/host-schema.ts";
 import {
   accept,
   emptyLedger,
@@ -8,12 +11,9 @@ import {
   type StoredControlMessage,
 } from "./protocol.ts";
 
-type LedgerSql = {
-  exec<T extends Record<string, ArrayBuffer | string | number | null>>(
-    query: string,
-    ...bindings: unknown[]
-  ): { toArray(): T[] };
-};
+const { ledger: hostLedger, refusedFrames } = hostSchema;
+
+export type HostDb = DurableDb<typeof hostSchema>;
 
 type Held = { frame: Frame<unknown>; message: HostMessage | null; forwarded: boolean; bytes: number };
 
@@ -21,21 +21,17 @@ const HELD_FRAMES = 1000;
 const HELD_BYTES = 1_000_000;
 
 export class HostLedger implements LedgerStore<StoredControlMessage> {
-  readonly #sql: LedgerSql;
+  readonly #db: HostDb;
   #held: Held[] = [];
   #stalled = { seq: 0, tries: 0 };
   #refused: Set<number> | null = null;
 
-  constructor(sql: LedgerSql) {
-    this.#sql = sql;
+  constructor(db: HostDb) {
+    this.#db = db;
   }
 
   load(): Ledger<StoredControlMessage> {
-    const [row] = this.#sql
-      .exec<{ received: number; sent: number; unacked: string }>(
-        "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
-      )
-      .toArray();
+    const row = this.#db.select().from(hostLedger).where(eq(hostLedger.ledgerId, 1)).get();
     if (row === undefined) return emptyLedger();
     return { received: row.received, sent: row.sent, unacked: JSON.parse(row.unacked) };
   }
@@ -45,17 +41,19 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
     const received = first === null ? ledger.received : Math.min(ledger.received, first - 1);
     const refused = this.refused();
     if ([...refused].some((seq) => seq <= received)) {
-      this.#sql.exec("DELETE FROM refused_frames WHERE seq <= ?", received);
+      this.#db.delete(refusedFrames).where(lte(refusedFrames.seq, received)).run();
       for (const seq of refused) if (seq <= received) refused.delete(seq);
     }
-    this.#sql.exec(
-      `INSERT INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)
-      ON CONFLICT (ledger_id) DO UPDATE SET received = excluded.received, sent = excluded.sent, unacked = excluded.unacked
-      WHERE ledger.received IS NOT excluded.received OR ledger.sent IS NOT excluded.sent OR ledger.unacked IS NOT excluded.unacked`,
-      received,
-      ledger.sent,
-      JSON.stringify(ledger.unacked),
-    );
+    const unacked = JSON.stringify(ledger.unacked);
+    this.#db
+      .insert(hostLedger)
+      .values({ ledgerId: 1, received, sent: ledger.sent, unacked })
+      .onConflictDoUpdate({
+        target: hostLedger.ledgerId,
+        set: { received, sent: ledger.sent, unacked },
+        setWhere: sql`${hostLedger.received} IS NOT ${received} OR ${hostLedger.sent} IS NOT ${ledger.sent} OR ${hostLedger.unacked} IS NOT ${unacked}`,
+      })
+      .run();
   }
 
   heard(): number {
@@ -66,7 +64,11 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
 
   skip(frame: Frame<unknown>): void {
     if (this.#held.length > 0) {
-      this.#sql.exec("INSERT INTO refused_frames (seq) VALUES (?) ON CONFLICT (seq) DO NOTHING", frame.seq);
+      this.#db
+        .insert(refusedFrames)
+        .values({ seq: frame.seq })
+        .onConflictDoNothing({ target: refusedFrames.seq })
+        .run();
       this.refused().add(frame.seq);
       return;
     }
@@ -78,9 +80,10 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
 
   refused(): Set<number> {
     this.#refused ??= new Set(
-      this.#sql
-        .exec<{ seq: number }>("SELECT seq FROM refused_frames")
-        .toArray()
+      this.#db
+        .select({ seq: refusedFrames.seq })
+        .from(refusedFrames)
+        .all()
         .map((row) => row.seq),
     );
     return this.#refused;

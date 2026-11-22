@@ -5,6 +5,7 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "observability": { "enabled": true },
+  "limits": { "cpu_ms": 30 },
   "d1_databases": [
     {
       "binding": "DB",
@@ -19,7 +20,14 @@
   ],
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics" }],
   "queues": {
-    "consumers": [{ "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 }]
+    "consumers": [
+      {
+        "queue": "tumpel-releases",
+        "max_batch_size": 10,
+        "max_retries": 0,
+        "dead_letter_queue": "tumpel-releases-prod-dlq"
+      }
+    ]
   },
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
@@ -27,9 +35,6 @@
     "METRICS_DATASET": "tumpel_metrics",
     "GITHUB_API_ORIGIN": "https://api.github.com",
     "GITHUB_WEB_ORIGIN": "https://github.com",
-    "CIRCLECI_API_ORIGIN": "https://circleci.com",
-    "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
-    "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
     "OPENROUTER_ORIGIN": "https://openrouter.ai",
     "TUMPEL_LIMITS": {
       "defaultTier": "Configured",
@@ -40,20 +45,23 @@
       ],
       "readsPerMinute": 600,
       "writesPerMinute": 120,
-      "hostFramesPerMinute": 600
+      "hostFramesPerMinute": 600,
+      "ceiling": {
+        "writesPerMinute": 120,
+        "hostFramesPerMinute": 600,
+        "usage": [
+          { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+          { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+        ]
+      }
     },
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
-      "snapshotDelaySeconds": 30,
       "snapshotDeadlineSeconds": 900,
       "turnOfferTtlSeconds": 60,
       "turnImageFetchBudgetSeconds": 900,
-      "turnFirstLineBudgetSeconds": 120,
-      "turnTotalBudgetSeconds": 3600,
+      "turnTotalBudgetSeconds": 14400,
       "transcriptChunkLines": 64,
-      "prebuildUploadBudgetSeconds": 3600,
-      "prebuildDispatchBudgetSeconds": 600,
-      "prebuildBuildBudgetSeconds": 3600,
       "claudeSetupUrlBudgetSeconds": 300,
       "claudeSetupCodeBudgetSeconds": 600,
       "claudeSetupMintBudgetSeconds": 120,
@@ -61,8 +69,7 @@
       "heartbeatIntervalSeconds": 10,
       "heartbeatDeadlineSeconds": 30,
       "devicePollIntervalSeconds": 5,
-      "deviceSlowDownStepSeconds": 5,
-      "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
+      "deviceSlowDownStepSeconds": 5
     }
   },
   "ratelimits": [
@@ -74,7 +81,6 @@
     "bindings": [
       { "name": "TENANT", "class_name": "Tenant" },
       { "name": "HOST", "class_name": "HostChannel" },
-      { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
       { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
       { "name": "EVENTS", "class_name": "EventChannel" },
       { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -86,11 +92,13 @@
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
     { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+    { "tag": "v7", "deleted_classes": ["SessionTimer"] }
   ],
   "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
     "dev": {
+      "limits": { "cpu_ms": 30 },
       "d1_databases": [
         {
           "binding": "DB",
@@ -105,7 +113,14 @@
       ],
       "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics_dev" }],
       "queues": {
-        "consumers": [{ "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 }]
+        "consumers": [
+          {
+            "queue": "tumpel-releases-dev",
+            "max_batch_size": 10,
+            "max_retries": 0,
+            "dead_letter_queue": "tumpel-releases-dev-dlq"
+          }
+        ]
       },
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",
@@ -113,9 +128,6 @@
         "METRICS_DATASET": "tumpel_metrics_dev",
         "GITHUB_API_ORIGIN": "https://api.github.com",
         "GITHUB_WEB_ORIGIN": "https://github.com",
-        "CIRCLECI_API_ORIGIN": "https://circleci.com",
-        "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
-        "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
         "OPENROUTER_ORIGIN": "https://openrouter.ai",
         "TUMPEL_LIMITS": {
           "defaultTier": "Configured",
@@ -126,20 +138,23 @@
           ],
           "readsPerMinute": 600,
           "writesPerMinute": 120,
-          "hostFramesPerMinute": 600
+          "hostFramesPerMinute": 600,
+          "ceiling": {
+            "writesPerMinute": 120,
+            "hostFramesPerMinute": 600,
+            "usage": [
+              { "measure": "RowsWritten", "window": "Hour", "limit": 3300000 },
+              { "measure": "RowsRead", "window": "Hour", "limit": 100000000 }
+            ]
+          }
         },
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
-          "snapshotDelaySeconds": 30,
           "snapshotDeadlineSeconds": 900,
           "turnOfferTtlSeconds": 60,
           "turnImageFetchBudgetSeconds": 900,
-          "turnFirstLineBudgetSeconds": 120,
-          "turnTotalBudgetSeconds": 3600,
+          "turnTotalBudgetSeconds": 14400,
           "transcriptChunkLines": 64,
-          "prebuildUploadBudgetSeconds": 3600,
-          "prebuildDispatchBudgetSeconds": 600,
-          "prebuildBuildBudgetSeconds": 3600,
           "claudeSetupUrlBudgetSeconds": 300,
           "claudeSetupCodeBudgetSeconds": 600,
           "claudeSetupMintBudgetSeconds": 120,
@@ -147,8 +162,7 @@
           "heartbeatIntervalSeconds": 10,
           "heartbeatDeadlineSeconds": 30,
           "devicePollIntervalSeconds": 5,
-          "deviceSlowDownStepSeconds": 5,
-          "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
+          "deviceSlowDownStepSeconds": 5
         }
       },
       "ratelimits": [
@@ -160,7 +174,6 @@
         "bindings": [
           { "name": "TENANT", "class_name": "Tenant" },
           { "name": "HOST", "class_name": "HostChannel" },
-          { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
           { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
           { "name": "EVENTS", "class_name": "EventChannel" },
           { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -172,7 +185,8 @@
         { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
         { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
         { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+        { "tag": "v7", "deleted_classes": ["SessionTimer"] }
       ]
     }
   }

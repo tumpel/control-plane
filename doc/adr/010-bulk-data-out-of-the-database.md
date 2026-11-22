@@ -16,4 +16,4 @@ Tenant SQL holds a fixed, small number of rows per entity: keys, digests, sizes 
 >
 > We treat cost as a signal.
 
-This applies tenet 8 and adds tenet 9. The cost is that a lookup by chunk digest reads a manifest from R2, and retention can no longer find an unreferenced pack with a join. The gain is that a snapshot writes the same few rows whatever the size of its tree, and the bill grows with sessions and turns instead of files. `rules/storage.md` gives the rules for agents.
+This applies tenet 9 and adds tenet 10. The cost is that a lookup by chunk digest reads a manifest from R2, and retention can no longer find an unreferenced pack with a join. The gain is that a snapshot writes the same few rows whatever the size of its tree, and the bill grows with sessions and turns instead of files. `rules/storage.md` gives the rules for agents.

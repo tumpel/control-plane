@@ -16,8 +16,7 @@ const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
-const OVER_CAP_PADDING = 120 * 1024 * 1024;
-const COLLECTION_RUNS = 10;
+const OVER_CAP_ROOT_PLACEMENTS = 700_000;
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 type ManifestsModule = {
@@ -107,7 +106,7 @@ const storesRoot = (
   storageKey: string,
   chunks: Placement[],
   unknownEntries: object[] = [],
-): Promise<string> => putsRoot(world.store, storageKey, chunks, unknownEntries, 0);
+): Promise<Placement> => putsRoot(world.store, storageKey, chunks, unknownEntries, 0);
 
 const putsRoot = async (
   store: R2Bucket,
@@ -115,7 +114,7 @@ const putsRoot = async (
   chunks: Placement[],
   unknownEntries: object[],
   padding: number,
-): Promise<string> => {
+): Promise<Placement> => {
   const json = JSON.stringify({
     entries: [
       ...unknownEntries,
@@ -136,11 +135,9 @@ const putsRoot = async (
   manifest.write(json, padding);
   const digest = createHash("sha256").update(manifest).digest("hex");
   await store.put(`${TENANT_ID}/packs/${digest}`, manifest);
-  await store.put(
-    storageKey,
-    JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.byteLength }] }),
-  );
-  return digest;
+  const root = { digest, packDigest: digest, offset: 0, length: manifest.byteLength };
+  await store.put(storageKey, JSON.stringify({ manifest: [root] }));
+  return root;
 };
 
 const insertsSnapshot = (
@@ -174,12 +171,17 @@ const failsSnapshot = async (host: Host, snapshotId: string): Promise<void> => {
   });
 };
 
-const storesSnapshot = async (world: World, host: Host, sessionId: string, chunks: Placement[]): Promise<string> => {
+const storesSnapshot = async (
+  world: World,
+  host: Host,
+  sessionId: string,
+  chunks: Placement[],
+): Promise<{ storageKey: string; root: Placement }> => {
   const request = snapshotAsked(host, sessionId);
   await uploadsChunks(world, host, request.snapshotId, chunks);
-  await storesRoot(world, request.storageKey, chunks);
+  const root = await storesRoot(world, request.storageKey, chunks);
   await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: chunks.length * CHUNK_BYTES });
-  return request.storageKey;
+  return { storageKey: request.storageKey, root };
 };
 
 const inWorld = async <T>(run: (world: World, host: Host) => Promise<T>): Promise<T> => {
@@ -203,11 +205,7 @@ const rowsOfFailedSnapshot = (chunks: Placement[], attempts: number): Promise<nu
       await uploadsChunks(world, host, request.snapshotId, chunks);
     }
     await failsSnapshot(host, request.snapshotId);
-    const written = world.tenantRowsWritten() - before;
-    for (const packDigest of new Set(chunks.map((chunk) => chunk.packDigest))) {
-      assert.equal(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, "no snapshot names the pack");
-    }
-    return written;
+    return world.tenantRowsWritten() - before;
   });
 
 const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
@@ -217,11 +215,11 @@ const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
     await host.claims(offer);
     await host.completes(offer);
     const before = world.tenantRowsWritten();
-    const root = await storesSnapshot(world, host, session.sessionId, chunks);
+    const { storageKey } = await storesSnapshot(world, host, session.sessionId, chunks);
     const written = world.tenantRowsWritten() - before;
 
     await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: session.sessionId, now: Date.now() });
-    assert.equal(await world.store.get(root), null, "the archive frees the root");
+    assert.equal(await world.store.get(storageKey), null, "the archive frees the root");
     const packs = new Set(chunks.map((chunk) => chunk.packDigest));
     for (const packDigest of packs) {
       assert.equal(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, "no snapshot holds the pack");
@@ -252,9 +250,10 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
     const { prepared } = parsed.data;
     assert.deepEqual(
       prepared.snapshots.map((snapshot) => snapshot.storageKey),
-      [layer],
+      [layer.storageKey],
     );
-    for (const [at, part] of parts(chunks).entries()) {
+    const restored = [[layer.root], ...parts(chunks)];
+    for (const [at, part] of restored.entries()) {
       const downloads = RestoreDownloadsSchema.parse(
         await host.says({ type: "RestoreChunks", turnId: offer.turnId, part: at + 1, chunks: part }),
       );
@@ -266,7 +265,7 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
     return world.tenantRowsWritten() - before;
   });
 
-test("a snapshot of 100000 chunks that the host uploads 50 times and then fails writes the rows of a one-chunk snapshot that fails at once, and frees the packs it uploaded", async () => {
+test("a snapshot of 100000 chunks that the host uploads 50 times and then fails writes the rows of a one-chunk snapshot that fails at once", async () => {
   const large = await rowsOfFailedSnapshot(tree(LARGE), 50);
   const small = await rowsOfFailedSnapshot(tree(1), 1);
   assert.equal(large, small);
@@ -344,7 +343,7 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     await host.completes(offer);
     const request = snapshotAsked(host, session.sessionId);
     const storedBefore = `${TENANT_ID}/${session.sessionId}/snapshots/stored-before`;
-    const manifestPack = await storesRoot(world, storedBefore, chunks, [unknownEntry]);
+    const manifestPack = (await storesRoot(world, storedBefore, chunks, [unknownEntry])).packDigest;
     for (const packDigest of new Set(chunks.map((chunk) => chunk.packDigest))) {
       await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
     }
@@ -367,11 +366,47 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     for (const packDigest of new Set([manifestPack, ...chunks.map((chunk) => chunk.packDigest)])) {
       assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
     }
-    assert.equal(
-      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures,
-      1,
-      "retention stops on the unreadable snapshot",
+  });
+});
+
+test("an object storage failure while SnapshotDone reads the root fails only that snapshot, and the next one is stored", async () => {
+  await inWorld(async (world, host) => {
+    const chunks = tree(DIGESTS_PER_PART, "flaky storage");
+    const session = await world.startSession({ prompt: "build while storage fails", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    const request = snapshotAsked(host, session.sessionId);
+    await uploadsChunks(world, host, request.snapshotId, chunks);
+    await storesRoot(world, request.storageKey, chunks);
+    world.store.failure = {
+      operation: "get",
+      prefix: request.storageKey,
+      error: new Error("object storage timed out"),
+    };
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: chunks.length * CHUNK_BYTES,
+    });
+    world.store.failure = null;
+
+    const failed = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
+    assert.equal(failed.snapshots.length, 1);
+    assert.equal(failed.snapshots[0]?.outcome.reason, "UploadRejected");
+    assert.match(failed.snapshots[0]?.outcome.detail ?? "", /object storage timed out/);
+
+    const other = await world.startSession({ prompt: "build after the failure", tags: [] });
+    const next = host.takeOffer();
+    await host.claims(next);
+    await host.completes(next);
+    await storesSnapshot(world, host, other.sessionId, chunks);
+    const stored = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: other.sessionId }),
+    );
+    assert.ok(stored.snapshots.some((snapshot) => snapshot.outcome.state === "Stored"));
   });
 });
 
@@ -421,47 +456,6 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
   });
 });
 
-test("an object storage failure while SnapshotDone reads the root fails only that snapshot, and the next one is stored", async () => {
-  await inWorld(async (world, host) => {
-    const chunks = tree(DIGESTS_PER_PART, "flaky storage");
-    const session = await world.startSession({ prompt: "build while storage fails", tags: [] });
-    const offer = host.takeOffer();
-    await host.claims(offer);
-    await host.completes(offer);
-    const request = snapshotAsked(host, session.sessionId);
-    await uploadsChunks(world, host, request.snapshotId, chunks);
-    await storesRoot(world, request.storageKey, chunks);
-    world.store.failure = {
-      operation: "get",
-      prefix: request.storageKey,
-      error: new Error("object storage timed out"),
-    };
-    await host.says({
-      type: "SnapshotDone",
-      snapshotId: request.snapshotId,
-      uploadedBytes: chunks.length * CHUNK_BYTES,
-    });
-    world.store.failure = null;
-
-    const failed = SnapshotsSchema.parse(
-      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
-    );
-    assert.equal(failed.snapshots.length, 1);
-    assert.equal(failed.snapshots[0]?.outcome.reason, "UploadRejected");
-    assert.match(failed.snapshots[0]?.outcome.detail ?? "", /object storage timed out/);
-
-    const other = await world.startSession({ prompt: "build after the failure", tags: [] });
-    const next = host.takeOffer();
-    await host.claims(next);
-    await host.completes(next);
-    await storesSnapshot(world, host, other.sessionId, chunks);
-    const stored = SnapshotsSchema.parse(
-      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: other.sessionId }),
-    );
-    assert.ok(stored.snapshots.some((snapshot) => snapshot.outcome.state === "Stored"));
-  });
-});
-
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
   const world = await World.open();
   try {
@@ -482,136 +476,27 @@ test("a manifest of 500000 chunks loads into an index within the memory the cont
   }
 });
 
-test("a stored snapshot whose index would pass the cap keeps its packs without stopping retention", async () => {
+test("a snapshot root whose own placements would pass the index cap is rejected at SnapshotDone", async () => {
   await inWorld(async (world, host) => {
-    const old = tree(DIGESTS_PER_PART, "over the cap");
-    const first = await world.startSession({ prompt: "an old snapshot", tags: [] });
-    const firstOffer = host.takeOffer();
-    await host.claims(firstOffer);
-    await host.completes(firstOffer);
-    const firstRequest = snapshotAsked(host, first.sessionId);
-    const storageKey = `${TENANT_ID}/${first.sessionId}/snapshots/over-the-cap`;
-    const manifestPack = await putsRoot(world.store, storageKey, old, [], OVER_CAP_PADDING);
-    for (const packDigest of new Set(old.map((chunk) => chunk.packDigest))) {
-      await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
-    }
-    insertsSnapshot(world, "over-the-cap", firstRequest, storageKey, "an-older-session");
-    const firstChunks = tree(1, "first");
-    await uploadsChunks(world, host, firstRequest.snapshotId, firstChunks);
-    await storesRoot(world, firstRequest.storageKey, firstChunks);
-    await host.says({ type: "SnapshotDone", snapshotId: firstRequest.snapshotId, uploadedBytes: CHUNK_BYTES });
-    const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
-    await world.store.put(junk, "junk");
-    await world.passes(2 * 60_000);
-
-    const second = await world.startSession({ prompt: "a new snapshot", tags: [] });
-    const secondOffer = host.takeOffer();
-    await host.claims(secondOffer);
-    await host.completes(secondOffer);
-    await storesSnapshot(world, host, second.sessionId, tree(1, "new"));
-
-    assert.equal(world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures, 0);
-    assert.equal(await world.store.get(junk), null, "retention frees the pack no snapshot names");
-    for (const packDigest of new Set([manifestPack, ...old.map((chunk) => chunk.packDigest)])) {
-      assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
-    }
-  });
-});
-
-test("a pack delete that object storage keeps refusing backs retention off and stops it after 10 runs, and snapshots keep working", async () => {
-  await inWorld(async (world, host) => {
-    const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
-    await world.store.put(junk, "junk");
-    await world.passes(2 * 60_000);
-    world.store.failure = {
-      operation: "delete",
-      prefix: `${TENANT_ID}/packs/`,
-      error: new Error("object storage refused the delete"),
-    };
-    const failures = (): unknown =>
-      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures;
-    const failedRun = async (prompt: string): Promise<void> => {
-      const session = await world.startSession({ prompt, tags: [] });
-      const offer = host.takeOffer();
-      await host.claims(offer);
-      await host.completes(offer);
-      await failsSnapshot(host, snapshotAsked(host, session.sessionId).snapshotId);
-      await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: session.sessionId, now: Date.now() });
-    };
-
-    await failedRun("the first run");
-    assert.equal(failures(), 1);
-    await failedRun("a run inside the backoff");
-    assert.equal(failures(), 1, "a run inside the backoff does not collect");
-    for (let run = 2; run <= COLLECTION_RUNS + 1; run++) {
-      await world.passes(2 ** run * 1000);
-      await failedRun(`run ${run}`);
-      assert.equal(failures(), Math.min(run, COLLECTION_RUNS));
-    }
-    assert.notEqual(await world.store.get(junk), null, "the refused pack stays");
-
-    world.store.failure = null;
-    const session = await world.startSession({ prompt: "build after retention stopped", tags: [] });
+    const session = await world.startSession({ prompt: "build a root of one-byte chunks", tags: [] });
     const offer = host.takeOffer();
     await host.claims(offer);
     await host.completes(offer);
-    await storesSnapshot(world, host, session.sessionId, tree(1, "after"));
+    const request = snapshotAsked(host, session.sessionId);
+    const packDigest = sha256("one-byte pack");
+    const manifest = Array.from({ length: OVER_CAP_ROOT_PLACEMENTS }, (_, at) => ({
+      digest: sha256("one-byte chunk"),
+      packDigest,
+      offset: at,
+      length: 1,
+    }));
+    await world.store.put(request.storageKey, JSON.stringify({ manifest }));
+    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: OVER_CAP_ROOT_PLACEMENTS });
+
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
-    assert.equal(snapshots[0]?.outcome.state, "Stored");
-  });
-});
-
-test("an object storage error while the live pack names are rebuilt leaves nothing behind, and retention runs again once it clears", async () => {
-  await inWorld(async (world, host) => {
-    const first = await world.startSession({ prompt: "a session with stored snapshots", tags: [] });
-    const firstOffer = host.takeOffer();
-    await host.claims(firstOffer);
-    await host.completes(firstOffer);
-    const request = snapshotAsked(host, first.sessionId);
-    const released = tree(DIGESTS_PER_PART, "released");
-    const kept = tree(DIGESTS_PER_PART, "kept");
-    const releasedKey = `${TENANT_ID}/${first.sessionId}/snapshots/released`;
-    const keptKey = `${TENANT_ID}/z-another-session/snapshots/kept`;
-    const releasedManifest = await storesRoot(world, releasedKey, released);
-    const keptManifest = await storesRoot(world, keptKey, kept);
-    for (const packDigest of new Set([...released, ...kept].map((chunk) => chunk.packDigest))) {
-      await world.store.put(`${TENANT_ID}/packs/${packDigest}`, "pack");
-    }
-    insertsSnapshot(world, "released", request, releasedKey);
-    insertsSnapshot(world, "kept", request, keptKey, "another-session");
-    const junk = `${TENANT_ID}/packs/${sha256("junk")}`;
-    await world.store.put(junk, "junk");
-    await world.passes(2 * 60_000);
-    const failures = (): unknown =>
-      world.tenantSql().exec("SELECT failures FROM pack_collection").toArray()[0]?.failures;
-
-    world.store.failure = { operation: "get", prefix: keptKey, error: new Error("object storage timed out") };
-    await failsSnapshot(host, request.snapshotId);
-    assert.equal(failures(), 1, "the failed rebuild fails the retention run");
-    await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: first.sessionId, now: Date.now() });
-    assert.equal(await world.store.get(releasedKey), null, "the archive deletes the released root");
-    world.store.failure = null;
-    await world.passes(5_000);
-
-    const second = await world.startSession({ prompt: "a session after the outage", tags: [] });
-    const secondOffer = host.takeOffer();
-    await host.claims(secondOffer);
-    await host.completes(secondOffer);
-    await failsSnapshot(host, snapshotAsked(host, second.sessionId).snapshotId);
-
-    assert.equal(failures(), 0, "retention runs again");
-    assert.equal(await world.store.get(junk), null, "retention frees the pack no snapshot names");
-    for (const packDigest of new Set([releasedManifest, ...released.map((chunk) => chunk.packDigest)])) {
-      assert.equal(
-        await world.store.get(`${TENANT_ID}/packs/${packDigest}`),
-        null,
-        `released pack ${packDigest} is freed`,
-      );
-    }
-    for (const packDigest of new Set([keptManifest, ...kept.map((chunk) => chunk.packDigest)])) {
-      assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
-    }
+    assert.equal(snapshots[0]?.outcome.state, "Failed");
+    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take/);
   });
 });

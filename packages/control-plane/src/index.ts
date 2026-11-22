@@ -61,20 +61,23 @@ import {
   SignUpSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
+  TenantLimitsSchema,
+  TenantLimitsSetSchema,
+  TenantTierSchema,
   WhoamiSchema,
   WhoamiWithEndpointSchema,
 } from "@tumpel/schemas";
+import { and, eq, sql } from "drizzle-orm";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
-import { handleCircleCIAuthorizations } from "./circleci-authorizations.ts";
-import { EVENTS_PATH as CIRCLECI_EVENTS_PATH, handleCircleCIEvents } from "./circleci-events.ts";
-import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, planConfig } from "./config-apply.ts";
 import { handleConnections } from "./connections.ts";
 import { handleConnectors } from "./connectors.ts";
 import { randomToken, sameSecret } from "./crypto";
+import { tenantLimits, tenants } from "./db/central-schema.ts";
+import { centralDb } from "./db/client.ts";
 import { handleReleaseRollout } from "./deploy-drain";
 import {
   approveDeviceCode,
@@ -111,6 +114,7 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
+  withPresence,
 } from "./hosts";
 import {
   issues,
@@ -150,9 +154,9 @@ import {
   openIdConfiguration,
 } from "./issuer.ts";
 import { keyStoreOf } from "./key-store.ts";
-import { bodyBoundOf, limitsOf } from "./limits.ts";
+import { bodyBoundOf, freeProfile, limitsOf, pastBound, type TenantLimitsProfile, type TenantTier } from "./limits.ts";
 import { type Dispatch, mcpEndpoint, mcpRefusal } from "./mcp";
-import { handleMembers } from "./members";
+import { handleMembers, ownerRequired } from "./members";
 import { handleMetrics } from "./metrics";
 import {
   AUTHORIZATION_SERVER_PATH,
@@ -202,7 +206,6 @@ import {
 } from "./pages";
 import { patchFiles, personaFileKey, readPersona, type StoredPersona, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildTemplates } from "./prebuild-templates.ts";
-import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { handlePushSubscriptions } from "./push-subscriptions.ts";
@@ -210,7 +213,6 @@ import { admitCaller, limitRefused, type RateLimit, rateLimited } from "./rate-l
 import { noticeRelease } from "./release-notices.ts";
 import { readRelease } from "./releases";
 import { keyPrefixMismatch, type UnreadableSecretSet, unreadableSecretSet } from "./secret-members.ts";
-import type { SessionTimer } from "./session-timer";
 import { handleSessions } from "./sessions";
 import { settingsOf } from "./settings";
 import { handleSubscriptions } from "./subscriptions.ts";
@@ -225,7 +227,6 @@ import { harnessCredential, noRelease, personaFiles, pinRefusal, repositoryToken
 
 export { EventChannel } from "./event-channel.ts";
 export { HostChannel } from "./host-channel";
-export { SessionTimer } from "./session-timer";
 export { Tenant } from "./tenant";
 export { TenantMetrics } from "./tenant-metrics";
 export { WebhookSender } from "./webhook-sender.ts";
@@ -242,7 +243,6 @@ export interface Env extends SignerEnv {
   EVENTS: DurableObjectNamespace<EventChannel>;
   WEBHOOKS: DurableObjectNamespace<WebhookSender>;
   HOST: DurableObjectNamespace<HostChannel>;
-  SESSION_TIMER: DurableObjectNamespace<SessionTimer>;
   TENANT_METRICS: DurableObjectNamespace<TenantMetrics>;
   METRICS: AnalyticsEngineDataset;
   METRICS_DATASET: string;
@@ -265,9 +265,6 @@ export interface Env extends SignerEnv {
   DEPLOYED_COMMIT: string;
   GITHUB_API_ORIGIN: string;
   GITHUB_WEB_ORIGIN: string;
-  CIRCLECI_API_ORIGIN: string;
-  CIRCLECI_OIDC_ORIGIN: string;
-  CIRCLECI_APP_ORIGIN: string;
   OPENROUTER_ORIGIN: string;
   VAPID_PUBLIC_KEY: string;
   VAPID_PRIVATE_KEY: string;
@@ -974,6 +971,95 @@ const handlePin = async (request: Request, _url: URL, env: Env): Promise<Respons
   return json(HarnessPinSchema.parse(pinned));
 };
 
+const handleLimitsRead = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const { limits } = await tenantApi(env.TENANT, caller.tenantId).call("readLimits", { tenantId: caller.tenantId });
+  return json(TenantLimitsSchema.parse(limits));
+};
+
+const aboveFreeTier = (detail: string): Response =>
+  problem(403, {
+    code: "AboveFreeTier",
+    title: "Above the Free tier",
+    detail: `the tenant is on the Free tier, and ${detail}`,
+    fix: "Set limits at or below the Free preset, or ask the operator of this deployment to move the tenant off the Free tier",
+  });
+
+const profileRefusal = (profile: TenantLimitsProfile, tier: TenantTier, env: Env): Response | null => {
+  const limits = limitsOf(env);
+  const pastFree = tier === "Free" ? pastBound(profile, freeProfile(limits)) : [];
+  if (pastFree.length > 0) return aboveFreeTier(`the profile goes past the Free preset: ${pastFree.join("; ")}`);
+  const pastCeiling = pastBound(profile, limits.ceiling);
+  if (pastCeiling.length > 0) {
+    return problem(400, {
+      code: "InvalidRequest",
+      title: "Limits past the ceiling",
+      detail: `the profile goes past the ceiling of this deployment: ${pastCeiling.join("; ")}`,
+      fix: "Lower each value to the ceiling or below it",
+    });
+  }
+  return null;
+};
+
+const tierChanged = (tier: TenantTier): Response =>
+  problem(409, {
+    code: "Conflict",
+    title: "Tier changed",
+    detail: `the tenant left the ${tier} tier while these limits were checked against it; nothing was written`,
+    fix: "Read the limits with tumpel limits get and set them again",
+  });
+
+const handleLimitsSet = async (request: Request, _url: URL, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const refused = ownerRequired(caller, "limits.set");
+  if (refused !== null) return refused;
+  const body = await parseBody(request, TenantLimitsSetSchema, "limits.set");
+  if (!body.ok) return body.response;
+  const set = body.value;
+  const now = Date.now();
+  if ("reset" in set) {
+    await centralDb(env.DB).delete(tenantLimits).where(eq(tenantLimits.tenantId, caller.tenantId)).run();
+  } else {
+    const db = centralDb(env.DB);
+    const row = await db
+      .select({ tier: tenants.tier })
+      .from(tenants)
+      .where(eq(tenants.tenantId, caller.tenantId))
+      .get();
+    if (row === undefined)
+      throw new Error(`tenant ${caller.tenantId} has a signed-in caller but no row in the tenants table`);
+    const tier = TenantTierSchema.parse(row.tier);
+    const past = profileRefusal(set, tier, env);
+    if (past !== null) return past;
+    const written = await db
+      .insert(tenantLimits)
+      .select(
+        db
+          .select({
+            tenantId: tenants.tenantId,
+            profile: sql<string>`${JSON.stringify(set)}`.as("profile"),
+            updatedAt: sql<number>`${now}`.as("updated_at"),
+          })
+          .from(tenants)
+          .where(and(eq(tenants.tenantId, caller.tenantId), eq(tenants.tier, tier))),
+      )
+      .onConflictDoUpdate({
+        target: tenantLimits.tenantId,
+        set: { profile: sql`excluded.profile`, updatedAt: sql`excluded.updated_at` },
+      })
+      .run();
+    if (written.meta.changes === 0) return tierChanged(tier);
+  }
+  const { limits } = await tenantApi(env.TENANT, caller.tenantId).call("setLimits", {
+    tenantId: caller.tenantId,
+    limits: set,
+    now,
+  });
+  return json(TenantLimitsSchema.parse(limits));
+};
+
 const PIN_PATH = /^\/v1\/harnesses\/pins\/([^/]+)$/;
 
 const handleUnpin = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
@@ -1048,7 +1134,7 @@ const handleEnrol = async (request: Request, _url: URL, env: Env): Promise<Respo
 const handleListHosts = async (request: Request, _url: URL, env: Env): Promise<Response> => {
   const caller = await deviceCaller(request, env);
   if (caller instanceof Response) return caller;
-  return json(await hostReads(env, caller.tenantId, await listHosts(env.DB, caller.tenantId)));
+  return json(await hostReads(env, caller.tenantId, await listHosts(env, caller.tenantId)));
 };
 
 const handleListHostUsage = async (request: Request, _url: URL, env: Env): Promise<Response> => {
@@ -1185,7 +1271,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
   if (host === null) return refusal(hostNotFound(hostId));
-  const [withUpdates] = await hostReads(env, caller.tenantId, [host]);
+  const [withUpdates] = await hostReads(env, caller.tenantId, [await withPresence(env, host)]);
   return json(withUpdates);
 };
 
@@ -1683,6 +1769,8 @@ const ROUTES: Record<string, Route> = {
   "GET /v1/harnesses": handleHarnessCatalog,
   "GET /v1/harnesses/pins": handlePinsList,
   "PUT /v1/harnesses/pins": handlePin,
+  "GET /v1/limits": handleLimitsRead,
+  "PUT /v1/limits": handleLimitsSet,
   "POST /v1/device/token": (request, _url, env) => handleDeviceToken(request, env),
   "POST /v1/enrolment-tokens": handleMint,
   "GET /v1/enrolment-tokens": handleListEnrolmentTokens,
@@ -1748,11 +1836,6 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleWebhooks(request, url, env, deviceCaller)) ??
     (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;
-  const uploads =
-    (await handlePrebuildUploads(request, url, env)) ??
-    (await handlePrebuildInputs(request, url, env)) ??
-    (await handleCircleCIEvents(request, url, env));
-  if (uploads) return uploads;
   const prebuilds =
     (await handlePrebuilds(request, url, env, deviceCaller)) ??
     (await handlePrebuildTemplates(request, url, env, deviceCaller));
@@ -1764,10 +1847,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const connections =
     (await handleConnectors(request, url, env, deviceCaller)) ??
     (await handleConnections(request, url, env, deviceCaller)) ??
-    (await handleCircleCIAuthorizations(request, url, env, deviceCaller)) ??
     (await handleOpenRouterAuthorizations(request, url, env, deviceCaller)) ??
-    (await handleOpenRouterCallback(request, url, env)) ??
-    (await handleCircleCIProjects(request, url, env, deviceCaller));
+    (await handleOpenRouterCallback(request, url, env));
   if (connections) return connections;
   const members = await handleMembers(request, url, env, {
     authenticate: deviceCaller,
@@ -1798,8 +1879,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   });
 };
 
-const signedWebhook = (pathname: string): boolean =>
-  pathname === GITHUB_WEBHOOK_PATH || CIRCLECI_EVENTS_PATH.test(pathname);
+const signedWebhook = (pathname: string): boolean => pathname === GITHUB_WEBHOOK_PATH;
 
 export default {
   async fetch(request, env): Promise<Response> {

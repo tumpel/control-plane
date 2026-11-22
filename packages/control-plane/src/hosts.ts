@@ -12,6 +12,7 @@ import { type HostRecord, HostRecordSchema } from "./host-record";
 import type { Problem, ProblemStatus } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { settingsOf } from "./settings.ts";
 import { NO_SUPERVISOR_UPDATES } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
 
@@ -262,13 +263,28 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
 };
 
-export const listHosts = async (db: D1Database, tenantId: string): Promise<HostRecord[]> => {
-  const { results } = await db
-    .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
+export type OfferSent = "Sent" | "RateLimited" | "Offline" | "Degraded";
+
+export const hostSilent = async (env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">, hostId: string): Promise<boolean> => {
+  const lastReceivedAt = await env.HOST.get(env.HOST.idFromName(hostId)).lastReceivedAt();
+  return lastReceivedAt === null || Date.now() - lastReceivedAt >= settingsOf(env).heartbeatDeadlineSeconds * 1000;
+};
+
+export const listHosts = async (
+  env: Pick<Env, "DB" | "HOST" | "TUMPEL_SETTINGS">,
+  tenantId: string,
+): Promise<HostRecord[]> => {
+  const { results } = await env.DB.prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
     .all<HostRow>();
-  return results.map(toHost);
+  return Promise.all(results.map((row) => withPresence(env, toHost(row))));
 };
+
+export const withPresence = async (
+  env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">,
+  host: HostRecord,
+): Promise<HostRecord> =>
+  host.state === "Online" && (await hostSilent(env, host.hostId)) ? { ...host, health: "Degraded" } : host;
 
 export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostRecord | null> => {
   const row = await db

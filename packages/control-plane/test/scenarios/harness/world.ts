@@ -4,7 +4,9 @@ import {
   ChannelProtocol,
   SessionSchema,
   StartedSessionSchema,
+  StoredTurnOfferSchema,
   SubscriptionSchema,
+  type TenantLimitsProfileSchema,
   TenantUsageSchema,
   TurnSchema,
 } from "@tumpel/schemas";
@@ -15,6 +17,7 @@ import { TEST_SETTINGS } from "../../timing.ts";
 import {
   D1Database,
   type DurableObjectState,
+  ioClock,
   migratedDatabase,
   type Namespace,
   R2Bucket,
@@ -41,6 +44,7 @@ export type ScenarioLimits = {
   readsPerMinute: number;
   writesPerMinute: number;
   hostFramesPerMinute: number;
+  ceiling: z.infer<typeof TenantLimitsProfileSchema>;
 };
 export type Member = { tenantId: string; token: string };
 
@@ -49,13 +53,6 @@ const imported = async <T>(path: string, name: string): Promise<T> => {
   return module[name] as T;
 };
 
-const StoredTurnOfferSchema = z.object({
-  type: z.literal("TurnOffer"),
-  turnId: z.string(),
-  sessionId: z.string(),
-  boxId: z.string(),
-  prompt: z.string(),
-});
 export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
@@ -79,7 +76,6 @@ const VAPID_PUBLIC_KEY = Buffer.concat([
   Buffer.from(VAPID_JWK.y ?? "", "base64url"),
 ]).toString("base64url");
 
-type SessionTimer = { set(tenantId: string, changes: Record<string, unknown>): Promise<void> };
 type TenantOperations = Record<string, (input: never) => unknown>;
 const REPOSITORY = "https://github.com/acme/app";
 
@@ -92,11 +88,17 @@ export const LIMITS: ScenarioLimits = {
   readsPerMinute: 600,
   writesPerMinute: 120,
   hostFramesPerMinute: 600,
+  ceiling: {
+    writesPerMinute: 120,
+    hostFramesPerMinute: 600,
+    usage: [{ measure: "RowsWritten", window: "Hour", limit: 1_000_000 }],
+  },
 };
 
 export class Host {
   private readonly inbox: ControlMessage[] = [];
   private readonly lineSeqs = new Map<string, number>();
+  private lastHeard: number | null = null;
   readonly hostId: string;
   private readonly world: World;
 
@@ -105,10 +107,28 @@ export class Host {
     this.world = world;
   }
 
-  send(message: unknown): Promise<"Sent" | "Deferred"> {
+  lastReceivedAt(): number {
+    return this.lastHeard ?? Date.now();
+  }
+
+  fallsSilent(): void {
+    this.lastHeard = Date.now();
+  }
+
+  async closesSocket(): Promise<void> {
+    this.world.db.sql.exec("UPDATE hosts SET state = 'Offline' WHERE host_id = ?", this.hostId);
+    await this.world.call("hostPresence", {
+      tenantId: TENANT_ID,
+      hostId: this.hostId,
+      presence: "Offline",
+      now: Date.now(),
+    });
+  }
+
+  send(message: unknown): Promise<"Sent" | "RateLimited"> {
     const parsed = ControlMessageSchema.parse(message);
     const [row] = this.world.db.sql.exec("SELECT health FROM hosts WHERE host_id = ?", this.hostId).toArray();
-    if (parsed.type === "TurnOffer" && row?.health !== "Healthy") return Promise.resolve("Deferred");
+    if (parsed.type === "TurnOffer" && row?.health !== "Healthy") return Promise.resolve("RateLimited");
     this.inbox.push(parsed);
     return Promise.resolve("Sent");
   }
@@ -133,6 +153,7 @@ export class Host {
   }
 
   async says(message: Record<string, unknown>): Promise<unknown> {
+    this.lastHeard = null;
     return this.world.call("hostMessage", { tenantId: TENANT_ID, hostId: this.hostId, message });
   }
 
@@ -165,6 +186,13 @@ export class Host {
     if (request.sessionId !== sessionId) throw new Error(`the snapshot asked for is of ${request.sessionId}`);
     const manifest = JSON.stringify({ entries: [] });
     const digest = createHash("sha256").update(manifest).digest("hex");
+    await this.says({
+      type: "SnapshotPacks",
+      snapshotId: request.snapshotId,
+      part: 1,
+      packs: [{ packDigest: digest, sizeBytes: manifest.length }],
+      chunks: [{ digest, packDigest: digest, offset: 0, length: manifest.length }],
+    });
     await this.world.store.put(`${request.storageKey.split("/")[0]}/packs/${digest}`, manifest);
     await this.world.store.put(
       request.storageKey,
@@ -179,11 +207,14 @@ export class Host {
     await this.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
     return teardown.boxId;
   }
+
+  async dropsIdleBox(offer: TurnOffer): Promise<void> {
+    await this.says({ type: "BoxGone", sessionId: offer.sessionId, boxId: offer.boxId });
+  }
 }
 
 type TenantSteps = {
   expireSubscriptions(now: number): void;
-  prebuildDeadlineReached(tenantId: string, due: unknown): Promise<void>;
 };
 
 export class World {
@@ -193,7 +224,6 @@ export class World {
   private readonly hosts = new Map<string, Host>();
   private api!: TenantApi;
   private tenants!: Namespace<object>;
-  private timers!: Namespace<SessionTimer>;
   private tenantApi!: (namespace: unknown, tenantId: string) => TenantApi;
   private worker!: Worker;
   private env: Record<string, unknown> = {};
@@ -220,10 +250,6 @@ export class World {
 
   private async boot(options: WorldOptions): Promise<void> {
     const Tenant = await imported<DurableObjectClass>("tenant.ts", "Tenant");
-    const SessionTimer = await imported<new (ctx: never, env: never) => SessionTimer>(
-      "session-timer.ts",
-      "SessionTimer",
-    );
     const WebhookSender = await imported<DurableObjectClass>("webhook-sender.ts", "WebhookSender");
     const unreachable = () =>
       this.runtime.stubs(() => ({
@@ -237,10 +263,10 @@ export class World {
       DB: this.db,
       STORE: this.store,
       RELEASES: this.releases,
-      SESSION_TIMER: null,
       HOST: this.runtime.stubs((hostId) => this.host(hostId)),
       EVENTS: ignored(),
-      WEBHOOKS: options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env) : unreachable(),
+      WEBHOOKS:
+        options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env, true) : unreachable(),
       TENANT_METRICS: ignored(),
       TUMPEL_SETTINGS: SETTINGS,
       SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
@@ -265,8 +291,6 @@ export class World {
       TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
       WEBHOOK_RATE: new RateLimiter(600),
     };
-    this.timers = this.runtime.namespace(SessionTimer, () => env);
-    env.SESSION_TIMER = this.timers;
     this.tenants = this.runtime.namespace(Tenant, () => env);
     env.TENANT = this.tenants;
     this.env = env;
@@ -373,6 +397,17 @@ export class World {
     return result;
   }
 
+  async computeMs(operation: string, input: unknown): Promise<number> {
+    const spent = ioClock.spentMs;
+    const started = performance.now();
+    await this.api.call(operation, input).catch((error: unknown) => {
+      if (error instanceof Error && /as invalid:/.test(error.message)) throw error;
+    });
+    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    await this.runtime.settle();
+    return elapsed;
+  }
+
   async hostOnline(name: string): Promise<Host> {
     const hostId = randomUUID();
     const now = Date.now();
@@ -436,7 +471,10 @@ export class World {
   }
 
   async startPrebuild(): Promise<void> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHosts",
+    );
     const personaId = await this.defaultPersona();
     const prebuildId = randomUUID();
     const [base] = CLAUDE_CODE_AMD64_RELEASE.bases;
@@ -452,11 +490,10 @@ export class World {
         headSha: "8".repeat(40),
         rootfsKey: "rootfs/scenario",
       },
-      provider: "Namespace",
       input: {
         principalId: PRINCIPAL_ID,
         startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
-        hosts: await listHosts(this.db, TENANT_ID),
+        hosts: await listHosts(this.env, TENANT_ID),
         harness: "ClaudeCode",
         harnessVersion: CLAUDE_CODE_VERSION,
         endpoint: "https://api.scenario.test",
@@ -480,7 +517,10 @@ export class World {
   }
 
   async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHosts",
+    );
     const personaId = await this.defaultPersona();
     return this.call("startSession", {
       tenantId: TENANT_ID,
@@ -488,7 +528,7 @@ export class World {
       input: {
         principalId: PRINCIPAL_ID,
         startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
-        hosts: await listHosts(this.db, TENANT_ID),
+        hosts: await listHosts(this.env, TENANT_ID),
         harness: "ClaudeCode",
         harnessVersion: CLAUDE_CODE_VERSION,
         endpoint: "https://api.scenario.test",
@@ -504,17 +544,20 @@ export class World {
     });
   }
 
-  async sendTurn(sessionId: string, prompt: string): Promise<void> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
-    z.object({ sent: z.object({ kind: z.literal("Sent") }) }).parse(
+  async sendTurn(sessionId: string, prompt: string): Promise<{ turnId: string }> {
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHosts",
+    );
+    return z.object({ sent: z.object({ kind: z.literal("Sent"), turn: z.object({ turnId: z.string() }) }) }).parse(
       await this.call("sendTurn", {
         tenantId: TENANT_ID,
         sessionId,
         send: { prompt },
-        hosts: await listHosts(this.db, TENANT_ID),
+        hosts: await listHosts(this.env, TENANT_ID),
         now: Date.now(),
       }),
-    );
+    ).sent.turn;
   }
 
   async session(sessionId: string): Promise<Session> {
@@ -552,11 +595,6 @@ export class World {
       .parse(await this.call("getSubscription", { tenantId: TENANT_ID, subscriptionId })).subscription;
   }
 
-  sessionTimer(name: string): { timer: SessionTimer; alarm(): Promise<number | null> } {
-    const { object, ctx } = this.timers.instance(name);
-    return { timer: object, alarm: () => ctx.storage.getAlarm() };
-  }
-
   tenantOperations(): TenantOperations {
     return (this.tenants.instance(TENANT_ID).object as { operations: TenantOperations }).operations;
   }
@@ -569,8 +607,29 @@ export class World {
     return this.tenants.instance(TENANT_ID).ctx.storage.sql;
   }
 
-  tenantAlarm(): Promise<number | null> {
-    return this.tenants.instance(TENANT_ID).ctx.storage.getAlarm();
+  async transcript(
+    sessionId: string,
+    query: { after?: number; turnId?: string; limit?: number },
+  ): Promise<{ lines: { lineSeq: number; turnId: string }[]; cursor: number; finished: boolean }> {
+    const readTranscript = await imported<
+      (env: unknown, caller: unknown, sessionId: string, query: unknown) => Promise<unknown>
+    >("sessions.ts", "readTranscript");
+    const outcome = await readTranscript(
+      this.env,
+      { tenantId: TENANT_ID, principalId: PRINCIPAL_ID },
+      sessionId,
+      query,
+    );
+    return z
+      .object({
+        ok: z.literal(true),
+        value: z.object({
+          lines: z.array(z.object({ lineSeq: z.number(), turnId: z.string() })),
+          cursor: z.number(),
+          finished: z.boolean(),
+        }),
+      })
+      .parse(outcome).value;
   }
 
   async passes(ms: number): Promise<void> {

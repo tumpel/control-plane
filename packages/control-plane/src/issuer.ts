@@ -1,6 +1,9 @@
 import type { D1Database } from "@cloudflare/workers-types/index.ts";
 import { IssuerJwkSchema, type OpenIdConfigurationSchema } from "@tumpel/schemas";
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
+import { issuerKeys } from "./db/central-schema.ts";
+import { centralDb } from "./db/client.ts";
 import { fromBase64, generateDataKey, seal, toBase64, unseal } from "./envelope.ts";
 import { type KeyStore, keyStoreOf } from "./key-store.ts";
 
@@ -42,13 +45,10 @@ export interface IssuedToken {
   expiresAt: number;
 }
 
-type KeyRow = { kid: string; wrapped_data_key: string; private_key_sealed: string };
-type PublishedRow = { public_jwk: string };
+type KeyRow = { kid: string; wrappedDataKey: string; privateKeySealed: string };
 type NewKey = { kid: string; publicJwk: string; wrappedDataKey: string; privateKeySealed: string };
 
 const RS256 = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
-const INSERT_KEY =
-  "INSERT INTO issuer_keys (key_slot, kid, public_jwk, wrapped_data_key, private_key_sealed) VALUES (1, ?, ?, ?, ?) ON CONFLICT (key_slot) DO NOTHING";
 const RESEAL = "SECRETS_KEK no longer opens the issuer's signing key; restore the key it was sealed with";
 const encoder = new TextEncoder();
 
@@ -91,15 +91,34 @@ const newKey = async (keyStore: KeyStore): Promise<NewKey> => {
   };
 };
 
-export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now: () => number) => {
-  const signingRow = (): Promise<KeyRow | null> =>
-    db.prepare("SELECT kid, wrapped_data_key, private_key_sealed FROM issuer_keys WHERE key_slot = 1").first<KeyRow>();
+export const d1Issuer = (d1: D1Database, keyStore: KeyStore, issuer: string, now: () => number) => {
+  const db = centralDb(d1);
+
+  const signingRow = async (): Promise<KeyRow | null> =>
+    (await db
+      .select({
+        kid: issuerKeys.kid,
+        wrappedDataKey: issuerKeys.wrappedDataKey,
+        privateKeySealed: issuerKeys.privateKeySealed,
+      })
+      .from(issuerKeys)
+      .where(eq(issuerKeys.keySlot, 1))
+      .get()) ?? null;
 
   const signing = async (): Promise<KeyRow> => {
     const row = await signingRow();
     if (row !== null) return row;
     const key = await newKey(keyStore);
-    await db.prepare(INSERT_KEY).bind(key.kid, key.publicJwk, key.wrappedDataKey, key.privateKeySealed).run();
+    await db
+      .insert(issuerKeys)
+      .values({
+        keySlot: 1,
+        kid: key.kid,
+        publicJwk: key.publicJwk,
+        wrappedDataKey: key.wrappedDataKey,
+        privateKeySealed: key.privateKeySealed,
+      })
+      .onConflictDoNothing({ target: issuerKeys.keySlot });
     const created = await signingRow();
     if (created === null)
       throw new Error("issuer_keys holds no signing key right after the insert; check the D1 migrations");
@@ -112,8 +131,8 @@ export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now
       const at = now();
       const row = await signing();
       const pkcs8 = await unseal(
-        await keyStore.unwrap(row.wrapped_data_key),
-        row.private_key_sealed,
+        await keyStore.unwrap(row.wrappedDataKey),
+        row.privateKeySealed,
         sealContext(row.kid),
         RESEAL,
       );
@@ -140,8 +159,8 @@ export const d1Issuer = (db: D1Database, keyStore: KeyStore, issuer: string, now
     },
     async publishedKeys(): Promise<IssuerJwk[]> {
       await signing();
-      const { results } = await db.prepare("SELECT public_jwk FROM issuer_keys").all<PublishedRow>();
-      return results.map((row) => IssuerJwkSchema.parse(JSON.parse(row.public_jwk)));
+      const published = await db.select({ publicJwk: issuerKeys.publicJwk }).from(issuerKeys);
+      return published.map((row) => IssuerJwkSchema.parse(JSON.parse(row.publicJwk)));
     },
   };
 };

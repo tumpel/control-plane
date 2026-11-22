@@ -92,6 +92,12 @@ import tenant0088_5 from "../migrations/tenant/0088_5_drop_packs.sql";
 import tenant0088_6 from "../migrations/tenant/0088_6_drop_snapshot_manifest_chunks.sql";
 import tenant0088_7 from "../migrations/tenant/0088_7_drop_snapshot_chunks.sql";
 import tenant0088 from "../migrations/tenant/0088_chunk_lists_in_object_storage.sql";
+import tenant0089 from "../migrations/tenant/0089_drop_alarm_bookkeeping.sql";
+import tenant0090 from "../migrations/tenant/0090_drop_bookkeeping.sql";
+import tenant0091 from "../migrations/tenant/0091_drop_transcript_tables.sql";
+import tenant0092 from "../migrations/tenant/0092_drop_ci_prebuilds.sql";
+import tenant0093 from "../migrations/tenant/0093_drop_build_providers.sql";
+import tenant0094 from "../migrations/tenant/0094_turns_offered.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -189,4 +195,10 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0088_5_drop_packs", sql: tenant0088_5 },
   { name: "0088_6_drop_snapshot_manifest_chunks", sql: tenant0088_6 },
   { name: "0088_7_drop_snapshot_chunks", sql: tenant0088_7 },
+  { name: "0089_drop_alarm_bookkeeping", sql: tenant0089 },
+  { name: "0090_drop_bookkeeping", sql: tenant0090 },
+  { name: "0091_drop_transcript_tables", sql: tenant0091 },
+  { name: "0092_drop_ci_prebuilds", sql: tenant0092 },
+  { name: "0093_drop_build_providers", sql: tenant0093 },
+  { name: "0094_turns_offered", sql: tenant0094 },
 ];

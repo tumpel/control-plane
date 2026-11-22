@@ -4,13 +4,15 @@ import { ChannelProtocol } from "@tumpel/schemas";
 import { RETRY_LIMIT } from "../../src/backoff.ts";
 import * as control from "../../src/channel/control.ts";
 import { HostLedger } from "../../src/channel/ledger.ts";
+import { durableDb } from "../../src/db/client.ts";
+import * as hostSchema from "../../src/db/host-schema.ts";
 import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
 
 const HOST_MIGRATIONS = new URL("../../migrations/host/", import.meta.url);
 
 const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = () => null) => {
   const sql = new SqlStorage(migratedDatabase(HOST_MIGRATIONS));
-  const ledger = new HostLedger(sql as never);
+  const ledger = new HostLedger(durableDb({ sql } as never, hostSchema));
   const closed: string[] = [];
   const context: control.ControlContext = {
     port: { send: () => undefined, close: (code, reason) => closed.push(`${code}: ${reason}`) },
@@ -135,11 +137,11 @@ test("held frames dropped after a refusal among them are resent without the refu
   assert.equal(await line(4), "Message");
   ledger.take();
 
-  const restarted = new HostLedger(sql as never);
+  const restarted = new HostLedger(durableDb({ sql } as never, hostSchema));
   assert.deepEqual([...restarted.refused()], [3]);
   for (const seq of [1, 2, 4]) assert.equal(await line(seq), "Message");
   control.acknowledge(context, ledger.take());
   assert.equal(ledger.load().received, 4);
-  assert.deepEqual([...new HostLedger(sql as never).refused()], []);
+  assert.deepEqual([...new HostLedger(durableDb({ sql } as never, hostSchema)).refused()], []);
   assert.deepEqual(closed, []);
 });

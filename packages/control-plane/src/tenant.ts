@@ -8,19 +8,30 @@ import {
   type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
+  TenantTierSchema,
 } from "@tumpel/schemas";
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
-import { backoffMs, errorOf, RETRY_LIMIT } from "./backoff.ts";
 import type { ConfigWrite } from "./configs.ts";
+import { tenantLimits, tenants } from "./db/central-schema.ts";
+import { centralDb } from "./db/client.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import { limitsOf, type TenantTier, tierLimits } from "./limits.ts";
+import {
+  customProfileOf,
+  effectiveLimits,
+  limitsOf,
+  type TenantLimitsProfile,
+  type TenantLimitsView,
+  type TenantTier,
+  windowStart,
+} from "./limits.ts";
 import { meteredState } from "./metered-state.ts";
-import { drainObjectCleanups } from "./object-cleanups.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import type { WriteRateRefusal } from "./rate-limit.ts";
 import {
   type MemberUpdate,
   memberWith,
@@ -29,7 +40,6 @@ import {
   storedKeys,
   type UnreadableSecretSet,
 } from "./secret-members.ts";
-import type { DueDeadline } from "./session-timer.ts";
 import { checkStart } from "./sessions.ts";
 import {
   recordSupervisorUpdate,
@@ -37,11 +47,16 @@ import {
   type SupervisorUpdates,
   supervisorUpdatesByHost,
 } from "./supervisor-updates";
-import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
+import {
+  serveTenantRequest,
+  type TenantHandlers,
+  type TenantInput,
+  type TenantRequest,
+  type TenantResponse,
+} from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
-import { PUSH_WAKES_DUE } from "./tenant-push-subscriptions.ts";
 import { memberRows, sealContext } from "./tenant-sessions";
 import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
@@ -62,15 +77,6 @@ export type PersonaPatch = z.infer<typeof PersonaPatchChangeSchema>;
 export type SecretSetPatch = z.infer<typeof SecretSetPatchSchema>;
 export type HarnessPin = z.infer<typeof HarnessPinSchema>;
 export type HarnessPinWrite = z.infer<typeof HarnessPinCreateSchema>;
-
-const ALARM_RETRY_KEY = "alarmRetry";
-const ALARM_FAILED_AT_KEY = "alarmFailedAt";
-const ALARM_FIRST_RETRY_MS = 2_000;
-const WEBHOOK_WAKE_FIRST_RETRY_MS = 2_000;
-const WEBHOOK_WAKE_RETRIES = `FROM webhook_wake_retries AS r
-  JOIN webhook_wakes USING (webhook_endpoint_id) JOIN webhook_endpoints USING (webhook_endpoint_id)`;
-
-type AlarmRetry = { retries: number; at: number };
 
 export type Written<T> = { ok: true; value: T } | { ok: false; constraint: string };
 
@@ -195,22 +201,31 @@ const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
 const USAGE_KEY = "usage";
-const TIER_FIRST_RETRY_MS = 1_000;
 
-const tierOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<TenantTier> => {
-  const row = await db
-    .prepare("SELECT tier FROM tenants WHERE tenant_id = ?")
-    .bind(tenantId)
-    .first<{ tier: TenantTier }>();
-  return row?.tier ?? fallback;
+type StoredLimits = { tier: TenantTier; custom: TenantLimitsProfile | null };
+
+const storedLimitsOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<StoredLimits> => {
+  const row = await centralDb(db)
+    .select({ tier: tenants.tier, profile: tenantLimits.profile })
+    .from(tenants)
+    .leftJoin(tenantLimits, eq(tenantLimits.tenantId, tenants.tenantId))
+    .where(eq(tenants.tenantId, tenantId))
+    .get();
+  if (row === undefined) return { tier: fallback, custom: null };
+  return { tier: TenantTierSchema.parse(row.tier), custom: customProfileOf(row.profile) };
 };
 
-type TierRead = { settled: boolean; retries: number; retryAt: number; reading: Promise<void> | null };
+type WriteWindow = { start: number; writes: number };
+
+const UNMETERED = new Set(["readUsage", "readLimits", "setLimits"]);
 
 export class Tenant extends TenantConnectors {
   private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
   private meter: UsageMeter | undefined;
-  private readonly tierRead: TierRead = { settled: false, retries: 0, retryAt: 0, reading: null };
+  private tier: TenantTier;
+  private limits: TenantLimitsView;
+  private writeWindow: WriteWindow = { start: 0, writes: 0 };
+  private tierRead: Promise<void> | null = null;
   private readonly opened: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -218,6 +233,8 @@ export class Tenant extends TenantConnectors {
     super(ctx, env);
     this.ctx = meteredState(this.ctx, cursors);
     this.cursors = cursors;
+    this.tier = limitsOf(env).defaultTier;
+    this.limits = effectiveLimits(limitsOf(env), this.tier, null);
     this.opened = this.ctx.blockConcurrencyWhile(async () => {
       await migrateDurableObject(this.ctx.storage, TENANT_MIGRATIONS);
       await this.holdDataKey();
@@ -229,44 +246,47 @@ export class Tenant extends TenantConnectors {
   private async openMeter(): Promise<void> {
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) return;
-    const tier = limitsOf(this.env).defaultTier;
     const saved = (await this.ctx.storage.get<SavedCounter[]>(USAGE_KEY)) ?? [];
-    this.meter = new UsageMeter(tier, tierLimits(limitsOf(this.env), tier), saved, this.cursors, Date.now());
+    this.meter = new UsageMeter(this.tier, this.limits.profile.usage, saved, this.cursors, Date.now());
   }
 
-  private async settleTier(now: number): Promise<void> {
-    const read = this.tierRead;
-    if (read.settled || read.retries > RETRY_LIMIT || now < read.retryAt) return;
-    read.reading ??= this.readTier().finally(() => {
-      read.reading = null;
+  private settleTier(): Promise<void> {
+    this.tierRead ??= this.readTier().catch((error: unknown) => {
+      this.tierRead = null;
+      throw error;
     });
-    await read.reading;
+    return this.tierRead;
   }
 
   private async readTier(): Promise<void> {
-    const read = this.tierRead;
-    const tenantId = this.tenantName();
     const { defaultTier } = limitsOf(this.env);
-    const outcome = await tierOf(this.env.DB, tenantId, defaultTier).then(
-      (tier) => ({ ok: true as const, tier }),
-      (error: unknown) => ({ ok: false as const, error: errorOf(error) }),
-    );
-    if (outcome.ok) {
-      read.settled = true;
-      this.usageMeter().retier(outcome.tier, tierLimits(limitsOf(this.env), outcome.tier), Date.now());
-      return;
+    const stored = await storedLimitsOf(this.env.DB, this.tenantName(), defaultTier);
+    this.relimit(stored);
+  }
+
+  private relimit(stored: StoredLimits): void {
+    this.tier = stored.tier;
+    this.limits = effectiveLimits(limitsOf(this.env), stored.tier, stored.custom);
+    this.usageMeter().retier(stored.tier, this.limits.profile.usage, Date.now());
+  }
+
+  private writeRateRefusal(writes: number, now: number): WriteRateRefusal | null {
+    if (writes === 0) return null;
+    const start = windowStart("Minute", now);
+    if (this.writeWindow.start !== start) this.writeWindow = { start, writes: 0 };
+    const { writesPerMinute } = this.limits.profile;
+    if (this.writeWindow.writes + writes > writesPerMinute) {
+      return {
+        writeRateLimited: `tenant ${this.tenantName()} sent more than ${writesPerMinute} writing requests in a minute`,
+      };
     }
-    read.retries += 1;
-    if (read.retries > RETRY_LIMIT) {
-      console.error(
-        `TenantTierUnread: tenant ${tenantId} stays on the default ${defaultTier} tier until the object restarts, because reading its tier from D1 failed ${RETRY_LIMIT + 1} times: ${outcome.error.message}`,
-      );
-      return;
-    }
-    read.retryAt = Date.now() + backoffMs(read.retries, TIER_FIRST_RETRY_MS);
-    console.error(
-      `TenantTierRetry: tenant ${tenantId} retry ${read.retries} of ${RETRY_LIMIT} reading its tier from D1, on the default ${defaultTier} tier meanwhile: ${outcome.error.message}`,
-    );
+    this.writeWindow.writes += writes;
+    return null;
+  }
+
+  private async setLimits({ tenantId }: TenantInput<"setLimits">): Promise<TenantLimitsView> {
+    this.relimit(await storedLimitsOf(this.env.DB, tenantId, limitsOf(this.env).defaultTier));
+    return this.limits;
   }
 
   private usageMeter(): UsageMeter {
@@ -274,10 +294,10 @@ export class Tenant extends TenantConnectors {
     return this.meter;
   }
 
-  private async meterUsage(operation: string | null, requested: boolean): Promise<void> {
+  private async meterUsage(operation: string | null): Promise<void> {
     const meter = this.usageMeter();
     const now = Date.now();
-    for (const signal of meter.count(operation, now, requested)) {
+    for (const signal of meter.count(operation, now)) {
       if (signal.event === "UsageLimitReached") {
         console.error(
           `UsageLimitReached: tenant ${this.tenantName()} on the ${signal.tier} tier spent its limit of ${signal.limit} ${signal.measure} per ${signal.window.toLowerCase()}; it is refused until ${signal.resetsAt}`,
@@ -292,101 +312,32 @@ export class Tenant extends TenantConnectors {
 
   async handle(request: TenantRequest): Promise<TenantResponse> {
     await this.opened;
-    await this.settleTier(Date.now());
+    await this.settleTier();
     return this.serve(request, null);
   }
 
-  async handleForTenant(request: TenantRequest): Promise<TenantResponse> {
+  async handleForTenant(request: TenantRequest, writes: number): Promise<TenantResponse | WriteRateRefusal> {
     await this.opened;
     const operation = typeof request.operation === "string" ? request.operation : "";
-    await this.settleTier(Date.now());
-    const spent = operation === "readUsage" ? null : this.usageMeter().spent(operation, Date.now());
+    await this.settleTier();
+    const refused = this.writeRateRefusal(writes, Date.now());
+    if (refused !== null) return refused;
+    const spent = UNMETERED.has(operation) ? null : this.usageMeter().spent(operation, Date.now());
     if (spent !== null) return spent;
     return this.serve(request, operation);
   }
 
   private async serve(request: TenantRequest, operation: string | null): Promise<TenantResponse> {
+    this.expireSubscriptions(Date.now());
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.meterUsage(operation, true);
-    await this.followUp();
-    await this.armAlarm();
+    await this.meterUsage(operation);
+    await this.startDeliveries(this.tenantName());
+    this.wakeEvents();
+    this.wakeWebhooks();
+    this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
     return response;
-  }
-
-  override async alarm(): Promise<void> {
-    await this.opened;
-    const now = Date.now();
-    await this.meterUsage(null, false);
-    const queued = await this.queuedAt();
-    if (queued === null || queued > now) return this.armAlarm();
-    const tenantId = this.tenantName();
-    const failed = [
-      await this.step("push delivery", () => this.deliverPushes(tenantId, now)),
-      await this.step("subscription expiry", () => this.expireSubscriptions(now)),
-      await this.step("subscription delivery retries", () => this.retryDeliveries(now)),
-      await this.followUp(),
-    ].includes(true);
-    await this.meterUsage(null, false);
-    if (!failed) {
-      await this.ctx.storage.delete([ALARM_RETRY_KEY, ALARM_FAILED_AT_KEY]);
-      return this.armAlarm();
-    }
-    const retry = ((await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY))?.retries ?? 0) + 1;
-    if (retry <= RETRY_LIMIT) {
-      const pending: AlarmRetry = { retries: retry, at: now + backoffMs(retry, ALARM_FIRST_RETRY_MS) };
-      await this.ctx.storage.put(ALARM_RETRY_KEY, pending);
-      console.error(`TenantAlarmRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} after a failed alarm step`);
-      return this.armAlarm();
-    }
-    await this.ctx.storage.delete(ALARM_RETRY_KEY);
-    await this.ctx.storage.put(ALARM_FAILED_AT_KEY, now);
-    console.error(
-      `TenantAlarmFailed: tenant ${tenantId} stopped retrying the alarm work overdue now after ${RETRY_LIMIT} retries; work that falls due later still runs`,
-    );
-    await this.armAlarm();
-  }
-
-  private async followUp(): Promise<boolean> {
-    return [
-      await this.step("delivery start", () => this.startDeliveries(this.tenantName())),
-      await this.step("event wake", () => this.wakeEvents()),
-      await this.step("webhook wake", () => this.wakeWebhooks()),
-      await this.step("object cleanup", () => this.drainObjects()),
-    ].includes(true);
-  }
-
-  private step(name: string, work: () => unknown): Promise<boolean> {
-    return Promise.resolve()
-      .then(work)
-      .then(
-        () => false,
-        (error: unknown) => {
-          console.error(`TenantStepFailed: tenant ${this.tenantName()} ${name} failed: ${errorOf(error).message}`);
-          return true;
-        },
-      );
-  }
-
-  private async reachDeadline(
-    due: DueDeadline,
-    retries: number,
-    reach: () => Promise<void>,
-    abandon: (detail: string) => Promise<void>,
-  ): Promise<void> {
-    const failed = await reach().then(() => null, errorOf);
-    if (failed === null) return;
-    if (retries < RETRY_LIMIT) throw failed;
-    const detail = `the ${due.name} deadline still failed after ${RETRY_LIMIT} retries, so it was dropped: ${failed.message}`;
-    console.error(
-      `DeadlineDropped: tenant ${this.tenantName()} ${due.name} ${JSON.stringify(due.deadline)}: ${detail}`,
-    );
-    await abandon(detail);
-  }
-
-  private drainObjects(): void {
-    this.ctx.waitUntil(drainObjectCleanups(this.ctx.storage.sql, this.env.STORE));
   }
 
   private tenantName(): string {
@@ -401,72 +352,13 @@ export class Tenant extends TenantConnectors {
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
   }
 
-  private async wakeWebhooks(): Promise<void> {
+  private wakeWebhooks(): void {
     const tenantId = this.tenantName();
-    const sql = this.ctx.storage.sql;
-    const wakes = sql
-      .exec<{ webhook_endpoint_id: string; start_event_id: number; failures: number }>(
-        `SELECT w.webhook_endpoint_id, w.start_event_id, COALESCE(r.failures, 0) AS failures FROM webhook_wakes
-        JOIN webhook_endpoints AS w USING (webhook_endpoint_id)
-        LEFT JOIN webhook_wake_retries AS r USING (webhook_endpoint_id)
-        WHERE r.retry_at IS NULL OR r.retry_at <= ? ORDER BY w.created_at, w.webhook_endpoint_id`,
-        Date.now(),
-      )
-      .toArray();
-    for (const wake of wakes) {
-      const failed = await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id))
-        .wake({ tenantId, webhookEndpointId: wake.webhook_endpoint_id, cursorEventId: wake.start_event_id })
-        .then(() => null, errorOf);
-      const retry = wake.failures + 1;
-      if (failed === null || retry > RETRY_LIMIT) {
-        sql.exec("DELETE FROM webhook_wake_retries WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
-        sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
-      }
-      if (failed === null) continue;
-      if (retry > RETRY_LIMIT) {
-        console.error(
-          `WebhookWakeFailed: tenant ${tenantId} dropped the wake of webhook endpoint ${wake.webhook_endpoint_id} after ${RETRY_LIMIT} retries; the next matching event wakes it again: ${failed.message}`,
-        );
-        continue;
-      }
-      sql.exec(
-        "INSERT OR REPLACE INTO webhook_wake_retries (webhook_endpoint_id, failures, retry_at) VALUES (?, ?, ?)",
-        wake.webhook_endpoint_id,
-        retry,
-        Date.now() + backoffMs(retry, WEBHOOK_WAKE_FIRST_RETRY_MS),
-      );
-      console.error(
-        `WebhookWakeRetry: tenant ${tenantId} retry ${retry} of ${RETRY_LIMIT} to wake webhook endpoint ${wake.webhook_endpoint_id}: ${failed.message}`,
+    for (const wake of this.takeWebhookWakes()) {
+      this.ctx.waitUntil(
+        this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhookEndpointId)).wake({ tenantId, ...wake }),
       );
     }
-  }
-
-  private async queuedAt(): Promise<number | null> {
-    const retry = await this.ctx.storage.get<AlarmRetry>(ALARM_RETRY_KEY);
-    const failedAt = await this.ctx.storage.get<number>(ALARM_FAILED_AT_KEY);
-    const [next] = this.ctx.storage.sql
-      .exec<{ at: number | null }>(
-        `SELECT MIN(at) AS at FROM (
-        SELECT s.expires_at_ms AS at FROM subscriptions AS s
-          WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
-        UNION ALL
-        SELECT w.next_attempt_at AS at ${PUSH_WAKES_DUE}
-        UNION ALL
-        SELECT retry_at AS at FROM subscription_delivery_retries
-        UNION ALL
-        SELECT r.retry_at AS at ${WEBHOOK_WAKE_RETRIES}) WHERE at > ?`,
-        failedAt ?? Number.MIN_SAFE_INTEGER,
-      )
-      .toArray();
-    return next?.at === null || next?.at === undefined ? null : Math.max(next.at, retry?.at ?? next.at);
-  }
-
-  private async armAlarm(): Promise<void> {
-    const flushAt = this.meter?.flushAt() ?? null;
-    const queued = await this.queuedAt();
-    const at = queued === null || flushAt === null ? (queued ?? flushAt) : Math.min(queued, flushAt);
-    if (at === null) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(at);
   }
 
   private readonly operations: TenantHandlers = {
@@ -556,39 +448,10 @@ export class Tenant extends TenantConnectors {
     getOpenRouterAuthorization: ({ tenantId, principalId, openRouterAuthorizationId }) => ({
       read: this.getOpenRouterAuthorization(tenantId, principalId, openRouterAuthorizationId),
     }),
-    openRouterCallback: async ({ tenantId, openRouterAuthorizationId, callback, now }) => ({
-      settled: await this.openRouterCallback(tenantId, openRouterAuthorizationId, callback, now),
+    openRouterCallback: async ({ openRouterAuthorizationId, callback, now }) => ({
+      settled: await this.openRouterCallback(openRouterAuthorizationId, callback, now),
     }),
-    openRouterAuthorizationDeadlineReached: ({ deadline }) => {
-      this.openRouterAuthorizationDeadlineReached(deadline);
-      return {};
-    },
     openRouterSecretSets: () => ({ names: this.openRouterSecretSets() }),
-    startCircleCIAuthorization: async ({ tenantId, principalId, now }) => ({
-      started: await this.startCircleCIAuthorization(tenantId, principalId, now),
-    }),
-    completeCircleCIAuthorization: async ({ tenantId, principalId, circleCIAuthorizationId, redirectedUrl, now }) => ({
-      stepped: await this.completeCircleCIAuthorization(
-        tenantId,
-        principalId,
-        circleCIAuthorizationId,
-        redirectedUrl,
-        now,
-      ),
-    }),
-    chooseCircleCIOrganization: async ({ tenantId, principalId, circleCIAuthorizationId, organizationId, now }) => ({
-      stepped: await this.chooseCircleCIOrganization(
-        tenantId,
-        principalId,
-        circleCIAuthorizationId,
-        organizationId,
-        now,
-      ),
-    }),
-    circleCIAuthorizationDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.circleCIAuthorizationDeadlineReached(tenantId, deadline);
-      return {};
-    },
     startClaudeSetup: async ({ tenantId, input, now }) => ({
       started: await this.startClaudeSetup(tenantId, input, now),
     }),
@@ -604,10 +467,6 @@ export class Tenant extends TenantConnectors {
     writeClaudeSetupToken: async ({ tenantId, claudeSetupId, credential, token, tokenExpiresAt, now }) => ({
       stored: await this.writeClaudeSetupToken(tenantId, claudeSetupId, credential, token, tokenExpiresAt, now),
     }),
-    claudeSetupDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.claudeSetupDeadlineReached(tenantId, deadline);
-      return {};
-    },
     prepareClaudeSetup: async ({ tenantId, stored, hostId, now }) => ({
       prepared: await this.prepareClaudeSetup(tenantId, stored, hostId, now),
     }),
@@ -615,58 +474,10 @@ export class Tenant extends TenantConnectors {
     listLatestPrebuilds: ({ tenantId }) => ({ prebuilds: this.listLatestPrebuilds(tenantId) }),
     getPrebuild: ({ tenantId, prebuildId }) => ({ prebuild: this.getPrebuild(tenantId, prebuildId) }),
     heldPrebuild: ({ tenantId, key }) => ({ prebuild: this.heldPrebuild(tenantId, key) }),
-    recordPrebuildBuilding: async ({ tenantId, prebuildId, now }) => {
-      await this.recordPrebuildBuilding(tenantId, prebuildId, now);
-      return {};
-    },
-    jobInputsTarget: ({ tenantId, repository, headSha, runId }) => ({
-      target: this.jobInputsTarget(tenantId, repository, headSha, runId),
-    }),
-    bindJobRun: async ({ tenantId, prebuildId, runId, now }) => ({
-      bound: await this.bindJobRun(tenantId, prebuildId, runId, now),
-    }),
-    workflowRunReported: async ({ tenantId, event, now }) => {
-      await this.workflowRunReported(tenantId, event, now);
-      return {};
-    },
-    prebuildDeadlineReached: async ({ tenantId, due, retries }) => {
-      await this.reachDeadline(
-        due,
-        retries,
-        () => this.prebuildDeadlineReached(tenantId, due),
-        (detail) => this.abandonPrebuildDeadline(tenantId, due, detail),
-      );
-      return {};
-    },
-    startGitHubActionsPrebuild: async ({ tenantId, start, now }) => ({
-      started: await this.startGitHubActionsPrebuild(tenantId, start, now),
-    }),
-    startHostPrebuild: async ({ tenantId, commit, provider, input, apiOrigin, now }) => ({
-      started: await this.startHostPrebuild(tenantId, commit, provider, input, apiOrigin, now),
-    }),
-    uploadTarget: ({ tenantId, prebuildId }) => ({ target: this.uploadTarget(tenantId, prebuildId) }),
-    bindCircleCIUploadJob: async ({ tenantId, prebuildId, upload, now }) => ({
-      bound: await this.bindCircleCIUploadJob(tenantId, prebuildId, upload, now),
-    }),
-    startPrebuildUpload: ({ tenantId, prebuildId, upload, now }) => ({
-      recorded: this.startPrebuildUpload(tenantId, prebuildId, upload, now),
-    }),
-    completePrebuildUpload: async ({ tenantId, prebuildId, upload, now }) => ({
-      recorded: await this.completePrebuildUpload(tenantId, prebuildId, upload, now),
+    startHostPrebuild: async ({ tenantId, commit, input, apiOrigin, now }) => ({
+      started: await this.startHostPrebuild(tenantId, commit, input, apiOrigin, now),
     }),
     getPrebuildFailure: ({ tenantId, prebuildId }) => ({ failure: this.getPrebuildFailure(tenantId, prebuildId) }),
-    dispatchCircleCIPrebuild: async ({ tenantId, start, project, parameters, now }) => ({
-      dispatched: await this.dispatchCircleCIPrebuild(tenantId, start, project, parameters, now),
-    }),
-    circleCIWorkflowCompleted: async ({ tenantId, event, now }) => {
-      const { pipelineId, projectId, ...rest } = event;
-      await this.circleCIWorkflowCompleted(
-        tenantId,
-        { ...rest, pipeline: { id: pipelineId }, project: { id: projectId } },
-        now,
-      );
-      return {};
-    },
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
       read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
     }),
@@ -680,9 +491,11 @@ export class Tenant extends TenantConnectors {
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),
-    steerTurn: ({ tenantId, turnId, steer, now }) => ({ sent: this.steerTurn(tenantId, turnId, steer.prompt, now) }),
+    steerTurn: async ({ tenantId, turnId, steer, now }) => ({
+      sent: await this.steerTurn(tenantId, turnId, steer.prompt, now),
+    }),
     listSteers: ({ tenantId, turnId }) => ({ steers: this.listSteers(tenantId, turnId) }),
-    takeSteers: ({ turnId, now }) => ({ taken: this.takeSteers(turnId, now) }),
+    takeSteers: ({ turnId }) => ({ taken: this.takeSteers(turnId) }),
     cancelTurn: ({ tenantId, turnId, cancelledBy, now }) => ({
       cancelled: this.cancelTurn(tenantId, turnId, cancelledBy, now),
     }),
@@ -737,11 +550,10 @@ export class Tenant extends TenantConnectors {
     deleteSession: async ({ tenantId, sessionId }) => ({
       deleted: await this.deleteSession(tenantId, sessionId, Date.now()),
     }),
-    getSession: ({ tenantId, sessionId }) => ({ session: this.getSession(tenantId, sessionId) }),
-    listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
-    listTurns: ({ tenantId, sessionId }) => ({ turns: this.listTurns(tenantId, sessionId) }),
-    getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
-    waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
+    getSession: async ({ tenantId, sessionId }) => ({ session: await this.readSession(tenantId, sessionId) }),
+    listSessions: async ({ tenantId, filter }) => ({ sessions: await this.listSessions(tenantId, filter) }),
+    listTurns: async ({ tenantId, sessionId }) => ({ turns: await this.listTurns(tenantId, sessionId) }),
+    getTurn: async ({ tenantId, turnId }) => ({ turn: await this.readTurn(tenantId, turnId) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),
@@ -766,38 +578,16 @@ export class Tenant extends TenantConnectors {
       this.setWebhookEndpointStatus(webhookEndpointId, status);
       return {};
     },
-    getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
+    getTurnFailure: async ({ tenantId, turnId }) => ({ failure: await this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
     listCredentialHandovers: ({ tenantId, sessionId }) => ({
       handovers: this.listCredentialHandovers(tenantId, sessionId),
     }),
     getSnapshot: ({ tenantId, snapshotId }) => ({ snapshot: this.getSnapshot(tenantId, snapshotId) }),
-    transcriptCursor: ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
-      cursor: this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
+    transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
+      cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
-    connectedAccounts: () => ({ accounts: this.connectedAccounts() }),
-    deleteBuildConnection: ({ provider }) => ({ deleted: this.deleteBuildConnection(provider) }),
-    circleCIConnection: () => ({ connection: this.circleCIConnection() }),
-    circleCIToken: async () => ({ token: await this.circleCIToken() }),
-    connectCircleCI: async ({ start, now }) => ({ connection: await this.connectCircleCI(start, now) }),
-    listCircleCIProjects: ({ tenantId }) => ({ projects: this.listCircleCIProjects(tenantId) }),
-    circleCIProjectBoundTo: ({ tenantId, projectId }) => ({
-      project: this.circleCIProjectBoundTo(tenantId, projectId),
-    }),
-    circleCIProjectOf: ({ tenantId, repository }) => ({ project: this.circleCIProjectOf(tenantId, repository) }),
-    addCircleCIProject: async ({ tenantId, binding, now }) => ({
-      project: await this.addCircleCIProject(tenantId, binding, now),
-    }),
-    circleCIWebhooks: () => ({ webhooks: this.circleCIWebhooks() }),
-    circleCIWebhookSecret: async ({ projectId }) => ({ secret: await this.circleCIWebhookSecret(projectId) }),
-    deleteCircleCIProject: ({ circleCIProjectId }) => ({ deleted: this.deleteCircleCIProject(circleCIProjectId) }),
-    gitHubActionsConnection: ({ tenantId }) => ({ connection: this.gitHubActionsConnection(tenantId) }),
-    connectGitHubActions: ({ tenantId, start, now }) => ({
-      connection: this.connectGitHubActions(tenantId, start, now),
-    }),
-    namespaceConnection: () => ({ connection: this.namespaceConnection() }),
-    connectNamespace: ({ start, now }) => ({ connection: this.connectNamespace(start, now) }),
     offerSent: ({ turnId }) => {
       this.offerSent(turnId);
       return {};
@@ -810,8 +600,15 @@ export class Tenant extends TenantConnectors {
       await this.hostUsage(hostId, usage, now);
       return {};
     },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, now }) => {
+    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
       await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+      await this.failHostClaudeSetups(
+        hostId,
+        "NoHostOnline",
+        `host ${hostId} reconnected without the setup's box; start the setup again`,
+        now,
+        heldClaudeSetupIds,
+      );
       return {};
     },
     forgetHostUsage: ({ hostId }) => {
@@ -821,34 +618,44 @@ export class Tenant extends TenantConnectors {
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
     listHostUsage: ({ tenantId }) => ({ usage: this.listHostUsage(tenantId) }),
     readUsage: () => ({ usage: this.usageMeter().usage(Date.now()) }),
-    deferredOffers: async ({ tenantId, hostId }) => ({ handoffs: await this.deferredOffers(tenantId, hostId) }),
+    readLimits: () => ({ limits: this.limits }),
+    setLimits: async (input) => ({ limits: await this.setLimits(input) }),
     turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
     hostPresence: async ({ tenantId, hostId, presence, now }) => {
       await this.hostPresence(tenantId, hostId, presence, now);
+      if (presence === "Offline") {
+        await this.failHostClaudeSetups(
+          hostId,
+          "NoHostOnline",
+          `host ${hostId} went offline during the setup; check that its supervisor runs, then start the setup again`,
+          now,
+        );
+      }
       return {};
     },
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};
-      await this.failHostWork(tenantId, hostId, detail, now);
-      await this.failHostClaudeSetups(tenantId, hostId, detail, now);
+      if (health === "Degraded") {
+        await this.hostFellSilent(tenantId, hostId, now);
+        return {};
+      }
+      const failed = await this.failHostTurns(
+        tenantId,
+        hostId,
+        { turn: "RateLimited", snapshot: "RateLimited", turnDetail: detail, snapshotDetail: detail },
+        now,
+      );
+      await this.cancelHostTurns(hostId, failed);
+      await this.failHostClaudeSetups(hostId, "RateLimited", detail, now);
       return {};
     },
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),
-    deadlineReached: async ({ tenantId, due, retries }) => {
-      await this.reachDeadline(
-        due,
-        retries,
-        () => this.deadlineReached(tenantId, due),
-        (detail) => this.abandonDeadline(tenantId, due, detail),
-      );
-      return {};
-    },
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

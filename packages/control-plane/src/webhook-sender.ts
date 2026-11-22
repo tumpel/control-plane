@@ -1,27 +1,20 @@
 import { DurableObject } from "cloudflare:workers";
-import type { ListEventsResultSchema, TenantEventSchema } from "@tumpel/schemas";
+import type { ListEventsResultSchema, TenantEventSchema, WebhookDeliveryStatusSchema } from "@tumpel/schemas";
 import type { z } from "zod";
-import { backoffMs, errorOf, RETRY_LIMIT, retryableStatus } from "./backoff.ts";
 import type { Env } from "./index.ts";
 import { keyStoreOf } from "./key-store.ts";
 import { tenantApi } from "./tenant-api.ts";
 import { signWebhook } from "./webhook-signing.ts";
 
 const REQUEST_TIMEOUT_MS = 10_000;
-const FIRST_RETRY_MS = 60_000;
 
 type SenderState = {
   tenantId: string;
   webhookEndpointId: string;
   cursorEventId: number;
-  generation: number;
 };
 
-type Failure = {
-  failures: number;
-  failingSince: number;
-};
-
+type WebhookDeliveryStatus = z.infer<typeof WebhookDeliveryStatusSchema>;
 type Wake = { tenantId: string; webhookEndpointId: string; cursorEventId: number };
 type Listed = z.infer<typeof ListEventsResultSchema>["listed"];
 type TenantEvent = z.infer<typeof TenantEventSchema>;
@@ -33,58 +26,49 @@ export class WebhookSender extends DurableObject<Env> {
   private delivering: Promise<void> = Promise.resolve();
 
   async wake(input: Wake): Promise<void> {
-    const retrying = await this.ctx.storage.transaction(async (transaction) => {
+    await this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<SenderState>("state");
-      const state: SenderState =
-        stored === undefined
-          ? {
-              tenantId: input.tenantId,
-              webhookEndpointId: input.webhookEndpointId,
-              cursorEventId: input.cursorEventId,
-              generation: 1,
-            }
-          : { ...stored, generation: stored.generation + 1 };
-      await transaction.put("state", state);
-      const failure = await transaction.get<Failure>("failure");
-      if (failure === undefined) await transaction.setAlarm(Date.now() + FIRST_RETRY_MS);
-      return failure !== undefined;
+      if (stored !== undefined) return;
+      await transaction.put("state", {
+        tenantId: input.tenantId,
+        webhookEndpointId: input.webhookEndpointId,
+        cursorEventId: input.cursorEventId,
+      } satisfies SenderState);
     });
-    if (retrying) return;
-    this.ctx.waitUntil(this.deliver(false));
+    this.ctx.waitUntil(this.deliver());
   }
 
   async stop(): Promise<void> {
     await this.delivering;
-    await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
 
-  override async alarm(): Promise<void> {
-    await this.deliver(true);
-  }
-
-  private deliver(retry: boolean): Promise<void> {
-    const send = (): Promise<void> => this.sendPending(retry).catch((error: unknown) => this.crashed(error));
+  private deliver(): Promise<void> {
+    const send = (): Promise<void> => this.sendPending();
     this.delivering = this.delivering.then(send, send);
     return this.delivering;
   }
 
-  private async sendPending(retry: boolean): Promise<void> {
+  private async sendPending(): Promise<void> {
     let state = await this.ctx.storage.get<SenderState>("state");
     if (state === undefined) return;
-    if (!retry && (await this.ctx.storage.get<Failure>("failure")) !== undefined) return;
-    const generation = state.generation;
     const tenant = tenantApi(this.env.TENANT, state.tenantId);
     const { endpoint } = await tenant.call("getWebhookEndpoint", {
       tenantId: state.tenantId,
       webhookEndpointId: state.webhookEndpointId,
     });
-    if (endpoint === null || endpoint.status.delivery === "Failing") {
-      await this.ctx.storage.deleteAlarm();
-      await this.ctx.storage.delete("failure");
-      if (endpoint === null) await this.ctx.storage.deleteAll();
+    if (endpoint === null) {
+      await this.ctx.storage.deleteAll();
       return;
     }
+    let failing = endpoint.status.delivery === "Failing";
+    const { tenantId, webhookEndpointId } = state;
+    const setStatus = (status: WebhookDeliveryStatus): Promise<unknown> =>
+      tenant.call("setWebhookEndpointStatus", {
+        tenantId,
+        webhookEndpointId,
+        status,
+      });
     for (;;) {
       const result: { listed: Listed } = await tenant.call("listEvents", {
         tenantId: state.tenantId,
@@ -92,16 +76,10 @@ export class WebhookSender extends DurableObject<Env> {
         events: endpoint.events,
         sessionId: null,
         triggerId: null,
-        waitSeconds: 0,
       });
       const listed: Listed = result.listed;
       if (listed.kind === "CursorExpired") {
-        await this.failed(
-          state,
-          `the endpoint fell behind event ${listed.oldestEventId}, which the event log no longer keeps`,
-          false,
-        );
-        return;
+        throw new Error(`webhook endpoint ${state.webhookEndpointId} fell behind event ${listed.oldestEventId}`);
       }
       const events: TenantEvent[] = listed.page.events;
       for (const event of events) {
@@ -125,20 +103,18 @@ export class WebhookSender extends DurableObject<Env> {
               : response instanceof Error
                 ? response.message
                 : String(response);
-          await this.failed(state, detail, !(response instanceof Response) || retryableStatus(response.status));
+          console.error(
+            `WebhookDeliveryFailed: webhook endpoint ${state.webhookEndpointId} of tenant ${state.tenantId} did not take event ${event.eventId}: ${detail}`,
+          );
+          if (!failing) await setStatus({ delivery: "Failing", detail, failingSince: new Date().toISOString() });
           return;
         }
-        await this.ctx.storage.delete("failure");
+        if (failing) await setStatus({ delivery: "Delivering" });
+        failing = false;
         state = await this.advanceCursor(event.eventId);
       }
       state = await this.advanceCursor(listed.page.lastEventId);
-      if (listed.page.events.length < 100) {
-        await this.ctx.storage.transaction(async (transaction) => {
-          const current = await transaction.get<SenderState>("state");
-          if (current?.generation === generation) await transaction.deleteAlarm();
-        });
-        return;
-      }
+      if (listed.page.events.length < 100) return;
     }
   }
 
@@ -150,42 +126,5 @@ export class WebhookSender extends DurableObject<Env> {
       await transaction.put("state", advanced);
       return advanced;
     });
-  }
-
-  private async crashed(error: unknown): Promise<void> {
-    const state = await this.ctx.storage.get<SenderState>("state");
-    if (state === undefined) throw error;
-    await this.failed(state, errorOf(error).message, true);
-  }
-
-  private async failed(state: SenderState, detail: string, retryable: boolean): Promise<void> {
-    const now = Date.now();
-    const failure = await this.ctx.storage.transaction(async (transaction) => {
-      const stored = await transaction.get<Failure>("failure");
-      const next = { failures: (stored?.failures ?? 0) + 1, failingSince: stored?.failingSince ?? now };
-      if (!retryable || next.failures > RETRY_LIMIT) return next;
-      await transaction.put("failure", next);
-      await transaction.setAlarm(now + backoffMs(next.failures, FIRST_RETRY_MS));
-      return null;
-    });
-    if (failure === null) return;
-    await this.ctx.storage.transaction(async (transaction) => {
-      await transaction.delete("failure");
-      await transaction.deleteAlarm();
-    });
-    const failing = retryable
-      ? `${detail}; still failing after ${RETRY_LIMIT} retries`
-      : `${detail}; retrying cannot fix this`;
-    const unmarked = await tenantApi(this.env.TENANT, state.tenantId)
-      .call("setWebhookEndpointStatus", {
-        tenantId: state.tenantId,
-        webhookEndpointId: state.webhookEndpointId,
-        status: { delivery: "Failing", detail: failing, failingSince: new Date(failure.failingSince).toISOString() },
-      })
-      .then(() => null, errorOf);
-    if (unmarked === null) return;
-    console.error(
-      `WebhookDeliveryFailed: webhook endpoint ${state.webhookEndpointId} of tenant ${state.tenantId} stopped delivering (${failing}), and marking it Failing failed too, so the next matching event tries again: ${unmarked.message}`,
-    );
   }
 }

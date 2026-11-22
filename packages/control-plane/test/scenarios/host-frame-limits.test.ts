@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
-import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
+import { ChannelProtocol } from "@tumpel/schemas";
 import * as control from "../../src/channel/control.ts";
 import { HostFrameMeter, rateLimitDetail } from "../../src/channel/host-health.ts";
 import {
@@ -243,18 +243,4 @@ test("a trip changes the meter health only once the channel settles it, so a fai
   assert.equal(second.kind === "Refused" ? second.tripped : null, "RateLimited");
   meter.settle("RateLimited");
   assert.equal(meter.health(), "RateLimited");
-});
-
-test("a host below protocol 32 over the limit is closed as an unsupported version with nothing stored, so it updates and replays the frame", async () => {
-  const { channel, frame, rateLimited, received } = await openChannel(
-    healthyMeter(),
-    control.FRAME_RATE_LIMITED_VERSION - 1,
-  );
-
-  await stream(frame, 1, 601);
-
-  assert.equal(channel.delivered.length, 600);
-  assert.deepEqual(rateLimited(), []);
-  assert.equal(received(), 600);
-  assert.match(channel.closed ?? "", new RegExp(`^${CloseCode.UnsupportedVersion} over 600 frames a minute`));
 });

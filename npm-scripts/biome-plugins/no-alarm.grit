@@ -1,0 +1,8 @@
+language js(typescript)
+
+or {
+  `setAlarm`,
+  JsMethodClassMember(name=`alarm`)
+} as $found where {
+  register_diagnostic(span=$found, message="No alarms: send inline, check expiry at read time, and let a failure fail.", severity="error")
+}

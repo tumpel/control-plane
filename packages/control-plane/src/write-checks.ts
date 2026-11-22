@@ -95,7 +95,7 @@ const unreleasedPin = async (
   harness: string,
   harnessVersion: string,
 ): Promise<Response | null> => {
-  const architectures = [...new Set((await listHosts(env.DB, tenantId)).map((host) => host.architecture))];
+  const architectures = [...new Set((await listHosts(env, tenantId)).map((host) => host.architecture))];
   if (architectures.length === 0) return null;
   const release = await readRelease(env.RELEASES, Date.now());
   if (release.kind === "Unpublished") return noRelease();

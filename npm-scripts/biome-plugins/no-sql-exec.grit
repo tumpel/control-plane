@@ -1,0 +1,9 @@
+language js(typescript)
+
+`$receiver.exec` as $found where {
+  $receiver <: or {
+    `sql`,
+    `$_.sql`
+  },
+  register_diagnostic(span=$found, message="No hand-written SQL: write the query with Drizzle (rules/storage.md). Files that still hold raw SQL are listed in biome.json and only leave the list.", severity="error")
+}

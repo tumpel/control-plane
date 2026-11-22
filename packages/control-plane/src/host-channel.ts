@@ -3,7 +3,7 @@ import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
+import { lost, refusedOrResent, resendable, unheard } from "./channel/failure.ts";
 import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
 import { HostLedger } from "./channel/ledger.ts";
 import type {
@@ -15,11 +15,14 @@ import type {
   StoredControlMessage,
   TelemetryBatch,
 } from "./channel/protocol.ts";
+import { durableDb } from "./db/client.ts";
+import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { HOST_MIGRATIONS } from "./host-migrations.ts";
+import type { OfferSent } from "./hosts";
 import { problem } from "./http";
 import type { Env } from "./index";
-import { limitsOf } from "./limits.ts";
+import { hostLimitsOf, limitsOf } from "./limits.ts";
 import { METRICS_LIMITS, metricBatches } from "./metrics-store.ts";
 import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
@@ -74,7 +77,7 @@ export class HostChannel extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.ledger = new HostLedger(ctx.storage.sql);
+    this.ledger = new HostLedger(durableDb(ctx.storage, hostSchema));
     void ctx.blockConcurrencyWhile(async () => {
       await migrateDurableObject(ctx.storage, HOST_MIGRATIONS);
     });
@@ -107,16 +110,30 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
-  async send(message: StoredControlMessage): Promise<"Sent" | "Deferred"> {
+  lastReceivedAt(): number | null {
+    const received = this.ctx
+      .getWebSockets()
+      .filter(
+        (socket) =>
+          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
+      )
+      .map((socket) => this.attachment(socket).lastReceivedAt);
+    return received.length === 0 ? null : Math.max(...received);
+  }
+
+  async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    if (message.type === "TurnOffer" && (await this.offersPaused(host.host_id))) return "Deferred";
     const open = this.ctx
       .getWebSockets()
       .find(
         (socket) =>
           socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
       );
+    if (message.type === "TurnOffer") {
+      const refused = await this.offerRefused(host.host_id, open);
+      if (refused !== null) return refused;
+    }
     if (open === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null));
       return "Sent";
@@ -125,6 +142,29 @@ export class HostChannel extends DurableObject<Env> {
     await control.send(attachment.connection, message, this.context(open, host, attachment));
     open.serializeAttachment(attachment);
     return "Sent";
+  }
+
+  private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
+    const tenantId = await this.tenantOf(hostId);
+    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so its running work failed`;
+    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", {
+      tenantId,
+      hostId,
+      health: "Degraded",
+      detail,
+      now,
+    });
+  }
+
+  private async offerRefused(hostId: string, open: WebSocket | undefined): Promise<OfferSent | null> {
+    if (await this.offersPaused(hostId)) return "RateLimited";
+    if (open === undefined) return "Offline";
+    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ state: string }>();
+    if (row?.state !== "Online") return "Offline";
+    const silentFor = Date.now() - this.attachment(open).lastReceivedAt;
+    return silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Degraded" : null;
   }
 
   async restoreHealth(detail: string): Promise<void> {
@@ -153,6 +193,7 @@ export class HostChannel extends DurableObject<Env> {
         fix: "Connect with tumpel-supervisor run",
       });
     }
+    await this.relimitFrames(host.host_id);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
     const now = Date.now();
@@ -165,7 +206,6 @@ export class HostChannel extends DurableObject<Env> {
     };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
-    await this.armAlarm(now + this.deadlineMs());
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -196,7 +236,10 @@ export class HostChannel extends DurableObject<Env> {
       return this.refreshPresence(socket);
     }
     const now = Date.now();
+    const silentFor = now - attachment.lastReceivedAt;
     attachment.lastReceivedAt = now;
+    if (attachment.connection.phase === "Open" && silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
+      await this.fellSilent(host.host_id, silentFor, now);
     const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
@@ -225,14 +268,14 @@ export class HostChannel extends DurableObject<Env> {
     if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
       await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
+    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
       if (
         !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
         this.ledger.stalled() >= RETRY_LIMIT
       )
         return this.giveUp(socket, attachment, context);
-      await this.sendDeferredOffers(host.host_id, attachment, context);
+      if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -241,14 +284,11 @@ export class HostChannel extends DurableObject<Env> {
     )
       control.beat(context);
     this.keep(socket, attachment);
-    await this.armAlarm(attachment.lastReceivedAt + this.deadlineMs());
     if (event.kind !== "Welcomed") return;
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
     await this.presence("Online");
-    await this.sendDeferredOffers(host.host_id, attachment, context);
-    this.keep(socket, attachment);
   }
 
   private async take(
@@ -324,13 +364,25 @@ export class HostChannel extends DurableObject<Env> {
     }
     const reported = await this.report(hostId, usage, now).then(
       () => true,
-      (error: unknown) => this.undelivered("Heartbeat", error),
+      (error: unknown) => this.unreported(error, attachment, context),
     );
     if (!reported) return false;
     const held = this.ledger.take();
     attachment.heldFrom = this.ledger.first();
     if (held.length > 0) control.acknowledge(context, held);
     return true;
+  }
+
+  private unreported(error: unknown, attachment: Attachment, context: control.ControlContext): false {
+    if (!unheard(error)) return this.undelivered("Heartbeat", error);
+    this.ledger.take();
+    attachment.heldFrom = null;
+    attachment.connection = control.close(
+      context.port,
+      CloseCode.ProtocolError,
+      "the tenant restarted and lost this host's Hello; reconnect so the Hello carries its usage again",
+    ).connection;
+    return false;
   }
 
   private undelivered(type: string, error: unknown): false {
@@ -356,37 +408,14 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;
-    if (reply.type === "TurnHandoff") {
-      const sent = await this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
-      if (sent !== "Sent") return;
-      const tenantId = await this.tenantOf(hostId);
-      await tenantApi(this.env.TENANT, tenantId).call("offerSent", { turnId: reply.offer.turnId });
-      return;
-    }
+    if (reply.type === "TurnHandoff")
+      throw new Error(`the tenant answered host ${hostId} with a TurnHandoff, which it sends itself`);
     if (reply.type === "Refused") {
       console.error(`FrameRefused: host ${hostId} frame ${frame.seq}: ${reply.reason}`);
       return control.refuseFrame(context.port, frame.seq, reply.reason);
     }
     return control.send(attachment.connection, reply, context);
-  }
-
-  private async sendDeferredOffers(
-    hostId: string,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): Promise<void> {
-    if (await this.offersPaused(hostId)) return;
-    const tenantId = await this.tenantOf(hostId);
-    const tenant = tenantApi(this.env.TENANT, tenantId);
-    for (const handoff of (await tenant.call("deferredOffers", { tenantId, hostId })).handoffs) {
-      const sent =
-        handoff.hostId === hostId
-          ? await control.send(attachment.connection, handoff.offer, context).then(() => "Sent")
-          : await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
-      if (sent === "Sent") await tenant.call("offerSent", { turnId: handoff.offer.turnId });
-    }
   }
 
   override async webSocketClose(socket: WebSocket): Promise<void> {
@@ -397,34 +426,10 @@ export class HostChannel extends DurableObject<Env> {
     await this.refreshPresence(socket);
   }
 
-  override async alarm(): Promise<void> {
-    const now = Date.now();
-    const deadlineMs = this.deadlineMs();
-    const live: number[] = [];
-    for (const socket of this.ctx.getWebSockets()) {
-      const { lastReceivedAt } = this.attachment(socket);
-      if (now - lastReceivedAt < deadlineMs) {
-        live.push(lastReceivedAt);
-        continue;
-      }
-      socket.close(CloseCode.HeartbeatDeadline, `nothing arrived for ${deadlineMs / 1000} seconds; reconnect`);
-    }
-    await this.refreshPresence();
-    if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + deadlineMs);
-  }
-
   private keep(socket: WebSocket, attachment: Attachment): void {
     attachment.heldFrom = this.ledger.first();
     attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
     socket.serializeAttachment(attachment);
-  }
-
-  private async armAlarm(at: number): Promise<void> {
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(at);
-  }
-
-  private deadlineMs(): number {
-    return settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
@@ -469,28 +474,27 @@ export class HostChannel extends DurableObject<Env> {
     });
   }
 
+  private async relimitFrames(hostId: string): Promise<void> {
+    if (this.meter === null) return;
+    const limits = await hostLimitsOf(this.env.DB, limitsOf(this.env), hostId);
+    if (limits !== null) this.meter.relimit(limits.hostFramesPerMinute);
+  }
+
   private async frameMeter(hostId: string): Promise<HostFrameMeter> {
     if (this.meter !== null) return this.meter;
-    const row = await this.env.DB.prepare("SELECT health FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ health: string }>();
+    const row = await hostLimitsOf(this.env.DB, limitsOf(this.env), hostId);
     if (row === null) throw new Error(`host ${hostId} has a channel but no row in the hosts table; enrol it again`);
     const sql = this.ctx.storage.sql;
     const [saved] = sql.exec<{ trips: string }>("SELECT trips FROM frame_trips WHERE frame_trips_id = 1").toArray();
     const trips = z.array(z.number()).parse(saved === undefined ? [] : JSON.parse(saved.trips));
-    this.meter ??= new HostFrameMeter(
-      limitsOf(this.env).hostFramesPerMinute,
-      HostHealthSchema.parse(row.health),
-      trips,
-      {
-        save: (next) =>
-          sql.exec(
-            "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
-            JSON.stringify(next),
-          ),
-        clear: () => sql.exec("DELETE FROM frame_trips WHERE frame_trips_id = 1"),
-      },
-    );
+    this.meter ??= new HostFrameMeter(row.hostFramesPerMinute, HostHealthSchema.parse(row.health), trips, {
+      save: (next) =>
+        sql.exec(
+          "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
+          JSON.stringify(next),
+        ),
+      clear: () => sql.exec("DELETE FROM frame_trips WHERE frame_trips_id = 1"),
+    });
     return this.meter;
   }
 
@@ -538,9 +542,13 @@ export class HostChannel extends DurableObject<Env> {
     await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
   }
 
-  private async reconcileHeldBoxes(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+  private async reconcileHeldBoxes(
+    hostId: string,
+    held: { heldSessionIds: string[]; heldClaudeSetupIds: string[] },
+    now: number,
+  ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, heldSessionIds, now });
+    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {

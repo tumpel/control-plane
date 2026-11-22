@@ -25,10 +25,11 @@ export const packKey = (tenantId: string, packDigest: string): string => `${tena
 
 export const packListKey = (storageKey: string): string => `${storageKey}.packs`;
 
+const placementsOf = (root: Placement[]): number =>
+  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) + root.length;
+
 export const indexBytesOf = (root: Placement[]): number =>
-  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) *
-    BYTES_PER_PLACEMENT +
-  MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
+  placementsOf(root) * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
 
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -312,7 +313,6 @@ export class SnapshotManifests {
       const sink = new PackSink();
       const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
       if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
-      for (const placement of root.value) sink.packs.add(placement.packDigest);
       return { kind: "Read", value: sink.packs };
     });
     if (read.kind !== "Read") return read;
@@ -349,7 +349,7 @@ export class SnapshotManifests {
       this.indexes.delete(key);
       cached -= index.bytes;
     }
-    const sink = new IndexSink(Math.floor(needed / BYTES_PER_PLACEMENT));
+    const sink = new IndexSink(placementsOf(root.value));
     const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
     if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
     return { kind: "Read", value: remember(this.indexes, storageKey, sink.index()) };
@@ -372,6 +372,10 @@ export class SnapshotManifests {
     root: Placement[],
     sink: PlacementSink,
   ): Promise<string | undefined> {
+    for (const placement of root) {
+      const failure = sink.add(placement);
+      if (failure !== undefined) return `the manifest of ${storageKey} is unreadable: ${failure}`;
+    }
     const manifest = new ManifestStream(sink);
     for (const range of ranges(root)) {
       const body = await store.get(packKey(tenantId, range.packDigest), {
@@ -410,13 +414,15 @@ const counted = (state: LiveState, storageKey: string, packs: ReadonlySet<string
   for (const packDigest of packs) state.counts.set(packDigest, (state.counts.get(packDigest) ?? 0) + 1);
 };
 
-const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): void => {
+const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): string[] => {
   state.members.delete(storageKey);
+  const freed: string[] = [];
   for (const packDigest of packs) {
     const count = (state.counts.get(packDigest) ?? 0) - 1;
     if (count > 0) state.counts.set(packDigest, count);
-    else state.counts.delete(packDigest);
+    else if (state.counts.delete(packDigest)) freed.push(packDigest);
   }
+  return freed;
 };
 
 export class LivePacks {
@@ -445,28 +451,49 @@ export class LivePacks {
     });
   }
 
-  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
+  claim(
+    store: R2Bucket,
+    tenantId: string,
+    storageKey: string,
+    packs: ReadonlySet<string>,
+    reused: ReadonlySet<string>,
+  ): Promise<string | null> {
+    return this.turn(async () => {
+      const state = await this.loaded(store, tenantId);
+      const gone = [...reused].sort().find((packDigest) => !state.counts.has(packDigest));
+      if (gone !== undefined) return gone;
+      if (state.members.has(storageKey)) return null;
+      counted(state, storageKey, packs);
+      await this.persist(store, tenantId, state);
+      return null;
+    });
+  }
+
+  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
     return this.turn(() =>
       this.released(store, tenantId, storageKeys).catch((error: unknown) => {
         this.state = null;
         console.error(
           `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
         );
+        return [];
       }),
     );
   }
 
-  private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
+  private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
     const state = await this.loaded(store, tenantId);
+    const freed: string[] = [];
     let changed = false;
     for (const storageKey of storageKeys) {
       if (state.unreadable.delete(storageKey) || !state.members.has(storageKey)) continue;
       const read = await this.manifests.packs(store, tenantId, storageKey);
       if (read.kind !== "Read") throw new Error(`snapshot ${storageKey} has no readable pack list: ${read.detail}`);
-      uncounted(state, storageKey, read.value);
+      freed.push(...uncounted(state, storageKey, read.value));
       changed = true;
     }
     if (changed) await this.persist(store, tenantId, state);
+    return freed;
   }
 
   private async loaded(store: R2Bucket, tenantId: string): Promise<LiveState> {

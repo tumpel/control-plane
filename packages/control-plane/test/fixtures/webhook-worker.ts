@@ -1,10 +1,9 @@
 import { TenantApiProtocol } from "@tumpel/schemas";
-import { RETRY_LIMIT } from "../../src/backoff.ts";
 import worker, { Tenant as BaseTenant, WebhookSender as BaseWebhookSender, type Env } from "../../src/index.ts";
 import type { NewTenantEvent } from "../../src/tenant-events.ts";
 import { webhookSenderName } from "../../src/webhook-sender.ts";
 
-export { EventChannel, HostChannel, SessionTimer, TenantMetrics } from "../../src/index.ts";
+export { EventChannel, HostChannel, TenantMetrics } from "../../src/index.ts";
 
 export class Tenant extends BaseTenant {
   createFixtureSubscription(sessionId: string, now: number): void {
@@ -56,47 +55,18 @@ export class Tenant extends BaseTenant {
         events: [],
         sessionId: null,
         triggerId: null,
-        waitSeconds: 0,
       },
     });
   }
 
-  pushWakes(): Record<string, SqlStorageValue>[] {
-    return this.ctx.storage.sql
-      .exec("SELECT push_subscription_id, failures, next_attempt_at FROM push_wakes ORDER BY push_subscription_id")
-      .toArray();
-  }
-
   corruptPushKey(endpoint: string): void {
     this.ctx.storage.sql.exec("UPDATE push_subscriptions SET p256dh = ? WHERE endpoint = ?", "A".repeat(87), endpoint);
-  }
-
-  alarmAt(): Promise<number | null> {
-    return this.ctx.storage.getAlarm();
   }
 }
 
 export class WebhookSender extends BaseWebhookSender {
   state(): Promise<unknown> {
     return this.ctx.storage.get("state");
-  }
-
-  failure(): Promise<unknown> {
-    return this.ctx.storage.get("failure");
-  }
-
-  alarmAt(): Promise<number | null> {
-    return this.ctx.storage.getAlarm();
-  }
-
-  async exhaustRetries(): Promise<void> {
-    const failure = await this.ctx.storage.get<Record<string, unknown>>("failure");
-    if (failure === undefined) throw new Error("the webhook sender has no failure");
-    await this.ctx.storage.put("failure", { ...failure, failures: RETRY_LIMIT });
-  }
-
-  runAlarm(): Promise<void> {
-    return super.alarm();
   }
 }
 
@@ -170,18 +140,10 @@ export default {
         }),
       );
     }
-    if (url.pathname === "/__fixture/push/wakes") {
-      const { tenantId } = await requestBody<{ tenantId: string }>(request);
-      return Response.json(await tenant(env, tenantId).pushWakes());
-    }
     if (url.pathname === "/__fixture/push/corrupt-key") {
       const { tenantId, endpoint } = await requestBody<{ tenantId: string; endpoint: string }>(request);
       await tenant(env, tenantId).corruptPushKey(endpoint);
       return new Response(null, { status: 204 });
-    }
-    if (url.pathname === "/__fixture/push/alarm-at") {
-      const { tenantId } = await requestBody<{ tenantId: string }>(request);
-      return Response.json({ alarmAt: await tenant(env, tenantId).alarmAt() });
     }
     if (url.pathname === "/__fixture/subscription/create") {
       const { tenantId, sessionId, now } = await requestBody<{ tenantId: string; sessionId: string; now: number }>(
@@ -190,24 +152,12 @@ export default {
       await tenant(env, tenantId).createFixtureSubscription(sessionId, now);
       return new Response(null, { status: 204 });
     }
-    const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)(\/exhaust-retries|\/alarm)?$/.exec(url.pathname);
+    const senderMatch = /^\/__fixture\/sender\/([^/]+)\/([^/]+)$/.exec(url.pathname);
     if (senderMatch !== null) {
       const tenantId = decodeURIComponent(senderMatch[1] ?? "");
       const endpointId = decodeURIComponent(senderMatch[2] ?? "");
       const stub = sender(env, tenantId, endpointId);
-      if (senderMatch[3] === "/exhaust-retries") {
-        await stub.exhaustRetries();
-        return new Response(null, { status: 204 });
-      }
-      if (senderMatch[3] === "/alarm") {
-        await stub.runAlarm();
-        return new Response(null, { status: 204 });
-      }
-      return Response.json({
-        state: (await stub.state()) ?? null,
-        failure: (await stub.failure()) ?? null,
-        alarmAt: await stub.alarmAt(),
-      });
+      return Response.json({ state: (await stub.state()) ?? null });
     }
     if (url.pathname === "/__fixture/endpoint") {
       const tenantId = url.searchParams.get("tenantId") ?? "";

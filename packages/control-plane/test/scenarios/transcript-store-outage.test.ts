@@ -30,6 +30,7 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const failed = await world.turn(a.turnId);
   assert.equal(failed.state, "Failed");
   assert.match(JSON.stringify(failed), /TranscriptNotStored/);
+  await host.answersSnapshot(a.sessionId);
 
   const before = world.tenantRowsWritten();
   for (let lineSeq = 2; lineSeq < lines; lineSeq++) await line(b.turnId, lineSeq);
@@ -51,9 +52,4 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const completed = await world.turn(b.turnId);
   assert.equal(completed.state, "Completed");
   assert.equal(completed.lineCount, lines);
-  assert.equal(
-    world.tenantSql().exec("SELECT COUNT(*) AS rows FROM transcript_pending").one().rows,
-    0,
-    "no line lands in transcript_pending",
-  );
 });

@@ -9,7 +9,6 @@ import {
   type ControlEnvelope,
   emptyLedger,
   type Frame,
-  HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
@@ -72,6 +71,9 @@ const turnOffer: StoredControlMessage = {
   harnessVersion: "1.0.0",
   model: "claude-test",
   prompt: "hello",
+  boxRetention: "Auto",
+  turnSeconds: 3600,
+  idleSeconds: 900,
 };
 
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
@@ -421,33 +423,9 @@ const telemetryBatch: HostMessage = {
   turns: [],
 };
 
-test("a TelemetryBatch on a connection below its version is refused and acked, and the next frame follows it", async () => {
-  const channel = setup();
-  const link = channel.connect();
-  await link.hello(undefined, control.TELEMETRY_BATCH_VERSION - 1);
-  await link.deliver(frame(1, 0, telemetryBatch));
-  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
-  assert.equal(link.closed, null);
-  assert.deepEqual(
-    link.sent.filter((envelope) => envelope.type === "FrameRefused"),
-    [
-      {
-        type: "FrameRefused",
-        seq: 1,
-        reason: `frame 1 carries TelemetryBatch, which needs protocol version ${control.TELEMETRY_BATCH_VERSION}; this connection speaks ${control.TELEMETRY_BATCH_VERSION - 1}, update the supervisor`,
-      },
-    ],
-  );
-  assert.deepEqual(
-    link.events.slice(1).map((event) => event.kind),
-    ["FrameRefused", "Message"],
-  );
-  assert.equal(channel.ledger.current.received, 2);
-});
-
 test("a TelemetryBatch on a connection that speaks its version is accepted as a message", async () => {
   const link = setup().connect();
-  await link.hello(undefined, control.TELEMETRY_BATCH_VERSION);
+  await link.hello();
   await link.deliver(frame(1, 0, telemetryBatch));
   assert.equal(link.closed, null);
   assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 0, telemetryBatch) });
@@ -626,11 +604,12 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
     sentAt: "2026-11-18T10:00:00+01:00",
     usage: USAGE,
     heldSessionIds,
+    heldClaudeSetupIds: [],
   });
   await first.deliver(beat(["session-1"]));
   await first.deliver(beat([]));
   assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"] },
+    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"], heldClaudeSetupIds: [] },
     { kind: "Heartbeat", usage: USAGE, health: "Healthy" },
   ]);
 
@@ -642,14 +621,6 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
     usage: USAGE,
     health: "Healthy",
     heldSessionIds: [],
+    heldClaudeSetupIds: [],
   });
-});
-
-test("a heartbeat from a host before the held sessions version reports nothing", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, HELD_SESSIONS_VERSION - 1);
-  const heartbeat = { type: "Heartbeat", sentAt: "2026-11-18T10:00:00+01:00", usage: USAGE };
-  const received = await control.receive(link.connection, JSON.stringify(heartbeat), link.context);
-  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE, health: "Healthy" });
-  assert.equal(link.closed, null);
 });

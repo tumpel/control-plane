@@ -8,7 +8,7 @@ const rowsFor = async (lines: number) => {
   const world = await World.open();
   try {
     const host = await world.hostOnline("host-1");
-    await world.startSession({ prompt: "write a long answer", tags: [] });
+    const session = await world.startSession({ prompt: "write a long answer", tags: [] });
     const offer = host.takeOffer();
     await host.claims(offer);
     const start = world.tenantRowsWritten();
@@ -23,6 +23,7 @@ const rowsFor = async (lines: number) => {
       lastLineSeq: lines + 1,
       completedAt: new Date(Date.now()).toISOString(),
     });
+    await host.answersSnapshot(session.sessionId);
     const turn = await world.turn(offer.turnId);
     assert.equal(turn.lineCount, lines + 1);
     return { streamed, turn: world.tenantRowsWritten() - start };
@@ -38,12 +39,9 @@ test("transcript lines within a chunk write no row each, so a turn's rows do not
   assert.equal(long.turn, short.turn);
 });
 
-test("a long transcript writes one chunk pointer per chunk of lines and nothing per line", async () => {
-  const chunks = 10;
+test("a long transcript writes no row per chunk of lines, so a turn's rows do not grow with its chunks", async () => {
   const short = await rowsFor(SETTINGS.transcriptChunkLines);
-  const long = await rowsFor(SETTINGS.transcriptChunkLines * chunks);
-  assert.ok(
-    long.turn - short.turn <= (chunks - 1) * 3,
-    `${chunks - 1} more chunks wrote ${long.turn - short.turn} more rows`,
-  );
+  const long = await rowsFor(SETTINGS.transcriptChunkLines * 10);
+  assert.equal(long.streamed, short.streamed);
+  assert.equal(long.turn, short.turn);
 });

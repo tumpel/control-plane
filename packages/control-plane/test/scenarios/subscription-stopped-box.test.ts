@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { World } from "./harness/world.ts";
 
-const MINUTE = 60_000;
-const IDLE_EVICTION = 15 * MINUTE;
-
-test("a foreman whose idle box was evicted gets the next crew event as a turn on a fresh box", async (t) => {
+test("a foreman whose idle box the host dropped gets the next crew event as a turn on a fresh box", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -27,9 +24,9 @@ test("a foreman whose idle box was evicted gets the next crew event as a turn on
   assert.equal(crewTurn.sessionId, crew.sessionId);
   await host.claims(crewTurn);
 
-  await world.passes(IDLE_EVICTION);
-  const evictedBox = await host.tearsDownBox(foreman.sessionId);
-  assert.equal(evictedBox, foremanTurn.boxId);
+  assert.equal(foremanTurn.idleSeconds, 15 * 60);
+  await world.passes(foremanTurn.idleSeconds * 1000);
+  await host.dropsIdleBox(foremanTurn);
   assert.equal((await world.session(foreman.sessionId)).state, "Stopped");
 
   await host.finishes(crewTurn);

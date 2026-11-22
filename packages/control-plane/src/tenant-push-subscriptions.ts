@@ -7,7 +7,7 @@ import {
 } from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
 import type { z } from "zod";
-import { backoffMs, errorOf, RETRY_LIMIT, retryableStatus } from "./backoff.ts";
+import { errorOf } from "./backoff.ts";
 import { fromBase64, seal, unseal } from "./envelope.ts";
 import { githubRepository } from "./github.ts";
 import type { NewTenantEvent } from "./tenant-events.ts";
@@ -33,8 +33,6 @@ type PushWakeRow = {
   payload: string;
   event_created_at: number;
   repository: string;
-  failures: number;
-  next_attempt_at: number;
 };
 
 const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id, p.endpoint, p.created_at,
@@ -42,17 +40,7 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
     WHERE push_subscription_id = p.push_subscription_id ORDER BY event)) AS events
   FROM push_subscriptions AS p`;
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
-const PUSH_BATCH_SIZE = 20;
-const PUSH_TTL_MS = 86_400 * 1000;
-const PUSH_FIRST_RETRY_MS = 60_000;
-
-export const PUSH_WAKES_DUE = `FROM push_wakes AS w
-  JOIN push_subscriptions AS p USING (push_subscription_id)
-  JOIN events AS e USING (event_id)
-  JOIN event_sessions AS es USING (event_id)
-  JOIN sessions AS s USING (session_id)
-  WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-    WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id)`;
+const PUSH_TTL_SECONDS = 86_400;
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
@@ -100,6 +88,8 @@ const toPushSubscription = (tenantId: string, row: PushSubscriptionRow): PushSub
   });
 
 export abstract class TenantPushSubscriptions extends TenantTriggers {
+  private readonly pushEventIds: number[] = [];
+
   protected listPushSubscriptions(tenantId: string, principalId: string): PushSubscription[] {
     return this.ctx.storage.sql
       .exec<PushSubscriptionRow>(
@@ -156,206 +146,117 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     );
   }
 
-  protected async deliverPushes(tenantId: string, now: number): Promise<void> {
+  protected async deliverPushes(tenantId: string): Promise<void> {
+    const eventIds = this.pushEventIds.splice(0);
+    if (eventIds.length === 0) return;
     const rows = this.ctx.storage.sql
       .exec<PushWakeRow>(
-        `SELECT w.event_id, w.failures, w.next_attempt_at, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed,
-          e.payload, e.created_at AS event_created_at, s.repository ${PUSH_WAKES_DUE}
-            AND w.next_attempt_at <= ?
-          ORDER BY w.event_id, p.push_subscription_id
-          LIMIT ?`,
-        now,
-        PUSH_BATCH_SIZE,
+        `SELECT e.event_id, p.push_subscription_id, p.endpoint, p.p256dh, p.auth_sealed,
+          e.payload, e.created_at AS event_created_at, s.repository FROM events AS e
+          JOIN event_sessions AS es USING (event_id)
+          JOIN sessions AS s USING (session_id)
+          JOIN push_subscription_events AS pe ON pe.event = json_extract(e.payload, '$.event')
+          JOIN push_subscriptions AS p USING (push_subscription_id)
+          WHERE e.event_id IN (SELECT value FROM json_each(?))
+          ORDER BY e.event_id, p.push_subscription_id`,
+        JSON.stringify(eventIds),
       )
       .toArray();
     if (rows.length === 0) return;
-    const keys = await Promise.all([this.dataKey(), vapidPrivateKey(this.env.VAPID_PRIVATE_KEY)]).then(
-      ([dataKey, privateKey]) => ({ dataKey, privateKey }),
-      errorOf,
-    );
+    const dataKey = await this.dataKey();
+    const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
     for (const row of rows) {
-      if (keys instanceof Error) {
-        this.dropPushWake(row, `${keys.message}, which no retry changes`);
+      const event = TenantEventSchema.parse({
+        ...JSON.parse(row.payload),
+        eventId: row.event_id,
+        tenantId,
+        createdAt: row.event_created_at,
+      });
+      if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
+        throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
+      }
+      const repository = githubRepository(row.repository);
+      if (repository === null) throw new Error(`session repository ${row.repository} is not a GitHub repository`);
+      const validKey = await importP256dh(row.p256dh).then(
+        () => true,
+        () => false,
+      );
+      if (!validKey) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ?",
+          row.push_subscription_id,
+          row.p256dh,
+        );
         continue;
       }
-      await this.deliverPush(tenantId, row, now, keys).catch((error: unknown) =>
-        this.dropPushWake(row, `${errorOf(error).message}, which no retry changes`),
-      );
-    }
-  }
-
-  private async deliverPush(
-    tenantId: string,
-    row: PushWakeRow,
-    now: number,
-    { dataKey, privateKey }: { dataKey: CryptoKey; privateKey: string },
-  ): Promise<void> {
-    const expiresAt = row.event_created_at + PUSH_TTL_MS;
-    if (now >= expiresAt) {
-      this.ctx.storage.sql.exec(
-        "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
-        row.event_id,
-        row.push_subscription_id,
-      );
-      return;
-    }
-    const event = TenantEventSchema.parse({
-      ...JSON.parse(row.payload),
-      eventId: row.event_id,
-      tenantId,
-      createdAt: row.event_created_at,
-    });
-    if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
-      return this.dropPushWake(row, `it holds unsupported event ${event.event}, which no retry changes`);
-    }
-    const repository = githubRepository(row.repository);
-    if (repository === null) {
-      this.dropPushWake(row, `session repository ${row.repository} is not a GitHub repository, which no retry changes`);
-      return;
-    }
-    const validKey = await importP256dh(row.p256dh).then(
-      () => true,
-      () => false,
-    );
-    if (!validKey) {
-      this.ctx.storage.sql.exec(
-        "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ?",
-        row.push_subscription_id,
-        row.p256dh,
-      );
-      return;
-    }
-    const path = `/t/${encodeURIComponent(event.tenantId)}/sessions/${encodeURIComponent(event.sessionId)}`;
-    const data =
-      event.event === "SubscriptionPaused"
-        ? {
-            title: `Subscription paused in ${repository.name}`,
-            body:
-              event.reason.kind === "ByRequest"
-                ? event.reason.message
-                : event.reason.kind === "DeliveryFailed"
-                  ? "A delivery turn failed. Open the session to decide what to do next."
-                  : "Several crew turns failed. Open the session to decide what to do next.",
-            path,
-          }
-        : {
-            title: `Subscription ended in ${repository.name}`,
-            body: {
-              SessionArchived: "The session was archived.",
-              SessionFailed: "The session failed.",
-              Expired: "The subscription expired.",
-              GoalMet: "The subscription reached its goal.",
-            }[event.reason],
-            path,
-          };
-    const payload = await buildPushPayload(
-      { data: PushNotificationSchema.parse(data), options: { ttl: Math.ceil((expiresAt - now) / 1000) } },
-      {
-        endpoint: row.endpoint,
-        expirationTime: null,
-        keys: {
-          p256dh: row.p256dh,
-          auth: await unseal(
-            dataKey,
-            row.auth_sealed,
-            authContext(row.push_subscription_id),
-            "turn notifications off and on again for this browser",
-          ),
+      const path = `/t/${encodeURIComponent(event.tenantId)}/sessions/${encodeURIComponent(event.sessionId)}`;
+      const data =
+        event.event === "SubscriptionPaused"
+          ? {
+              title: `Subscription paused in ${repository.name}`,
+              body:
+                event.reason.kind === "ByRequest"
+                  ? event.reason.message
+                  : event.reason.kind === "DeliveryFailed"
+                    ? "A delivery turn failed. Open the session to decide what to do next."
+                    : "Several crew turns failed. Open the session to decide what to do next.",
+              path,
+            }
+          : {
+              title: `Subscription ended in ${repository.name}`,
+              body: {
+                SessionArchived: "The session was archived.",
+                SessionFailed: "The session failed.",
+                Expired: "The subscription expired.",
+                GoalMet: "The subscription reached its goal.",
+              }[event.reason],
+              path,
+            };
+      const payload = await buildPushPayload(
+        { data: PushNotificationSchema.parse(data), options: { ttl: PUSH_TTL_SECONDS } },
+        {
+          endpoint: row.endpoint,
+          expirationTime: null,
+          keys: {
+            p256dh: row.p256dh,
+            auth: await unseal(
+              dataKey,
+              row.auth_sealed,
+              authContext(row.push_subscription_id),
+              "turn notifications off and on again for this browser",
+            ),
+          },
         },
-      },
-      {
-        privateKey,
-        publicKey: this.env.VAPID_PUBLIC_KEY,
-        subject: this.env.VAPID_SUBJECT,
-      },
-    );
-    const signal = AbortSignal.timeout(10_000);
-    const response = await fetch(row.endpoint, { ...payload, signal }).catch((error: unknown) =>
-      signal.aborted ? "The push service did not answer within 10 seconds" : error,
-    );
-    if (response instanceof Response && (response.status === 404 || response.status === 410)) {
-      const deleted = this.ctx.storage.sql.exec(
-        "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
-        row.push_subscription_id,
-        row.p256dh,
-        row.auth_sealed,
-      ).rowsWritten;
-      if (deleted === 0) {
+        {
+          privateKey,
+          publicKey: this.env.VAPID_PUBLIC_KEY,
+          subject: this.env.VAPID_SUBJECT,
+        },
+      );
+      const signal = AbortSignal.timeout(10_000);
+      const response = await fetch(row.endpoint, { ...payload, signal }).catch((error: unknown) =>
+        signal.aborted ? "The push service did not answer within 10 seconds" : error,
+      );
+      if (response instanceof Response && (response.status === 404 || response.status === 410)) {
         this.ctx.storage.sql.exec(
-          "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-          now,
-          row.event_id,
+          "DELETE FROM push_subscriptions WHERE push_subscription_id = ? AND p256dh = ? AND auth_sealed = ?",
           row.push_subscription_id,
+          row.p256dh,
+          row.auth_sealed,
+        );
+        continue;
+      }
+      if (!(response instanceof Response) || !response.ok) {
+        console.error(
+          `PushDeliveryFailed: push subscription ${row.push_subscription_id} of tenant ${tenantId} did not take event ${row.event_id}: ${response instanceof Response ? `HTTP ${response.status}` : errorOf(response).message}`,
         );
       }
-      return;
     }
-    if (!(response instanceof Response) || !response.ok) {
-      const reason =
-        response instanceof Response
-          ? `HTTP ${response.status}`
-          : response instanceof Error
-            ? response.message
-            : String(response);
-      const retry = row.failures + 1;
-      if (response instanceof Response && !retryableStatus(response.status)) {
-        this.dropPushWake(row, `the push service answered ${reason}, which no retry changes`);
-        return;
-      }
-      if (retry > RETRY_LIMIT) {
-        this.dropPushWake(row, `the push service still failed after ${RETRY_LIMIT} retries: ${reason}`);
-        return;
-      }
-      this.ctx.storage.sql.exec(
-        "UPDATE push_wakes SET failures = ?, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-        retry,
-        Math.min(now + backoffMs(retry, PUSH_FIRST_RETRY_MS), expiresAt),
-        row.event_id,
-        row.push_subscription_id,
-      );
-      return;
-    }
-    const deleted = this.ctx.storage.sql.exec(
-      `DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?
-        AND EXISTS (SELECT 1 FROM push_subscriptions WHERE push_subscription_id = ?
-          AND p256dh = ? AND auth_sealed = ?)`,
-      row.event_id,
-      row.push_subscription_id,
-      row.push_subscription_id,
-      row.p256dh,
-      row.auth_sealed,
-    ).rowsWritten;
-    if (deleted === 0) {
-      this.ctx.storage.sql.exec(
-        "UPDATE push_wakes SET failures = 0, next_attempt_at = ? WHERE event_id = ? AND push_subscription_id = ?",
-        now,
-        row.event_id,
-        row.push_subscription_id,
-      );
-    }
-  }
-
-  private dropPushWake(row: PushWakeRow, reason: string): void {
-    this.ctx.storage.sql.exec(
-      "DELETE FROM push_wakes WHERE event_id = ? AND push_subscription_id = ?",
-      row.event_id,
-      row.push_subscription_id,
-    );
-    console.error(
-      `PushDeliveryFailed: push subscription ${row.push_subscription_id} dropped event ${row.event_id}: ${reason}`,
-    );
   }
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
     const eventId = super.appendEvent(event, now);
-    if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") return eventId;
-    this.ctx.storage.sql.exec(
-      `INSERT OR IGNORE INTO push_wakes (event_id, push_subscription_id, failures, next_attempt_at)
-        SELECT ?, push_subscription_id, 0, ? FROM push_subscription_events WHERE event = ?`,
-      eventId,
-      now,
-      event.event,
-    );
+    if (event.event === "SubscriptionPaused" || event.event === "SubscriptionEnded") this.pushEventIds.push(eventId);
     return eventId;
   }
 

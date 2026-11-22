@@ -3,13 +3,10 @@ import {
   accept,
   type ControlEnvelope,
   type ControlMessage,
-  type DispatchGrant,
   decodeBase64,
   type Frame,
-  HELD_SESSIONS_VERSION,
   type Hello,
   HelloVersionSchema,
-  HostEnvelopeBeforeHeldSessionsSchema,
   HostEnvelopeSchema,
   type HostMessage,
   type HostReportedHealth,
@@ -23,7 +20,6 @@ import {
   type PreparedOffer,
   parseEnvelope,
   randomNonce,
-  reportsHeldSessions,
   resend,
   type StoredClaudeSetupCode,
   type StoredClaudeSetupOffer,
@@ -37,9 +33,7 @@ export type ControlConnection =
   | { phase: "Open"; protocolVersion: number; heldReported: boolean }
   | { phase: "Closed" };
 
-export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
-export const FRAME_RATE_LIMITED_VERSION = 32;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -47,7 +41,7 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   TurnOffer: ChannelProtocol.Oldest,
   TurnWithdrawn: ChannelProtocol.Oldest,
   TurnClaimed: ChannelProtocol.Oldest,
-  TurnCancel: TURN_CANCEL_VERSION,
+  TurnCancel: ChannelProtocol.Oldest,
   SnapshotRequest: ChannelProtocol.Oldest,
   SnapshotChunksHeld: ChannelProtocol.Oldest,
   SnapshotPackUploads: ChannelProtocol.Oldest,
@@ -60,8 +54,6 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
 };
 
 export type HostMessageVersions = Record<HostMessage["type"], number>;
-
-export const TELEMETRY_BATCH_VERSION = 19;
 
 export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
   TurnImageFetching: ChannelProtocol.Oldest,
@@ -82,10 +74,8 @@ export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
   ClaudeSetupBoxFailed: ChannelProtocol.Oldest,
   SupervisorUpdateStep: ChannelProtocol.Oldest,
   SupervisorUpdateFailed: ChannelProtocol.Oldest,
-  TelemetryBatch: TELEMETRY_BATCH_VERSION,
+  TelemetryBatch: ChannelProtocol.Oldest,
 };
-
-export const CONNECTORS_VERSION = 26;
 
 export interface ControlHost {
   hostId: string;
@@ -122,7 +112,13 @@ export type ControlEvent =
       guestProtocol: Hello["guestProtocol"];
     }
   | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
-  | { kind: "FirstHeartbeat"; usage: HostUsage; health: HostReportedHealth; heldSessionIds: string[] }
+  | {
+      kind: "FirstHeartbeat";
+      usage: HostUsage;
+      health: HostReportedHealth;
+      heldSessionIds: string[];
+      heldClaudeSetupIds: string[];
+    }
   | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "FrameRateLimited"; seq: number; reason: string }
@@ -156,14 +152,7 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-const spokenGrant = (credential: DispatchGrant, protocolVersion: number): DispatchGrant =>
-  protocolVersion >= CONNECTORS_VERSION ? credential : { ...credential, connectors: [] };
-
-const outbound = async (
-  stored: StoredControlMessage,
-  protocolVersion: number,
-  context: ControlContext,
-): Promise<ControlMessage> => {
+const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
   if (stored.type === "ClaudeSetupBoxOffer" || stored.type === "ClaudeSetupBoxCode") {
     return (await context.prepareClaudeSetup(stored)).message;
   }
@@ -173,7 +162,7 @@ const outbound = async (
   const { credential, lastLineSeq, snapshots, personaFiles, image, gitAuthorName, gitAuthorEmail } = prepared;
   return {
     ...stored,
-    credential: spokenGrant(credential, protocolVersion),
+    credential,
     lastLineSeq,
     snapshots,
     personaFiles,
@@ -219,7 +208,7 @@ export const send = async (
     store(message, context);
     return;
   }
-  const spoken = await outbound(message, protocolVersion, context);
+  const spoken = await outbound(message, context);
   context.port.send({ ...store(message, context), message: spoken });
 };
 
@@ -259,7 +248,7 @@ const hello = async (
     const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
     if (refused !== null) return refused;
   }
-  const resent = await resend(ledger, (stored) => outbound(stored, envelope.protocolVersion, context));
+  const resent = await resend(ledger, (stored) => outbound(stored, context));
   context.port.send({
     type: "Welcome",
     hostId: context.host.hostId,
@@ -332,10 +321,7 @@ export const receive = async (
       );
     }
   }
-  const parsed =
-    connection.phase === "Open" && connection.protocolVersion < HELD_SESSIONS_VERSION
-      ? parseEnvelope(HostEnvelopeBeforeHeldSessionsSchema, text)
-      : parseEnvelope(HostEnvelopeSchema, text);
+  const parsed = parseEnvelope(HostEnvelopeSchema, text);
   if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;
@@ -350,12 +336,18 @@ export const receive = async (
   }
   if (envelope.type === "Heartbeat") {
     const health = envelope.health ?? "Healthy";
-    if (connection.heldReported || !reportsHeldSessions(envelope)) {
+    if (connection.heldReported) {
       return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
     }
     return {
       connection: { ...connection, heldReported: true },
-      event: { kind: "FirstHeartbeat", usage: envelope.usage, health, heldSessionIds: envelope.heldSessionIds },
+      event: {
+        kind: "FirstHeartbeat",
+        usage: envelope.usage,
+        health,
+        heldSessionIds: envelope.heldSessionIds,
+        heldClaudeSetupIds: envelope.heldClaudeSetupIds,
+      },
     };
   }
   const needed = HOST_MESSAGE_VERSIONS[envelope.message.type];
@@ -377,13 +369,6 @@ export const receive = async (
     );
   }
   const overRate = context.admitFrame(envelope.seq);
-  if (overRate !== null && connection.protocolVersion < FRAME_RATE_LIMITED_VERSION) {
-    return close(
-      context.port,
-      CloseCode.UnsupportedVersion,
-      `over ${overRate.framesPerMinute} frames a minute; protocol ${connection.protocolVersion} cannot slow down, update the supervisor`,
-    );
-  }
   if (overRate !== null) {
     context.ledger.skip(envelope);
     refuseOverRate(context.port, envelope.seq, overRate);

@@ -10,12 +10,6 @@ const healthIs = async (world: World, host: Host, health: string, detail: string
   await world.call("hostHealth", { tenantId: TENANT_ID, hostId: host.hostId, health, detail, now: Date.now() });
 };
 
-const handoffs = async (world: World, host: Host): Promise<string[]> =>
-  z
-    .object({ handoffs: z.array(z.object({ offer: z.object({ turnId: z.string() }) })) })
-    .parse(await world.call("deferredOffers", { tenantId: TENANT_ID, hostId: host.hostId }))
-    .handoffs.map((handoff) => handoff.offer.turnId);
-
 test("a host going RateLimited has its running turn failed RateLimited with the limit named, cancelled on the host, and a HostHealthChanged event", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
@@ -35,7 +29,7 @@ test("a host going RateLimited has its running turn failed RateLimited with the 
   assert.ok(world.events(world.owner).includes("HostHealthChanged"));
 });
 
-test("a host that is RateLimited is sent no offer, and the waiting turn is offered once the host is Healthy again", async (t) => {
+test("a turn sent to a RateLimited host fails RateLimited at once and reaches no host", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   await world.holdsAgentCredentials();
@@ -46,11 +40,11 @@ test("a host that is RateLimited is sent no offer, and the waiting turn is offer
   await host.finishes(first);
   await healthIs(world, host, "RateLimited", RATE_LIMITED);
 
-  await world.sendTurn(session.sessionId, "a turn while the host is limited");
+  const sent = await world.sendTurn(session.sessionId, "a turn while the host is limited");
   assert.equal(host.received("TurnOffer").length, 0);
 
-  await healthIs(world, host, "Healthy", "host sent no more than 600 frames a minute for a full minute");
-  assert.equal((await handoffs(world, host)).length, 1);
+  const turn = await world.turn(sent.turnId);
+  assert.equal(turn.state === "Failed" ? turn.reason : null, "RateLimited");
 });
 
 test("a host held Unhealthy after its third trip takes no new session, and the refusal names it not healthy", async (t) => {

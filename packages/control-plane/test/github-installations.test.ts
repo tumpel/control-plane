@@ -263,7 +263,7 @@ test("a trigger drops a delivery it does not match and records why a matched one
   await signedDelivery("status", status("success", { target_url: "https://github.com/acme/app/pull/1" }));
   await signedDelivery("status", status("pending"));
   await signedDelivery("status", status("pending", { target_url: "https://github.com/acme/app/pull/1" }));
-  const events = await send("GET", `/v1/events?triggerId=${triggerId}&afterEventId=0&waitSeconds=0`, undefined, bearer);
+  const events = await send("GET", `/v1/events?triggerId=${triggerId}&afterEventId=0`, undefined, bearer);
   assert.equal(events.status, 200, await events.clone().text());
   assert.deepEqual(
     EventPageSchema.parse(await events.json()).events.map((event) =>
@@ -294,12 +294,7 @@ test("a stale route starts nothing its trigger rejects and is repaired, and an o
     sha: "4f1c9e2",
     target_url: "https://github.com/acme/app/pull/1",
   });
-  const events = await send(
-    "GET",
-    `/v1/events?triggerId=${trigger.triggerId}&afterEventId=0&waitSeconds=0`,
-    undefined,
-    bearer,
-  );
+  const events = await send("GET", `/v1/events?triggerId=${trigger.triggerId}&afterEventId=0`, undefined, bearer);
   assert.equal(EventPageSchema.parse(await events.json()).events.length, 2);
   assert.deepEqual(await conditions(), { held: 2 });
   await projectRoute(env.DB, {

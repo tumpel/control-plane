@@ -73,7 +73,6 @@ export const APP_EVENTS = [
   "push",
   "status",
   "workflow_job",
-  "workflow_run",
 ];
 
 export const AGENT_PERMISSIONS = {

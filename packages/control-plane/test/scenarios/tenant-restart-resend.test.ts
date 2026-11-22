@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ChannelProtocol } from "@tumpel/schemas";
 import { World } from "./harness/world.ts";
 
 const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
@@ -8,7 +9,7 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
-  await world.startSession({ prompt: "write three lines", tags: [] });
+  const session = await world.startSession({ prompt: "write three lines", tags: [] });
   const offer = host.takeOffer();
   await host.claims(offer);
   const line = (lineSeq: number) =>
@@ -23,10 +24,21 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
   );
 
   for (let lineSeq = 1; lineSeq <= 4; lineSeq++) await line(lineSeq);
+  await world.call("hostHello", {
+    hostId: host.hostId,
+    boxCapacity: 8,
+    usage: USAGE,
+    now: Date.now(),
+    channelProtocol: ChannelProtocol.Version,
+  });
   await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
   const turn = await world.turn(offer.turnId);
   assert.equal(turn.state, "Running");
-  assert.equal(turn.lineCount, 4);
+  const read = await world.transcript(session.sessionId, {});
+  assert.deepEqual(
+    read.lines.map((stored) => stored.lineSeq),
+    [1, 2, 3, 4],
+  );
 });
 
 test("a tenant that restarts with nothing held asks for the next frame again, and the resent TurnComplete completes the turn", async (t) => {
