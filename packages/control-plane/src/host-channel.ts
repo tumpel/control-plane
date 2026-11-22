@@ -144,6 +144,18 @@ export class HostChannel extends DurableObject<Env> {
     return "Sent";
   }
 
+  private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
+    const tenantId = await this.tenantOf(hostId);
+    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so its running work failed`;
+    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", {
+      tenantId,
+      hostId,
+      health: "Degraded",
+      detail,
+      now,
+    });
+  }
+
   private async offerRefused(hostId: string, open: WebSocket | undefined): Promise<OfferSent | null> {
     if (await this.offersPaused(hostId)) return "RateLimited";
     if (open === undefined) return "Offline";
@@ -224,7 +236,10 @@ export class HostChannel extends DurableObject<Env> {
       return this.refreshPresence(socket);
     }
     const now = Date.now();
+    const silentFor = now - attachment.lastReceivedAt;
     attachment.lastReceivedAt = now;
+    if (attachment.connection.phase === "Open" && silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
+      await this.fellSilent(host.host_id, silentFor, now);
     const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;

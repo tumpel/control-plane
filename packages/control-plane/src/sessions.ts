@@ -561,14 +561,6 @@ export const stopSession = async (
   if (stopped.kind === "Stopping") return ok(stopped.session);
   if (stopped.kind === "NotFound") return sessionNotFound(sessionId);
   if (stopped.kind === "Archived") return sessionArchived(sessionId, "stop");
-  if (stopped.kind === "CancelUnspoken") {
-    return refuse(409, {
-      code: "TurnInFlight",
-      title: "A turn is running",
-      detail: `session ${sessionId} is running turn ${stopped.turnId} on host ${stopped.host}, whose supervisor is too old to cancel a turn`,
-      fix: `Wait for turn ${stopped.turnId} to finish, then stop again; the host updates its supervisor on its own once no box runs`,
-    });
-  }
   return refuse(409, {
     code: "TurnInFlight",
     title: "A turn is running",

@@ -304,6 +304,11 @@ export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
     const exchanged = await this.spendOpenRouterCode(row, phase.wait.verifier_sealed, callback.code);
     if (exchanged.kind === "Refused") return fail(EXCHANGES, "CodeRefused", exchanged.detail);
     if (exchanged.kind === "Failed") return fail(EXCHANGES, "ExchangeFailed", exchanged.detail);
+    const exchangedAt = Date.now();
+    if (exchangedAt >= exchangeDueAt) {
+      this.expireOpenRouterAuthorization(row, exchangedAt);
+      return returned;
+    }
     const stored = await this.storeOpenRouterKey(row, exchanged.key);
     if (stored.kind === "NotStored") return fail(EXCHANGES, "KeyNotStored", stored.detail);
     return returned;

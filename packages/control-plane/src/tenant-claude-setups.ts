@@ -135,7 +135,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
         architectures: bootArchitectures(release, input.harness, input.harnessVersion),
       },
       { boxMemoryMib: BoxMemoryLimit.DefaultMib, boxDiskMib: BoxDiskLimit.DefaultMib },
-      false,
       this.heldBoxes(),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
@@ -361,9 +360,10 @@ export class TenantClaudeSetups extends TenantPrebuilds {
 
   private async stepClaudeSetup(
     row: ClaudeSetupRow,
-    event: ClaudeSetupEvent,
+    input: ClaudeSetupEvent,
     now: number,
   ): Promise<ClaudeSetupDiscard | null> {
+    const event: ClaudeSetupEvent = overdue(row, now) ? { kind: "Deadline" } : input;
     const step = advance(row.claude_setup_id, harnessOf(row), stateOf(row), event, settingsOf(this.env));
     if (step.kind === "Fail") {
       return this.failClaudeSetup(row, step.reason, step.detail, now, event.kind !== "BoxFailed");

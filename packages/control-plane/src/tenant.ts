@@ -550,16 +550,10 @@ export class Tenant extends TenantConnectors {
     deleteSession: async ({ tenantId, sessionId }) => ({
       deleted: await this.deleteSession(tenantId, sessionId, Date.now()),
     }),
-    getSession: async ({ tenantId, sessionId }) => ({
-      session: this.getSession(tenantId, sessionId, await this.lostHosts(tenantId)),
-    }),
-    listSessions: async ({ tenantId, filter }) => ({
-      sessions: this.listSessions(tenantId, filter, await this.lostHosts(tenantId)),
-    }),
-    listTurns: async ({ tenantId, sessionId }) => ({
-      turns: this.listTurns(tenantId, sessionId, await this.lostHosts(tenantId)),
-    }),
-    getTurn: async ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId, await this.lostHosts(tenantId)) }),
+    getSession: async ({ tenantId, sessionId }) => ({ session: await this.readSession(tenantId, sessionId) }),
+    listSessions: async ({ tenantId, filter }) => ({ sessions: await this.listSessions(tenantId, filter) }),
+    listTurns: async ({ tenantId, sessionId }) => ({ turns: await this.listTurns(tenantId, sessionId) }),
+    getTurn: async ({ tenantId, turnId }) => ({ turn: await this.readTurn(tenantId, turnId) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),
@@ -584,9 +578,7 @@ export class Tenant extends TenantConnectors {
       this.setWebhookEndpointStatus(webhookEndpointId, status);
       return {};
     },
-    getTurnFailure: async ({ tenantId, turnId }) => ({
-      failure: this.getTurnFailure(tenantId, turnId, await this.lostHosts(tenantId)),
-    }),
+    getTurnFailure: async ({ tenantId, turnId }) => ({ failure: await this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
     listCredentialHandovers: ({ tenantId, sessionId }) => ({
@@ -647,12 +639,17 @@ export class Tenant extends TenantConnectors {
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};
-      await this.failHostTurns(
+      if (health === "Degraded") {
+        await this.hostFellSilent(tenantId, hostId, now);
+        return {};
+      }
+      const failed = await this.failHostTurns(
         tenantId,
         hostId,
         { turn: "RateLimited", snapshot: "RateLimited", turnDetail: detail, snapshotDetail: detail },
         now,
       );
+      await this.cancelHostTurns(hostId, failed);
       await this.failHostClaudeSetups(hostId, "RateLimited", detail, now);
       return {};
     },

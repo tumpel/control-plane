@@ -3,7 +3,6 @@ import {
   accept,
   type ControlEnvelope,
   type ControlMessage,
-  type DispatchGrant,
   decodeBase64,
   type Frame,
   type Hello,
@@ -34,7 +33,6 @@ export type ControlConnection =
   | { phase: "Open"; protocolVersion: number; heldReported: boolean }
   | { phase: "Closed" };
 
-export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
@@ -43,7 +41,7 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   TurnOffer: ChannelProtocol.Oldest,
   TurnWithdrawn: ChannelProtocol.Oldest,
   TurnClaimed: ChannelProtocol.Oldest,
-  TurnCancel: TURN_CANCEL_VERSION,
+  TurnCancel: ChannelProtocol.Oldest,
   SnapshotRequest: ChannelProtocol.Oldest,
   SnapshotChunksHeld: ChannelProtocol.Oldest,
   SnapshotPackUploads: ChannelProtocol.Oldest,
@@ -56,8 +54,6 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
 };
 
 export type HostMessageVersions = Record<HostMessage["type"], number>;
-
-export const TELEMETRY_BATCH_VERSION = 19;
 
 export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
   TurnImageFetching: ChannelProtocol.Oldest,
@@ -78,10 +74,8 @@ export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
   ClaudeSetupBoxFailed: ChannelProtocol.Oldest,
   SupervisorUpdateStep: ChannelProtocol.Oldest,
   SupervisorUpdateFailed: ChannelProtocol.Oldest,
-  TelemetryBatch: TELEMETRY_BATCH_VERSION,
+  TelemetryBatch: ChannelProtocol.Oldest,
 };
-
-export const CONNECTORS_VERSION = 26;
 
 export interface ControlHost {
   hostId: string;
@@ -158,14 +152,7 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-const spokenGrant = (credential: DispatchGrant, protocolVersion: number): DispatchGrant =>
-  protocolVersion >= CONNECTORS_VERSION ? credential : { ...credential, connectors: [] };
-
-const outbound = async (
-  stored: StoredControlMessage,
-  protocolVersion: number,
-  context: ControlContext,
-): Promise<ControlMessage> => {
+const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
   if (stored.type === "ClaudeSetupBoxOffer" || stored.type === "ClaudeSetupBoxCode") {
     return (await context.prepareClaudeSetup(stored)).message;
   }
@@ -175,7 +162,7 @@ const outbound = async (
   const { credential, lastLineSeq, snapshots, personaFiles, image, gitAuthorName, gitAuthorEmail } = prepared;
   return {
     ...stored,
-    credential: spokenGrant(credential, protocolVersion),
+    credential,
     lastLineSeq,
     snapshots,
     personaFiles,
@@ -221,7 +208,7 @@ export const send = async (
     store(message, context);
     return;
   }
-  const spoken = await outbound(message, protocolVersion, context);
+  const spoken = await outbound(message, context);
   context.port.send({ ...store(message, context), message: spoken });
 };
 
@@ -261,7 +248,7 @@ const hello = async (
     const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
     if (refused !== null) return refused;
   }
-  const resent = await resend(ledger, (stored) => outbound(stored, envelope.protocolVersion, context));
+  const resent = await resend(ledger, (stored) => outbound(stored, context));
   context.port.send({
     type: "Welcome",
     hostId: context.host.hostId,
