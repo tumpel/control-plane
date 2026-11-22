@@ -1,4 +1,5 @@
 import worker, { Tenant as BaseTenant, type Env } from "../../src/index";
+import { tenantApi } from "../../src/tenant-api";
 
 export { EventChannel, HostChannel, TenantMetrics, WebhookSender } from "../../src/index";
 
@@ -40,6 +41,9 @@ const sql = async (request: Request, env: Env, tenantId: string): Promise<Respon
   return Response.json(await tenant.sql(query, bindings));
 };
 
+const usage = async (env: Env, tenantId: string): Promise<Response> =>
+  Response.json(await tenantApi(env.TENANT, tenantId).call("readUsage", { tenantId }));
+
 const d1 = async (request: Request, env: Env): Promise<Response> => {
   const { query, bindings } = await request.json<{ query: string; bindings: unknown[] }>();
   await env.DB.prepare(query)
@@ -54,6 +58,7 @@ const fixture = (request: Request, env: Env, path: string): Promise<Response> =>
   if (kind === "objects") return objects(request, env, target);
   if (kind === "sql") return sql(request, env, target);
   if (kind === "d1") return d1(request, env);
+  if (kind === "usage") return usage(env, target);
   return Promise.resolve(new Response(`no fixture route ${path}`, { status: 404 }));
 };
 

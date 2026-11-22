@@ -40,6 +40,7 @@ import {
   SubscriptionSchema,
   SupervisorHostKeySchema,
   TenantEventSchema,
+  TenantUsageSchema,
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
@@ -279,6 +280,7 @@ class HostSide {
       sentAt: new Date().toISOString(),
       usage: this.usage,
       heldSessionIds: [...this.held],
+      heldClaudeSetupIds: [],
     });
   }
 
@@ -1798,6 +1800,50 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
     assert.equal(await store.text(warm.storageKey), null);
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
+  });
+
+  test("idle heartbeats read a few rows each, not one per archived session, turn or ended subscription", async () => {
+    const { tenantId, host, tool, completedTurn, storedSnapshot } = await tenant();
+    const archived = 20;
+    for (let index = 0; index < archived; index++) {
+      const { session } = await completedTurn(`archived session ${index}`);
+      await storedSnapshot(session.sessionId);
+      await until(
+        "the session reading Idle",
+        () => tool("tumpel_session_get", { sessionId: session.sessionId }, SessionSchema),
+        (read) => read.state === "Idle",
+      );
+      await tool(
+        "tumpel_subscription_create",
+        {
+          sessionId: session.sessionId,
+          prompt: "watch",
+          goal: "watch",
+          events: ["TurnFailed"],
+          crewTags: [],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+        SubscriptionSchema,
+      );
+      assert.equal(
+        (await tool("tumpel_session_archive", { sessionId: session.sessionId }, SessionSchema)).state,
+        "Archived",
+      );
+      await host.next("BoxDiscard");
+    }
+    const rowsRead = async (): Promise<number> => {
+      const response = await call(`/__fixture/usage/${tenantId}`);
+      const { usage } = z.object({ usage: TenantUsageSchema }).parse(await response.json());
+      const counter = usage.counters.find((each) => each.measure === "RowsRead");
+      if (counter === undefined) throw new Error("the tenant usage has no RowsRead counter");
+      return counter.used;
+    };
+
+    const before = await rowsRead();
+    await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
+    const read = (await rowsRead()) - before;
+
+    assert.ok(read < 2 * archived, `two idle heartbeats read ${read} rows`);
   });
 
   test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
