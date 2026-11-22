@@ -12,16 +12,6 @@ const BASELINE = {
   "packages/control-plane/migrations/tenant": "0088_chunk_lists_in_object_storage.sql",
 };
 
-const ddlStatements = (sql) =>
-  sql
-    .replace(/--[^\n]*/g, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/'(?:[^']|'')*'/g, "''")
-    .split(";")
-    .filter((statement) => /^\s*(?:CREATE\s+(?:TEMP\w*\s+)?TABLE|ALTER\s+TABLE)\b/i.test(statement));
-
-const addsBulkColumn = (sql) => ddlStatements(sql).some((statement) => /\b(?:TEXT|BLOB)\b/i.test(statement));
-
 const migrations = execFileSync("git", ["ls-files", "--", "packages/*/migrations/**.sql"], {
   cwd: ROOT,
   encoding: "utf8",
@@ -34,7 +24,14 @@ const unreviewed = migrations.filter((file) => {
   const after = BASELINE[file.slice(0, slash)];
   if (after !== undefined && file.slice(slash + 1) <= after) return false;
   const sql = readFileSync(`${ROOT}${file}`, "utf8");
-  return addsBulkColumn(sql) && !REVIEWED.test(sql);
+  if (REVIEWED.test(sql)) return false;
+  return sql
+    .replace(/--[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .split(";")
+    .filter((statement) => /^\s*(?:CREATE\s+(?:TEMP\w*\s+)?TABLE|ALTER\s+TABLE)\b/i.test(statement))
+    .some((statement) => /\b(?:TEXT|BLOB)\b/i.test(statement));
 });
 
 if (unreviewed.length > 0) {
