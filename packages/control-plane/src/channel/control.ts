@@ -36,7 +36,6 @@ export type ControlConnection =
 
 export const TURN_CANCEL_VERSION = 23;
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
-export const FRAME_RATE_LIMITED_VERSION = 32;
 
 export type MessageVersions = Record<StoredControlMessage["type"], number>;
 
@@ -383,13 +382,6 @@ export const receive = async (
     );
   }
   const overRate = context.admitFrame(envelope.seq);
-  if (overRate !== null && connection.protocolVersion < FRAME_RATE_LIMITED_VERSION) {
-    return close(
-      context.port,
-      CloseCode.UnsupportedVersion,
-      `over ${overRate.framesPerMinute} frames a minute; protocol ${connection.protocolVersion} cannot slow down, update the supervisor`,
-    );
-  }
   if (overRate !== null) {
     context.ledger.skip(envelope);
     refuseOverRate(context.port, envelope.seq, overRate);
