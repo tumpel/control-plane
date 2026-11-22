@@ -134,6 +134,8 @@ export class HostChannel extends DurableObject<Env> {
     }
     const spoken = await control.prepare(message, this.context(null, host, null));
     const open = this.openSocket();
+    if (message.type === "TurnOffer" && open === undefined) return "Offline";
+    if (message.type === "TurnOffer" && open !== undefined && this.silent(open)) return "Degraded";
     if (open === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
       return "Sent";
@@ -173,8 +175,11 @@ export class HostChannel extends DurableObject<Env> {
       .first<{ state: string }>();
     const open = this.openSocket();
     if (row?.state !== "Online" || open === undefined) return "Offline";
-    const silentFor = Date.now() - this.attachment(open).lastReceivedAt;
-    return silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Degraded" : null;
+    return this.silent(open) ? "Degraded" : null;
+  }
+
+  private silent(socket: WebSocket): boolean {
+    return Date.now() - this.attachment(socket).lastReceivedAt >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
   }
 
   async restoreHealth(detail: string): Promise<void> {
