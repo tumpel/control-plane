@@ -69,7 +69,6 @@ const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-ant-sessions-e2e-key";
 const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
-const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 type HostUsage = z.infer<typeof HostUsageSchema>;
 
@@ -85,14 +84,11 @@ const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
   ...TEST_SETTINGS,
   dispatchGrantTtlSeconds: OFFER_TTL_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
-  snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
   turnOfferTtlSeconds: OFFER_TTL_SECONDS,
   turnImageFetchBudgetSeconds: IMAGE_FETCH_BUDGET_SECONDS,
-  turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
-  prebuildUploadBudgetSeconds: 60,
 };
 
 type WorkerConfig = Extract<
@@ -219,22 +215,6 @@ const storePlacedRoot = async (storageKey: string, chunks: Placement[]): Promise
   return root;
 };
 const releases = objects("RELEASES");
-
-const storeTimers = async (sessionId: string, timers: unknown, at: number): Promise<void> => {
-  const response = await call(`/__fixture/timers/${sessionId}`, {
-    method: "PUT",
-    body: JSON.stringify({ timers, at }),
-  });
-  assert.equal(response.status, 204, await response.text());
-};
-
-const StoredTimersSchema = z.object({ deadlines: z.record(z.string(), z.unknown()) }).nullable();
-
-const storedTimers = async (sessionId: string): Promise<z.infer<typeof StoredTimersSchema>> => {
-  const response = await call(`/__fixture/timers/${sessionId}`);
-  assert.equal(response.status, 200, await response.clone().text());
-  return StoredTimersSchema.parse(await response.json());
-};
 
 const tenantSql = async (tenantId: string, query: string, ...bindings: (string | number)[]): Promise<unknown[]> => {
   const response = await call(`/__fixture/sql/${tenantId}`, {
@@ -2251,46 +2231,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await tool("tumpel_turn_get", { turnId: second.turnId }, TurnSchema)).state, "Completed");
   });
 
-  test("a waiting turn's whole-turn budget starts when it starts, not when it was sent", async () => {
-    const { host, tool, sessionStart } = await tenant();
-    const started = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "long" },
-      StartedSessionSchema,
-    );
-    const { sessionId, tenantId } = started.session;
-    const first = await host.next("TurnOffer");
-    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
-    await until(
-      "the turn reading Running",
-      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
-      (turn) => turn.state === "Running",
-    );
-    const waiting = await tool("tumpel_turn_send", { sessionId, prompt: "behind it" }, TurnSchema);
-    await tenantSql(
-      tenantId,
-      "UPDATE turns SET created_at = ? WHERE turn_id = ?",
-      Date.now() - (SETTINGS.turnTotalBudgetSeconds + 10) * 1000,
-      waiting.turnId,
-    );
-
-    const ended = Date.now();
-    host.send({
-      type: "TurnFailed",
-      turnId: first.turnId,
-      reason: "HarnessExited",
-      detail: "the harness exited",
-      failedAt: new Date().toISOString(),
-    });
-    assert.equal((await host.next("TurnOffer")).turnId, waiting.turnId);
-    const total = z
-      .object({ turnId: z.string(), at: z.number() })
-      .parse((await storedTimers(sessionId))?.deadlines.Total);
-    assert.equal(total.turnId, waiting.turnId);
-    assert.ok(total.at >= ended + SETTINGS.turnTotalBudgetSeconds * 1000, `${total.at} is before ${ended}`);
-    assert.equal((await tool("tumpel_turn_get", { turnId: waiting.turnId }, TurnSchema)).state, "Offered");
-  });
-
   test("a cancel fails a waiting turn Cancelled and the turns behind it keep their order, and a running turn is refused", async () => {
     const { email, host, refused, tool, sessionStart } = await tenant();
     const started = await tool(
@@ -2428,50 +2368,6 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
-  test("a stop whose snapshot fails returns the session to Idle and does not ask for that snapshot again", async () => {
-    const { host, getJson, tool, sessionStart } = await tenant();
-    const started = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "fail my snapshot" },
-      StartedSessionSchema,
-    );
-    const { sessionId } = started.session;
-    const offer = await host.next("TurnOffer");
-    const { turnId } = offer;
-    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({
-      type: "TurnLine",
-      turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"error_during_execution","is_error":false}',
-    });
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    await until(
-      "the turn reading Failed",
-      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-
-    await tool("tumpel_session_stop", { sessionId }, SessionSchema);
-    const warm = await host.next("SnapshotRequest");
-    host.send({
-      type: "SnapshotFailed",
-      snapshotId: warm.snapshotId,
-      reason: "UploadRejected",
-      detail: "the store refused the upload",
-      failedAt: new Date().toISOString(),
-    });
-    await until(
-      "the session reading Idle",
-      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
-      (session) => session.state === "Idle",
-    );
-
-    const timers = await storedTimers(sessionId);
-    assert.equal(timers?.deadlines.Snapshot, undefined);
-    assert.equal(host.snapshotRequestsFor(sessionId), 0);
-  });
-
   test("a finished turn reads Running until its snapshot is stored, and fails SnapshotNotStored, never Completed, when the host fails the snapshot", async () => {
     const { host, tool, sessionStart } = await tenant();
     await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "lose my snapshot" }, StartedSessionSchema);
@@ -2500,34 +2396,6 @@ suite("sessions", { concurrency: 8 }, () => {
     const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
     assert.equal(failure.reason, "SnapshotNotStored");
     assert.match(failure.detail, /UploadRejected: the store refused the upload/);
-  });
-
-  test("a finished turn whose snapshot the host never answers fails SnapshotNotStored, never Completed", async () => {
-    const { host, tool, sessionStart } = await tenant();
-    const started = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "wait for my snapshot" },
-      StartedSessionSchema,
-    );
-    const { sessionId, tenantId } = started.session;
-    const offer = await host.next("TurnOffer");
-    const { turnId } = offer;
-    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
-
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { SnapshotAnswer: { turnId, at } } }, at);
-    const failed = await until(
-      "the turn reading Failed",
-      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
-      (turn) => turn.state !== "Running",
-    );
-    assert.equal(failed.state, "Failed");
-    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
-    assert.equal(failure.reason, "SnapshotNotStored");
-    assert.match(failure.detail, /did not answer a snapshot within 60 seconds/);
   });
 
   test("a finished turn whose host goes offline before its snapshot lands fails SnapshotNotStored, never Completed", async () => {
@@ -2756,56 +2624,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.assertOpen("after the large snapshot");
   });
 
-  test("a host frame whose handling throws is refused with the error and the channel carries the next frame", async () => {
-    const { host, tool, completedTurn } = await tenant();
-    const { offer } = await completedTurn("snapshot with an unreadable root");
-    const request = await host.next("SnapshotRequest");
-    await store.put(request.storageKey, JSON.stringify({ manifest: "not a list" }));
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64 });
-    const refused = await host.refusal();
-    assert.equal(refused.seq, host.carried().sent);
-    assert.ok((await storedTimers(request.sessionId))?.deadlines.SnapshotAnswer);
-    assert.match(refused.reason, /failed to handle SnapshotDone: .*manifest/);
-
-    host.send({
-      type: "SnapshotFailed",
-      snapshotId: request.snapshotId,
-      reason: "UploadRejected",
-      detail: "the root is unreadable",
-      failedAt: new Date().toISOString(),
-    });
-    await until(
-      "the snapshotted turn failing",
-      () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    host.assertOpen("after the refusal");
-  });
-
-  test("a turn whose host goes offline before claiming it stays Offered, is offered again at the next Welcome and runs", async () => {
-    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
-    const flaky = await enrol("flaky");
-    const before = await connect(flaky.id, flaky.key, 16);
-    await hostState(flaky.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a reset" }, bearer);
-    assert.equal(response.status, 200);
-    const started = StartedSessionSchema.parse(await response.json());
-    assert.equal(started.session.hostId, flaky.id);
-    assert.equal((await before.next("TurnOffer")).turnId, started.turn.turnId);
-    before.close();
-    await hostState(flaky.id, "Offline");
-    await wait((Math.max(SETTINGS.heartbeatDeadlineSeconds, OFFER_TTL_SECONDS) + 1) * 1000);
-    assert.equal((await getJson(`/v1/turns/${started.turn.turnId}`, TurnSchema)).state, "Offered");
-
-    const after = await connect(flaky.id, flaky.key, 16);
-    const offer = await after.next("TurnOffer");
-    assert.equal(offer.turnId, started.turn.turnId);
-    after.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await after.next("TurnClaimed")).turnId, offer.turnId);
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
-    after.close();
-  });
-
   test("a turn the host reports NotClaimed after its claim is offered again and runs on the next claim", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "claim lost" }, bearer);
@@ -2828,64 +2646,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnClaim", turnId: again.turnId, boxId: again.boxId });
     assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
     assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
-  });
-
-  test("a turn no host claims by its whole-turn deadline dead-letters Undelivered on turn and session reads, also from a timer stored before its owner field was dropped", async () => {
-    const { bearer, host, getJson, sessionStart } = await tenant();
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
-    assert.equal(response.status, 200);
-    const started = StartedSessionSchema.parse(await response.json());
-    const offer = await host.next("TurnOffer");
-    const { sessionId, tenantId } = started.session;
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
-
-    const failed = await until(
-      "the turn reading Failed",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "Undelivered");
-    assert.match(
-      failure.detail,
-      /^no host took the turn within 60 seconds of its first offer, so it never ran; host box is online but never claimed it\./,
-    );
-    assert.doesNotMatch(failure.detail, UUID);
-    const read = FailedTurnSchema.parse(failed);
-    assert.deepEqual(
-      { reason: read.reason, detail: read.detail, failedAt: read.failedAt },
-      { reason: failure.reason, detail: failure.detail, failedAt: failure.failedAt },
-    );
-    const session = await getJson(`/v1/sessions/${sessionId}`, SessionSchema);
-    assert.deepEqual(session.lastTurn, read);
-  });
-
-  test("a first turn that fails before its box exists leaves the session Stopped, and the next turn gets a new box", async () => {
-    const { bearer, host, getJson, sessionStart } = await tenant();
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never claimed" }, bearer);
-    assert.equal(response.status, 200);
-    const started = StartedSessionSchema.parse(await response.json());
-    const offer = await host.next("TurnOffer");
-    const { sessionId, tenantId } = started.session;
-    const at = Date.now() + 500;
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Total: { turnId: offer.turnId, at } } }, at);
-
-    await until(
-      "the turn reading Failed",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    assert.equal((await getJson(`/v1/sessions/${sessionId}`, SessionSchema)).state, "Stopped");
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await host.next("TurnWithdrawn")).turnId, offer.turnId);
-    assert.deepEqual(await host.next("BoxDiscard"), { type: "BoxDiscard", sessionId, boxId: offer.boxId });
-
-    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const again = await host.next("TurnOffer");
-    assert.equal(again.sessionId, sessionId);
-    assert.notEqual(again.boxId, offer.boxId);
   });
 
   test("a turn whose harness exits without a successful result fails HarnessExitedWithoutResult on every read, and a snapshot of its box follows", async () => {
@@ -2914,89 +2674,9 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual((await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema)).lastTurn, read);
   });
 
-  test("a turn wait over MCP answers when the first of several turns ends, with every turn's state and a failed turn's reason", async () => {
-    const { host, tool, toolRefusal, sessionStart } = await tenant();
-    const running = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "keeps running" },
-      StartedSessionSchema,
-    );
-    const offer = await host.next("TurnOffer");
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await host.next("TurnClaimed")).turnId, running.turn.turnId);
-    const unclaimed = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "never claimed" },
-      StartedSessionSchema,
-    );
-    const unclaimedOffer = await host.next("TurnOffer");
-    const { sessionId, tenantId } = unclaimed.session;
-    const at = Date.now() + 500;
-    await storeTimers(
-      sessionId,
-      { tenantId, sessionId, deadlines: { Total: { turnId: unclaimedOffer.turnId, at } } },
-      at,
-    );
-
-    const firstWait = Date.now();
-    const failed = await tool(
-      "tumpel_turn_wait",
-      { turnId: [running.turn.turnId, unclaimed.turn.turnId], timeoutSeconds: 50 },
-      TurnSchema.array(),
-    );
-    assert.ok(Date.now() - firstWait < 20_000);
-    assert.deepEqual(
-      failed.map((turn) => [turn.turnId, turn.state]),
-      [
-        [running.turn.turnId, "Running"],
-        [unclaimed.turn.turnId, "Failed"],
-      ],
-    );
-    assert.equal(
-      (await tool("tumpel_turn_failure", { turnId: unclaimed.turn.turnId }, TurnFailureSchema)).reason,
-      "Undelivered",
-    );
-
-    const timedOut = await tool(
-      "tumpel_turn_wait",
-      { turnId: [running.turn.turnId], timeoutSeconds: 1 },
-      TurnSchema.array(),
-    );
-    assert.deepEqual(
-      timedOut.map((turn) => turn.state),
-      ["Running"],
-    );
-
-    const secondWait = Date.now();
-    const waiting = tool("tumpel_turn_wait", { turnId: [running.turn.turnId], timeoutSeconds: 50 }, TurnSchema.array());
-    await wait(500);
-    host.send({
-      type: "TurnLine",
-      turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    let snapshot = await host.next("SnapshotRequest");
-    while (snapshot.turnId !== offer.turnId) snapshot = await host.next("SnapshotRequest");
-    await storeRoot(snapshot.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    const completed = await waiting;
-    assert.ok(Date.now() - secondWait < 20_000);
-    assert.deepEqual(
-      completed.map((turn) => [turn.turnId, turn.state]),
-      [[running.turn.turnId, "Completed"]],
-    );
-
-    assert.match(
-      await toolRefusal("tumpel_turn_wait", { turnId: [running.turn.turnId, "no-such-turn"], timeoutSeconds: 1 }),
-      /your tenant has no turn no-such-turn/,
-    );
-  });
-
   test("tenant events record a turn's start, completion and the idle session in order, read over MCP and stream over a WebSocket, also to a browser that sends its token as a subprotocol", async () => {
     const { tenantId, bearer, host, tool, sessionStart } = await tenant();
-    const start = await tool("tumpel_events_wait", {}, EventPageSchema);
+    const start = await tool("tumpel_events_list", {}, EventPageSchema);
     assert.deepEqual(start.events, []);
 
     const socket = new WebSocket(
@@ -3045,13 +2725,13 @@ suite("sessions", { concurrency: 8 }, () => {
     browser.close();
 
     const { sessionId } = started.session;
-    const all = await tool("tumpel_events_wait", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
+    const all = await tool("tumpel_events_list", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
     assert.deepEqual(
       all.events.map((event) => event.event),
       ["TurnStarted", "TurnCompleted", "SessionIdle"],
     );
     assert.deepEqual(
-      (await tool("tumpel_events_wait", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,
+      (await tool("tumpel_events_list", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,
       [],
     );
 
@@ -3525,36 +3205,6 @@ suite("sessions", { concurrency: 8 }, () => {
     for (const side of sides.values()) side.close();
   });
 
-  test("a turn the only host refuses HostUpdating stays Offered and is claimed after the host's next Hello", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("updating-only");
-    const swapping = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during a swap" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal((await swapping.next("TurnOffer")).turnId, turn.turnId);
-    swapping.send({
-      type: "TurnFailed",
-      turnId: turn.turnId,
-      reason: "HostUpdating",
-      detail: "this host is swapping to a new supervisor binary",
-      failedAt: new Date().toISOString(),
-    });
-    swapping.close();
-    await hostState(only.id, "Offline");
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
-    const swapped = await connect(only.id, only.key, 32, swapping.carried());
-    const offer = await swapped.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    swapped.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await swapped.next("TurnClaimed")).turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
-    swapped.close();
-  });
-
   test("a claimed turn whose box a handover keeps warm is offered again to the same host in the same box, not to another host", async () => {
     const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("handover-1");
@@ -3744,93 +3394,28 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await host.next("TurnOffer")).boxMemoryMib, 512);
   });
 
-  test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline, naming the refusal", async () => {
+  test("a turn the only host refuses PoolExhausted fails at once, naming the refusal", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never fits" }, bearer);
     assert.equal(response.status, 200, await response.clone().text());
-    const { session, turn } = StartedSessionSchema.parse(await response.json());
-    await tenantSql(
-      session.tenantId,
-      "UPDATE turns SET created_at = ? WHERE turn_id = ?",
-      Date.now() - (SETTINGS.turnTotalBudgetSeconds - 2) * 1000,
-      turn.turnId,
-    );
+    const { turn } = StartedSessionSchema.parse(await response.json());
     const refusal =
       "this host gives box disks 70000 MiB, its 80000 MiB of free disk and the 0 MiB its boxes wrote less the 10000 MiB it keeps free; its 2 boxes hold 65536 MiB of it, so a box disk of 32768 MiB does not fit; free disk on the host, or lower the persona's boxDiskMib";
-    const refuse = (turnId: string): void =>
-      host.send({
-        type: "TurnFailed",
-        turnId,
-        reason: "PoolExhausted",
-        detail: refusal,
-        failedAt: new Date().toISOString(),
-      });
-    refuse((await host.next("TurnOffer")).turnId);
-    refuse((await host.next("TurnOffer")).turnId);
+    host.send({
+      type: "TurnFailed",
+      turnId: (await host.next("TurnOffer")).turnId,
+      reason: "PoolExhausted",
+      detail: refusal,
+      failedAt: new Date().toISOString(),
+    });
     await until(
       "the turn reading Failed",
       () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
       (read) => read.state === "Failed",
     );
     const failure = await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "Undelivered");
-    assert.ok(failure.detail.endsWith(`last refused it: ${refusal}`), failure.detail);
-  });
-
-  test("a turn a host refuses PoolExhausted goes to an idle host on the refusing host's next heartbeat, in a new box", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "too big here" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { session, turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal(session.hostId, hostId);
-    const idle = await enrol("idle-host");
-    const idleSide = await connect(idle.id, idle.key, 32);
-    await hostState(idle.id, "Online");
-    const offer = await host.next("TurnOffer");
-    host.send({
-      type: "TurnFailed",
-      turnId: offer.turnId,
-      reason: "PoolExhausted",
-      detail:
-        "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
-      failedAt: new Date().toISOString(),
-    });
-    const moved = await idleSide.next("TurnOffer");
-    assert.equal(moved.turnId, turn.turnId);
-    assert.notEqual(moved.boxId, offer.boxId);
-    const read = await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema);
-    assert.deepEqual({ hostId: read.hostId, boxId: read.boxId }, { hostId: idle.id, boxId: moved.boxId });
-    idleSide.send({ type: "TurnClaim", turnId: moved.turnId, boxId: moved.boxId });
-    assert.equal((await idleSide.next("TurnClaimed")).turnId, turn.turnId);
-    idleSide.close();
-  });
-
-  test("a turn the only host refuses PoolExhausted stays Offered and is offered again on a later heartbeat", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("short-of-memory");
-    const side = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "under pressure" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal((await side.next("TurnOffer")).turnId, turn.turnId);
-    side.send({
-      type: "TurnFailed",
-      turnId: turn.turnId,
-      reason: "PoolExhausted",
-      detail:
-        "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
-      failedAt: new Date().toISOString(),
-    });
-    const offer = await side.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
-    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
-    side.close();
+    assert.equal(failure.reason, "PoolExhausted");
+    assert.match(failure.detail, /a box disk of 32768 MiB does not fit/);
   });
 
   test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
@@ -3934,93 +3519,28 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
-  test("an Auto box idle for 15 minutes with its snapshot stored is torn down, and the next turn restores it on a fresh box", async () => {
+  test("an unsolicited BoxGone for an idle Auto box stops the session and its next turn boots a fresh box", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
-    const idle = await idleTurn(host, { ...(await sessionStart()), prompt: "go quiet" }, bearer);
-    const { sessionId, tenantId } = idle.session;
+    const idle = await idleTurn(host, { ...(await sessionStart()), prompt: "idle out" }, bearer);
+    const { sessionId } = idle.session;
+    assert.equal(idle.session.boxRetention, "Auto");
     const snapshot = await host.next("SnapshotRequest");
     await storeRoot(snapshot.storageKey);
     host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    const timers = await until(
-      "the idle teardown armed",
-      () => storedTimers(sessionId),
-      (stored) => stored?.deadlines.Teardown !== undefined,
-    );
-    const armed = z.object({ turnId: z.string(), at: z.number() }).parse(timers?.deadlines.Teardown);
-    assert.equal(armed.turnId, idle.offer.turnId);
-    assert.ok(armed.at > Date.now() + 14 * 60 * 1000, `the eviction is due at ${armed.at}, before 15 idle minutes`);
-    assert.equal(host.holds("BoxTeardown"), false);
-
-    const at = Date.now();
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Teardown: { turnId: armed.turnId, at } } }, at);
-    assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: idle.offer.boxId });
-    host.send({ type: "BoxGone", sessionId, boxId: idle.offer.boxId });
-    const evicted = await until(
-      "the evicted session settling",
-      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
-      (session) => session.state !== "Stopping",
-    );
-    assert.notEqual(evicted.state, "Failed");
-
-    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "wake up" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const offer = await host.next("TurnOffer");
-    assert.equal(offer.sessionId, sessionId);
-    assert.notEqual(offer.boxId, idle.offer.boxId);
-    assert.deepEqual(
-      offer.snapshots.map((each) => each.snapshotId),
-      [snapshot.snapshotId],
-    );
-  });
-
-  test("an Auto box whose latest turn was cancelled while it waited is snapshotted again and torn down after 15 idle minutes", async () => {
-    const { host, tool, sessionStart } = await tenant();
-    const started = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "busy" },
-      StartedSessionSchema,
-    );
-    const { sessionId, tenantId } = started.session;
-    const first = await host.next("TurnOffer");
-    host.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
     await until(
-      "the turn reading Running",
-      () => tool("tumpel_turn_get", { turnId: first.turnId }, TurnSchema),
-      (turn) => turn.state === "Running",
+      "the session reading Idle",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Idle",
     );
-    const waiting = await tool("tumpel_turn_send", { sessionId, prompt: "never mind" }, TurnSchema);
-    const cancelled = await tool("tumpel_turn_cancel", { turnId: waiting.turnId }, TurnSchema);
-    assert.equal(cancelled.state, "Failed");
-
-    host.send({
-      type: "TurnLine",
-      turnId: first.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    host.send({ type: "TurnComplete", turnId: first.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    const completed = await host.next("SnapshotRequest");
-    assert.equal(completed.turnId, first.turnId);
-    await storeRoot(completed.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: completed.snapshotId, uploadedBytes: 14 });
-
-    const after = await host.next("SnapshotRequest");
-    assert.deepEqual([after.turnId, after.boxId], [waiting.turnId, first.boxId]);
-    await storeRoot(after.storageKey);
-    host.send({ type: "SnapshotDone", snapshotId: after.snapshotId, uploadedBytes: 14 });
-    const timers = await until(
-      "the idle teardown armed",
-      () => storedTimers(sessionId),
-      (stored) => stored?.deadlines.Teardown !== undefined,
+    host.send({ type: "BoxGone", sessionId, boxId: idle.offer.boxId });
+    await until(
+      "the session reading Stopped",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
     );
-    const armed = z.object({ turnId: z.string(), at: z.number() }).parse(timers?.deadlines.Teardown);
-    assert.equal(armed.turnId, waiting.turnId);
-    assert.ok(armed.at > Date.now() + 14 * 60 * 1000, `the eviction is due at ${armed.at}, before 15 idle minutes`);
-    assert.equal(host.holds("BoxTeardown"), false);
-
-    const at = Date.now();
-    await storeTimers(sessionId, { tenantId, sessionId, deadlines: { Teardown: { turnId: armed.turnId, at } } }, at);
-    assert.deepEqual(await host.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: first.boxId });
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    assert.notEqual((await host.next("TurnOffer")).boxId, idle.offer.boxId);
   });
 
   test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
@@ -4263,40 +3783,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     assert.deepEqual(await host.next("TurnWithdrawn"), { type: "TurnWithdrawn", turnId: offer.turnId });
     assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Completed");
-  });
-
-  test("a turn the only host refuses HostUpdating is offered again when its swap fails", async () => {
-    const { bearer, host, hostId, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("update-fails");
-    const side = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "swap fails" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal((await side.next("TurnOffer")).turnId, turn.turnId);
-    side.send({
-      type: "TurnFailed",
-      turnId: turn.turnId,
-      reason: "HostUpdating",
-      detail: "this host is swapping to a new supervisor binary",
-      failedAt: new Date().toISOString(),
-    });
-    side.send({
-      type: "SupervisorUpdateFailed",
-      fromSha256: "a".repeat(64),
-      toSha256: "b".repeat(64),
-      reason: "SupervisorUpdateSwapFailed",
-      detail: "renaming the candidate over the binary failed",
-      outputTail: [],
-      failedAt: new Date().toISOString(),
-    });
-    const offer = await side.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
-    side.close();
   });
 
   test("a turn sent while the only host restarts for an update waits in its channel and is claimed after its Hello", async () => {

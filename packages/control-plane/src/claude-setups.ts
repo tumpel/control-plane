@@ -11,6 +11,7 @@ import { listHosts } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { degradedOnly } from "./placement";
 import { releaseUnreadable } from "./releases";
 import { placeableFix, why } from "./sessions";
 import { tenantApi } from "./tenant-api.ts";
@@ -93,6 +94,14 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       title: `Secret set holds another ${provider} credential`,
       detail: `secret set ${body.value.secretSetId} holds the ${provider} credential ${started.name}, and a set holds one credential per provider`,
       fix: `Remove ${started.name} from the set, or set up ${name} for another set, then ${START_AGAIN}`,
+    });
+  }
+  if (degradedOnly(started.hosts)) {
+    return problem(409, {
+      code: "HostDegraded",
+      title: "No healthy host",
+      detail: `no host of your tenant is healthy: ${started.hosts.map(why).join(", ")}`,
+      fix: `Check that tumpel-supervisor runs on a host and reaches the control plane, then ${START_AGAIN}`,
     });
   }
   return problem(409, {

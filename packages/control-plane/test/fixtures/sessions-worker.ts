@@ -1,18 +1,6 @@
 import worker, { Tenant as BaseTenant, type Env } from "../../src/index";
-import { SessionTimer as BaseSessionTimer } from "../../src/session-timer";
 
 export { EventChannel, HostChannel, TenantMetrics, WebhookSender } from "../../src/index";
-
-export class SessionTimer extends BaseSessionTimer {
-  async store(timers: { tenantId: string }): Promise<void> {
-    await this.ctx.storage.put("timers", timers);
-    await this.set(timers.tenantId, {});
-  }
-
-  async stored(): Promise<unknown> {
-    return this.ctx.storage.get("timers");
-  }
-}
 
 export class Tenant extends BaseTenant {
   sql(query: string, bindings: SqlStorageValue[]): Record<string, SqlStorageValue>[] {
@@ -46,16 +34,6 @@ const objects = async (request: Request, env: Env, path: string): Promise<Respon
   return new Response(object.body);
 };
 
-const timers = async (request: Request, env: Env, sessionId: string): Promise<Response> => {
-  const timer = (env.SESSION_TIMER as unknown as DurableObjectNamespace<SessionTimer>).getByName(sessionId);
-  if (request.method === "PUT") {
-    const { timers } = await request.json<{ timers: { tenantId: string } }>();
-    await timer.store(timers);
-    return new Response(null, { status: 204 });
-  }
-  return Response.json((await timer.stored()) ?? null);
-};
-
 const sql = async (request: Request, env: Env, tenantId: string): Promise<Response> => {
   const tenant = (env.TENANT as unknown as DurableObjectNamespace<Tenant>).getByName(tenantId);
   const { query, bindings } = await request.json<{ query: string; bindings: SqlStorageValue[] }>();
@@ -74,7 +52,6 @@ const fixture = (request: Request, env: Env, path: string): Promise<Response> =>
   const [kind = "", ...rest] = path.split("/");
   const target = rest.join("/");
   if (kind === "objects") return objects(request, env, target);
-  if (kind === "timers") return timers(request, env, target);
   if (kind === "sql") return sql(request, env, target);
   if (kind === "d1") return d1(request, env);
   return Promise.resolve(new Response(`no fixture route ${path}`, { status: 404 }));

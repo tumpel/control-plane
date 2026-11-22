@@ -1,6 +1,5 @@
 import { BoxMemoryLimit, type ReportedHostUsageSchema } from "@tumpel/schemas";
 import type { z } from "zod";
-import { CONNECTORS_VERSION } from "./channel/control.ts";
 import type { HostRecord as Host } from "./host-record.ts";
 import type { HostArchitecture } from "./releases.ts";
 
@@ -89,7 +88,6 @@ const assess = (
   usages: ReadonlyMap<string, ReportedHostUsage>,
   image: ImageAvailability,
   { boxMemoryMib, boxDiskMib }: BoxSize,
-  connectors: boolean,
 ): Candidate | Unplaceable => {
   if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (host.health !== "Healthy" || host.reportedHealth !== "Healthy")
@@ -100,9 +98,6 @@ const assess = (
     throw new Error(
       `host ${host.name} (${host.hostId}) is Online but its tenant holds no usage from its Hello; restart tumpel-supervisor run on that host so its Hello carries its usage`,
     );
-  }
-  if (connectors && usage.channelProtocol < CONNECTORS_VERSION) {
-    return { kind: "Unplaceable", host, reason: "NoConnectors", usage };
   }
   const freeMemory = freeMemoryMib(usage);
   if (freeMemory !== undefined && boxMemoryMib > freeMemory)
@@ -120,27 +115,29 @@ const evicting = (
   usage: ReportedHostUsage,
   image: ImageAvailability,
   box: BoxSize,
-  connectors: boolean,
   victims: readonly HeldBox[],
 ): HeldBox[] | null => {
   for (let count = 1; count <= victims.length; count++) {
     const evict = victims.slice(0, count);
-    const freed = assess(host, new Map([[host.hostId, freeing(usage, evict)]]), image, box, connectors);
+    const freed = assess(host, new Map([[host.hostId, freeing(usage, evict)]]), image, box);
     if (freed.kind === "Candidate") return evict;
   }
   return null;
 };
+
+export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
+  hosts.some(({ reason, host }) => reason === "NotHealthy" && host.health === "Degraded") &&
+  hosts.every(({ reason }) => reason === "NotOnline" || reason === "NotHealthy");
 
 export const placeSession = (
   hosts: readonly Host[],
   usages: readonly ReportedHostUsage[],
   image: ImageAvailability,
   box: BoxSize,
-  connectors: boolean,
   held: readonly HeldBox[],
 ): Placement => {
   const byHost = new Map(usages.map((usage) => [usage.hostId, withHeld(usage, held)]));
-  const assessed = hosts.map((host) => assess(host, byHost, image, box, connectors));
+  const assessed = hosts.map((host) => assess(host, byHost, image, box));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
     .sort((a, b) => busyness(a) - busyness(b) || freeSlots(b.usage) - freeSlots(a.usage));
@@ -153,7 +150,7 @@ export const placeSession = (
     const usage = byHost.get(hostId);
     if (host === undefined || usage === undefined) continue;
     const victims = evictable.filter((each) => each.hostId === hostId);
-    const evict = evicting(host, usage, image, box, connectors, victims);
+    const evict = evicting(host, usage, image, box, victims);
     if (evict !== null) return { kind: "Placed", host, evict };
   }
   return { kind: "Refused", hosts: assessed.filter((each): each is Unplaceable => each.kind === "Unplaceable") };

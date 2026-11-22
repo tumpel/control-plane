@@ -16,11 +16,7 @@
     },
     {
       "path": "./npm-scripts/biome-plugins/no-alarm.grit",
-      "includes": [
-        "packages/control-plane/**/*.ts",
-        "!packages/control-plane/src/session-timer.ts",
-        "!packages/control-plane/test/scenarios/harness/runtime.ts"
-      ]
+      "includes": ["packages/control-plane/**/*.ts"]
     },
     {
       "path": "./npm-scripts/biome-plugins/no-sql-exec.grit",

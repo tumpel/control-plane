@@ -180,7 +180,6 @@ export const startPrebuild = async (
       headSha: inputs.headSha,
       rootfsKey: rootfsKey(entry.image),
     },
-    provider: start.provider,
     input: {
       principalId: caller.principalId,
       startedBy: { kind: "Person", principalId: caller.principalId },

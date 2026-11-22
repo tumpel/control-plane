@@ -263,6 +263,8 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
 };
 
+export type OfferSent = "Sent" | "RateLimited" | "Offline" | "Degraded";
+
 export const hostSilent = async (env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">, hostId: string): Promise<boolean> => {
   const lastReceivedAt = await env.HOST.get(env.HOST.idFromName(hostId)).lastReceivedAt();
   return lastReceivedAt === null || Date.now() - lastReceivedAt >= settingsOf(env).heartbeatDeadlineSeconds * 1000;
@@ -275,13 +277,14 @@ export const listHosts = async (
   const { results } = await env.DB.prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
     .all<HostRow>();
-  return Promise.all(
-    results.map(async (row) => {
-      const host = toHost(row);
-      return host.state === "Online" && (await hostSilent(env, host.hostId)) ? { ...host, state: "Offline" } : host;
-    }),
-  );
+  return Promise.all(results.map((row) => withPresence(env, toHost(row))));
 };
+
+export const withPresence = async (
+  env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">,
+  host: HostRecord,
+): Promise<HostRecord> =>
+  host.state === "Online" && (await hostSilent(env, host.hostId)) ? { ...host, health: "Degraded" } : host;
 
 export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostRecord | null> => {
   const row = await db

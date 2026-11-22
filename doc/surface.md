@@ -39,7 +39,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `EnrolmentTokens_list`                   | `tumpel_host_list_tokens`                    | `tumpel host list-tokens`                    |
 | `EnrolmentTokens_mint`                   | `tumpel_host_mint_token`                     | `tumpel host mint-token`                     |
 | `EnrolmentTokens_revoke`                 | `tumpel_host_revoke_token`                   | `tumpel host revoke-token`                   |
-| `Events_list`                            | `tumpel_events_wait`                         | `tumpel events wait`                         |
+| `Events_list`                            | `tumpel_events_list`                         | `tumpel events wait`                         |
 | `GitHubConnections_delete`               | `tumpel_github_delete`                       | `tumpel github delete`                       |
 | `GitHubConnections_get`                  | `tumpel_github_get`                          | `tumpel github get`                          |
 | `GitHubConnections_list`                 | `tumpel_github_list`                         | `tumpel github list`                         |
@@ -69,9 +69,6 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Metrics_catalog`                        | `tumpel_metrics_catalog`                     | `tumpel metrics catalog`                     |
 | `Metrics_query`                          | `tumpel_metrics_query`                       | `tumpel metrics query`                       |
 | `Metrics_turns`                          | `tumpel_metrics_turns`                       | `tumpel metrics turns`                       |
-| `NamespaceConnections_delete`            | `tumpel_namespace_delete`                    | `tumpel namespace delete`                    |
-| `NamespaceConnections_get`               | `tumpel_namespace_get`                       | `tumpel namespace get`                       |
-| `NamespaceConnections_start`             | `tumpel_namespace_start`                     | `tumpel namespace start`                     |
 | `OAuthConnectors_authorize`              | `tumpel_connector_authorize`                 | `tumpel connector authorize`                 |
 | `OAuthConnectors_create`                 | `tumpel_connector_create_oauth`              | `tumpel connector create-oauth`              |
 | `OAuthGrants_list`                       | `tumpel_oauth_grant_list`                    | `tumpel oauth-grant list`                    |
@@ -143,7 +140,6 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_listSteers`                       | `tumpel_turn_list_steers`                    | `tumpel turn list-steers`                    |
 | `Turns_send`                             | `tumpel_turn_send`                           | `tumpel turn send`                           |
 | `Turns_steer`                            | `tumpel_turn_steer`                          | `tumpel turn steer`                          |
-| `Turns_wait`                             | `tumpel_turn_wait`                           | `tumpel turn wait`                           |
 
 CLI only: tenant operations with a CLI command and no MCP tool:
 
@@ -173,22 +169,6 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `Releases_supervisor`: release download the installer and the supervisor fetch without sign-in.
 - `Releases_install`: install script a person pipes to sh before the CLI exists.
 - `Releases_rollout`: stage-wide rollout the release workflow reads with the drainToken it wrote to the release bucket, never a principal.
-- `PrebuildUploads_start`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `PrebuildUploads_complete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `PrebuildInputs_read`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIEvents_receive`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIConnections_authorize`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIConnections_choose`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIConnections_complete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIConnections_delete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIConnections_get`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIConnections_start`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIProjects_add`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIProjects_delete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `CircleCIProjects_list`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `GitHubActionsConnections_delete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `GitHubActionsConnections_get`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
-- `GitHubActionsConnections_start`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
 - `ConnectorTokens_fetch`: box wire of the guest forwarder, signed by the turn's connector token, never by a principal.
 - `WebhookEndpoints_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.

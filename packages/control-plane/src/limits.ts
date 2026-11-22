@@ -162,6 +162,6 @@ export const pastBound = (profile: TenantLimitsProfile, bound: TenantLimitsProfi
 ];
 
 const READ_OPERATION =
-  /^(list|get|read)[A-Z]|^(transcriptCursor|connectedAccounts|deferredOffers|runningTurnsByHost|turnMetricDimensions|waitTurns)$/;
+  /^(list|get|read)[A-Z]|^(transcriptCursor|connectedAccounts|runningTurnsByHost|turnMetricDimensions)$/;
 
 export const writes = (operation: string): boolean => !READ_OPERATION.test(operation);

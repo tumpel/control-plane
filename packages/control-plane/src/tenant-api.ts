@@ -5,14 +5,10 @@ import {
   ArchiveSessionResultSchema,
   CancelTurnInputSchema,
   CancelTurnResultSchema,
-  ClaudeSetupDeadlineReachedInputSchema,
-  ClaudeSetupDeadlineReachedResultSchema,
   ClearConnectorCredentialInputSchema,
   ClearConnectorCredentialResultSchema,
   CompleteSubscriptionInputSchema,
   CompleteSubscriptionResultSchema,
-  ConnectNamespaceInputSchema,
-  ConnectNamespaceResultSchema,
   ConnectorCallbackInputSchema,
   ConnectorCallbackResultSchema,
   CreateConnectorInputSchema,
@@ -29,12 +25,6 @@ import {
   CreateTriggerResultSchema,
   CreateWebhookEndpointInputSchema,
   CreateWebhookEndpointResultSchema,
-  DeadlineReachedInputSchema,
-  DeadlineReachedResultSchema,
-  DeferredOffersInputSchema,
-  DeferredOffersResultSchema,
-  DeleteBuildConnectionInputSchema,
-  DeleteBuildConnectionResultSchema,
   DeleteConnectorInputSchema,
   DeleteConnectorResultSchema,
   DeletePersonaInputSchema,
@@ -131,14 +121,10 @@ import {
   ListTurnsResultSchema,
   ListWebhookEndpointsInputSchema,
   ListWebhookEndpointsResultSchema,
-  NamespaceConnectionInputSchema,
-  NamespaceConnectionResultSchema,
   OfferSentInputSchema,
   OfferSentResultSchema,
   OpenInputSchema,
   OpenResultSchema,
-  OpenRouterAuthorizationDeadlineReachedInputSchema,
-  OpenRouterAuthorizationDeadlineReachedResultSchema,
   OpenRouterCallbackInputSchema,
   OpenRouterCallbackResultSchema,
   OpenRouterSecretSetsInputSchema,
@@ -229,8 +215,6 @@ import {
   UpdateSecretSetResultSchema,
   UpdateTriggerInputSchema,
   UpdateTriggerResultSchema,
-  WaitTurnsInputSchema,
-  WaitTurnsResultSchema,
   WriteClaudeSetupTokenInputSchema,
   WriteClaudeSetupTokenResultSchema,
 } from "@tumpel/schemas";
@@ -285,20 +269,12 @@ export const TENANT_OPERATIONS = {
     result: GetOpenRouterAuthorizationResultSchema,
   },
   openRouterCallback: { input: OpenRouterCallbackInputSchema, result: OpenRouterCallbackResultSchema },
-  openRouterAuthorizationDeadlineReached: {
-    input: OpenRouterAuthorizationDeadlineReachedInputSchema,
-    result: OpenRouterAuthorizationDeadlineReachedResultSchema,
-  },
   openRouterSecretSets: { input: OpenRouterSecretSetsInputSchema, result: OpenRouterSecretSetsResultSchema },
   startClaudeSetup: { input: StartClaudeSetupInputSchema, result: StartClaudeSetupResultSchema },
   getClaudeSetup: { input: GetClaudeSetupInputSchema, result: GetClaudeSetupResultSchema },
   listClaudeSetups: { input: ListClaudeSetupsInputSchema, result: ListClaudeSetupsResultSchema },
   submitClaudeSetupCode: { input: SubmitClaudeSetupCodeInputSchema, result: SubmitClaudeSetupCodeResultSchema },
   writeClaudeSetupToken: { input: WriteClaudeSetupTokenInputSchema, result: WriteClaudeSetupTokenResultSchema },
-  claudeSetupDeadlineReached: {
-    input: ClaudeSetupDeadlineReachedInputSchema,
-    result: ClaudeSetupDeadlineReachedResultSchema,
-  },
   prepareClaudeSetup: { input: PrepareClaudeSetupInputSchema, result: PrepareClaudeSetupResultSchema },
   listPrebuilds: { input: ListPrebuildsInputSchema, result: ListPrebuildsResultSchema },
   listLatestPrebuilds: { input: ListLatestPrebuildsInputSchema, result: ListLatestPrebuildsResultSchema },
@@ -336,7 +312,6 @@ export const TENANT_OPERATIONS = {
   listSessions: { input: ListSessionsInputSchema, result: ListSessionsResultSchema },
   listTurns: { input: ListTurnsInputSchema, result: ListTurnsResultSchema },
   getTurn: { input: GetTurnInputSchema, result: GetTurnResultSchema },
-  waitTurns: { input: WaitTurnsInputSchema, result: WaitTurnsResultSchema },
   listEvents: { input: ListEventsInputSchema, result: ListEventsResultSchema },
   listPushSubscriptions: { input: ListPushSubscriptionsInputSchema, result: ListPushSubscriptionsResultSchema },
   createPushSubscription: { input: CreatePushSubscriptionInputSchema, result: CreatePushSubscriptionResultSchema },
@@ -355,9 +330,6 @@ export const TENANT_OPERATIONS = {
   listCredentialHandovers: { input: ListCredentialHandoversInputSchema, result: ListCredentialHandoversResultSchema },
   getSnapshot: { input: GetSnapshotInputSchema, result: GetSnapshotResultSchema },
   transcriptCursor: { input: TranscriptCursorInputSchema, result: TranscriptCursorResultSchema },
-  deleteBuildConnection: { input: DeleteBuildConnectionInputSchema, result: DeleteBuildConnectionResultSchema },
-  namespaceConnection: { input: NamespaceConnectionInputSchema, result: NamespaceConnectionResultSchema },
-  connectNamespace: { input: ConnectNamespaceInputSchema, result: ConnectNamespaceResultSchema },
   offerSent: { input: OfferSentInputSchema, result: OfferSentResultSchema },
   hostHello: { input: HostHelloInputSchema, result: HostHelloResultSchema },
   hostUsage: { input: HostUsageInputSchema, result: HostUsageResultSchema },
@@ -368,13 +340,11 @@ export const TENANT_OPERATIONS = {
   readUsage: { input: ReadUsageInputSchema, result: ReadUsageResultSchema },
   readLimits: { input: ReadLimitsInputSchema, result: ReadLimitsResultSchema },
   setLimits: { input: SetLimitsInputSchema, result: SetLimitsResultSchema },
-  deferredOffers: { input: DeferredOffersInputSchema, result: DeferredOffersResultSchema },
   turnMetricDimensions: { input: TurnMetricDimensionsInputSchema, result: TurnMetricDimensionsResultSchema },
   prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
   hostPresence: { input: HostPresenceInputSchema, result: HostPresenceResultSchema },
   hostHealth: { input: HostHealthInputSchema, result: HostHealthResultSchema },
   hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
-  deadlineReached: { input: DeadlineReachedInputSchema, result: DeadlineReachedResultSchema },
 } as const;
 
 type Operations = typeof TENANT_OPERATIONS;
@@ -397,14 +367,6 @@ const invalid = (operation: string, error: z.ZodError): TenantRefusal => ({
   operation,
   issues: error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`),
 });
-
-const DEADLINE_RETRIES_VERSION = 10;
-
-const upgrade = (tenantApiVersion: number, operation: TenantOperation, input: unknown): unknown => {
-  if (tenantApiVersion >= DEADLINE_RETRIES_VERSION) return input;
-  if (operation !== "deadlineReached") return input;
-  return typeof input === "object" && input !== null ? { retries: 0, ...input } : input;
-};
 
 const run = <O extends TenantOperation>(handlers: TenantHandlers, operation: O, input: unknown) => {
   const parsed = TENANT_OPERATIONS[operation].input.safeParse(input);
@@ -431,7 +393,7 @@ export const serveTenantRequest = async (
     };
   }
   if (!known(operation)) return { refusal: "TenantOperationUnknown", operation };
-  return run(handlers, operation, upgrade(tenantApiVersion, operation, input));
+  return run(handlers, operation, input);
 };
 
 type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };

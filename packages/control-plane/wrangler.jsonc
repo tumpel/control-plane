@@ -57,16 +57,11 @@
     },
     "TUMPEL_SETTINGS": {
       "dispatchGrantTtlSeconds": 300,
-      "snapshotDelaySeconds": 30,
       "snapshotDeadlineSeconds": 900,
       "turnOfferTtlSeconds": 60,
       "turnImageFetchBudgetSeconds": 900,
-      "turnFirstLineBudgetSeconds": 120,
-      "turnTotalBudgetSeconds": 3600,
+      "turnTotalBudgetSeconds": 14400,
       "transcriptChunkLines": 64,
-      "prebuildUploadBudgetSeconds": 3600,
-      "prebuildDispatchBudgetSeconds": 600,
-      "prebuildBuildBudgetSeconds": 3600,
       "claudeSetupUrlBudgetSeconds": 300,
       "claudeSetupCodeBudgetSeconds": 600,
       "claudeSetupMintBudgetSeconds": 120,
@@ -74,8 +69,7 @@
       "heartbeatIntervalSeconds": 10,
       "heartbeatDeadlineSeconds": 30,
       "devicePollIntervalSeconds": 5,
-      "deviceSlowDownStepSeconds": 5,
-      "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
+      "deviceSlowDownStepSeconds": 5
     }
   },
   "ratelimits": [
@@ -87,7 +81,6 @@
     "bindings": [
       { "name": "TENANT", "class_name": "Tenant" },
       { "name": "HOST", "class_name": "HostChannel" },
-      { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
       { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
       { "name": "EVENTS", "class_name": "EventChannel" },
       { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -99,7 +92,8 @@
     { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
     { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
     { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+    { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+    { "tag": "v7", "deleted_classes": ["SessionTimer"] }
   ],
   "rules": [{ "type": "Text", "globs": ["**/*.sql", "**/*.css", "**/*.sh", "**/*.jsonc"], "fallthrough": true }],
   "env": {
@@ -156,16 +150,11 @@
         },
         "TUMPEL_SETTINGS": {
           "dispatchGrantTtlSeconds": 300,
-          "snapshotDelaySeconds": 30,
           "snapshotDeadlineSeconds": 900,
           "turnOfferTtlSeconds": 60,
           "turnImageFetchBudgetSeconds": 900,
-          "turnFirstLineBudgetSeconds": 120,
-          "turnTotalBudgetSeconds": 3600,
+          "turnTotalBudgetSeconds": 14400,
           "transcriptChunkLines": 64,
-          "prebuildUploadBudgetSeconds": 3600,
-          "prebuildDispatchBudgetSeconds": 600,
-          "prebuildBuildBudgetSeconds": 3600,
           "claudeSetupUrlBudgetSeconds": 300,
           "claudeSetupCodeBudgetSeconds": 600,
           "claudeSetupMintBudgetSeconds": 120,
@@ -173,8 +162,7 @@
           "heartbeatIntervalSeconds": 10,
           "heartbeatDeadlineSeconds": 30,
           "devicePollIntervalSeconds": 5,
-          "deviceSlowDownStepSeconds": 5,
-          "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
+          "deviceSlowDownStepSeconds": 5
         }
       },
       "ratelimits": [
@@ -186,7 +174,6 @@
         "bindings": [
           { "name": "TENANT", "class_name": "Tenant" },
           { "name": "HOST", "class_name": "HostChannel" },
-          { "name": "SESSION_TIMER", "class_name": "SessionTimer" },
           { "name": "TENANT_METRICS", "class_name": "TenantMetrics" },
           { "name": "EVENTS", "class_name": "EventChannel" },
           { "name": "WEBHOOKS", "class_name": "WebhookSender" }
@@ -198,7 +185,8 @@
         { "tag": "v3", "new_sqlite_classes": ["SessionTimer"] },
         { "tag": "v4", "new_sqlite_classes": ["TenantMetrics"] },
         { "tag": "v5", "new_sqlite_classes": ["EventChannel"] },
-        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] }
+        { "tag": "v6", "new_sqlite_classes": ["WebhookSender"] },
+        { "tag": "v7", "deleted_classes": ["SessionTimer"] }
       ]
     }
   }

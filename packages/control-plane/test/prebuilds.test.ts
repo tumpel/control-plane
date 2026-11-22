@@ -8,7 +8,6 @@ import {
   ConnectionSummarySchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
-  NamespaceConnectionLinkSchema,
   OpenRouterAuthorizationSchema,
   PersonaSchema,
   PrebuildSchema,
@@ -22,9 +21,6 @@ import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
-type OpenRouterTenant = {
-  openRouterAuthorizationDeadlineReached(deadline: { openRouterAuthorizationId: string; at: number }): Promise<void>;
-};
 
 const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
@@ -149,12 +145,14 @@ after(async () => {
 test("a prebuild start refuses before it stores anything: an unreadable repository, a foreign repository, an unknown persona", async () => {
   const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
   assert.ok(persona);
-  const unnamed = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
-  const start = { ...unnamed, provider: "Namespace" };
+  const start = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
   const unreadable = await refused("POST", "/v1/prebuilds", start, 409);
   assert.equal(unreadable.code, "RepositoryUnreadable");
   assert.match(unreadable.detail, /acme\/app/);
-  assert.equal((await refused("POST", "/v1/prebuilds", unnamed, 400)).code, "InvalidRequest");
+  assert.equal(
+    (await refused("POST", "/v1/prebuilds", { repository: REPOSITORY, rebuild: false }, 400)).code,
+    "InvalidRequest",
+  );
   assert.equal(
     (await refused("POST", "/v1/prebuilds", { ...start, repository: "https://example.test/app.git" }, 422)).code,
     "InvalidRequest",
@@ -171,24 +169,9 @@ test("a prebuild start refuses before it stores anything: an unreadable reposito
 
 const ConnectionRows = ConnectionSummarySchema.array();
 
-test("the connection list holds one row per provider, and a connected build provider shows its billing account", async () => {
+test("the connection list holds one row per connection kind", async () => {
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
     { kind: "GitHub", state: "NotConfigured" },
-    { kind: "Namespace", state: "NotConfigured" },
-    { kind: "OpenRouter", state: "NotConnected" },
-  ]);
-
-  const namespace = await rest(NamespaceConnectionLinkSchema, "GET", "/v1/namespace-connection");
-  assert.equal(namespace.link.state, "NotConfigured");
-  const start = {
-    accountLabel: "acme workspace",
-    workspaceId: "tenant_123456789ab",
-  };
-  assert.equal((await refused("POST", "/v1/namespace-connection/start", start, 409)).code, "IssuerMissing");
-
-  assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
-    { kind: "GitHub", state: "NotConfigured" },
-    { kind: "Namespace", state: "NotConfigured" },
     { kind: "OpenRouter", state: "NotConnected" },
   ]);
 });
@@ -238,24 +221,6 @@ test("Connect OpenRouter spends one code into the secret set, fails on its deadl
     undefined,
   );
   assert.equal(refusedState.status, 400);
-  assert.equal(keyExchanges.length, 1);
-
-  const late = await rest(OpenRouterAuthorizationSchema, "POST", authorize, { secretSetId: set.secretSetId });
-  assert.ok(late.status.state === "AwaitingCallback");
-  const tenant = (
-    await server.getWorker<{ TENANT: { getByName(name: string): OpenRouterTenant } }>().getEnv()
-  ).TENANT.getByName(set.tenantId);
-  await tenant.openRouterAuthorizationDeadlineReached({
-    openRouterAuthorizationId: late.openRouterAuthorizationId,
-    at: Date.parse(late.status.callbackDueAt),
-  });
-  const timedOut = await read(late.openRouterAuthorizationId);
-  assert.ok(timedOut.status.state === "Failed");
-  assert.equal(timedOut.status.reason, "AuthorizationTimedOut");
-  assert.equal(
-    (await send("GET", `${callbackOf(late.status.authorizeUrl)}?code=${OPENROUTER_CODE}`, undefined)).status,
-    303,
-  );
   assert.equal(keyExchanges.length, 1);
 
   const other = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {

@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
-import { type Host, TENANT_ID, World } from "./harness/world.ts";
-
-const healthIs = async (world: World, host: Host, health: string, detail: string): Promise<void> => {
-  world.db.sql.exec("UPDATE hosts SET health = ? WHERE host_id = ?", health, host.hostId);
-  await world.call("hostHealth", { tenantId: TENANT_ID, hostId: host.hostId, health, detail, now: Date.now() });
-};
+import { World } from "./harness/world.ts";
 
 test("a delivery turn that cannot be composed fails Undelivered while the turn queued behind it is delivered", async (t) => {
   const world = await World.open();
@@ -58,11 +53,8 @@ test("a delivery turn that cannot be composed fails Undelivered while the turn q
     JSON.stringify(["crew:epic"]),
   );
 
-  await healthIs(world, host, "RateLimited", "host sent more than 600 frames a minute");
-  await world.sendTurn(helperTurn?.sessionId ?? "", "a turn queued behind the delivery");
   const resumed = await world.fetch(world.owner, "POST", `${path}/resume`);
   assert.equal(resumed.status, 200);
-  await healthIs(world, host, "Healthy", "host sent no more than 600 frames a minute for a full minute");
 
   const deliveries = z
     .array(z.object({ turn_id: z.string() }))
@@ -75,14 +67,6 @@ test("a delivery turn that cannot be composed fails Undelivered while the turn q
   const [delivery] = deliveries;
   assert.ok(delivery !== undefined);
 
-  const { handoffs } = z
-    .object({ handoffs: z.array(z.object({ offer: z.object({ turnId: z.string(), sessionId: z.string() }) })) })
-    .parse(await world.call("deferredOffers", { tenantId: TENANT_ID, hostId: host.hostId }));
-
-  assert.deepEqual(
-    handoffs.map((handoff) => handoff.offer.sessionId),
-    [helperTurn?.sessionId],
-  );
   const failed = await world.turn(delivery.turn_id);
   assert.equal(failed.state, "Failed");
   assert.equal(failed.state === "Failed" ? failed.reason : null, "Undelivered");
@@ -90,4 +74,7 @@ test("a delivery turn that cannot be composed fails Undelivered while the turn q
     failed.state === "Failed" ? (failed.detail ?? "") : "",
     new RegExp(`could not be composed.*stored event ${stored.event_id} does not match the event schema`, "s"),
   );
+
+  await world.sendTurn(helperTurn?.sessionId ?? "", "a turn queued behind the delivery");
+  assert.equal(host.takeOffer().sessionId, helperTurn?.sessionId);
 });
