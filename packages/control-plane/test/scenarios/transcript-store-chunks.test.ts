@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
-import { type Host, SETTINGS, World } from "./harness/world.ts";
+import { type Host, SETTINGS, TENANT_ID, World } from "./harness/world.ts";
 
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
 const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
@@ -47,11 +47,13 @@ test("a tenant that restarts after storing a chunk goes on from the stored lines
   );
   for (let lineSeq = stored + 1; lineSeq <= stored + 7; lineSeq++) await line(host, first.turnId, lineSeq);
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
     boxCapacity: 8,
     usage: USAGE,
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
+    heldTurnIds: [first.turnId],
   });
   await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
   await completes(host, session.sessionId, first.turnId, stored + 8);

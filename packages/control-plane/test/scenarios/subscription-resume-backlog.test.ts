@@ -49,11 +49,13 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   await world.runtime.settle();
   assert.equal(world.tenantRowsWritten() - before, 0, "the restart rewrites no stored event");
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
     boxCapacity: 8,
     usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
+    heldTurnIds: [],
   });
 
   const resumed = await world.fetch(world.owner, "POST", `${path}/resume`);

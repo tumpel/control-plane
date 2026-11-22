@@ -48,6 +48,7 @@ test("an offer that waits on the tenant while a heartbeat stores the held frames
     hostMessage: { reply: null },
     hostUsage: {},
     hostPresence: {},
+    reconcileHostHoldings: {},
     prepareOffer: { prepared: { kind: "Withdrawn" } },
   };
   const tenant = {
@@ -61,7 +62,7 @@ test("an offer that waits on the tenant while a heartbeat stores the held frames
   };
 
   let attachment: unknown = {
-    connection: { phase: "Open", protocolVersion: ChannelProtocol.Version, heldReported: true },
+    connection: { phase: "Open", protocolVersion: ChannelProtocol.Version },
     lastReceivedAt: now,
     lastSentAt: now,
     usage: USAGE,
@@ -96,6 +97,7 @@ test("an offer that waits on the tenant while a heartbeat stores the held frames
     usage: USAGE,
     heldSessionIds: [],
     heldClaudeSetupIds: [],
+    heldTurnIds: [],
   });
 
   await channel.webSocketMessage(socket, line(1));

@@ -161,6 +161,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
           usage: USAGE,
+          heldTurnIds: [],
         });
       },
       oldHello: async () => {
@@ -201,6 +202,7 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       protocolVersion: ChannelProtocol.Version,
       channelProtocolOldest: undefined,
       guestProtocol: undefined,
+      heldTurnIds: [],
     },
   ]);
   assert.deepEqual(
@@ -251,6 +253,7 @@ test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () =
     protocolVersion: ChannelProtocol.Oldest,
     channelProtocolOldest: undefined,
     guestProtocol: undefined,
+    heldTurnIds: [],
   });
 });
 
@@ -593,34 +596,4 @@ test("revoke closes a live connection, and a revoked host's next Hello is closed
     ["Challenge"],
   );
   assert.deepEqual(channel.ledger.current, before);
-});
-
-test("only the first heartbeat after Welcome reports the held sessions, once per connection", async () => {
-  const channel = setup();
-  const first = channel.connect();
-  await first.hello();
-  const beat = (heldSessionIds: string[]): HostEnvelope => ({
-    type: "Heartbeat",
-    sentAt: "2026-11-18T10:00:00+01:00",
-    usage: USAGE,
-    heldSessionIds,
-    heldClaudeSetupIds: [],
-  });
-  await first.deliver(beat(["session-1"]));
-  await first.deliver(beat([]));
-  assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"], heldClaudeSetupIds: [] },
-    { kind: "Heartbeat", usage: USAGE, health: "Healthy" },
-  ]);
-
-  const second = channel.connect();
-  await second.hello();
-  await second.deliver(beat([]));
-  assert.deepEqual(second.events.at(-1), {
-    kind: "FirstHeartbeat",
-    usage: USAGE,
-    health: "Healthy",
-    heldSessionIds: [],
-    heldClaudeSetupIds: [],
-  });
 });

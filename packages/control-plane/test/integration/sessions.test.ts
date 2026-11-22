@@ -3025,7 +3025,7 @@ suite("sessions", { concurrency: 8 }, () => {
     }
   });
 
-  test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {
+  test("a claimed turn keeps running when its host disconnects, and the session refuses a stop while the host is away", async () => {
     const { bearer, host, refused, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "host goes away" }, bearer);
     assert.equal(response.status, 200);
@@ -3041,20 +3041,11 @@ suite("sessions", { concurrency: 8 }, () => {
     );
 
     host.close();
-    await until(
-      "the turn reading Failed",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "HostOffline");
-    assert.match(failure.detail, /^host box went offline during the turn/);
-    assert.doesNotMatch(failure.detail, UUID);
-
     const offline = await refused(`/v1/sessions/${started.session.sessionId}/stop`);
     assert.equal(offline.code, "HostOffline");
     assert.match(offline.detail, /runs on host box, which is Offline/);
     assert.doesNotMatch(offline.detail, UUID);
+    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
   });
 
   test("the first heartbeat after a reconnect fails BoxLost each Running turn whose box the host no longer holds, after the turns its resent frames settle", async () => {
@@ -3257,7 +3248,7 @@ suite("sessions", { concurrency: 8 }, () => {
       () => getJson(`/v1/turns/${afterOffer.turnId}`, TurnSchema),
       (turn) => turn.state === "Running",
     );
-    assert.equal((await getJson(`/v1/turns/${lost.turnId}/failure`, TurnFailureSchema)).reason, "HostOffline");
+    assert.equal((await getJson(`/v1/turns/${lost.turnId}/failure`, TurnFailureSchema)).reason, "HostDropped");
     from.close();
     to.close();
   });

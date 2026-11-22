@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
-import { World } from "./harness/world.ts";
+import { TENANT_ID, World } from "./harness/world.ts";
 
 const STEADY_ROWS_BUDGET = 100;
 const TURN_ROWS_BUDGET = 24;
@@ -17,11 +17,13 @@ test("one host streaming 10 running turns for 10 minutes writes fewer than 100 t
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
     boxCapacity: SESSIONS,
     usage: USAGE,
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
+    heldTurnIds: [],
   });
   const turnIds: string[] = [];
   for (let session = 1; session <= SESSIONS; session++) {

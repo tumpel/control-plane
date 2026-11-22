@@ -592,23 +592,27 @@ export class Tenant extends TenantConnectors {
       this.offerSent(turnId);
       return {};
     },
-    hostHello: ({ hostId, boxCapacity, usage, now, channelProtocol }) => {
+    hostHello: async ({ tenantId, hostId, boxCapacity, usage, now, channelProtocol, heldTurnIds }) => {
       this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
+      await this.reconcileHeldTurns(tenantId, hostId, heldTurnIds, "Hello", now);
       return {};
     },
     hostUsage: async ({ hostId, usage, now }) => {
       await this.hostUsage(hostId, usage, now);
       return {};
     },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
-      await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
-      await this.failHostClaudeSetups(
-        hostId,
-        "NoHostOnline",
-        `host ${hostId} reconnected without the setup's box; start the setup again`,
-        now,
-        heldClaudeSetupIds,
-      );
+    reconcileHostHoldings: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, heldTurnIds, now }) => {
+      if (this.firstHoldings(hostId)) {
+        await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+        await this.failHostClaudeSetups(
+          hostId,
+          "NoHostOnline",
+          `host ${hostId} reconnected without the setup's box; start the setup again`,
+          now,
+          heldClaudeSetupIds,
+        );
+      }
+      await this.reconcileHeldTurns(tenantId, hostId, heldTurnIds, "Heartbeat", now);
       return {};
     },
     forgetHostUsage: ({ hostId }) => {
@@ -624,8 +628,8 @@ export class Tenant extends TenantConnectors {
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
-    hostPresence: async ({ tenantId, hostId, presence, now }) => {
-      await this.hostPresence(tenantId, hostId, presence, now);
+    hostPresence: async ({ hostId, presence, now }) => {
+      this.hostPresence(hostId, presence, now);
       if (presence === "Offline") {
         await this.failHostClaudeSetups(
           hostId,
@@ -638,11 +642,7 @@ export class Tenant extends TenantConnectors {
     },
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
-      if (health === "Healthy") return {};
-      if (health === "Degraded") {
-        await this.hostFellSilent(tenantId, hostId, now);
-        return {};
-      }
+      if (health !== "RateLimited") return {};
       const failed = await this.failHostTurns(
         tenantId,
         hostId,

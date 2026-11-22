@@ -30,7 +30,7 @@ import {
 
 export type ControlConnection =
   | { phase: "AwaitingHello"; nonce: string }
-  | { phase: "Open"; protocolVersion: number; heldReported: boolean }
+  | { phase: "Open"; protocolVersion: number }
   | { phase: "Closed" };
 
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
@@ -110,14 +110,15 @@ export type ControlEvent =
       protocolVersion: number;
       channelProtocolOldest: Hello["channelProtocolOldest"];
       guestProtocol: Hello["guestProtocol"];
+      heldTurnIds: string[];
     }
-  | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
   | {
-      kind: "FirstHeartbeat";
+      kind: "Heartbeat";
       usage: HostUsage;
       health: HostReportedHealth;
       heldSessionIds: string[];
       heldClaudeSetupIds: string[];
+      heldTurnIds: string[];
     }
   | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
@@ -258,7 +259,7 @@ const hello = async (
   });
   for (const frame of resent) context.port.send(frame);
   return {
-    connection: { phase: "Open", protocolVersion: envelope.protocolVersion, heldReported: false },
+    connection: { phase: "Open", protocolVersion: envelope.protocolVersion },
     event: {
       kind: "Welcomed",
       boxCapacity: envelope.boxCapacity,
@@ -267,6 +268,7 @@ const hello = async (
       protocolVersion: envelope.protocolVersion,
       channelProtocolOldest: envelope.channelProtocolOldest,
       guestProtocol: envelope.guestProtocol,
+      heldTurnIds: envelope.heldTurnIds,
     },
   };
 };
@@ -336,18 +338,15 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") {
-    const health = envelope.health ?? "Healthy";
-    if (connection.heldReported) {
-      return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
-    }
     return {
-      connection: { ...connection, heldReported: true },
+      connection,
       event: {
-        kind: "FirstHeartbeat",
+        kind: "Heartbeat",
         usage: envelope.usage,
-        health,
+        health: envelope.health ?? "Healthy",
         heldSessionIds: envelope.heldSessionIds,
         heldClaudeSetupIds: envelope.heldClaudeSetupIds,
+        heldTurnIds: envelope.heldTurnIds,
       },
     };
   }

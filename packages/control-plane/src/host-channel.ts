@@ -158,7 +158,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so its running work failed`;
+    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so it reads as Degraded until it speaks again`;
     await tenantApi(this.env.TENANT, tenantId).call("hostHealth", {
       tenantId,
       hostId,
@@ -262,10 +262,10 @@ export class HostChannel extends DurableObject<Env> {
       this.ledger.take();
       attachment.usage = event.usage;
     }
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
+    if (event.kind === "Heartbeat") attachment.usage = event.usage;
     this.keep(socket, attachment);
     if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
+    if (event.kind === "Heartbeat") {
       await this.reportHealth(host.host_id, event.health);
       if (meter.recovered(now)) {
         await this.setHealth(
@@ -283,14 +283,11 @@ export class HostChannel extends DurableObject<Env> {
     if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
       await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      if (
-        !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
-        this.ledger.stalled() >= RETRY_LIMIT
-      )
-        return this.giveUp(socket, attachment, context);
+    if (event.kind === "Heartbeat") {
+      const flushed = await this.flush(host.host_id, event.usage, now, attachment, context);
+      if (!flushed && this.ledger.stalled() >= RETRY_LIMIT) return this.giveUp(socket, attachment, context);
       if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
+      if (flushed) await this.reconcileHostHoldings(host.host_id, event, now);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -499,11 +496,13 @@ export class HostChannel extends DurableObject<Env> {
     ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
+      tenantId,
       hostId,
       boxCapacity: welcomed.boxCapacity,
       usage: welcomed.usage,
       now,
       channelProtocol: welcomed.protocolVersion,
+      heldTurnIds: welcomed.heldTurnIds,
     });
   }
 
@@ -575,13 +574,20 @@ export class HostChannel extends DurableObject<Env> {
     await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
   }
 
-  private async reconcileHeldBoxes(
+  private async reconcileHostHoldings(
     hostId: string,
-    held: { heldSessionIds: string[]; heldClaudeSetupIds: string[] },
+    { heldSessionIds, heldClaudeSetupIds, heldTurnIds }: Extract<control.ControlEvent, { kind: "Heartbeat" }>,
     now: number,
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
+    await tenantApi(this.env.TENANT, tenantId).call("reconcileHostHoldings", {
+      tenantId,
+      hostId,
+      heldSessionIds,
+      heldClaudeSetupIds,
+      heldTurnIds,
+      now,
+    });
   }
 
   private async tenantOf(hostId: string): Promise<string> {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
-import { World } from "./harness/world.ts";
+import { TENANT_ID, World } from "./harness/world.ts";
 
 const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
 
@@ -25,11 +25,13 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
 
   for (let lineSeq = 1; lineSeq <= 4; lineSeq++) await line(lineSeq);
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
     boxCapacity: 8,
     usage: USAGE,
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
+    heldTurnIds: [offer.turnId],
   });
   await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
   const turn = await world.turn(offer.turnId);

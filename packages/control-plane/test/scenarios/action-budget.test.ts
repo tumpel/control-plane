@@ -220,11 +220,13 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
     boxCapacity: 64,
     usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
+    heldTurnIds: [],
   });
   const lineSeqs = new Map<string, number>();
   const runTurn = async (sessionId: string, lines: number, chunks: Placement[] | null): Promise<void> => {
