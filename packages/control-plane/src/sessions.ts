@@ -638,12 +638,7 @@ export const patchSessionTags = async (
   });
 };
 
-export const deleteSession = async (
-  env: Env,
-  caller: Caller,
-  sessionId: string,
-  now: number,
-): Promise<Outcome<null>> => {
+export const deleteSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<null>> => {
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
@@ -952,7 +947,7 @@ const sessionRoute = async (
     return answer(await patchSessionTags(env, caller, sessionId, body.value, Date.now()));
   }
   if (request.method === "DELETE") {
-    const deleted = await deleteSession(env, caller, sessionId, Date.now());
+    const deleted = await deleteSession(env, caller, sessionId);
     return deleted.ok ? noContent() : answer(deleted);
   }
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
