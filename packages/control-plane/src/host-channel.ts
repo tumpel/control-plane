@@ -315,13 +315,15 @@ export class HostChannel extends DurableObject<Env> {
   ): Promise<void> {
     const bytes = JSON.stringify(frame.message).length;
     if (this.ledger.queued().length > 0) return this.queue(frame, bytes, attachment, context);
-    if (frame.message.type !== "TurnLine" && this.ledger.holding()) {
+    const rides =
+      frame.message.type === "TurnLine" || (frame.message.type === "TelemetryBatch" && this.ledger.holding());
+    if (!rides && this.ledger.holding()) {
       if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context)))
         return this.queue(frame, bytes, attachment, context);
     }
     const delivered = await this.reply(hostId, frame);
     if (!delivered.ok) return this.queue(frame, bytes, attachment, context);
-    if (frame.message.type !== "TurnLine") {
+    if (!rides) {
       control.acknowledge(context, [frame]);
       return this.answer(hostId, frame, delivered.reply, attachment, context);
     }

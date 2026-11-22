@@ -1846,6 +1846,92 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(read < 2 * archived, `two idle heartbeats read ${read} rows`);
   });
 
+  test("a turn of 201 lines, 5 telemetry batches and a snapshot stays within its row budget on the tenant and the host", async () => {
+    const { tenantId, hostId, host, tool, sessionStart, storedSnapshot } = await tenant();
+    const tenantRows = async (): Promise<{ rowsRead: number; rowsWritten: number }> => {
+      const response = await call(`/__fixture/usage/${tenantId}`);
+      const { usage } = z.object({ usage: TenantUsageSchema }).parse(await response.json());
+      const used = (measure: string): number => {
+        const counter = usage.counters.find((each) => each.measure === measure);
+        if (counter === undefined) throw new Error(`the tenant usage has no ${measure} counter`);
+        return counter.used;
+      };
+      return { rowsRead: used("RowsRead"), rowsWritten: used("RowsWritten") };
+    };
+    const hostRows = async (): Promise<{ rowsRead: number; rowsWritten: number }> =>
+      z
+        .object({ rowsRead: z.number(), rowsWritten: z.number() })
+        .parse(await (await call(`/__fixture/host-rows/${hostId}`)).json());
+    host.quiet();
+    const tenantBefore = await tenantRows();
+    const hostBefore = await hostRows();
+
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "fix the build" },
+      StartedSessionSchema,
+    );
+    const offer = await host.next("TurnOffer");
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
+    let lineSeq = 0;
+    for (let round = 0; round < 5; round++) {
+      for (let index = 0; index < 40; index++) {
+        lineSeq += 1;
+        host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+      }
+      host.send({
+        type: "TelemetryBatch",
+        instruments: [{ metric: "turn.tokens", unit: "1", kind: "Turn", description: "tokens" }],
+        samples: [{ metric: "host.load.1m", at: new Date().toISOString(), value: 0.5, dimensions: {} }],
+        turns: [
+          {
+            metric: "turn.tokens",
+            at: new Date().toISOString(),
+            value: 10,
+            dimensions: {},
+            turnId: offer.turnId,
+            sessionId: started.session.sessionId,
+          },
+        ],
+      });
+      host.report(USAGE);
+    }
+    lineSeq += 1;
+    host.send({
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq,
+      text: '{"type":"result","subtype":"success","is_error":false}',
+    });
+    host.send({
+      type: "TurnComplete",
+      turnId: offer.turnId,
+      lastLineSeq: lineSeq,
+      completedAt: new Date().toISOString(),
+    });
+    host.report(USAGE);
+    await storedSnapshot(started.session.sessionId);
+    await until(
+      "the session reading Idle",
+      () => tool("tumpel_session_get", { sessionId: started.session.sessionId }, SessionSchema),
+      (read) => read.state === "Idle",
+    );
+    const tenantAfter = await tenantRows();
+    const hostAfter = await hostRows();
+
+    const spent = {
+      tenantWritten: tenantAfter.rowsWritten - tenantBefore.rowsWritten,
+      tenantRead: tenantAfter.rowsRead - tenantBefore.rowsRead,
+      hostWritten: hostAfter.rowsWritten - hostBefore.rowsWritten,
+      hostRead: hostAfter.rowsRead - hostBefore.rowsRead,
+    };
+    assert.ok(spent.tenantWritten <= 50, `the turn wrote ${spent.tenantWritten} tenant rows`);
+    assert.ok(spent.tenantRead <= 2300, `the turn read ${spent.tenantRead} tenant rows`);
+    assert.ok(spent.hostWritten <= 14, `the turn wrote ${spent.hostWritten} host rows`);
+    assert.ok(spent.hostRead <= 520, `the turn read ${spent.hostRead} host rows`);
+  });
+
   test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
     const { tool, toolRefusal, sessionStart } = await tenant();
     const started = await tool(

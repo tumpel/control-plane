@@ -1749,8 +1749,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec<{ host_id: string; running: number }>(
         `SELECT t.host_id, COUNT(DISTINCT t.session_id) AS running FROM turns t JOIN sessions s ON s.session_id = t.session_id
-        WHERE t.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND s.state != 'Stopped' GROUP BY t.host_id`,
-        ...IN_FLIGHT,
+        WHERE t.state IN ('Offered', 'Running') AND s.state != 'Stopped' GROUP BY t.host_id`,
       )
       .toArray()
       .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
@@ -3505,12 +3504,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     handle: () => Promise<Reply>,
   ): Promise<Reply> {
     const now = Date.now();
+    const fetchStartedAt = this.imageFetches.get(message.turnId);
+    if (fetchStartedAt === undefined || message.type === "TurnImageFetching") return handle();
     const offered = this.offeredTurn(hostId, message);
-    if (offered.type === "Refused" || message.type === "TurnImageFetching") return handle();
-    const fetchStartedAt = this.imageFetches.get(offered.turn.turn_id);
-    this.imageFetches.delete(offered.turn.turn_id);
+    if (offered.type === "Refused") return handle();
+    this.imageFetches.delete(message.turnId);
     const reply = await handle();
-    if (fetchStartedAt === undefined) return reply;
     const { turn, session } = offered;
     await this.recordTiming(tenantId, "turn.image_fetch.duration", turn, session, fetchStartedAt, now);
     return reply;

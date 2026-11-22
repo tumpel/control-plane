@@ -1,7 +1,30 @@
-import worker, { Tenant as BaseTenant, type Env } from "../../src/index";
+import { HostLedger } from "../../src/channel/ledger";
+import { durableDb } from "../../src/db/client";
+import * as hostSchema from "../../src/db/host-schema";
+import worker, { HostChannel as BaseHostChannel, Tenant as BaseTenant, type Env } from "../../src/index";
+import { meteredState } from "../../src/metered-state";
 import { tenantApi } from "../../src/tenant-api";
+import type { Rows } from "../../src/usage-meter";
 
-export { EventChannel, HostChannel, TenantMetrics, WebhookSender } from "../../src/index";
+export { EventChannel, TenantMetrics, WebhookSender } from "../../src/index";
+
+export class HostChannel extends BaseHostChannel {
+  private readonly cursors: Rows[];
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.cursors = [];
+    this.ctx = meteredState(this.ctx, this.cursors);
+    Reflect.set(this, "ledger", new HostLedger(durableDb(this.ctx.storage, hostSchema)));
+  }
+
+  rows(): Rows {
+    return {
+      rowsRead: this.cursors.reduce((sum, cursor) => sum + cursor.rowsRead, 0),
+      rowsWritten: this.cursors.reduce((sum, cursor) => sum + cursor.rowsWritten, 0),
+    };
+  }
+}
 
 export class Tenant extends BaseTenant {
   sql(query: string, bindings: SqlStorageValue[]): Record<string, SqlStorageValue>[] {
@@ -44,6 +67,11 @@ const sql = async (request: Request, env: Env, tenantId: string): Promise<Respon
 const usage = async (env: Env, tenantId: string): Promise<Response> =>
   Response.json(await tenantApi(env.TENANT, tenantId).call("readUsage", { tenantId }));
 
+const hostRows = async (env: Env, hostId: string): Promise<Response> => {
+  const host = (env.HOST as unknown as DurableObjectNamespace<HostChannel>).getByName(hostId);
+  return Response.json(await host.rows());
+};
+
 const d1 = async (request: Request, env: Env): Promise<Response> => {
   const { query, bindings } = await request.json<{ query: string; bindings: unknown[] }>();
   await env.DB.prepare(query)
@@ -59,6 +87,7 @@ const fixture = (request: Request, env: Env, path: string): Promise<Response> =>
   if (kind === "sql") return sql(request, env, target);
   if (kind === "d1") return d1(request, env);
   if (kind === "usage") return usage(env, target);
+  if (kind === "host-rows") return hostRows(env, target);
   return Promise.resolve(new Response(`no fixture route ${path}`, { status: 404 }));
 };
 
