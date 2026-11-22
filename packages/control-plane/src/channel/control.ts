@@ -197,6 +197,7 @@ export const send = async (
   connection: ControlConnection,
   message: StoredControlMessage,
   context: ControlContext,
+  prepared?: ControlMessage,
 ): Promise<void> => {
   if (connection.phase !== "Open") {
     store(message, context);
@@ -208,25 +209,7 @@ export const send = async (
     store(message, context);
     return;
   }
-  const spoken = await prepare(message, context);
-  context.port.send({ ...store(message, context), message: spoken });
-};
-
-export const sendPrepared = (
-  connection: ControlConnection,
-  message: StoredControlMessage,
-  spoken: ControlMessage,
-  context: ControlContext,
-): void => {
-  if (connection.phase !== "Open") {
-    store(message, context);
-    return;
-  }
-  const nextSeq = context.ledger.load().sent + 1;
-  if (unspoken(connection.protocolVersion, message.type, nextSeq, context) !== null) {
-    store(message, context);
-    return;
-  }
+  const spoken = prepared ?? (await prepare(message, context));
   context.port.send({ ...store(message, context), message: spoken });
 };
 

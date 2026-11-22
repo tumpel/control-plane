@@ -124,24 +124,24 @@ export class HostChannel extends DurableObject<Env> {
   async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    const open = this.openSocket();
     if (message.type === "TurnOffer") {
-      const refused = await this.offerRefused(host.host_id, open);
+      const refused = await this.offerRefused(host.host_id);
       if (refused !== null) return refused;
     }
-    if (open === undefined) {
+    if (this.openSocket() === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null));
       return "Sent";
     }
     const spoken = await control.prepare(message, this.context(null, host, null));
-    const current = this.openSocket();
-    if (current === undefined) {
-      control.sendPrepared({ phase: "Closed" }, message, spoken, this.context(null, host, null));
+    const open = this.openSocket();
+    if (open === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
       return "Sent";
     }
-    const attachment = this.attachment(current);
-    control.sendPrepared(attachment.connection, message, spoken, this.context(current, host, attachment));
-    current.serializeAttachment(attachment);
+    const attachment = this.attachment(open);
+    const sent = control.send(attachment.connection, message, this.context(open, host, attachment), spoken);
+    open.serializeAttachment(attachment);
+    await sent;
     return "Sent";
   }
 
@@ -166,13 +166,13 @@ export class HostChannel extends DurableObject<Env> {
     });
   }
 
-  private async offerRefused(hostId: string, open: WebSocket | undefined): Promise<OfferSent | null> {
+  private async offerRefused(hostId: string): Promise<OfferSent | null> {
     if (await this.offersPaused(hostId)) return "RateLimited";
-    if (open === undefined) return "Offline";
     const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
       .bind(hostId)
       .first<{ state: string }>();
-    if (row?.state !== "Online") return "Offline";
+    const open = this.openSocket();
+    if (row?.state !== "Online" || open === undefined) return "Offline";
     const silentFor = Date.now() - this.attachment(open).lastReceivedAt;
     return silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Degraded" : null;
   }
