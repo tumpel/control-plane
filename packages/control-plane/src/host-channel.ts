@@ -525,7 +525,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private async reconcileHeldBoxes(
     hostId: string,
-    held: { heldSessionIds: string[]; heldClaudeSetupIds?: string[] },
+    held: { heldSessionIds: string[]; heldClaudeSetupIds: string[] },
     now: number,
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);

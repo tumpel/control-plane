@@ -451,6 +451,7 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, NULL, reason, detail, failed_at, created_at, created_at FROM snapshot_failures
 )`;
 
+const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 const STORE_DELETE_BATCH = 1000;
@@ -1527,6 +1528,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       boxDiskMib: session.box_disk_mib,
       boxRetention: session.box_retention,
       turnSeconds: settingsOf(this.env).turnTotalBudgetSeconds,
+      idleSeconds: BOX_IDLE_SECONDS,
       ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
     return { kind: "Composed", offer };

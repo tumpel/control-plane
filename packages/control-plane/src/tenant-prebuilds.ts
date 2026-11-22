@@ -1,9 +1,4 @@
-import {
-  type BuildProviderSchema,
-  type NamespaceConnectionStartSchema,
-  PrebuildFailureSchema,
-  PrebuildSchema,
-} from "@tumpel/schemas";
+import { PrebuildFailureSchema, PrebuildSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { type GitHubRepository, type Permissions, REPOSITORY_TOKEN, repositoryCredential } from "./github.ts";
 import type { ConfigSource } from "./prebuild-inputs.ts";
@@ -12,16 +7,6 @@ import { type FailureReport, type NewSession, PREBUILD_ARCHITECTURE, type Starte
 
 export type Prebuild = z.infer<typeof PrebuildSchema>;
 export type PrebuildFailure = z.infer<typeof PrebuildFailureSchema>;
-export type BuildProvider = z.infer<typeof BuildProviderSchema>;
-export type NamespaceConnectionStart = z.infer<typeof NamespaceConnectionStartSchema>;
-
-export interface NamespaceRow {
-  namespaceConnectionId: string;
-  accountLabel: string;
-  workspaceId: string;
-  createdAt: number;
-  updatedAt: number;
-}
 
 export type ReadToken = { kind: "Token"; token: string } | { kind: "Refused"; detail: string };
 
@@ -49,7 +34,6 @@ type PrebuildRow = {
   default_branch: string;
   input_digest: string;
   guest_image_digest: string;
-  provider: string;
   config_source: string;
   head_sha: string;
   rootfs_key: string;
@@ -73,7 +57,7 @@ type FailureRow = {
   created_at: number;
 };
 
-const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, provider, config_source,
+const PREBUILD_SELECT = `SELECT prebuilds.prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest, config_source,
   head_sha, rootfs_key, state, started_at, log_url, prebuilds.created_at, prebuilds.updated_at, prebuild_layers.layer_digest,
   prebuild_layers.layer_size_bytes, prebuild_layers.finished_at AS layer_finished_at,
   prebuild_failures.phase AS failure_phase, prebuild_failures.finished_at AS failure_finished_at
@@ -104,7 +88,6 @@ const toPrebuild = (tenantId: string, row: PrebuildRow): Prebuild =>
     repository: row.repository,
     inputDigest: row.input_digest,
     guestImageDigest: row.guest_image_digest,
-    provider: row.provider,
     configSource: row.config_source,
     status: statusOf(row),
     startedAt: row.started_at,
@@ -155,19 +138,18 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     return row === undefined ? null : toPrebuild(tenantId, row);
   }
 
-  private writePrebuildCommit(commit: PrebuildCommit, provider: BuildProvider, state: string, now: number): void {
+  private writePrebuildCommit(commit: PrebuildCommit, state: string, now: number): void {
     const { prebuildId } = commit;
     this.ctx.storage.sql.exec(
       `INSERT INTO prebuilds (prebuild_id, persona_id, repository, default_branch, input_digest, guest_image_digest,
-        provider, config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        config_source, head_sha, rootfs_key, state, started_at, log_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       prebuildId,
       commit.personaId,
       commit.key.repository,
       commit.defaultBranch,
       commit.key.inputDigest,
       commit.key.guestImageDigest,
-      provider,
       commit.configSource,
       commit.headSha,
       commit.rootfsKey,
@@ -218,7 +200,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
   protected async startHostPrebuild(
     tenantId: string,
     commit: Omit<PrebuildCommit, "logUrl">,
-    provider: BuildProvider,
     input: NewSession,
     apiOrigin: string,
     now: number,
@@ -227,7 +208,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     const begun = await this.begin(tenantId, { ...input, hosts }, now, (sessionId) => {
       this.writePrebuildCommit(
         { ...commit, logUrl: `${apiOrigin}/v1/sessions/${sessionId}/transcript` },
-        provider,
         "Dispatched",
         now,
       );
@@ -270,47 +250,6 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
       fix: row.fix,
       createdAt: row.created_at,
     });
-  }
-
-  protected namespaceConnection(): NamespaceRow | null {
-    const [row] = this.ctx.storage.sql
-      .exec<{
-        namespace_connection_id: string;
-        account_label: string;
-        workspace_id: string;
-        created_at: number;
-        updated_at: number;
-      }>("SELECT * FROM namespace_connections WHERE connection_slot = 1")
-      .toArray();
-    if (row === undefined) return null;
-    return {
-      namespaceConnectionId: row.namespace_connection_id,
-      accountLabel: row.account_label,
-      workspaceId: row.workspace_id,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  protected connectNamespace(start: NamespaceConnectionStart, now: number): NamespaceRow {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO namespace_connections (connection_slot, namespace_connection_id, account_label, workspace_id, created_at, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (connection_slot) DO UPDATE SET account_label = excluded.account_label,
-      workspace_id = excluded.workspace_id, updated_at = excluded.updated_at`,
-      crypto.randomUUID(),
-      start.accountLabel,
-      start.workspaceId,
-      now,
-      now,
-    );
-    const connection = this.namespaceConnection();
-    if (connection === null) throw new Error("the Namespace connection was written and then not found");
-    return connection;
-  }
-
-  protected deleteBuildConnection(provider: BuildProvider): boolean {
-    if (provider !== "Namespace") throw new Error(`prebuilds on ${provider} were removed, so it holds no connection`);
-    return this.ctx.storage.sql.exec("DELETE FROM namespace_connections").rowsWritten > 0;
   }
 
   protected async repositoryReadToken(

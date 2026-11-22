@@ -492,7 +492,6 @@ export class World {
         headSha: "8".repeat(40),
         rootfsKey: "rootfs/scenario",
       },
-      provider: "Namespace",
       input: {
         principalId: PRINCIPAL_ID,
         startedBy: { kind: "Person", principalId: PRINCIPAL_ID },

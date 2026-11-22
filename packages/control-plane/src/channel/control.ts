@@ -127,7 +127,7 @@ export type ControlEvent =
       usage: HostUsage;
       health: HostReportedHealth;
       heldSessionIds: string[];
-      heldClaudeSetupIds?: string[];
+      heldClaudeSetupIds: string[];
     }
   | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
@@ -366,7 +366,7 @@ export const receive = async (
         usage: envelope.usage,
         health,
         heldSessionIds: envelope.heldSessionIds,
-        ...(envelope.heldClaudeSetupIds === undefined ? {} : { heldClaudeSetupIds: envelope.heldClaudeSetupIds }),
+        heldClaudeSetupIds: envelope.heldClaudeSetupIds,
       },
     };
   }

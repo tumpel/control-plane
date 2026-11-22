@@ -8,7 +8,6 @@ import {
   ConnectionSummarySchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
-  NamespaceConnectionLinkSchema,
   OpenRouterAuthorizationSchema,
   PersonaSchema,
   PrebuildSchema,
@@ -146,12 +145,14 @@ after(async () => {
 test("a prebuild start refuses before it stores anything: an unreadable repository, a foreign repository, an unknown persona", async () => {
   const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
   assert.ok(persona);
-  const unnamed = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
-  const start = { ...unnamed, provider: "Namespace" };
+  const start = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
   const unreadable = await refused("POST", "/v1/prebuilds", start, 409);
   assert.equal(unreadable.code, "RepositoryUnreadable");
   assert.match(unreadable.detail, /acme\/app/);
-  assert.equal((await refused("POST", "/v1/prebuilds", unnamed, 400)).code, "InvalidRequest");
+  assert.equal(
+    (await refused("POST", "/v1/prebuilds", { repository: REPOSITORY, rebuild: false }, 400)).code,
+    "InvalidRequest",
+  );
   assert.equal(
     (await refused("POST", "/v1/prebuilds", { ...start, repository: "https://example.test/app.git" }, 422)).code,
     "InvalidRequest",
@@ -168,24 +169,9 @@ test("a prebuild start refuses before it stores anything: an unreadable reposito
 
 const ConnectionRows = ConnectionSummarySchema.array();
 
-test("the connection list holds one row per provider, and a connected build provider shows its billing account", async () => {
+test("the connection list holds one row per connection kind", async () => {
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
     { kind: "GitHub", state: "NotConfigured" },
-    { kind: "Namespace", state: "NotConfigured" },
-    { kind: "OpenRouter", state: "NotConnected" },
-  ]);
-
-  const namespace = await rest(NamespaceConnectionLinkSchema, "GET", "/v1/namespace-connection");
-  assert.equal(namespace.link.state, "NotConfigured");
-  const start = {
-    accountLabel: "acme workspace",
-    workspaceId: "tenant_123456789ab",
-  };
-  assert.equal((await refused("POST", "/v1/namespace-connection/start", start, 409)).code, "IssuerMissing");
-
-  assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
-    { kind: "GitHub", state: "NotConfigured" },
-    { kind: "Namespace", state: "NotConfigured" },
     { kind: "OpenRouter", state: "NotConnected" },
   ]);
 });

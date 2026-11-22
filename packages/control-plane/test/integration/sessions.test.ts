@@ -92,7 +92,6 @@ const SETTINGS = {
   turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
-  prebuildUploadBudgetSeconds: 60,
 };
 
 type WorkerConfig = Extract<

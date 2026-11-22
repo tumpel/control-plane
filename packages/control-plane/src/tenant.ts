@@ -474,8 +474,8 @@ export class Tenant extends TenantConnectors {
     listLatestPrebuilds: ({ tenantId }) => ({ prebuilds: this.listLatestPrebuilds(tenantId) }),
     getPrebuild: ({ tenantId, prebuildId }) => ({ prebuild: this.getPrebuild(tenantId, prebuildId) }),
     heldPrebuild: ({ tenantId, key }) => ({ prebuild: this.heldPrebuild(tenantId, key) }),
-    startHostPrebuild: async ({ tenantId, commit, provider, input, apiOrigin, now }) => ({
-      started: await this.startHostPrebuild(tenantId, commit, provider, input, apiOrigin, now),
+    startHostPrebuild: async ({ tenantId, commit, input, apiOrigin, now }) => ({
+      started: await this.startHostPrebuild(tenantId, commit, input, apiOrigin, now),
     }),
     getPrebuildFailure: ({ tenantId, prebuildId }) => ({ failure: this.getPrebuildFailure(tenantId, prebuildId) }),
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
@@ -603,9 +603,6 @@ export class Tenant extends TenantConnectors {
     transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
       cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
-    deleteBuildConnection: ({ provider }) => ({ deleted: this.deleteBuildConnection(provider) }),
-    namespaceConnection: () => ({ connection: this.namespaceConnection() }),
-    connectNamespace: ({ start, now }) => ({ connection: this.connectNamespace(start, now) }),
     offerSent: ({ turnId }) => {
       this.offerSent(turnId);
       return {};
@@ -620,15 +617,13 @@ export class Tenant extends TenantConnectors {
     },
     reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
       await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
-      if (heldClaudeSetupIds !== undefined) {
-        await this.failHostClaudeSetups(
-          hostId,
-          "NoHostOnline",
-          `host ${hostId} reconnected without the setup's box; start the setup again`,
-          now,
-          heldClaudeSetupIds,
-        );
-      }
+      await this.failHostClaudeSetups(
+        hostId,
+        "NoHostOnline",
+        `host ${hostId} reconnected without the setup's box; start the setup again`,
+        now,
+        heldClaudeSetupIds,
+      );
       return {};
     },
     forgetHostUsage: ({ hostId }) => {

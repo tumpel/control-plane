@@ -72,6 +72,9 @@ const turnOffer: StoredControlMessage = {
   harnessVersion: "1.0.0",
   model: "claude-test",
   prompt: "hello",
+  boxRetention: "Auto",
+  turnSeconds: 3600,
+  idleSeconds: 900,
 };
 
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
@@ -626,11 +629,12 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
     sentAt: "2026-11-18T10:00:00+01:00",
     usage: USAGE,
     heldSessionIds,
+    heldClaudeSetupIds: [],
   });
   await first.deliver(beat(["session-1"]));
   await first.deliver(beat([]));
   assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"] },
+    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"], heldClaudeSetupIds: [] },
     { kind: "Heartbeat", usage: USAGE, health: "Healthy" },
   ]);
 
@@ -642,6 +646,7 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
     usage: USAGE,
     health: "Healthy",
     heldSessionIds: [],
+    heldClaudeSetupIds: [],
   });
 });
 

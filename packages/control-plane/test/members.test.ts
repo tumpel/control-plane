@@ -251,8 +251,6 @@ test("a Member is refused the member and connection operations of an Owner", asy
   const refusals = [
     await send("POST", "/v1/invitations", { email: DAVE, role: "Member" }, bob),
     await send("DELETE", `/v1/members/${ownerId}`, null, bob),
-    await send("POST", "/v1/namespace-connection/start", { accountLabel: "ns", workspaceId: "tenant_ns" }, bob),
-    await send("DELETE", "/v1/namespace-connection", null, bob),
     await send("POST", "/v1/github-connection/start", null, bob),
     await send("DELETE", "/v1/github-connection/installations/901", null, bob),
   ];

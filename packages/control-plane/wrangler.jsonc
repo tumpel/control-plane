@@ -64,7 +64,6 @@
       "turnFirstLineBudgetSeconds": 120,
       "turnTotalBudgetSeconds": 14400,
       "transcriptChunkLines": 64,
-      "prebuildUploadBudgetSeconds": 3600,
       "prebuildDispatchBudgetSeconds": 600,
       "prebuildBuildBudgetSeconds": 3600,
       "claudeSetupUrlBudgetSeconds": 300,
@@ -74,8 +73,7 @@
       "heartbeatIntervalSeconds": 10,
       "heartbeatDeadlineSeconds": 30,
       "devicePollIntervalSeconds": 5,
-      "deviceSlowDownStepSeconds": 5,
-      "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
+      "deviceSlowDownStepSeconds": 5
     }
   },
   "ratelimits": [
@@ -163,7 +161,6 @@
           "turnFirstLineBudgetSeconds": 120,
           "turnTotalBudgetSeconds": 14400,
           "transcriptChunkLines": 64,
-          "prebuildUploadBudgetSeconds": 3600,
           "prebuildDispatchBudgetSeconds": 600,
           "prebuildBuildBudgetSeconds": 3600,
           "claudeSetupUrlBudgetSeconds": 300,
@@ -173,8 +170,7 @@
           "heartbeatIntervalSeconds": 10,
           "heartbeatDeadlineSeconds": 30,
           "devicePollIntervalSeconds": 5,
-          "deviceSlowDownStepSeconds": 5,
-          "gitHubActionsIssuer": "https://token.actions.githubusercontent.com"
+          "deviceSlowDownStepSeconds": 5
         }
       },
       "ratelimits": [
