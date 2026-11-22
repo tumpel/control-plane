@@ -460,7 +460,9 @@ export class LivePacks {
   ): Promise<string | null> {
     return this.turn(async () => {
       const state = await this.loaded(store, tenantId);
-      const gone = [...reused].sort().find((packDigest) => !state.counts.has(packDigest));
+      const unnamed = [...reused].sort().filter((packDigest) => !state.counts.has(packDigest));
+      const held = await Promise.all(unnamed.map((packDigest) => store.head(packKey(tenantId, packDigest))));
+      const gone = unnamed.find((_, at) => held[at] === null);
       if (gone !== undefined) return gone;
       if (state.members.has(storageKey)) return null;
       counted(state, storageKey, packs);
@@ -469,16 +471,22 @@ export class LivePacks {
     });
   }
 
-  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
-    return this.turn(() =>
-      this.released(store, tenantId, storageKeys).catch((error: unknown) => {
+  release(
+    store: R2Bucket,
+    tenantId: string,
+    storageKeys: string[],
+    freedPacks: (packDigests: string[]) => Promise<void>,
+  ): Promise<void> {
+    return this.turn(async () => {
+      const freed = await this.released(store, tenantId, storageKeys).catch((error: unknown) => {
         this.state = null;
         console.error(
           `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
         );
         return [];
-      }),
-    );
+      });
+      await freedPacks(freed);
+    });
   }
 
   private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {

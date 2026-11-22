@@ -2367,13 +2367,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray()
       .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
-    const freed = await this.live.release(
+    await this.live.release(
       this.env.STORE,
       tenantId,
       stored.map((snapshot) => snapshot.storage_key),
+      (freed) => this.deleteFreedPacks(tenantId, freed),
     );
     await this.deleteObjects([...keys, ...this.objectKeys(stored)]);
-    await this.deleteFreedPacks(tenantId, freed);
     this.ctx.storage.transactionSync(() => {
       this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
@@ -2408,13 +2408,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
       stored.session_id,
       stored.snapshot_seq,
     );
-    const freed = await this.live.release(
+    await this.live.release(
       this.env.STORE,
       tenantId,
       older.map((snapshot) => snapshot.storage_key),
+      (freed) => this.deleteFreedPacks(tenantId, freed),
     );
     await this.deleteObjects([...this.objectKeys(older), ...failed]);
-    await this.deleteFreedPacks(tenantId, freed);
     this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
     await this.archiveSupersededPrebuilds(tenantId, now);
   }
@@ -3874,14 +3874,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (claimed.gone !== null) {
       return {
         kind: "Rejected",
-        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which no stored snapshot names any longer, so the session keeps its previous snapshot`,
+        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which object storage no longer holds, so the session keeps its previous snapshot`,
       };
     }
     const [stillPending] = this.ctx.storage.sql
       .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
       .toArray();
     if (stillPending === undefined) {
-      await this.live.release(this.env.STORE, tenantId, [request.storage_key]);
+      await this.live.release(this.env.STORE, tenantId, [request.storage_key], () => Promise.resolve());
       return { kind: "Answered" };
     }
     return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes, ended) };

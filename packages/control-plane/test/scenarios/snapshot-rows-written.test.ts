@@ -456,6 +456,37 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
   });
 });
 
+test("a snapshot that reuses a pack an unstored snapshot uploaded is stored while object storage holds the pack", async () => {
+  await inWorld(async (world, host) => {
+    await world.holdsAgentCredentials();
+    const chunks = tree(DIGESTS_PER_PART, "uploaded before the host went offline");
+    const session = await world.startSession({ prompt: "build the tree", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    const unstored = snapshotAsked(host, session.sessionId);
+    await uploadsChunks(world, host, unstored.snapshotId, chunks);
+    await failsSnapshot(host, unstored.snapshotId);
+
+    await world.sendTurn(session.sessionId, "change the tree");
+    const next = host.takeOffer();
+    await host.claims(next);
+    await host.completes(next);
+    const request = snapshotAsked(host, session.sessionId);
+    await storesRoot(world, request.storageKey, chunks);
+    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0 });
+
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+    );
+    assert.deepEqual(
+      snapshots.map((snapshot) => snapshot.outcome.state),
+      ["Failed", "Stored"],
+      JSON.stringify(snapshots),
+    );
+  });
+});
+
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
   const world = await World.open();
   try {
