@@ -3519,6 +3519,30 @@ suite("sessions", { concurrency: 8 }, () => {
     side.close();
   });
 
+  test("an unsolicited BoxGone for an idle Auto box stops the session and its next turn boots a fresh box", async () => {
+    const { bearer, host, getJson, sessionStart } = await tenant();
+    const idle = await idleTurn(host, { ...(await sessionStart()), prompt: "idle out" }, bearer);
+    const { sessionId } = idle.session;
+    assert.equal(idle.session.boxRetention, "Auto");
+    const snapshot = await host.next("SnapshotRequest");
+    await storeRoot(snapshot.storageKey);
+    host.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "the session reading Idle",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Idle",
+    );
+    host.send({ type: "BoxGone", sessionId, boxId: idle.offer.boxId });
+    await until(
+      "the session reading Stopped",
+      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    assert.notEqual((await host.next("TurnOffer")).boxId, idle.offer.boxId);
+  });
+
   test("an Off session releases its box after each turn and its next turn boots a fresh box on the same host", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const off = await idleTurn(host, { ...(await sessionStart()), prompt: "once", boxRetention: "Off" }, bearer);
