@@ -263,6 +263,8 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
 };
 
+export type OfferSent = "Sent" | "RateLimited" | "Offline" | "Degraded";
+
 export const hostSilent = async (env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">, hostId: string): Promise<boolean> => {
   const lastReceivedAt = await env.HOST.get(env.HOST.idFromName(hostId)).lastReceivedAt();
   return lastReceivedAt === null || Date.now() - lastReceivedAt >= settingsOf(env).heartbeatDeadlineSeconds * 1000;

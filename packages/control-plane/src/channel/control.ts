@@ -6,12 +6,8 @@ import {
   type DispatchGrant,
   decodeBase64,
   type Frame,
-  HELD_CLAUDE_SETUPS_VERSION,
-  HELD_SESSIONS_VERSION,
   type Hello,
   HelloVersionSchema,
-  HostEnvelopeBeforeHeldClaudeSetupsSchema,
-  HostEnvelopeBeforeHeldSessionsSchema,
   HostEnvelopeSchema,
   type HostMessage,
   type HostReportedHealth,
@@ -25,7 +21,6 @@ import {
   type PreparedOffer,
   parseEnvelope,
   randomNonce,
-  reportsHeldSessions,
   resend,
   type StoredClaudeSetupCode,
   type StoredClaudeSetupOffer,
@@ -340,14 +335,7 @@ export const receive = async (
       );
     }
   }
-  const parsed =
-    connection.phase !== "Open"
-      ? parseEnvelope(HostEnvelopeSchema, text)
-      : connection.protocolVersion < HELD_SESSIONS_VERSION
-        ? parseEnvelope(HostEnvelopeBeforeHeldSessionsSchema, text)
-        : connection.protocolVersion < HELD_CLAUDE_SETUPS_VERSION
-          ? parseEnvelope(HostEnvelopeBeforeHeldClaudeSetupsSchema, text)
-          : parseEnvelope(HostEnvelopeSchema, text);
+  const parsed = parseEnvelope(HostEnvelopeSchema, text);
   if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;
@@ -362,7 +350,7 @@ export const receive = async (
   }
   if (envelope.type === "Heartbeat") {
     const health = envelope.health ?? "Healthy";
-    if (connection.heldReported || !reportsHeldSessions(envelope)) {
+    if (connection.heldReported) {
       return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
     }
     return {
@@ -372,7 +360,7 @@ export const receive = async (
         usage: envelope.usage,
         health,
         heldSessionIds: envelope.heldSessionIds,
-        heldClaudeSetupIds: envelope.heldClaudeSetupIds ?? [],
+        heldClaudeSetupIds: envelope.heldClaudeSetupIds,
       },
     };
   }

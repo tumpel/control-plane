@@ -102,20 +102,6 @@ test("the setup offer carries the box's image, its token URL and credential, and
     fetchSeconds: 300,
   };
   const offer = setupOffer("tenant-1", row, image, "t".repeat(43), budgets);
-  assert.deepEqual(Object.keys(offer).sort(), [
-    "boxId",
-    "claudeSetupId",
-    "codeSeconds",
-    "expiresAt",
-    "harness",
-    "harnessVersion",
-    "image",
-    "tenantId",
-    "tokenCredential",
-    "tokenUrl",
-    "type",
-    "urlSeconds",
-  ]);
   assert.equal(offer.harness, "ClaudeCode");
   assert.equal(offer.tokenUrl, "https://api.example.test/v1/claude-setups/setup-1/token");
   assert.match(offer.expiresAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/);

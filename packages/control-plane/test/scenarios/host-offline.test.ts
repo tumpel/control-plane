@@ -6,26 +6,6 @@ import { SETTINGS, World } from "./harness/world.ts";
 const reasonOf = (turn: { state: string; reason?: string }): string | null =>
   turn.state === "Failed" ? (turn.reason ?? null) : null;
 
-test("a hung turn fails when its host reports it timed out", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  await world.holdsAgentCredentials();
-  const host = await world.hostOnline("host-1");
-  await world.startSession({ prompt: "run forever", tags: [] });
-  const offer = host.takeOffer();
-  await host.claims(offer);
-
-  await host.says({
-    type: "TurnFailed",
-    turnId: offer.turnId,
-    reason: "TurnTimedOut",
-    detail: "the turn ran past its turnSeconds budget",
-    failedAt: new Date().toISOString(),
-  });
-
-  assert.equal(reasonOf(await world.turn(offer.turnId)), "TurnTimedOut");
-});
-
 test("a host that closes its socket fails its running turn HostOffline at once", async (t) => {
   const world = await World.open();
   t.after(() => world.close());

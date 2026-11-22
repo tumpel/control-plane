@@ -55,14 +55,17 @@ const VERBS = {
   Prebuilds_getFailure: "failure",
   StaticConnectors_create: "create-static",
   OAuthConnectors_create: "create-oauth",
-  Events_list: "wait",
 };
+const CLI_VERBS = { Events_list: "wait" };
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
 const namesFor = (operationId) => {
   const [group, op = ""] = operationId.split("_");
-  const parts = [NOUNS[group] ?? kebab(group), VERBS[operationId] ?? kebab(op)].filter(Boolean);
-  return { tool: `tumpel_${parts.join("_").replaceAll(/[- ]/g, "_")}`, command: `tumpel ${parts.join(" ")}` };
+  const noun = NOUNS[group] ?? kebab(group);
+  const verb = VERBS[operationId] ?? kebab(op);
+  const parts = [noun, verb].filter(Boolean);
+  const command = [noun, CLI_VERBS[operationId] ?? verb].filter(Boolean);
+  return { tool: `tumpel_${parts.join("_").replaceAll(/[- ]/g, "_")}`, command: `tumpel ${command.join(" ")}` };
 };
 
 const operations = () => {

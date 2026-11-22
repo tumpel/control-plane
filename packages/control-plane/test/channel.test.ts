@@ -9,7 +9,6 @@ import {
   type ControlEnvelope,
   emptyLedger,
   type Frame,
-  HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
@@ -648,13 +647,4 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
     heldSessionIds: [],
     heldClaudeSetupIds: [],
   });
-});
-
-test("a heartbeat from a host before the held sessions version reports nothing", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, HELD_SESSIONS_VERSION - 1);
-  const heartbeat = { type: "Heartbeat", sentAt: "2026-11-18T10:00:00+01:00", usage: USAGE };
-  const received = await control.receive(link.connection, JSON.stringify(heartbeat), link.context);
-  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE, health: "Healthy" });
-  assert.equal(link.closed, null);
 });

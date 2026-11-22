@@ -19,6 +19,7 @@ import { durableDb } from "./db/client.ts";
 import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { HOST_MIGRATIONS } from "./host-migrations.ts";
+import type { OfferSent } from "./hosts";
 import { problem } from "./http";
 import type { Env } from "./index";
 import { hostLimitsOf, limitsOf } from "./limits.ts";
@@ -120,16 +121,19 @@ export class HostChannel extends DurableObject<Env> {
     return received.length === 0 ? null : Math.max(...received);
   }
 
-  async send(message: StoredControlMessage): Promise<"Sent" | "Deferred"> {
+  async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    if (message.type === "TurnOffer" && (await this.offersPaused(host.host_id))) return "Deferred";
     const open = this.ctx
       .getWebSockets()
       .find(
         (socket) =>
           socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
       );
+    if (message.type === "TurnOffer") {
+      const refused = await this.offerRefused(host.host_id, open);
+      if (refused !== null) return refused;
+    }
     if (open === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null));
       return "Sent";
@@ -138,6 +142,17 @@ export class HostChannel extends DurableObject<Env> {
     await control.send(attachment.connection, message, this.context(open, host, attachment));
     open.serializeAttachment(attachment);
     return "Sent";
+  }
+
+  private async offerRefused(hostId: string, open: WebSocket | undefined): Promise<OfferSent | null> {
+    if (await this.offersPaused(hostId)) return "RateLimited";
+    if (open === undefined) return "Offline";
+    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ state: string }>();
+    if (row?.state !== "Online") return "Offline";
+    const silentFor = Date.now() - this.attachment(open).lastReceivedAt;
+    return silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Degraded" : null;
   }
 
   async restoreHealth(detail: string): Promise<void> {
@@ -258,8 +273,6 @@ export class HostChannel extends DurableObject<Env> {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
     await this.presence("Online");
-    await this.sendDeferredOffers(host.host_id, attachment, context);
-    this.keep(socket, attachment);
   }
 
   private async take(
@@ -368,35 +381,13 @@ export class HostChannel extends DurableObject<Env> {
     context: control.ControlContext,
   ): Promise<void> {
     if (reply === null) return;
-    if (reply.type === "TurnHandoff") {
-      const sent = await this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
-      if (sent !== "Sent") return;
-      const tenantId = await this.tenantOf(hostId);
-      await tenantApi(this.env.TENANT, tenantId).call("offerSent", { turnId: reply.offer.turnId });
-      return;
-    }
+    if (reply.type === "TurnHandoff")
+      throw new Error(`the tenant answered host ${hostId} with a TurnHandoff, which it sends itself`);
     if (reply.type === "Refused") {
       console.error(`FrameRefused: host ${hostId} frame ${frame.seq}: ${reply.reason}`);
       return control.refuseFrame(context.port, frame.seq, reply.reason);
     }
     return control.send(attachment.connection, reply, context);
-  }
-
-  private async sendDeferredOffers(
-    hostId: string,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): Promise<void> {
-    if (await this.offersPaused(hostId)) return;
-    const tenantId = await this.tenantOf(hostId);
-    const tenant = tenantApi(this.env.TENANT, tenantId);
-    for (const handoff of (await tenant.call("deferredOffers", { tenantId, hostId })).handoffs) {
-      const sent =
-        handoff.hostId === hostId
-          ? await control.send(attachment.connection, handoff.offer, context).then(() => "Sent")
-          : await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
-      if (sent === "Sent") await tenant.call("offerSent", { turnId: handoff.offer.turnId });
-    }
   }
 
   override async webSocketClose(socket: WebSocket): Promise<void> {

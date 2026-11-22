@@ -69,7 +69,6 @@ const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-ant-sessions-e2e-key";
 const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
-const FIRST_LINE_BUDGET_SECONDS = 10;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 type HostUsage = z.infer<typeof HostUsageSchema>;
 
@@ -85,11 +84,9 @@ const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
   ...TEST_SETTINGS,
   dispatchGrantTtlSeconds: OFFER_TTL_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
-  snapshotDelaySeconds: 1,
   snapshotDeadlineSeconds: 60,
   turnOfferTtlSeconds: OFFER_TTL_SECONDS,
   turnImageFetchBudgetSeconds: IMAGE_FETCH_BUDGET_SECONDS,
-  turnFirstLineBudgetSeconds: FIRST_LINE_BUDGET_SECONDS,
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
 };
@@ -2627,30 +2624,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.assertOpen("after the large snapshot");
   });
 
-  test("a turn whose host goes offline before claiming it stays Offered, is offered again at the next Welcome and runs", async () => {
-    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
-    const flaky = await enrol("flaky");
-    const before = await connect(flaky.id, flaky.key, 16);
-    await hostState(flaky.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a reset" }, bearer);
-    assert.equal(response.status, 200);
-    const started = StartedSessionSchema.parse(await response.json());
-    assert.equal(started.session.hostId, flaky.id);
-    assert.equal((await before.next("TurnOffer")).turnId, started.turn.turnId);
-    before.close();
-    await hostState(flaky.id, "Offline");
-    await wait((Math.max(SETTINGS.heartbeatDeadlineSeconds, OFFER_TTL_SECONDS) + 1) * 1000);
-    assert.equal((await getJson(`/v1/turns/${started.turn.turnId}`, TurnSchema)).state, "Offered");
-
-    const after = await connect(flaky.id, flaky.key, 16);
-    const offer = await after.next("TurnOffer");
-    assert.equal(offer.turnId, started.turn.turnId);
-    after.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await after.next("TurnClaimed")).turnId, offer.turnId);
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
-    after.close();
-  });
-
   test("a turn the host reports NotClaimed after its claim is offered again and runs on the next claim", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "claim lost" }, bearer);
@@ -2703,7 +2676,7 @@ suite("sessions", { concurrency: 8 }, () => {
 
   test("tenant events record a turn's start, completion and the idle session in order, read over MCP and stream over a WebSocket, also to a browser that sends its token as a subprotocol", async () => {
     const { tenantId, bearer, host, tool, sessionStart } = await tenant();
-    const start = await tool("tumpel_events_wait", {}, EventPageSchema);
+    const start = await tool("tumpel_events_list", {}, EventPageSchema);
     assert.deepEqual(start.events, []);
 
     const socket = new WebSocket(
@@ -2752,13 +2725,13 @@ suite("sessions", { concurrency: 8 }, () => {
     browser.close();
 
     const { sessionId } = started.session;
-    const all = await tool("tumpel_events_wait", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
+    const all = await tool("tumpel_events_list", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
     assert.deepEqual(
       all.events.map((event) => event.event),
       ["TurnStarted", "TurnCompleted", "SessionIdle"],
     );
     assert.deepEqual(
-      (await tool("tumpel_events_wait", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,
+      (await tool("tumpel_events_list", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,
       [],
     );
 

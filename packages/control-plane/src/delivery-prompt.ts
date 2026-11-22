@@ -17,7 +17,7 @@ export const eventReference = (eventId: number, event: string, sessionId: string
     eventId,
     event,
     sessionId,
-    tooLongToInline: `read it in full with GET /v1/events?afterEventId=${eventId - 1}&event=${event}&sessionId=${sessionId} (tumpel_events_wait); it is the first event of the page`,
+    tooLongToInline: `read it in full with GET /v1/events?afterEventId=${eventId - 1}&event=${event}&sessionId=${sessionId} (tumpel_events_list); it is the first event of the page`,
   });
 
 export const widestReference = (events: string[]): string =>

@@ -54,7 +54,7 @@ test("a delivery prompt delivers by reference an event too long to fit on its ow
       event: "TurnFailed",
       sessionId: "crew-1",
       tooLongToInline:
-        "read it in full with GET /v1/events?afterEventId=40&event=TurnFailed&sessionId=crew-1 (tumpel_events_wait); it is the first event of the page",
+        "read it in full with GET /v1/events?afterEventId=40&event=TurnFailed&sessionId=crew-1 (tumpel_events_list); it is the first event of the page",
     })}`,
     lastEventId: 41,
   });

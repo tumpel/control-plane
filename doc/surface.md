@@ -39,7 +39,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `EnrolmentTokens_list`                   | `tumpel_host_list_tokens`                    | `tumpel host list-tokens`                    |
 | `EnrolmentTokens_mint`                   | `tumpel_host_mint_token`                     | `tumpel host mint-token`                     |
 | `EnrolmentTokens_revoke`                 | `tumpel_host_revoke_token`                   | `tumpel host revoke-token`                   |
-| `Events_list`                            | `tumpel_events_wait`                         | `tumpel events wait`                         |
+| `Events_list`                            | `tumpel_events_list`                         | `tumpel events wait`                         |
 | `GitHubConnections_delete`               | `tumpel_github_delete`                       | `tumpel github delete`                       |
 | `GitHubConnections_get`                  | `tumpel_github_get`                          | `tumpel github get`                          |
 | `GitHubConnections_list`                 | `tumpel_github_list`                         | `tumpel github list`                         |
