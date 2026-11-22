@@ -21,6 +21,29 @@
         "!packages/control-plane/src/session-timer.ts",
         "!packages/control-plane/test/scenarios/harness/runtime.ts"
       ]
+    },
+    {
+      "path": "./npm-scripts/biome-plugins/no-sql-exec.grit",
+      "includes": [
+        "packages/control-plane/src/**/*.ts",
+        "!packages/control-plane/src/connector-rows.ts",
+        "!packages/control-plane/src/durable-migrate.ts",
+        "!packages/control-plane/src/host-channel.ts",
+        "!packages/control-plane/src/metrics-query.ts",
+        "!packages/control-plane/src/metrics-store.ts",
+        "!packages/control-plane/src/supervisor-updates.ts",
+        "!packages/control-plane/src/tenant-claude-setups.ts",
+        "!packages/control-plane/src/tenant-connectors.ts",
+        "!packages/control-plane/src/tenant-events.ts",
+        "!packages/control-plane/src/tenant-openrouter-authorizations.ts",
+        "!packages/control-plane/src/tenant-prebuilds.ts",
+        "!packages/control-plane/src/tenant-push-subscriptions.ts",
+        "!packages/control-plane/src/tenant-sessions.ts",
+        "!packages/control-plane/src/tenant-subscriptions.ts",
+        "!packages/control-plane/src/tenant-triggers.ts",
+        "!packages/control-plane/src/tenant-webhooks.ts",
+        "!packages/control-plane/src/tenant.ts"
+      ]
     }
   ],
   "formatter": {
