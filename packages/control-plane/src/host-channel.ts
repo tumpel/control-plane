@@ -124,24 +124,36 @@ export class HostChannel extends DurableObject<Env> {
   async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    const open = this.ctx
+    if (message.type === "TurnOffer") {
+      const refused = await this.offerRefused(host.host_id);
+      if (refused !== null) return refused;
+    }
+    if (this.openSocket() === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
+      return "Sent";
+    }
+    const spoken = await control.prepare(message, this.context(null, host, null));
+    const open = this.openSocket();
+    if (message.type === "TurnOffer" && open === undefined) return "Offline";
+    if (message.type === "TurnOffer" && open !== undefined && this.silent(open)) return "Degraded";
+    if (open === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
+      return "Sent";
+    }
+    const attachment = this.attachment(open);
+    const sent = control.send(attachment.connection, message, this.context(open, host, attachment), spoken);
+    open.serializeAttachment(attachment);
+    await sent;
+    return "Sent";
+  }
+
+  private openSocket(): WebSocket | undefined {
+    return this.ctx
       .getWebSockets()
       .find(
         (socket) =>
           socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
       );
-    if (message.type === "TurnOffer") {
-      const refused = await this.offerRefused(host.host_id, open);
-      if (refused !== null) return refused;
-    }
-    if (open === undefined) {
-      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
-      return "Sent";
-    }
-    const attachment = this.attachment(open);
-    await control.send(attachment.connection, message, this.context(open, host, attachment));
-    open.serializeAttachment(attachment);
-    return "Sent";
   }
 
   private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
@@ -156,15 +168,18 @@ export class HostChannel extends DurableObject<Env> {
     });
   }
 
-  private async offerRefused(hostId: string, open: WebSocket | undefined): Promise<OfferSent | null> {
+  private async offerRefused(hostId: string): Promise<OfferSent | null> {
     if (await this.offersPaused(hostId)) return "RateLimited";
-    if (open === undefined) return "Offline";
     const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
       .bind(hostId)
       .first<{ state: string }>();
-    if (row?.state !== "Online") return "Offline";
-    const silentFor = Date.now() - this.attachment(open).lastReceivedAt;
-    return silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Degraded" : null;
+    const open = this.openSocket();
+    if (row?.state !== "Online" || open === undefined) return "Offline";
+    return this.silent(open) ? "Degraded" : null;
+  }
+
+  private silent(socket: WebSocket): boolean {
+    return Date.now() - this.attachment(socket).lastReceivedAt >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
   }
 
   async restoreHealth(detail: string): Promise<void> {
@@ -427,8 +442,10 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private keep(socket: WebSocket, attachment: Attachment): void {
+    const stored = this.attachment(socket);
     attachment.heldFrom = this.ledger.first();
-    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
+    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, stored.lastReceivedAt);
+    attachment.lastSentAt = Math.max(attachment.lastSentAt, stored.lastSentAt);
     socket.serializeAttachment(attachment);
   }
 
