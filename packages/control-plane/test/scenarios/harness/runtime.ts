@@ -75,6 +75,7 @@ export class SqlStorage {
   private savepoint = 0;
   readonly db: DatabaseSync;
   rowsWritten = 0;
+  readMeter: { rows: number } | null = null;
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -85,11 +86,35 @@ export class SqlStorage {
       this.db.exec(query);
       return new Cursor([], 0);
     }
+    if (this.readMeter !== null) this.readMeter.rows += this.scanned(query, params);
     const rows = this.db.prepare(query).all(...params.map(bindable)) as Row[];
+    if (this.readMeter !== null) this.readMeter.rows += rows.length;
     const { written } = this.db.prepare("SELECT changes() AS written").get() as { written: number };
     const counted = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query) ? written : 0;
     this.rowsWritten += counted;
     return new Cursor(rows, counted);
+  }
+
+  private scanned(query: string, params: unknown[]): number {
+    const plan = this.db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...params.map(bindable)) as { detail: string }[];
+    const aliases = new Map<string, string>();
+    for (const [, table, alias] of query.matchAll(/\b(?:FROM|JOIN)\s+(\w+)\s+(?:AS\s+)?(\w+)/gi)) {
+      if (table !== undefined && alias !== undefined) aliases.set(alias, table);
+    }
+    let rows = 0;
+    for (const { detail } of plan) {
+      const [, name, index] = /^SCAN (\w+)(?: USING (?:COVERING )?INDEX (\w+))?/.exec(detail) ?? [];
+      if (name === undefined) continue;
+      const table = aliases.get(name) ?? name;
+      const known = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+      if (known === undefined) continue;
+      const indexSql =
+        index === undefined ? undefined : this.db.prepare("SELECT sql FROM sqlite_master WHERE name = ?").get(index);
+      const partial = /\bWHERE\b(.*)$/is.exec(String(indexSql?.sql ?? ""))?.[1];
+      const where = partial === undefined ? "" : ` WHERE ${partial}`;
+      rows += (this.db.prepare(`SELECT count(*) AS n FROM "${table}"${where}`).get() as { n: number }).n;
+    }
+    return rows;
   }
 
   totalRowsWritten(): number {

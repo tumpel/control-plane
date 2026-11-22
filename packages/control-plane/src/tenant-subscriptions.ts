@@ -69,6 +69,8 @@ const STATE_TABLES = [
   "subscription_crew_failing_pauses",
 ];
 
+const LIVE_SUBSCRIPTIONS = STATE_TABLES.map((table) => `SELECT subscription_id FROM ${table}`).join(" UNION ALL ");
+
 const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription => {
   const base = {
     subscriptionId: row.subscription_id,
@@ -196,12 +198,18 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected expireSubscriptions(now: number): void {
     const due = this.ctx.storage.sql
-      .exec<SubscriptionRow>(
-        `${SUBSCRIPTION_SELECT} WHERE st.state != 'Ended' AND CAST(strftime('%s', s.expires_at) AS INTEGER) * 1000 <= ?`,
+      .exec<{ subscription_id: string }>(
+        `SELECT s.subscription_id FROM (${LIVE_SUBSCRIPTIONS}) AS live
+        CROSS JOIN subscriptions AS s ON s.subscription_id = live.subscription_id
+        WHERE CAST(strftime('%s', s.expires_at) AS INTEGER) * 1000 <= ?`,
         now,
       )
       .toArray();
-    for (const row of due) this.ctx.storage.transactionSync(() => this.end(row, "Expired", now));
+    for (const { subscription_id: subscriptionId } of due) {
+      const row = this.subscriptionRow(subscriptionId);
+      if (row === null) throw new Error(`subscription ${subscriptionId} vanished while it expired`);
+      this.ctx.storage.transactionSync(() => this.end(row, "Expired", now));
+    }
   }
 
   protected crewTagsOf(sessionId: string): string[] {
