@@ -75,7 +75,6 @@ import {
   GitHubSetupActionSchema,
   GitHubSetupCallbackSchema,
   GitHubTriggerDeliverySchema,
-  GitHubWorkflowRunEventSchema,
 } from "./github-schemas.ts";
 import {
   appKey,
@@ -101,7 +100,6 @@ import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { ownerRequired } from "./members";
 import { htmlPage } from "./pages";
-import { tenantApi } from "./tenant-api.ts";
 import { fireTriggers } from "./triggers.ts";
 
 export type PersonCheck = { ok: true; email: string } | { ok: false; reason: string };
@@ -834,35 +832,6 @@ export const handleGitHubPage = async (
   return handleInstalled(env, url, person.email);
 };
 
-const handleWorkflowRun = async (env: Env, body: ArrayBuffer, noContent: Response): Promise<Response> => {
-  const delivery = GitHubWorkflowRunEventSchema.safeParse(parseJson(new TextDecoder().decode(body)));
-  if (!delivery.success) {
-    return problem(400, {
-      code: "InvalidRequest",
-      title: "Not a workflow_run event",
-      detail: `the workflow_run delivery does not parse: ${issues(delivery.error)}`,
-      fix: "Send workflow_run events in the shape GitHub documents, with an action, an installation, a repository and a workflow_run",
-    });
-  }
-  const { action, installation, repository, workflow_run: run } = delivery.data;
-  const tenantId = await tenantOfInstallation(env.DB, installation.id);
-  if (tenantId === null) return noContent;
-  await tenantApi(env.TENANT, tenantId).call("workflowRunReported", {
-    tenantId,
-    event: {
-      action,
-      runId: run.id,
-      repository: repository.full_name,
-      path: run.path,
-      headSha: run.head_sha,
-      htmlUrl: run.html_url,
-      conclusion: run.conclusion,
-    },
-    now: Date.now(),
-  });
-  return noContent;
-};
-
 const handleTriggerEvent = async (
   env: Env,
   event: string,
@@ -911,7 +880,6 @@ export const handleGitHubWebhook = async (request: Request, url: URL, env: Env):
   }
   const noContent = new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
   const event = request.headers.get("x-github-event");
-  if (event === "workflow_run") return handleWorkflowRun(env, body, noContent);
   const triggered = GitHubTriggerEventSchema.safeParse(event);
   if (triggered.success) {
     const deliveryId = request.headers.get("x-github-delivery");

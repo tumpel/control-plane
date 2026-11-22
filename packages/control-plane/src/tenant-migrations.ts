@@ -95,6 +95,7 @@ import tenant0088 from "../migrations/tenant/0088_chunk_lists_in_object_storage.
 import tenant0089 from "../migrations/tenant/0089_drop_alarm_bookkeeping.sql";
 import tenant0090 from "../migrations/tenant/0090_drop_bookkeeping.sql";
 import tenant0091 from "../migrations/tenant/0091_drop_transcript_tables.sql";
+import tenant0092 from "../migrations/tenant/0092_drop_ci_prebuilds.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -195,4 +196,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0089_drop_alarm_bookkeeping", sql: tenant0089 },
   { name: "0090_drop_bookkeeping", sql: tenant0090 },
   { name: "0091_drop_transcript_tables", sql: tenant0091 },
+  { name: "0092_drop_ci_prebuilds", sql: tenant0092 },
 ];

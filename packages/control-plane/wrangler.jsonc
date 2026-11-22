@@ -28,9 +28,6 @@
     "METRICS_DATASET": "tumpel_metrics",
     "GITHUB_API_ORIGIN": "https://api.github.com",
     "GITHUB_WEB_ORIGIN": "https://github.com",
-    "CIRCLECI_API_ORIGIN": "https://circleci.com",
-    "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
-    "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
     "OPENROUTER_ORIGIN": "https://openrouter.ai",
     "TUMPEL_LIMITS": {
       "defaultTier": "Configured",
@@ -123,9 +120,6 @@
         "METRICS_DATASET": "tumpel_metrics_dev",
         "GITHUB_API_ORIGIN": "https://api.github.com",
         "GITHUB_WEB_ORIGIN": "https://github.com",
-        "CIRCLECI_API_ORIGIN": "https://circleci.com",
-        "CIRCLECI_OIDC_ORIGIN": "https://oidc.circleci.com",
-        "CIRCLECI_APP_ORIGIN": "https://app.circleci.com",
         "OPENROUTER_ORIGIN": "https://openrouter.ai",
         "TUMPEL_LIMITS": {
           "defaultTier": "Configured",

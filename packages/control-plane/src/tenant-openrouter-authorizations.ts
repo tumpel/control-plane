@@ -22,7 +22,7 @@ import {
   timedOutDetail,
 } from "./openrouter-oauth.ts";
 import type { OpenRouterAuthorizationDeadline } from "./session-timer";
-import { TenantCircleCIAuthorizations } from "./tenant-circleci-authorizations";
+import { TenantClaudeSetups } from "./tenant-claude-setups";
 import { sealContext } from "./tenant-sessions";
 
 type AuthorizationRow = {
@@ -108,7 +108,7 @@ const statusOf = (phase: Phase, keyLabel: string): unknown => {
   };
 };
 
-export class TenantOpenRouterAuthorizations extends TenantCircleCIAuthorizations {
+export class TenantOpenRouterAuthorizations extends TenantClaudeSetups {
   private openRouterRow(openRouterAuthorizationId: string): AuthorizationRow | null {
     const [row] = this.ctx.storage.sql
       .exec<AuthorizationRow>(`${SELECT} WHERE openrouter_authorization_id = ?`, openRouterAuthorizationId)

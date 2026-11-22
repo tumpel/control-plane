@@ -24,15 +24,6 @@ nothing: the server cannot read your environment, so they return the config entr
 
 | Operation                                | MCP tool                                     | CLI command                                  |
 | ---------------------------------------- | -------------------------------------------- | -------------------------------------------- |
-| `CircleCIConnections_authorize`          | `tumpel_circleci_authorize`                  | `tumpel circleci authorize`                  |
-| `CircleCIConnections_choose`             | `tumpel_circleci_choose`                     | `tumpel circleci choose`                     |
-| `CircleCIConnections_complete`           | `(none)`                                     | `tumpel circleci complete`                   |
-| `CircleCIConnections_delete`             | `tumpel_circleci_delete`                     | `tumpel circleci delete`                     |
-| `CircleCIConnections_get`                | `tumpel_circleci_get`                        | `tumpel circleci get`                        |
-| `CircleCIConnections_start`              | `tumpel_circleci_start`                      | `tumpel circleci start`                      |
-| `CircleCIProjects_add`                   | `tumpel_circleci_project_add`                | `tumpel circleci project add`                |
-| `CircleCIProjects_delete`                | `tumpel_circleci_project_delete`             | `tumpel circleci project delete`             |
-| `CircleCIProjects_list`                  | `tumpel_circleci_project_list`               | `tumpel circleci project list`               |
 | `ClaudeSetups_get`                       | `tumpel_claude_setup_get`                    | `tumpel claude-setup get`                    |
 | `ClaudeSetups_list`                      | `tumpel_claude_setup_list`                   | `tumpel claude-setup list`                   |
 | `ClaudeSetups_start`                     | `tumpel_claude_setup_start`                  | `tumpel claude-setup start`                  |
@@ -49,9 +40,6 @@ nothing: the server cannot read your environment, so they return the config entr
 | `EnrolmentTokens_mint`                   | `tumpel_host_mint_token`                     | `tumpel host mint-token`                     |
 | `EnrolmentTokens_revoke`                 | `tumpel_host_revoke_token`                   | `tumpel host revoke-token`                   |
 | `Events_list`                            | `tumpel_events_wait`                         | `tumpel events wait`                         |
-| `GitHubActionsConnections_delete`        | `tumpel_github_actions_delete`               | `tumpel github-actions delete`               |
-| `GitHubActionsConnections_get`           | `tumpel_github_actions_get`                  | `tumpel github-actions get`                  |
-| `GitHubActionsConnections_start`         | `tumpel_github_actions_start`                | `tumpel github-actions start`                |
 | `GitHubConnections_delete`               | `tumpel_github_delete`                       | `tumpel github delete`                       |
 | `GitHubConnections_get`                  | `tumpel_github_get`                          | `tumpel github get`                          |
 | `GitHubConnections_list`                 | `tumpel_github_list`                         | `tumpel github list`                         |
@@ -160,7 +148,6 @@ nothing: the server cannot read your environment, so they return the config entr
 CLI only: tenant operations with a CLI command and no MCP tool:
 
 - `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
-- `CircleCIConnections_complete`: takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it.
 
 Allowlist: operations that are not tenant operations, with no tool or command:
 
@@ -186,10 +173,22 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `Releases_supervisor`: release download the installer and the supervisor fetch without sign-in.
 - `Releases_install`: install script a person pipes to sh before the CLI exists.
 - `Releases_rollout`: stage-wide rollout the release workflow reads with the drainToken it wrote to the release bucket, never a principal.
-- `PrebuildUploads_start`: build job wire, signed by the provider's OIDC job token, never by a principal.
-- `PrebuildUploads_complete`: build job wire, signed by the provider's OIDC job token, never by a principal.
-- `PrebuildInputs_read`: build job wire, signed by the provider's OIDC job token, never by a principal.
-- `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
+- `PrebuildUploads_start`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `PrebuildUploads_complete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `PrebuildInputs_read`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIEvents_receive`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIConnections_authorize`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIConnections_choose`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIConnections_complete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIConnections_delete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIConnections_get`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIConnections_start`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIProjects_add`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIProjects_delete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `CircleCIProjects_list`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `GitHubActionsConnections_delete`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `GitHubActionsConnections_get`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
+- `GitHubActionsConnections_start`: CI prebuilds are removed from the control plane; the pinned protocol still defines it.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
 - `ConnectorTokens_fetch`: box wire of the guest forwarder, signed by the turn's connector token, never by a principal.
 - `WebhookEndpoints_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.
