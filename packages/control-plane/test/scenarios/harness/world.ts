@@ -4,6 +4,7 @@ import {
   ChannelProtocol,
   SessionSchema,
   StartedSessionSchema,
+  StoredTurnOfferSchema,
   SubscriptionSchema,
   type TenantLimitsProfileSchema,
   TenantUsageSchema,
@@ -52,13 +53,6 @@ const imported = async <T>(path: string, name: string): Promise<T> => {
   return module[name] as T;
 };
 
-const StoredTurnOfferSchema = z.object({
-  type: z.literal("TurnOffer"),
-  turnId: z.string(),
-  sessionId: z.string(),
-  boxId: z.string(),
-  prompt: z.string(),
-});
 export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
@@ -212,6 +206,10 @@ export class Host {
     if (teardown.sessionId !== sessionId) throw new Error(`the box torn down is of ${teardown.sessionId}`);
     await this.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
     return teardown.boxId;
+  }
+
+  async dropsIdleBox(offer: TurnOffer): Promise<void> {
+    await this.says({ type: "BoxGone", sessionId: offer.sessionId, boxId: offer.boxId });
   }
 }
 

@@ -6,9 +6,11 @@ import {
   type DispatchGrant,
   decodeBase64,
   type Frame,
+  HELD_CLAUDE_SETUPS_VERSION,
   HELD_SESSIONS_VERSION,
   type Hello,
   HelloVersionSchema,
+  HostEnvelopeBeforeHeldClaudeSetupsSchema,
   HostEnvelopeBeforeHeldSessionsSchema,
   HostEnvelopeSchema,
   type HostMessage,
@@ -339,9 +341,13 @@ export const receive = async (
     }
   }
   const parsed =
-    connection.phase === "Open" && connection.protocolVersion < HELD_SESSIONS_VERSION
-      ? parseEnvelope(HostEnvelopeBeforeHeldSessionsSchema, text)
-      : parseEnvelope(HostEnvelopeSchema, text);
+    connection.phase !== "Open"
+      ? parseEnvelope(HostEnvelopeSchema, text)
+      : connection.protocolVersion < HELD_SESSIONS_VERSION
+        ? parseEnvelope(HostEnvelopeBeforeHeldSessionsSchema, text)
+        : connection.protocolVersion < HELD_CLAUDE_SETUPS_VERSION
+          ? parseEnvelope(HostEnvelopeBeforeHeldClaudeSetupsSchema, text)
+          : parseEnvelope(HostEnvelopeSchema, text);
   if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;
@@ -366,7 +372,7 @@ export const receive = async (
         usage: envelope.usage,
         health,
         heldSessionIds: envelope.heldSessionIds,
-        heldClaudeSetupIds: envelope.heldClaudeSetupIds,
+        heldClaudeSetupIds: envelope.heldClaudeSetupIds ?? [],
       },
     };
   }

@@ -30,6 +30,7 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const failed = await world.turn(a.turnId);
   assert.equal(failed.state, "Failed");
   assert.match(JSON.stringify(failed), /TranscriptNotStored/);
+  await host.answersSnapshot(a.sessionId);
 
   const before = world.tenantRowsWritten();
   for (let lineSeq = 2; lineSeq < lines; lineSeq++) await line(b.turnId, lineSeq);

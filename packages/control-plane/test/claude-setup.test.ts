@@ -105,6 +105,7 @@ test("the setup offer carries the box's image, its token URL and credential, and
   assert.deepEqual(Object.keys(offer).sort(), [
     "boxId",
     "claudeSetupId",
+    "codeSeconds",
     "expiresAt",
     "harness",
     "harnessVersion",
@@ -113,6 +114,7 @@ test("the setup offer carries the box's image, its token URL and credential, and
     "tokenCredential",
     "tokenUrl",
     "type",
+    "urlSeconds",
   ]);
   assert.equal(offer.harness, "ClaudeCode");
   assert.equal(offer.tokenUrl, "https://api.example.test/v1/claude-setups/setup-1/token");

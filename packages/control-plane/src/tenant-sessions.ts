@@ -3194,7 +3194,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async failSilentHosts(tenantId: string, now: number): Promise<void> {
-    const hostIds = new Set(this.heldBoxes().map((held) => held.hostId));
+    const hostIds = new Set([
+      ...this.runningTurnsByHost().map((running) => running.hostId),
+      ...this.heldBoxes().map((held) => held.hostId),
+    ]);
     for (const hostId of hostIds) {
       if (!(await this.hostOffline(hostId))) continue;
       const host = await this.hostName(tenantId, hostId);
