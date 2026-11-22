@@ -315,14 +315,16 @@ export class HostChannel extends DurableObject<Env> {
   ): Promise<void> {
     const bytes = JSON.stringify(frame.message).length;
     if (this.ledger.queued().length > 0) return this.queue(frame, bytes, attachment, context);
-    if (frame.message.type !== "TurnLine" && this.ledger.holding()) {
-      if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context)))
-        return this.queue(frame, bytes, attachment, context);
-    }
+    const ordered = frame.message.type !== "TurnLine" && this.ledger.holding();
+    if (ordered && !(await this.settle(hostId, usageOf(attachment), now, attachment, context)))
+      return this.queue(frame, bytes, attachment, context);
     const delivered = await this.reply(hostId, frame);
-    if (!delivered.ok) return this.queue(frame, bytes, attachment, context);
+    if (!delivered.ok) {
+      if (ordered) this.checkpoint(attachment, context, []);
+      return this.queue(frame, bytes, attachment, context);
+    }
     if (frame.message.type !== "TurnLine") {
-      control.acknowledge(context, [frame]);
+      this.checkpoint(attachment, context, [frame]);
       return this.answer(hostId, frame, delivered.reply, attachment, context);
     }
     await this.answer(hostId, frame, delivered.reply, attachment, context);
@@ -371,6 +373,24 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<boolean> {
+    if (!(await this.settle(hostId, usage, now, attachment, context))) return false;
+    this.checkpoint(attachment, context, []);
+    return true;
+  }
+
+  private checkpoint(attachment: Attachment, context: control.ControlContext, frames: Frame<HostMessage>[]): void {
+    const acked = [...this.ledger.take(), ...frames];
+    attachment.heldFrom = this.ledger.first();
+    if (acked.length > 0) control.acknowledge(context, acked);
+  }
+
+  private async settle(
+    hostId: string,
+    usage: HostUsage,
+    now: number,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<boolean> {
     for (const frame of this.ledger.queued()) {
       const delivered = await this.reply(hostId, frame);
       if (!delivered.ok) return false;
@@ -381,11 +401,7 @@ export class HostChannel extends DurableObject<Env> {
       () => true,
       (error: unknown) => this.unreported(error, attachment, context),
     );
-    if (!reported) return false;
-    const held = this.ledger.take();
-    attachment.heldFrom = this.ledger.first();
-    if (held.length > 0) control.acknowledge(context, held);
-    return true;
+    return reported;
   }
 
   private unreported(error: unknown, attachment: Attachment, context: control.ControlContext): false {
