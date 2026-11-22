@@ -125,10 +125,10 @@ export class Host {
     });
   }
 
-  send(message: unknown): Promise<"Sent" | "Deferred"> {
+  send(message: unknown): Promise<"Sent" | "RateLimited"> {
     const parsed = ControlMessageSchema.parse(message);
     const [row] = this.world.db.sql.exec("SELECT health FROM hosts WHERE host_id = ?", this.hostId).toArray();
-    if (parsed.type === "TurnOffer" && row?.health !== "Healthy") return Promise.resolve("Deferred");
+    if (parsed.type === "TurnOffer" && row?.health !== "Healthy") return Promise.resolve("RateLimited");
     this.inbox.push(parsed);
     return Promise.resolve("Sent");
   }
