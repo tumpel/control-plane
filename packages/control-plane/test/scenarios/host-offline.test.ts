@@ -6,7 +6,7 @@ import { SETTINGS, World } from "./harness/world.ts";
 const reasonOf = (turn: { state: string; reason?: string }): string | null =>
   turn.state === "Failed" ? (turn.reason ?? null) : null;
 
-test("a host that closes its socket and stays away past the heartbeat deadline reads its running turn as failed HostOffline", async (t) => {
+test("a host that closes its socket and stays away past the heartbeat deadline keeps its running turn until it reconnects", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   await world.holdsAgentCredentials();
@@ -16,15 +16,15 @@ test("a host that closes its socket and stays away past the heartbeat deadline r
   await host.claims(offer);
 
   await host.closesSocket();
-  assert.equal((await world.turn(offer.turnId)).state, "Running");
   await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
+  assert.equal((await world.turn(offer.turnId)).state, "Running");
 
-  const turn = await world.turn(offer.turnId);
-  assert.equal(reasonOf(turn), "HostOffline");
-  assert.match(turn.state === "Failed" ? (turn.detail ?? "") : "", /sent nothing for/);
+  await host.reconnects([offer.turnId]);
+  await host.heartbeats([offer.turnId]);
+  assert.equal((await world.turn(offer.turnId)).state, "Running");
 });
 
-test("a host that falls silent fails its running turn HostOffline on the next read", async (t) => {
+test("a host that falls silent keeps its running turn, and the next heartbeat that drops it fails it HostDropped", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   await world.holdsAgentCredentials();
@@ -34,12 +34,11 @@ test("a host that falls silent fails its running turn HostOffline on the next re
   await host.claims(offer);
 
   host.fallsSilent();
-  assert.equal((await world.turn(offer.turnId)).state, "Running");
   await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
+  assert.equal((await world.turn(offer.turnId)).state, "Running");
 
-  const turn = await world.turn(offer.turnId);
-  assert.equal(reasonOf(turn), "HostOffline");
-  assert.match(turn.state === "Failed" ? (turn.detail ?? "") : "", /sent nothing for/);
+  await host.heartbeats([]);
+  assert.equal(reasonOf(await world.turn(offer.turnId)), "HostDropped");
 });
 
 test("a silent host counts as Degraded and takes no new session", async (t) => {

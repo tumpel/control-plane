@@ -158,7 +158,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so its running work failed`;
+    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so it reads as Degraded until it speaks again`;
     await tenantApi(this.env.TENANT, tenantId).call("hostHealth", {
       tenantId,
       hostId,
@@ -464,12 +464,6 @@ export class HostChannel extends DurableObject<Env> {
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
     const db = this.env.DB;
-    const away = await db
-      .prepare("SELECT state, updated_at FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ state: string; updated_at: number }>();
-    if (away?.state === "Offline" && now - away.updated_at >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
-      await this.fellSilent(hostId, now - away.updated_at, now);
     const { channelProtocolOldest, guestProtocol } = welcomed;
     await db.batch([
       db

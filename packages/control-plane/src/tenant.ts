@@ -642,11 +642,7 @@ export class Tenant extends TenantConnectors {
     },
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
-      if (health === "Healthy") return {};
-      if (health === "Degraded") {
-        await this.hostFellSilent(tenantId, hostId, now);
-        return {};
-      }
+      if (health !== "RateLimited") return {};
       const failed = await this.failHostTurns(
         tenantId,
         hostId,

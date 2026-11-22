@@ -472,8 +472,6 @@ type ChunkReply = Extract<
 type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
 type Handoff = { hostId: string; offer: StoredTurnOffer };
 type TurnHandoff = Handoff & { type: "TurnHandoff" };
-type LostHosts = ReadonlyMap<string, string>;
-const NONE_LOST: LostHosts = new Map();
 export type Refused = { type: "Refused"; reason: string };
 type OfferedTurn = { type: "Offered"; turn: TurnRow; session: SessionRow };
 export type HostReply =
@@ -598,27 +596,6 @@ const undelivered = (host: string, sent: Exclude<OfferSent, "Sent"> | Error): [T
     "RateLimited",
     `host ${host} is rate limited and takes no offers, so the turn never reached it; send the turn again once its health recovers`,
   ];
-};
-
-const lostTurnDetail = (lost: string): string =>
-  `${lost} during the turn; check that its supervisor runs, then send the turn again`;
-
-const lostTurn = (row: TurnRow, lost: LostHosts, failedAt: string): TurnRow => {
-  const detail = IN_FLIGHT.includes(row.state) ? lost.get(row.host_id) : undefined;
-  return detail === undefined ? row : { ...row, state: "Failed", reason: "HostOffline", detail, failed_at: failedAt };
-};
-
-const lostSession = (row: SessionViewRow, lost: LostHosts, failedAt: string): SessionViewRow => {
-  const detail = IN_FLIGHT.includes(row.last_turn_state) ? lost.get(row.last_turn_host_id) : undefined;
-  return detail === undefined
-    ? row
-    : {
-        ...row,
-        last_turn_state: "Failed",
-        last_turn_reason: "HostOffline",
-        last_turn_detail: detail,
-        last_turn_failed_at: failedAt,
-      };
 };
 
 const offerPrompt = (harness: string, turn: TurnRow): string => {
@@ -943,19 +920,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private inFlightTurns(
-    sessionId: string,
-    lost: LostHosts = NONE_LOST,
-  ): { turn_id: string; state: string; offer_sent: number }[] {
+  private inFlightTurns(sessionId: string): { turn_id: string; state: string; offer_sent: number }[] {
     return this.ctx.storage.sql
-      .exec<{ turn_id: string; host_id: string; state: string; offer_sent: number }>(
-        `SELECT turn_id, host_id, state, offer_sent FROM turns WHERE session_id = ? AND state IN (${IN_FLIGHT.map(() => "?").join(", ")})
+      .exec<{ turn_id: string; state: string; offer_sent: number }>(
+        `SELECT turn_id, state, offer_sent FROM turns WHERE session_id = ? AND state IN (${IN_FLIGHT.map(() => "?").join(", ")})
         ORDER BY created_at, turn_id`,
         sessionId,
         ...IN_FLIGHT,
       )
-      .toArray()
-      .filter((row) => !lost.has(row.host_id));
+      .toArray();
   }
 
   private latestTurn(sessionId: string, state: string | null): TurnRow | null {
@@ -2107,10 +2080,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    const lost = await this.lostHosts(tenantId);
-    if (this.inFlightTurns(sessionId, lost).length > 0) return this.sendWaiting(tenantId, session, send, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
     const online =
-      !lost.has(session.host_id) && hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
+      (await this.hostReach(session.host_id)) === "Connected" &&
+      hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
     if (online && session.state !== "Stopped") {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
       const turn = this.runTurn(session, session.host_id, boxId, send, now);
@@ -2127,7 +2100,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
     const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
-    if (this.inFlightTurns(sessionId, lost).length > 0) return this.sendWaiting(tenantId, session, send, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
@@ -2584,26 +2557,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async readSession(tenantId: string, sessionId: string): Promise<Session | null> {
-    return this.getSession(tenantId, sessionId, await this.lostHosts(tenantId));
+    return this.getSession(tenantId, sessionId);
   }
 
-  private getSession(tenantId: string, sessionId: string, lost: LostHosts = NONE_LOST): Session | null {
+  private getSession(tenantId: string, sessionId: string): Session | null {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
     return row === undefined
       ? null
-      : toSession(
-          tenantId,
-          lostSession(row, lost, iso(Date.now())),
-          this.turnImage(row.last_turn_id),
-          this.sessionLayer(row.session_id),
-        );
+      : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id));
   }
 
   protected async listSessions(tenantId: string, filter: SessionFilter): Promise<Session[]> {
-    const lost = await this.lostHosts(tenantId);
-    const failedAt = iso(Date.now());
     return this.ctx.storage.sql
       .exec<SessionViewRow>(
         `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2)
@@ -2620,14 +2586,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         filter.triggerId ?? null,
       )
       .toArray()
-      .map((row) =>
-        toSession(
-          tenantId,
-          lostSession(row, lost, failedAt),
-          this.turnImage(row.last_turn_id),
-          this.sessionLayer(row.session_id),
-        ),
-      );
+      .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));
   }
 
   protected startTags(_startedBy: SessionStartedBy, tags: string[]): string[] {
@@ -2671,14 +2630,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async listTurns(tenantId: string, sessionId: string): Promise<Turn[] | null> {
     if (this.sessionRow(sessionId) === null) return null;
-    return this.liveTurnRows(sessionId, await this.lostHosts(tenantId)).map((row) =>
-      toTurn(tenantId, row, this.turnImage(row.turn_id)),
-    );
-  }
-
-  private liveTurnRows(sessionId: string, lost: LostHosts): TurnRow[] {
-    const failedAt = iso(Date.now());
-    return this.turnRows(sessionId).map((row) => lostTurn(row, lost, failedAt));
+    return this.turnRows(sessionId).map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id)));
   }
 
   private turnRows(sessionId: string): TurnRow[] {
@@ -2688,12 +2640,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async readTurn(tenantId: string, turnId: string): Promise<Turn | null> {
-    return this.getTurn(tenantId, turnId, await this.lostHosts(tenantId));
+    return this.getTurn(tenantId, turnId);
   }
 
-  private getTurn(tenantId: string, turnId: string, lost: LostHosts = NONE_LOST): Turn | null {
+  private getTurn(tenantId: string, turnId: string): Turn | null {
     const row = this.turnRow(turnId);
-    return row === null ? null : toTurn(tenantId, lostTurn(row, lost, iso(Date.now())), this.turnImage(turnId));
+    return row === null ? null : toTurn(tenantId, row, this.turnImage(turnId));
   }
 
   private turnImage(turnId: string): TurnImage | null {
@@ -2778,14 +2730,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async getTurnFailure(tenantId: string, turnId: string): Promise<TurnFailure | null> {
-    const lost = await this.lostHosts(tenantId);
     const [row] = this.ctx.storage.sql
       .exec<FailureRow>(
         "SELECT turn_id, session_id, reason, detail, failed_at, created_at FROM turn_failures WHERE turn_id = ?",
         turnId,
       )
       .toArray();
-    if (row === undefined) return this.lostTurnFailure(tenantId, turnId, lost);
+    if (row === undefined) return null;
     return TurnFailureSchema.parse({
       turnId: row.turn_id,
       tenantId,
@@ -2794,22 +2745,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       detail: turnFailureDetail(row.detail),
       failedAt: row.failed_at,
       createdAt: row.created_at,
-    });
-  }
-
-  private lostTurnFailure(tenantId: string, turnId: string, lost: LostHosts): TurnFailure | null {
-    const turn = this.turnRow(turnId);
-    const detail = turn !== null && IN_FLIGHT.includes(turn.state) ? lost.get(turn.host_id) : undefined;
-    if (turn === null || detail === undefined) return null;
-    const now = Date.now();
-    return TurnFailureSchema.parse({
-      turnId,
-      tenantId,
-      sessionId: turn.session_id,
-      reason: "HostOffline",
-      detail,
-      failedAt: iso(now),
-      createdAt: now,
     });
   }
 
@@ -2874,7 +2809,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<TranscriptCursor | null> {
     const session = this.sessionRow(sessionId);
     if (session === null) return null;
-    const turns = this.liveTurnRows(sessionId, await this.lostHosts(tenantId));
+    const turns = this.turnRows(sessionId);
     const index = turnId === null ? -1 : turns.findIndex((turn) => turn.turn_id === turnId);
     const read = turnId === null ? turns : turns.slice(index, index + 1);
     const running = read.find((turn) => turn.state === "Running");
@@ -3189,41 +3124,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     for (const turnId of turnIds) await this.host(hostId).send({ type: "TurnCancel", turnId });
   }
 
-  protected async hostFellSilent(tenantId: string, hostId: string, now: number): Promise<void> {
-    const failed = await this.failLostHost(tenantId, hostId, await this.silence(tenantId, hostId), now);
-    await this.cancelHostTurns(hostId, failed);
-  }
-
-  private async silence(tenantId: string, hostId: string): Promise<string> {
-    const host = await this.hostName(tenantId, hostId);
-    return `host ${host} sent nothing for ${settingsOf(this.env).heartbeatDeadlineSeconds} seconds`;
-  }
-
   protected hostPresence(hostId: string, presence: "Online" | "Offline", now: number): void {
     this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
-  }
-
-  protected async lostHosts(tenantId: string): Promise<LostHosts> {
-    const lost = new Map<string, string>();
-    for (const { hostId } of this.runningTurnsByHost()) {
-      if ((await this.hostReach(hostId)) === "Connected") continue;
-      lost.set(hostId, lostTurnDetail(await this.silence(tenantId, hostId)));
-    }
-    return lost;
-  }
-
-  private async failLostHost(tenantId: string, hostId: string, lost: string, now: number): Promise<string[]> {
-    return this.failHostTurns(
-      tenantId,
-      hostId,
-      {
-        turn: "HostOffline",
-        snapshot: "NotAnswered",
-        turnDetail: lostTurnDetail(lost),
-        snapshotDetail: `${lost} before it answered the snapshot; check that its supervisor runs`,
-      },
-      now,
-    );
   }
 
   private async hostName(tenantId: string, hostId: string): Promise<string> {
@@ -3232,14 +3134,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return host.name;
   }
 
-  private async hostReach(hostId: string): Promise<"Connected" | "Lost"> {
-    const row = await this.env.DB.prepare("SELECT state, updated_at FROM hosts WHERE host_id = ?")
+  private async hostReach(hostId: string): Promise<"Connected" | "Offline" | "Degraded"> {
+    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
       .bind(hostId)
-      .first<{ state: string; updated_at: number }>();
-    if (row?.state === "Offline")
-      return Date.now() - row.updated_at >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Lost" : "Connected";
-    if (row?.state !== "Online") return "Lost";
-    return (await hostSilent(this.env, hostId)) ? "Lost" : "Connected";
+      .first<{ state: string }>();
+    if (row?.state !== "Online") return "Offline";
+    return (await hostSilent(this.env, hostId)) ? "Degraded" : "Connected";
   }
 
   protected async hostMessage(
