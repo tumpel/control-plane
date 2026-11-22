@@ -131,6 +131,9 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
+  if (refused.reason === "NotHeard") {
+    return `${named} has not said hello since your tenant restarted, so its free room is unknown until it reconnects`;
+  }
   if (refused.reason === "NotHealthy") {
     if (refused.host.health === "Degraded") {
       return `${named} missed its heartbeat and counts as Degraded until it sends one or reconnects`;
