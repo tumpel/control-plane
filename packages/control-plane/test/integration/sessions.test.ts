@@ -1928,7 +1928,7 @@ suite("sessions", { concurrency: 8 }, () => {
     };
     assert.ok(spent.tenantWritten <= 50, `the turn wrote ${spent.tenantWritten} tenant rows`);
     assert.ok(spent.tenantRead <= 2300, `the turn read ${spent.tenantRead} tenant rows`);
-    assert.ok(spent.hostWritten <= 14, `the turn wrote ${spent.hostWritten} host rows`);
+    assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
     assert.ok(spent.hostRead <= 520, `the turn read ${spent.hostRead} host rows`);
   });
 
