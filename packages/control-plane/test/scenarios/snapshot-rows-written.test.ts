@@ -487,6 +487,35 @@ test("a snapshot that reuses packs an unstored snapshot of the session uploaded 
   });
 });
 
+test("a snapshot that reuses a pack an unstored snapshot was granted but never put is rejected, naming the pack", async () => {
+  await inWorld(async (world, host) => {
+    await world.holdsAgentCredentials();
+    const chunks = tree(DIGESTS_PER_PART, "granted before the host went offline");
+    const session = await world.startSession({ prompt: "build the tree", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    const unstored = snapshotAsked(host, session.sessionId);
+    await uploadsChunks(world, host, unstored.snapshotId, chunks);
+    const packDigest = chunks[0]?.packDigest ?? "";
+    await world.store.delete(`${TENANT_ID}/packs/${packDigest}`);
+    await failsSnapshot(host, unstored.snapshotId);
+
+    await world.sendTurn(session.sessionId, "change the tree");
+    const next = host.takeOffer();
+    await host.claims(next);
+    await host.completes(next);
+    const request = snapshotAsked(host, session.sessionId);
+    await storesRoot(world, request.storageKey, chunks);
+    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0 });
+
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+    );
+    assert.match(JSON.stringify(snapshots.at(-1)?.outcome), new RegExp(`reuses pack ${packDigest}`));
+  });
+});
+
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
   const world = await World.open();
   try {
