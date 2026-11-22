@@ -1,10 +1,6 @@
 import {
   ApiKeyMemberSchema,
   ApiKeyUpdateSchema,
-  CircleCIAuthorizationChooseSchema,
-  CircleCIConnectionStartSchema,
-  CircleCIProjectAddSchema,
-  CircleCIProjectPathSchema,
   ClaudeSetupListQuerySchema,
   ClaudeSetupPathSchema,
   ClaudeSetupStartSchema,
@@ -23,7 +19,6 @@ import {
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
   EventQuerySchema,
-  GitHubActionsConnectionStartSchema,
   GitHubInstallationPathSchema,
   GitHubRepositoryPathSchema,
   HarnessPathSchema,
@@ -133,7 +128,7 @@ interface ToolDefinition {
   description: string;
   input: z.ZodType<Record<string, unknown>>;
   request: { method: Method; path: string; query?: string[] } | null;
-  answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand" | "connectorTokenCommand";
+  answer: "rest" | "configSecretSet" | "memberCommand" | "connectorTokenCommand";
 }
 
 const DONE: Record<string, string> = {
@@ -147,10 +142,7 @@ const DONE: Record<string, string> = {
   tumpel_trigger_delete: "Trigger deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
-  tumpel_github_actions_delete: "GitHub Actions disconnected",
   tumpel_namespace_delete: "Namespace disconnected",
-  tumpel_circleci_delete: "CircleCI disconnected",
-  tumpel_circleci_project_delete: "CircleCI project binding deleted",
   tumpel_secret_set_delete: "Secret set deleted",
   tumpel_connector_delete: "Connector deleted",
 };
@@ -215,13 +207,6 @@ const memberCommand = (args: z.infer<typeof MEMBER_WITHOUT_VALUE>): string => {
   if (member.kind === "SubscriptionToken") flags.push(`--expires-at ${member.expiresAt}`);
   return `Secret values never pass through MCP and this tool writes nothing. Pipe the value of ${member.name} into this command on your machine: tumpel secret-set set-member ${kind} ${args.secretSetId} ${flags.join(" ")} --stdin`;
 };
-
-const CIRCLECI_START_WITHOUT_TOKEN = CircleCIConnectionStartSchema.omit({ apiToken: true }).strict();
-
-const shellQuoted = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
-const circleCIStartCommand = (args: z.infer<typeof CIRCLECI_START_WITHOUT_TOKEN>): string =>
-  `CircleCI API tokens never pass through MCP and this tool writes nothing. Pipe a personal API token of a member of the organization into this command on your machine: tumpel circleci start --account-label ${shellQuoted(args.accountLabel)} --organization-id ${args.organizationId} --token-stdin. Or paste it in the dashboard's Connect CircleCI dialog.`;
 
 const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
   secretValues: z
@@ -550,28 +535,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/connections",
     NO_ARGUMENTS,
-    "List one row per connection kind: GitHub, GitHubActions, CircleCI, Namespace and OpenRouter, each NotConfigured, NotConnected or Connected with what it is connected as: GitHub logins, a build provider's account label, or the secret sets that hold an OpenRouter key.",
-  ),
-  rest(
-    "tumpel_github_actions_get",
-    "GET",
-    "/v1/github-actions-connection",
-    NO_ARGUMENTS,
-    "Read the tenant's GitHub Actions build provider connection.",
-  ),
-  rest(
-    "tumpel_github_actions_start",
-    "POST",
-    "/v1/github-actions-connection/start",
-    GitHubActionsConnectionStartSchema,
-    "Connect the tenant's own GitHub Actions account, replacing an earlier one. Takes {accountLabel, callerWorkflow}: callerWorkflow is the workflow file each repository holds, such as .github/workflows/tumpel-prebuild.yml, which calls Tumpel's reusable prebuild workflow.",
-  ),
-  rest(
-    "tumpel_github_actions_delete",
-    "DELETE",
-    "/v1/github-actions-connection",
-    NO_ARGUMENTS,
-    "Disconnect the tenant's GitHub Actions account.",
+    "List one row per connection kind: GitHub, Namespace and OpenRouter, each NotConfigured, NotConnected or Connected with what it is connected as: GitHub logins, the Namespace account label, or the secret sets that hold an OpenRouter key.",
   ),
   rest(
     "tumpel_namespace_get",
@@ -593,63 +557,6 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/namespace-connection",
     NO_ARGUMENTS,
     "Disconnect the tenant's Namespace workspace.",
-  ),
-  rest(
-    "tumpel_circleci_get",
-    "GET",
-    "/v1/circleci-connection",
-    NO_ARGUMENTS,
-    "Read the tenant's CircleCI build provider connection. Returns the connection without its token, the orb and the config each repository commits.",
-  ),
-  {
-    name: "tumpel_circleci_start",
-    description:
-      "Draft the command that connects the tenant's CircleCI organization. Takes {accountLabel, organizationId}: organizationId is the organization id from CircleCI's Organization Settings. CircleCI API tokens never pass through MCP, so this tool writes nothing; it returns the tumpel circleci start command the user pipes a personal API token into.",
-    input: CIRCLECI_START_WITHOUT_TOKEN,
-    request: null,
-    answer: "circleCIStartCommand",
-  },
-  rest(
-    "tumpel_circleci_authorize",
-    "POST",
-    "/v1/circleci-connection/authorize",
-    NO_ARGUMENTS,
-    "Start connecting the tenant's CircleCI organization through CircleCI's OAuth consent page, the way that needs no token from the user. Returns the authorization, AwaitingRedirect with authorizeUrl and redirectDueAt. Give the person authorizeUrl; after they choose Allow the browser lands on a 127.0.0.1 address whose code never passes through MCP, so they run tumpel circleci authorize on their machine instead, which listens there, or paste that address into tumpel circleci complete --stdin. With several organizations the authorization turns ChoosingOrganization; pick one with tumpel_circleci_choose.",
-  ),
-  rest(
-    "tumpel_circleci_choose",
-    "POST",
-    "/v1/circleci-connection/choose",
-    CircleCIAuthorizationChooseSchema,
-    "Connect the organization a ChoosingOrganization CircleCI authorization lists. Takes {circleCIAuthorizationId, organizationId}. Returns the authorization, Completed with the organization and the token's expiresAt.",
-  ),
-  rest(
-    "tumpel_circleci_delete",
-    "DELETE",
-    "/v1/circleci-connection",
-    NO_ARGUMENTS,
-    "Disconnect the tenant's CircleCI organization and delete its project bindings.",
-  ),
-  rest(
-    "tumpel_circleci_project_list",
-    "GET",
-    "/v1/circleci-projects",
-    NO_ARGUMENTS,
-    "List the repositories bound to a CircleCI project.",
-  ),
-  rest(
-    "tumpel_circleci_project_add",
-    "POST",
-    "/v1/circleci-projects",
-    CircleCIProjectAddSchema,
-    "Bind a repository to its CircleCI project once. Takes {repository, projectSlug, pipelineDefinitionId}: projectSlug is gh/<owner>/<name> in a GitHub OAuth organization or circleci/<organization id>/<project id> in a GitHub App organization, and the pipeline definition must check out the repository.",
-  ),
-  rest(
-    "tumpel_circleci_project_delete",
-    "DELETE",
-    "/v1/circleci-projects/{circleCIProjectId}",
-    CircleCIProjectPathSchema,
-    "Delete a repository's CircleCI project binding.",
   ),
   rest(
     "tumpel_prebuild_start",
@@ -1203,9 +1110,6 @@ const runTool = async (
     return { ok: true, text: connectorTokenCommand(ConnectorPathSchema.parse(args)) };
   }
   if (tool.answer === "memberCommand") return { ok: true, text: memberCommand(MEMBER_WITHOUT_VALUE.parse(args)) };
-  if (tool.answer === "circleCIStartCommand") {
-    return { ok: true, text: circleCIStartCommand(CIRCLECI_START_WITHOUT_TOKEN.parse(args)) };
-  }
   const entry = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "secretSetId"));
   return { ok: true, text: JSON.stringify(ConfigSecretSetSchema.parse(entry)) };
 };

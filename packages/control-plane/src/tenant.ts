@@ -456,31 +456,6 @@ export class Tenant extends TenantConnectors {
       return {};
     },
     openRouterSecretSets: () => ({ names: this.openRouterSecretSets() }),
-    startCircleCIAuthorization: async ({ tenantId, principalId, now }) => ({
-      started: await this.startCircleCIAuthorization(tenantId, principalId, now),
-    }),
-    completeCircleCIAuthorization: async ({ tenantId, principalId, circleCIAuthorizationId, redirectedUrl, now }) => ({
-      stepped: await this.completeCircleCIAuthorization(
-        tenantId,
-        principalId,
-        circleCIAuthorizationId,
-        redirectedUrl,
-        now,
-      ),
-    }),
-    chooseCircleCIOrganization: async ({ tenantId, principalId, circleCIAuthorizationId, organizationId, now }) => ({
-      stepped: await this.chooseCircleCIOrganization(
-        tenantId,
-        principalId,
-        circleCIAuthorizationId,
-        organizationId,
-        now,
-      ),
-    }),
-    circleCIAuthorizationDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.circleCIAuthorizationDeadlineReached(tenantId, deadline);
-      return {};
-    },
     startClaudeSetup: async ({ tenantId, input, now }) => ({
       started: await this.startClaudeSetup(tenantId, input, now),
     }),
@@ -507,53 +482,10 @@ export class Tenant extends TenantConnectors {
     listLatestPrebuilds: ({ tenantId }) => ({ prebuilds: this.listLatestPrebuilds(tenantId) }),
     getPrebuild: ({ tenantId, prebuildId }) => ({ prebuild: this.getPrebuild(tenantId, prebuildId) }),
     heldPrebuild: ({ tenantId, key }) => ({ prebuild: this.heldPrebuild(tenantId, key) }),
-    recordPrebuildBuilding: async ({ tenantId, prebuildId, now }) => {
-      await this.recordPrebuildBuilding(tenantId, prebuildId, now);
-      return {};
-    },
-    jobInputsTarget: ({ tenantId, repository, headSha, runId }) => ({
-      target: this.jobInputsTarget(tenantId, repository, headSha, runId),
-    }),
-    bindJobRun: async ({ tenantId, prebuildId, runId, now }) => ({
-      bound: await this.bindJobRun(tenantId, prebuildId, runId, now),
-    }),
-    workflowRunReported: async ({ tenantId, event, now }) => {
-      await this.workflowRunReported(tenantId, event, now);
-      return {};
-    },
-    prebuildDeadlineReached: async ({ tenantId, due }) => {
-      await this.prebuildDeadlineReached(tenantId, due);
-      return {};
-    },
-    startGitHubActionsPrebuild: async ({ tenantId, start, now }) => ({
-      started: await this.startGitHubActionsPrebuild(tenantId, start, now),
-    }),
     startHostPrebuild: async ({ tenantId, commit, provider, input, apiOrigin, now }) => ({
       started: await this.startHostPrebuild(tenantId, commit, provider, input, apiOrigin, now),
     }),
-    uploadTarget: ({ tenantId, prebuildId }) => ({ target: this.uploadTarget(tenantId, prebuildId) }),
-    bindCircleCIUploadJob: async ({ tenantId, prebuildId, upload, now }) => ({
-      bound: await this.bindCircleCIUploadJob(tenantId, prebuildId, upload, now),
-    }),
-    startPrebuildUpload: ({ tenantId, prebuildId, upload, now }) => ({
-      recorded: this.startPrebuildUpload(tenantId, prebuildId, upload, now),
-    }),
-    completePrebuildUpload: async ({ tenantId, prebuildId, upload, now }) => ({
-      recorded: await this.completePrebuildUpload(tenantId, prebuildId, upload, now),
-    }),
     getPrebuildFailure: ({ tenantId, prebuildId }) => ({ failure: this.getPrebuildFailure(tenantId, prebuildId) }),
-    dispatchCircleCIPrebuild: async ({ tenantId, start, project, parameters, now }) => ({
-      dispatched: await this.dispatchCircleCIPrebuild(tenantId, start, project, parameters, now),
-    }),
-    circleCIWorkflowCompleted: async ({ tenantId, event, now }) => {
-      const { pipelineId, projectId, ...rest } = event;
-      await this.circleCIWorkflowCompleted(
-        tenantId,
-        { ...rest, pipeline: { id: pipelineId }, project: { id: projectId } },
-        now,
-      );
-      return {};
-    },
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
       read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
     }),
@@ -665,26 +597,7 @@ export class Tenant extends TenantConnectors {
     transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
       cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
-    connectedAccounts: () => ({ accounts: this.connectedAccounts() }),
     deleteBuildConnection: ({ provider }) => ({ deleted: this.deleteBuildConnection(provider) }),
-    circleCIConnection: () => ({ connection: this.circleCIConnection() }),
-    circleCIToken: async () => ({ token: await this.circleCIToken() }),
-    connectCircleCI: async ({ start, now }) => ({ connection: await this.connectCircleCI(start, now) }),
-    listCircleCIProjects: ({ tenantId }) => ({ projects: this.listCircleCIProjects(tenantId) }),
-    circleCIProjectBoundTo: ({ tenantId, projectId }) => ({
-      project: this.circleCIProjectBoundTo(tenantId, projectId),
-    }),
-    circleCIProjectOf: ({ tenantId, repository }) => ({ project: this.circleCIProjectOf(tenantId, repository) }),
-    addCircleCIProject: async ({ tenantId, binding, now }) => ({
-      project: await this.addCircleCIProject(tenantId, binding, now),
-    }),
-    circleCIWebhooks: () => ({ webhooks: this.circleCIWebhooks() }),
-    circleCIWebhookSecret: async ({ projectId }) => ({ secret: await this.circleCIWebhookSecret(projectId) }),
-    deleteCircleCIProject: ({ circleCIProjectId }) => ({ deleted: this.deleteCircleCIProject(circleCIProjectId) }),
-    gitHubActionsConnection: ({ tenantId }) => ({ connection: this.gitHubActionsConnection(tenantId) }),
-    connectGitHubActions: ({ tenantId, start, now }) => ({
-      connection: this.connectGitHubActions(tenantId, start, now),
-    }),
     namespaceConnection: () => ({ connection: this.namespaceConnection() }),
     connectNamespace: ({ start, now }) => ({ connection: this.connectNamespace(start, now) }),
     offerSent: ({ turnId }) => {

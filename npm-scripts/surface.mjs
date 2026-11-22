@@ -84,7 +84,7 @@ const OAUTH_WIRE = "OAuth wire a client signs in with before it holds a token";
 const DISCOVERY = "OAuth and OpenID discovery document a client reads before it signs in";
 const DEVICE_WIRE = "device-code wire the CLI signs in with before it holds a token";
 const RELEASE_DOWNLOAD = "release download the installer and the supervisor fetch without sign-in";
-const BUILD_JOB = "build job wire, signed by the provider's OIDC job token, never by a principal";
+const CI_PREBUILD_REMOVED = "CI prebuilds are removed from the control plane; the pinned protocol still defines it";
 const DELIVERY_CHANNEL = "delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19";
 
 const ALLOWLIST = {
@@ -111,10 +111,22 @@ const ALLOWLIST = {
   Releases_install: "install script a person pipes to sh before the CLI exists",
   Releases_rollout:
     "stage-wide rollout the release workflow reads with the drainToken it wrote to the release bucket, never a principal",
-  PrebuildUploads_start: BUILD_JOB,
-  PrebuildUploads_complete: BUILD_JOB,
-  PrebuildInputs_read: BUILD_JOB,
-  CircleCIEvents_receive: "provider webhook, signed with the project binding's secret, never by a principal",
+  PrebuildUploads_start: CI_PREBUILD_REMOVED,
+  PrebuildUploads_complete: CI_PREBUILD_REMOVED,
+  PrebuildInputs_read: CI_PREBUILD_REMOVED,
+  CircleCIEvents_receive: CI_PREBUILD_REMOVED,
+  CircleCIConnections_authorize: CI_PREBUILD_REMOVED,
+  CircleCIConnections_choose: CI_PREBUILD_REMOVED,
+  CircleCIConnections_complete: CI_PREBUILD_REMOVED,
+  CircleCIConnections_delete: CI_PREBUILD_REMOVED,
+  CircleCIConnections_get: CI_PREBUILD_REMOVED,
+  CircleCIConnections_start: CI_PREBUILD_REMOVED,
+  CircleCIProjects_add: CI_PREBUILD_REMOVED,
+  CircleCIProjects_delete: CI_PREBUILD_REMOVED,
+  CircleCIProjects_list: CI_PREBUILD_REMOVED,
+  GitHubActionsConnections_delete: CI_PREBUILD_REMOVED,
+  GitHubActionsConnections_get: CI_PREBUILD_REMOVED,
+  GitHubActionsConnections_start: CI_PREBUILD_REMOVED,
   ClaudeSetupBoxes_writeToken: "setup box wire, signed by the box's single-use token, never by a principal",
   ConnectorTokens_fetch: "box wire of the guest forwarder, signed by the turn's connector token, never by a principal",
   WebhookEndpoints_create: DELIVERY_CHANNEL,
@@ -131,8 +143,6 @@ const ALLOWLIST = {
 const CLI_ONLY = {
   ClaudeSetups_submitCode:
     "takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it",
-  CircleCIConnections_complete:
-    "takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it",
 };
 
 const tools = () => new Set([...readFileSync(MCP, "utf8").matchAll(/"(tumpel_[a-z_]+)"/g)].map((match) => match[1]));

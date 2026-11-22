@@ -10,12 +10,8 @@ export type DeadlineName =
   | "Teardown"
   | "TeardownAnswer"
   | "HostOffline"
-  | PrebuildDeadlineName
   | "ClaudeSetup"
-  | "CircleCIAuthorization"
   | "OpenRouterAuthorization";
-
-export type PrebuildDeadlineName = "PrebuildDispatch" | "PrebuildBuild";
 
 export interface Deadline {
   turnId: string;
@@ -27,42 +23,20 @@ export interface ClaudeSetupDeadline {
   at: number;
 }
 
-export interface CircleCIAuthorizationDeadline {
-  circleCIAuthorizationId: string;
-  at: number;
-}
-
 export interface OpenRouterAuthorizationDeadline {
   openRouterAuthorizationId: string;
   at: number;
 }
 
-export interface PrebuildDeadline {
-  prebuildId: string;
-  at: number;
-}
-
-type DeadlineOf<N extends DeadlineName> = N extends PrebuildDeadlineName
-  ? PrebuildDeadline
-  : N extends "ClaudeSetup"
-    ? ClaudeSetupDeadline
-    : N extends "CircleCIAuthorization"
-      ? CircleCIAuthorizationDeadline
-      : N extends "OpenRouterAuthorization"
-        ? OpenRouterAuthorizationDeadline
-        : Deadline;
+type DeadlineOf<N extends DeadlineName> = N extends "ClaudeSetup"
+  ? ClaudeSetupDeadline
+  : N extends "OpenRouterAuthorization"
+    ? OpenRouterAuthorizationDeadline
+    : Deadline;
 
 export type DueDeadline = { [N in DeadlineName]: { name: N; deadline: DeadlineOf<N> } }[DeadlineName];
 
-export type SessionDueDeadline = Exclude<
-  DueDeadline,
-  { name: PrebuildDeadlineName | "ClaudeSetup" | "CircleCIAuthorization" | "OpenRouterAuthorization" }
->;
-
-export type PrebuildDueDeadline = Extract<DueDeadline, { name: PrebuildDeadlineName }>;
-
-const isPrebuildDeadline = (due: DueDeadline): due is PrebuildDueDeadline =>
-  due.name === "PrebuildDispatch" || due.name === "PrebuildBuild";
+export type SessionDueDeadline = Exclude<DueDeadline, { name: "ClaudeSetup" | "OpenRouterAuthorization" }>;
 
 export type DeadlineChanges = { [N in DeadlineName]?: DeadlineOf<N> | null };
 
@@ -99,12 +73,8 @@ export class SessionTimer extends DurableObject<Env> {
     const reach = async (reached: DueDeadline): Promise<unknown> => {
       if (reached.name === "ClaudeSetup")
         return api.call("claudeSetupDeadlineReached", { tenantId, deadline: reached.deadline });
-      if (reached.name === "CircleCIAuthorization")
-        return api.call("circleCIAuthorizationDeadlineReached", { tenantId, deadline: reached.deadline });
       if (reached.name === "OpenRouterAuthorization")
         return api.call("openRouterAuthorizationDeadlineReached", { deadline: reached.deadline });
-      if (isPrebuildDeadline(reached))
-        return api.call("prebuildDeadlineReached", { tenantId, due: reached, retries: 0 });
       return api.call("deadlineReached", { tenantId, due: reached, retries: 0 });
     };
     for (const [at, reached] of due.entries()) {

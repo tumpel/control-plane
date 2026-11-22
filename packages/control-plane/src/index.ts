@@ -71,9 +71,6 @@ import { and, eq, sql } from "drizzle-orm";
 import type { z } from "zod";
 import { accessVerifier, type Verification, type Verify } from "./access";
 import { CHANNEL_PATH } from "./channel/protocol.ts";
-import { handleCircleCIAuthorizations } from "./circleci-authorizations.ts";
-import { EVENTS_PATH as CIRCLECI_EVENTS_PATH, handleCircleCIEvents } from "./circleci-events.ts";
-import { handleCircleCIProjects } from "./circleci-projects.ts";
 import { handleClaudeSetups } from "./claude-setups";
 import { applyConfig, planConfig } from "./config-apply.ts";
 import { handleConnections } from "./connections.ts";
@@ -208,7 +205,6 @@ import {
 } from "./pages";
 import { patchFiles, personaFileKey, readPersona, type StoredPersona, UPLOAD_TTL_SECONDS } from "./persona-files";
 import { handlePrebuildTemplates } from "./prebuild-templates.ts";
-import { handlePrebuildInputs, handlePrebuildUploads } from "./prebuild-uploads.ts";
 import { handlePrebuilds } from "./prebuilds";
 import { type SignerEnv, signerOf } from "./presign";
 import { handlePushSubscriptions } from "./push-subscriptions.ts";
@@ -271,9 +267,6 @@ export interface Env extends SignerEnv {
   DEPLOYED_COMMIT: string;
   GITHUB_API_ORIGIN: string;
   GITHUB_WEB_ORIGIN: string;
-  CIRCLECI_API_ORIGIN: string;
-  CIRCLECI_OIDC_ORIGIN: string;
-  CIRCLECI_APP_ORIGIN: string;
   OPENROUTER_ORIGIN: string;
   VAPID_PUBLIC_KEY: string;
   VAPID_PRIVATE_KEY: string;
@@ -1845,11 +1838,6 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
     (await handleWebhooks(request, url, env, deviceCaller)) ??
     (await handleEvents(request, url, env, deviceCaller));
   if (sessions) return sessions;
-  const uploads =
-    (await handlePrebuildUploads(request, url, env)) ??
-    (await handlePrebuildInputs(request, url, env)) ??
-    (await handleCircleCIEvents(request, url, env));
-  if (uploads) return uploads;
   const prebuilds =
     (await handlePrebuilds(request, url, env, deviceCaller)) ??
     (await handlePrebuildTemplates(request, url, env, deviceCaller));
@@ -1861,10 +1849,8 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   const connections =
     (await handleConnectors(request, url, env, deviceCaller)) ??
     (await handleConnections(request, url, env, deviceCaller)) ??
-    (await handleCircleCIAuthorizations(request, url, env, deviceCaller)) ??
     (await handleOpenRouterAuthorizations(request, url, env, deviceCaller)) ??
-    (await handleOpenRouterCallback(request, url, env)) ??
-    (await handleCircleCIProjects(request, url, env, deviceCaller));
+    (await handleOpenRouterCallback(request, url, env));
   if (connections) return connections;
   const members = await handleMembers(request, url, env, {
     authenticate: deviceCaller,
@@ -1895,8 +1881,7 @@ const dispatch = async (request: Request, url: URL, env: Env): Promise<Response>
   });
 };
 
-const signedWebhook = (pathname: string): boolean =>
-  pathname === GITHUB_WEBHOOK_PATH || CIRCLECI_EVENTS_PATH.test(pathname);
+const signedWebhook = (pathname: string): boolean => pathname === GITHUB_WEBHOOK_PATH;
 
 export default {
   async fetch(request, env): Promise<Response> {
