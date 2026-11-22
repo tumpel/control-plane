@@ -19,7 +19,6 @@ const BYTES_PER_PLACEMENT = DIGEST_BYTES + 8 + 4 + 4 + 4;
 const PACK_NAME_BYTES = 128;
 const LIVE_PAGE = 100;
 export const MAX_PACKS_PER_MANIFEST = 16_384;
-export const MAX_UNNAMED_REUSED_PACKS = 128;
 export const STORE_DELETE_BATCH = 1000;
 export const MAX_INDEX_BYTES = 32 * 1024 * 1024;
 
@@ -400,36 +399,48 @@ export class SnapshotManifests {
   }
 }
 
-export type Claim =
-  | { kind: "Claimed" }
-  | { kind: "Gone"; packDigest: string }
-  | { kind: "TooManyUnnamed"; count: number };
-
-export type LiveNames = { has(packDigest: string): boolean; unreadable: string | undefined };
-
-type LiveState = { counts: Map<string, number>; members: Set<string>; unreadable: Map<string, string> };
+type LiveState = {
+  counts: Map<string, number>;
+  members: Set<string>;
+  held: Map<string, Set<string>>;
+  unreadable: Map<string, string>;
+};
 
 const LivePacksSchema = z.object({
   members: z.array(z.string()),
   counts: z.array(z.tuple([z.string(), z.number().int().min(1)])),
+  held: z.array(z.tuple([z.string(), z.array(z.string())])).default([]),
 });
+
+type SavedLivePacks = z.infer<typeof LivePacksSchema>;
 
 export const livePacksKey = (tenantId: string): string => `${tenantId}/live-packs.json`;
 
+const increment = (state: LiveState, packDigest: string): void => {
+  state.counts.set(packDigest, (state.counts.get(packDigest) ?? 0) + 1);
+};
+
+const decrement = (state: LiveState, packDigest: string): string[] => {
+  const count = (state.counts.get(packDigest) ?? 0) - 1;
+  if (count > 0) state.counts.set(packDigest, count);
+  return count <= 0 && state.counts.delete(packDigest) ? [packDigest] : [];
+};
+
 const counted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): void => {
   state.members.add(storageKey);
-  for (const packDigest of packs) state.counts.set(packDigest, (state.counts.get(packDigest) ?? 0) + 1);
+  for (const packDigest of packs) increment(state, packDigest);
 };
 
 const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<string>): string[] => {
   state.members.delete(storageKey);
-  const freed: string[] = [];
-  for (const packDigest of packs) {
-    const count = (state.counts.get(packDigest) ?? 0) - 1;
-    if (count > 0) state.counts.set(packDigest, count);
-    else if (state.counts.delete(packDigest)) freed.push(packDigest);
+  return [...packs].flatMap((packDigest) => decrement(state, packDigest));
+};
+
+const heldFrom = (state: LiveState, saved: SavedLivePacks["held"]): void => {
+  for (const [sessionId, packs] of saved) {
+    state.held.set(sessionId, new Set(packs));
+    for (const packDigest of packs) increment(state, packDigest);
   }
-  return freed;
 };
 
 export class LivePacks {
@@ -443,12 +454,6 @@ export class LivePacks {
     this.livePage = livePage;
   }
 
-  async names(store: R2Bucket, tenantId: string): Promise<LiveNames> {
-    const state = await this.turn(() => this.loaded(store, tenantId));
-    const [unreadable] = state.unreadable.values();
-    return { has: (packDigest) => state.counts.has(packDigest), unreadable };
-  }
-
   add(store: R2Bucket, tenantId: string, storageKey: string, packs: ReadonlySet<string>): Promise<void> {
     return this.turn(async () => {
       const state = this.state;
@@ -458,86 +463,123 @@ export class LivePacks {
     });
   }
 
+  hold(store: R2Bucket, tenantId: string, sessionId: string, packDigests: string[]): Promise<string[]> {
+    return this.turn(async () => {
+      const state = await this.loaded(store, tenantId);
+      const held = state.held.get(sessionId) ?? new Set<string>();
+      const unnamed = packDigests.filter((packDigest) => !state.counts.has(packDigest));
+      const uploading = packDigests.filter((packDigest) => held.has(packDigest) || !state.counts.has(packDigest));
+      if (unnamed.length === 0) return uploading;
+      for (const packDigest of unnamed) {
+        held.add(packDigest);
+        increment(state, packDigest);
+      }
+      state.held.set(sessionId, held);
+      await this.persist(store, tenantId, state);
+      return uploading;
+    });
+  }
+
   claim(
     store: R2Bucket,
     tenantId: string,
     storageKey: string,
     packs: ReadonlySet<string>,
     reused: ReadonlySet<string>,
-  ): Promise<Claim> {
-    return this.turn(async (): Promise<Claim> => {
+  ): Promise<string | null> {
+    return this.turn(async () => {
       const state = await this.loaded(store, tenantId);
-      const unnamed = [...reused].sort().filter((packDigest) => !state.counts.has(packDigest));
-      if (unnamed.length > MAX_UNNAMED_REUSED_PACKS) return { kind: "TooManyUnnamed", count: unnamed.length };
-      const held = await Promise.all(unnamed.map((packDigest) => store.head(packKey(tenantId, packDigest))));
-      const gone = unnamed.find((_, at) => held[at] === null);
-      if (gone !== undefined) return { kind: "Gone", packDigest: gone };
-      if (state.members.has(storageKey)) return { kind: "Claimed" };
+      const gone = [...reused].sort().find((packDigest) => !state.counts.has(packDigest));
+      if (gone !== undefined) return gone;
+      if (state.members.has(storageKey)) return null;
       counted(state, storageKey, packs);
       await this.persist(store, tenantId, state);
-      return { kind: "Claimed" };
+      return null;
     });
   }
 
-  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
-    return this.turn(async () => {
-      const freed = await this.unclaimed(store, tenantId, storageKeys);
-      const keys = freed.map((packDigest) => packKey(tenantId, packDigest));
-      for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
-        await store.delete(keys.slice(start, start + STORE_DELETE_BATCH));
-      }
-    });
+  release(store: R2Bucket, tenantId: string, sessionId: string, storageKeys: string[]): Promise<void> {
+    return this.turn(() =>
+      this.changing(store, tenantId, async (state) => {
+        const freed = await this.released(store, tenantId, state, storageKeys);
+        for (const packDigest of state.held.get(sessionId) ?? []) freed.push(...decrement(state, packDigest));
+        state.held.delete(sessionId);
+        const keys = freed.map((packDigest) => packKey(tenantId, packDigest));
+        for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+          await store.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+        }
+        await this.persist(store, tenantId, state);
+      }),
+    );
   }
 
-  async unclaim(store: R2Bucket, tenantId: string, storageKey: string): Promise<void> {
-    await this.turn(() => this.unclaimed(store, tenantId, [storageKey]));
+  unclaim(store: R2Bucket, tenantId: string, storageKey: string): Promise<void> {
+    return this.turn(() =>
+      this.changing(store, tenantId, async (state) => {
+        await this.released(store, tenantId, state, [storageKey]);
+        await this.persist(store, tenantId, state);
+      }),
+    );
   }
 
-  private unclaimed(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
-    return this.released(store, tenantId, storageKeys).catch((error: unknown) => {
-      this.state = null;
-      console.error(
-        `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
-      );
-      return [];
-    });
-  }
-
-  private async released(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
+  private async changing(
+    store: R2Bucket,
+    tenantId: string,
+    change: (state: LiveState) => Promise<void>,
+  ): Promise<void> {
     const state = await this.loaded(store, tenantId);
+    await change(state).catch((error: unknown) => {
+      this.state = null;
+      throw error;
+    });
+  }
+
+  private async released(
+    store: R2Bucket,
+    tenantId: string,
+    state: LiveState,
+    storageKeys: string[],
+  ): Promise<string[]> {
     const freed: string[] = [];
-    let changed = false;
     for (const storageKey of storageKeys) {
       if (state.unreadable.delete(storageKey) || !state.members.has(storageKey)) continue;
       const read = await this.manifests.packs(store, tenantId, storageKey);
+      if (read.kind === "Gone") {
+        state.members.delete(storageKey);
+        continue;
+      }
       if (read.kind !== "Read") throw new Error(`snapshot ${storageKey} has no readable pack list: ${read.detail}`);
       freed.push(...uncounted(state, storageKey, read.value));
-      changed = true;
     }
-    if (changed) await this.persist(store, tenantId, state);
     return freed;
   }
 
   private async loaded(store: R2Bucket, tenantId: string): Promise<LiveState> {
     if (this.state !== null) return this.state;
-    const state = (await this.reconciled(store, tenantId)) ?? (await this.rebuilt(store, tenantId));
+    const saved = await this.saved(store, tenantId);
+    const state =
+      (saved === null ? null : await this.reconciled(store, tenantId, saved)) ??
+      (await this.rebuilt(store, tenantId, saved?.held ?? []));
     this.state = state;
     return state;
   }
 
-  private async reconciled(store: R2Bucket, tenantId: string): Promise<LiveState | null> {
+  private async saved(store: R2Bucket, tenantId: string): Promise<SavedLivePacks | null> {
     const object = await store.get(livePacksKey(tenantId));
     if (object === null) return null;
     const parsed = LivePacksSchema.safeParse(parsedJson(await object.text()));
-    if (!parsed.success) {
-      console.error(
-        `tenant ${tenantId} holds live pack names that do not parse, so they are rebuilt: ${issues(parsed.error)}`,
-      );
-      return null;
-    }
+    if (parsed.success) return parsed.data;
+    console.error(
+      `tenant ${tenantId} holds live pack names that do not parse, so they are rebuilt: ${issues(parsed.error)}`,
+    );
+    return null;
+  }
+
+  private async reconciled(store: R2Bucket, tenantId: string, saved: SavedLivePacks): Promise<LiveState | null> {
     const state: LiveState = {
-      counts: new Map(parsed.data.counts),
-      members: new Set(parsed.data.members),
+      counts: new Map(saved.counts),
+      members: new Set(saved.members),
+      held: new Map(saved.held.map(([sessionId, packs]) => [sessionId, new Set(packs)])),
       unreadable: new Map(),
     };
     const live = new Set<string>();
@@ -558,8 +600,9 @@ export class LivePacks {
     return state;
   }
 
-  private async rebuilt(store: R2Bucket, tenantId: string): Promise<LiveState> {
-    const state: LiveState = { counts: new Map(), members: new Set(), unreadable: new Map() };
+  private async rebuilt(store: R2Bucket, tenantId: string, held: SavedLivePacks["held"]): Promise<LiveState> {
+    const state: LiveState = { counts: new Map(), members: new Set(), held: new Map(), unreadable: new Map() };
+    heldFrom(state, held);
     await this.eachLive(async (storageKey) => {
       await this.counts(store, tenantId, state, storageKey);
     });
@@ -586,7 +629,11 @@ export class LivePacks {
   }
 
   private persist(store: R2Bucket, tenantId: string, state: LiveState): Promise<void> {
-    const body = JSON.stringify({ members: [...state.members], counts: [...state.counts] });
+    const body = JSON.stringify({
+      members: [...state.members],
+      counts: [...state.counts],
+      held: [...state.held].map(([sessionId, packs]) => [sessionId, [...packs]]),
+    });
     return store.put(livePacksKey(tenantId), body).then(
       () => undefined,
       (error: unknown) =>
