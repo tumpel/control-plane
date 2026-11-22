@@ -140,7 +140,7 @@ export class HostChannel extends DurableObject<Env> {
     }
     const attachment = this.attachment(open);
     await control.send(attachment.connection, message, this.context(open, host, attachment));
-    open.serializeAttachment(attachment);
+    this.sent(open, attachment.lastSentAt);
     return "Sent";
   }
 
@@ -427,9 +427,16 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private keep(socket: WebSocket, attachment: Attachment): void {
+    const stored = this.attachment(socket);
     attachment.heldFrom = this.ledger.first();
-    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
+    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, stored.lastReceivedAt);
+    attachment.lastSentAt = Math.max(attachment.lastSentAt, stored.lastSentAt);
     socket.serializeAttachment(attachment);
+  }
+
+  private sent(socket: WebSocket, lastSentAt: number): void {
+    const stored = this.attachment(socket);
+    socket.serializeAttachment({ ...stored, lastSentAt: Math.max(stored.lastSentAt, lastSentAt) });
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
