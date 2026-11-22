@@ -9,8 +9,7 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "biome check . && node npm-scripts/sql-check.mjs && node npm-scripts/db-schema.mjs --check",
-    "sql:update": "node npm-scripts/sql-check.mjs --update && biome format --write npm-scripts/sql-allowlist.json",
+    "lint": "biome check . && node npm-scripts/migration-check.mjs && node npm-scripts/db-schema.mjs --check",
     "fix": "biome check --write .",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",

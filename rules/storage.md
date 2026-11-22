@@ -13,6 +13,6 @@
 
 Drizzle is the only query route. `npm run db:schema` derives `src/db/*-schema.ts` from the migrations, and `npm run lint` fails when a migration changes and its schema file does not. Build a handle with `centralDb(env.DB)` or `durableDb(storage, schema)` from `src/db/client.ts`.
 
-`npm run lint` runs `npm-scripts/sql-check.mjs`. It finds every remaining hand-written SQL site under `packages/*/src` and fails on one that is not in `npm-scripts/sql-allowlist.json`, and on an allowlisted site that no longer exists. It also fails when any file holds more sites than on the base branch (`origin/main`, or `origin/$GITHUB_BASE_REF` in CI). `npm run sql:update` only removes entries. The allowlist only shrinks.
+The Biome plugin `npm-scripts/biome-plugins/no-sql-exec.grit` fails `npm run lint` on any `sql.exec` call in `packages/control-plane/src`. The files that still hold raw SQL are excluded from it in `biome.json`. The excluded files are unchecked. The change that removes a file's last `sql.exec` also removes the file from the list. No file joins it.
 
-A new migration that adds a TEXT or BLOB column carries a `-- bulk-data-reviewed: <reason>` comment, or the check fails.
+A new migration that adds a TEXT or BLOB column carries a `-- bulk-data-reviewed: <reason>` comment, or `npm-scripts/migration-check.mjs` fails `npm run lint`.
