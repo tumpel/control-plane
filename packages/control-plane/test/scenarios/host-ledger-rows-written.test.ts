@@ -1,0 +1,147 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { ChannelProtocol } from "@tumpel/schemas";
+import { RETRY_LIMIT } from "../../src/backoff.ts";
+import * as control from "../../src/channel/control.ts";
+import { HostLedger } from "../../src/channel/ledger.ts";
+import { durableDb } from "../../src/db/client.ts";
+import * as hostSchema from "../../src/db/host-schema.ts";
+import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
+
+const HOST_MIGRATIONS = new URL("../../migrations/host/", import.meta.url);
+
+const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = () => null) => {
+  const sql = new SqlStorage(migratedDatabase(HOST_MIGRATIONS));
+  const ledger = new HostLedger(durableDb({ sql } as never, hostSchema));
+  const closed: string[] = [];
+  const context: control.ControlContext = {
+    port: { send: () => undefined, close: (code, reason) => closed.push(`${code}: ${reason}`) },
+    host: { hostId: "host-1", publicKey: "key", revoked: false },
+    ledger,
+    prepareOffer: () => Promise.reject(new Error("this channel offers no turns")),
+    prepareClaudeSetup: () => Promise.reject(new Error("this channel offers no Claude setup")),
+    messageVersions: control.CONTROL_MESSAGE_VERSIONS,
+    admitFrame,
+    now: () => new Date(),
+  };
+  let connection: control.ControlConnection = {
+    phase: "Open",
+    protocolVersion: ChannelProtocol.Version,
+    heldReported: true,
+  };
+  const line = async (seq: number) => {
+    const text = JSON.stringify({
+      type: "Frame",
+      seq,
+      ack: 0,
+      message: { type: "TurnLine", turnId: "turn-1", lineSeq: seq, text: `{"n":${seq}}` },
+    });
+    const received = await control.receive(connection, text, context);
+    connection = received.connection;
+    if (received.event.kind === "Message") ledger.hold(received.event.frame, true, text.length);
+    return received.event.kind;
+  };
+  const oversized = async (seq: number) => {
+    const text = JSON.stringify({
+      type: "Frame",
+      seq,
+      ack: 0,
+      message: { type: "TurnLine", turnId: "turn-1", lineSeq: seq, text: "x".repeat(control.MAX_HOST_FRAME_BYTES) },
+    });
+    const received = await control.receive(connection, text, context);
+    connection = received.connection;
+    return received.event.kind;
+  };
+  return { sql, ledger, context, closed, line, oversized };
+};
+
+const rowsFor = async (lines: number) => {
+  const { sql, ledger, context, line } = channel();
+  const start = sql.totalRowsWritten();
+  for (let seq = 1; seq <= lines; seq++) await line(seq);
+  const held = sql.totalRowsWritten() - start;
+  control.acknowledge(context, ledger.take());
+  assert.equal(ledger.load().received, lines);
+  return { held, checkpoint: sql.totalRowsWritten() - start };
+};
+
+test("the host channel writes no row per transcript line and one row per checkpoint, however many lines it holds", async () => {
+  const one = await rowsFor(1);
+  const many = await rowsFor(500);
+  assert.equal(one.held, 0);
+  assert.equal(many.held, 0);
+  assert.equal(many.checkpoint, one.checkpoint);
+  assert.equal(one.checkpoint, 1);
+});
+
+test("lines the channel lost before their checkpoint turn the next frame into a gap, so the host resends them", async () => {
+  const { ledger, closed, line } = channel();
+  for (let seq = 1; seq <= 3; seq++) assert.equal(await line(seq), "Message");
+  ledger.take();
+  assert.equal(await line(4), "Closed");
+  assert.match(closed[0] ?? "", /frame gap: expected seq 1, got 4/);
+});
+
+test("a frame refused while lines wait for their checkpoint is acked with them, and the stream carries on", async () => {
+  const { ledger, context, closed, line, oversized } = channel();
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await oversized(3), "FrameRefused");
+  assert.equal(await line(4), "Message");
+  assert.deepEqual(closed, []);
+  control.acknowledge(context, ledger.take());
+  assert.equal(ledger.load().received, 4);
+});
+
+test("the channel counts failed checkpoints of the same first held frame up to the retry limit, and a stored checkpoint starts the count over", async () => {
+  const { ledger, context, line } = channel();
+  for (let seq = 1; seq <= 2; seq++) await line(seq);
+  const tries = Array.from({ length: RETRY_LIMIT }, () => ledger.stalled());
+  assert.deepEqual(
+    tries,
+    Array.from({ length: RETRY_LIMIT }, (_, retry) => retry + 1),
+  );
+  control.acknowledge(context, ledger.take());
+  await line(3);
+  assert.equal(ledger.stalled(), 1);
+});
+
+test("a frame refused over the rate with nothing held is stored, so a reconnect right after it opens no gap", async () => {
+  const refuseFirst = (seq: number) =>
+    seq === 1 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { ledger, closed, line } = channel(refuseFirst);
+  assert.equal(await line(1), "FrameRateLimited");
+  ledger.take();
+  assert.equal(await line(2), "Message");
+  assert.deepEqual(closed, []);
+});
+
+test("a frame refused over the rate mid-stream is stored with the frames held before it once they flush, so a reconnect right after it opens no gap", async () => {
+  const refuseThird = (seq: number) =>
+    seq === 3 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { ledger, context, closed, line } = channel(refuseThird);
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await line(3), "FrameRateLimited");
+  assert.ok(ledger.holding());
+  control.acknowledge(context, ledger.take());
+  ledger.take();
+  assert.equal(await line(4), "Message");
+  assert.deepEqual(closed, []);
+});
+
+test("held frames dropped after a refusal among them are resent without the refused one, and the refused seq is stepped over instead of opening a gap", async () => {
+  const refuseThird = (seq: number) =>
+    seq === 3 ? { reason: "over the limit", framesPerMinute: 600, retryAfter: new Date(0) } : null;
+  const { sql, ledger, context, closed, line } = channel(refuseThird);
+  for (let seq = 1; seq <= 2; seq++) assert.equal(await line(seq), "Message");
+  assert.equal(await line(3), "FrameRateLimited");
+  assert.equal(await line(4), "Message");
+  ledger.take();
+
+  const restarted = new HostLedger(durableDb({ sql } as never, hostSchema));
+  assert.deepEqual([...restarted.refused()], [3]);
+  for (const seq of [1, 2, 4]) assert.equal(await line(seq), "Message");
+  control.acknowledge(context, ledger.take());
+  assert.equal(ledger.load().received, 4);
+  assert.deepEqual([...new HostLedger(durableDb({ sql } as never, hostSchema)).refused()], []);
+  assert.deepEqual(closed, []);
+});

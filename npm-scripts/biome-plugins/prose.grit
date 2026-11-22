@@ -1,0 +1,33 @@
+language js(typescript)
+
+or {
+  JsStringLiteralExpression(),
+  JsTemplateChunkElement(),
+  TsStringLiteralType(),
+  JsLiteralMemberName(),
+  JsRegexLiteralExpression()
+} as $text where {
+  not $text <: within JsImport(),
+  or {
+    and {
+      $text <: r"(?s).*(?-s:\bG\d{1,3}\b).*",
+      register_diagnostic(span=$text, message="User-facing text names a gap id. Rewrite it without internal ids; say what the user can do now.")
+    },
+    and {
+      $text <: r"(?s).*(?-s:\b(?:N?FR|OR)-\d+).*",
+      register_diagnostic(span=$text, message="User-facing text names a requirement id. Rewrite it without internal ids; say what the user can do now.")
+    },
+    and {
+      $text <: r"(?s).*(?-s:\b(?:EDD|ADR|RFC)-?\s?\d+|\bRFC-).*",
+      register_diagnostic(span=$text, message="User-facing text names a design document id. Rewrite it without internal ids; say what the user can do now.")
+    },
+    and {
+      $text <: r"(?s).*(?-s:\b[Ss]tory \d+|\bissue #\d+).*",
+      register_diagnostic(span=$text, message="User-facing text names a story or issue number. Rewrite it without internal ids; say what the user can do now.")
+    },
+    and {
+      $text <: r"(?s).*(?-s:\b[Uu]ntil\b.{0,80}?\b(?:is|are|can be|gets|get)\s+(?:built|kept|supported|shipped|implemented|added|finished)\b).*",
+      register_diagnostic(span=$text, message="User-facing text carries a caveat about what is not built yet. Say what the user can do now.")
+    }
+  }
+}

@@ -5,13 +5,9 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  CircleCIConnectionLinkSchema,
-  CircleCIProjectSchema,
   ConnectionSummarySchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
-  GitHubActionsConnectionLinkSchema,
-  NamespaceConnectionLinkSchema,
   OpenRouterAuthorizationSchema,
   PersonaSchema,
   PrebuildSchema,
@@ -25,20 +21,11 @@ import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 type Bucket = { put(key: string, value: string): Promise<unknown> };
-type OpenRouterTenant = {
-  openRouterAuthorizationDeadlineReached(deadline: { openRouterAuthorizationId: string; at: number }): Promise<void>;
-};
 
 const AUDIENCE = "tumpel-prebuilds-e2e";
 const KID = "prebuilds-e2e-key";
 const EMAIL = "prebuilds@example.test";
 const REPOSITORY = "https://github.com/acme/app.git";
-const CIRCLECI_TOKEN = "circleci-personal-token";
-const CIRCLECI_ORGANIZATION = "6f1c2b3a-0d4e-4f5a-9b8c-7d6e5f4a3b2c";
-const CIRCLECI_PROJECT = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
-const CIRCLECI_DEFINITION = "11111111-2222-4333-8444-555555555555";
-const FOREIGN_DEFINITION = "99999999-2222-4333-8444-555555555555";
-const PROJECT_SLUG = `circleci/${CIRCLECI_ORGANIZATION}/${CIRCLECI_PROJECT}`;
 const OPENROUTER_CODE = "openrouter-approved-code";
 const OPENROUTER_KEY = "openrouter-minted-key";
 const keyExchanges: { code: string; code_verifier: string }[] = [];
@@ -98,32 +85,6 @@ const deviceToken = async (tenantId: string): Promise<string> => {
   return DeviceTokenSchema.parse(await granted.json()).access_token;
 };
 
-const fakeCircleCI = (path: string, token: unknown): { status: number; body: unknown } => {
-  if (token !== CIRCLECI_TOKEN) return { status: 401, body: { message: "Invalid token provided." } };
-  if (path === "/me") return { status: 200, body: { id: "u1", login: "acme-bot", name: "Acme Bot" } };
-  if (path === "/webhook") return { status: 201, body: { id: "webhook-1" } };
-  if (path === "/webhook/webhook-1") return { status: 200, body: { message: "ok" } };
-  if (path === `/project/${PROJECT_SLUG}`) {
-    return { status: 200, body: { id: CIRCLECI_PROJECT, slug: PROJECT_SLUG, organization_id: CIRCLECI_ORGANIZATION } };
-  }
-  const definition = /^\/projects\/([^/]+)\/pipeline-definitions\/([^/]+)$/.exec(path);
-  if (
-    definition?.[1] === CIRCLECI_PROJECT &&
-    (definition[2] === CIRCLECI_DEFINITION || definition[2] === FOREIGN_DEFINITION)
-  ) {
-    const repo = { full_name: definition[2] === CIRCLECI_DEFINITION ? "Acme/App" : "acme/other", external_id: "7" };
-    return {
-      status: 200,
-      body: {
-        id: definition[2],
-        config_source: { provider: "github_app", repo, file_path: ".circleci/tumpel-prebuild.yml" },
-        checkout_source: { provider: "github_app", repo },
-      },
-    };
-  }
-  return { status: 404, body: { message: "Not found." } };
-};
-
 before(async () => {
   certs = createServer((request, response) => {
     const path = request.url ?? "";
@@ -141,14 +102,8 @@ before(async () => {
       });
       return;
     }
-    if (!path.startsWith("/circleci/api/v2/")) {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ keys: [jwk] }));
-      return;
-    }
-    const answer = fakeCircleCI(path.slice("/circleci/api/v2".length), request.headers["circle-token"]);
-    response.writeHead(answer.status, { "content-type": "application/json" });
-    response.end(JSON.stringify(answer.body));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ keys: [jwk] }));
   });
   await new Promise<void>((resolve) => certs.listen(0, "127.0.0.1", resolve));
   issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
@@ -164,7 +119,6 @@ before(async () => {
           SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
           DASHBOARD_ORIGIN: "https://app.tumpel.test",
           API_ORIGIN: "https://api.tumpel.test",
-          CIRCLECI_API_ORIGIN: `${issuer}/circleci`,
           OPENROUTER_ORIGIN: `${issuer}/openrouter`,
         },
       },
@@ -191,12 +145,14 @@ after(async () => {
 test("a prebuild start refuses before it stores anything: an unreadable repository, a foreign repository, an unknown persona", async () => {
   const [persona] = await rest(PersonaSchema.array(), "GET", "/v1/personas");
   assert.ok(persona);
-  const unnamed = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
-  const start = { ...unnamed, provider: "GitHubActions" };
+  const start = { repository: REPOSITORY, personaId: persona.personaId, rebuild: false };
   const unreadable = await refused("POST", "/v1/prebuilds", start, 409);
   assert.equal(unreadable.code, "RepositoryUnreadable");
   assert.match(unreadable.detail, /acme\/app/);
-  assert.equal((await refused("POST", "/v1/prebuilds", unnamed, 400)).code, "InvalidRequest");
+  assert.equal(
+    (await refused("POST", "/v1/prebuilds", { repository: REPOSITORY, rebuild: false }, 400)).code,
+    "InvalidRequest",
+  );
   assert.equal(
     (await refused("POST", "/v1/prebuilds", { ...start, repository: "https://example.test/app.git" }, 422)).code,
     "InvalidRequest",
@@ -213,98 +169,11 @@ test("a prebuild start refuses before it stores anything: an unreadable reposito
 
 const ConnectionRows = ConnectionSummarySchema.array();
 
-test("the connection list holds one row per provider, and a connected build provider shows its billing account", async () => {
+test("the connection list holds one row per connection kind", async () => {
   assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
     { kind: "GitHub", state: "NotConfigured" },
-    { kind: "GitHubActions", state: "NotConnected" },
-    { kind: "CircleCI", state: "NotConnected" },
-    { kind: "Namespace", state: "NotConfigured" },
     { kind: "OpenRouter", state: "NotConnected" },
   ]);
-
-  const actions = await rest(GitHubActionsConnectionLinkSchema, "POST", "/v1/github-actions-connection/start", {
-    accountLabel: "acme on GitHub Actions",
-    callerWorkflow: ".github/workflows/tumpel-prebuild.yml",
-  });
-  assert.equal(actions.link.state, "Connected");
-  assert.deepEqual(await rest(GitHubActionsConnectionLinkSchema, "GET", "/v1/github-actions-connection"), actions);
-  assert.equal(
-    (
-      await refused(
-        "POST",
-        "/v1/github-actions-connection/start",
-        { accountLabel: "acme", callerWorkflow: "ci.yml" },
-        400,
-      )
-    ).code,
-    "InvalidRequest",
-  );
-
-  const namespace = await rest(NamespaceConnectionLinkSchema, "GET", "/v1/namespace-connection");
-  assert.equal(namespace.link.state, "NotConfigured");
-  const start = {
-    accountLabel: "acme workspace",
-    workspaceId: "tenant_123456789ab",
-  };
-  assert.equal((await refused("POST", "/v1/namespace-connection/start", start, 409)).code, "IssuerMissing");
-
-  assert.deepEqual(await rest(ConnectionRows, "GET", "/v1/connections"), [
-    { kind: "GitHub", state: "NotConfigured" },
-    { kind: "GitHubActions", state: "Connected", account: "acme on GitHub Actions" },
-    { kind: "CircleCI", state: "NotConnected" },
-    { kind: "Namespace", state: "NotConfigured" },
-    { kind: "OpenRouter", state: "NotConnected" },
-  ]);
-
-  assert.equal((await send("DELETE", "/v1/github-actions-connection", undefined, bearer)).status, 204);
-  assert.deepEqual(
-    (await rest(ConnectionRows, "GET", "/v1/connections")).map((row) => row.state),
-    ["NotConfigured", "NotConnected", "NotConnected", "NotConfigured", "NotConnected"],
-  );
-});
-
-test("CircleCI connects only with a token CircleCI accepts, binds a repository to a definition that checks it out, and a disconnect drops the bindings", async () => {
-  const start = { accountLabel: "acme on CircleCI", organizationId: CIRCLECI_ORGANIZATION, apiToken: "mistyped" };
-  const binding = { repository: REPOSITORY, projectSlug: PROJECT_SLUG, pipelineDefinitionId: CIRCLECI_DEFINITION };
-  assert.equal((await refused("POST", "/v1/circleci-projects", binding, 409)).code, "NoBuildProvider");
-
-  const mistyped = await refused("POST", "/v1/circleci-connection/start", start, 422);
-  assert.equal(mistyped.code, "CircleCITokenRefused");
-  assert.match(mistyped.detail, /\/api\/v2\/me with 401: Invalid token provided/);
-  assert.equal((await rest(CircleCIConnectionLinkSchema, "GET", "/v1/circleci-connection")).link.state, "NotConnected");
-
-  const connected = await rest(CircleCIConnectionLinkSchema, "POST", "/v1/circleci-connection/start", {
-    ...start,
-    apiToken: CIRCLECI_TOKEN,
-  });
-  assert.ok(connected.link.state === "Connected");
-  assert.equal(connected.link.connection.issuer, `https://oidc.circleci.com/org/${CIRCLECI_ORGANIZATION}`);
-  assert.equal(connected.orb, "tumpel/prebuild@1");
-  assert.doesNotMatch(JSON.stringify(connected), new RegExp(CIRCLECI_TOKEN));
-
-  const foreign = await refused(
-    "POST",
-    "/v1/circleci-projects",
-    { ...binding, pipelineDefinitionId: FOREIGN_DEFINITION },
-    422,
-  );
-  assert.equal(foreign.code, "CircleCIDefinitionMismatch");
-  assert.match(foreign.detail, /checks out acme\/other/);
-  const missing = await refused("POST", "/v1/circleci-projects", { ...binding, projectSlug: "gh/acme/missing" }, 404);
-  assert.equal(missing.code, "CircleCIProjectMissing");
-
-  const bound = await rest(CircleCIProjectSchema, "POST", "/v1/circleci-projects", binding);
-  assert.equal(bound.repository, "https://github.com/acme/app");
-  assert.equal(bound.projectId, CIRCLECI_PROJECT);
-  assert.equal((await refused("POST", "/v1/circleci-projects", binding, 409)).code, "Conflict");
-  assert.deepEqual(await rest(CircleCIProjectSchema.array(), "GET", "/v1/circleci-projects"), [bound]);
-
-  assert.equal((await send("DELETE", "/v1/circleci-connection", undefined, bearer)).status, 204);
-  assert.deepEqual(await rest(CircleCIProjectSchema.array(), "GET", "/v1/circleci-projects"), []);
-  assert.equal(
-    (await refused("DELETE", `/v1/circleci-projects/${bound.circleCIProjectId}`, undefined, 404)).code,
-    "NotFound",
-  );
 });
 
 test("Connect OpenRouter spends one code into the secret set, fails on its deadline, and refuses a forged state and a second OpenRouter credential", async () => {
@@ -352,24 +221,6 @@ test("Connect OpenRouter spends one code into the secret set, fails on its deadl
     undefined,
   );
   assert.equal(refusedState.status, 400);
-  assert.equal(keyExchanges.length, 1);
-
-  const late = await rest(OpenRouterAuthorizationSchema, "POST", authorize, { secretSetId: set.secretSetId });
-  assert.ok(late.status.state === "AwaitingCallback");
-  const tenant = (
-    await server.getWorker<{ TENANT: { getByName(name: string): OpenRouterTenant } }>().getEnv()
-  ).TENANT.getByName(set.tenantId);
-  await tenant.openRouterAuthorizationDeadlineReached({
-    openRouterAuthorizationId: late.openRouterAuthorizationId,
-    at: Date.parse(late.status.callbackDueAt),
-  });
-  const timedOut = await read(late.openRouterAuthorizationId);
-  assert.ok(timedOut.status.state === "Failed");
-  assert.equal(timedOut.status.reason, "AuthorizationTimedOut");
-  assert.equal(
-    (await send("GET", `${callbackOf(late.status.authorizeUrl)}?code=${OPENROUTER_CODE}`, undefined)).status,
-    303,
-  );
   assert.equal(keyExchanges.length, 1);
 
   const other = await rest(SecretSetSchema, "POST", "/v1/secret-sets", {

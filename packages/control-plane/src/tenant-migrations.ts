@@ -83,6 +83,21 @@ import tenant0082 from "../migrations/tenant/0082_box_eviction_blocks.sql";
 import tenant0083 from "../migrations/tenant/0083_turn_capacity_waits.sql";
 import tenant0084 from "../migrations/tenant/0084_push_subscriptions.sql";
 import tenant0085 from "../migrations/tenant/0085_push_delivery.sql";
+import tenant0087 from "../migrations/tenant/0087_retries.sql";
+import tenant0088_1 from "../migrations/tenant/0088_1_drop_chunk_releases.sql";
+import tenant0088_2 from "../migrations/tenant/0088_2_drop_snapshot_packs.sql";
+import tenant0088_3 from "../migrations/tenant/0088_3_drop_session_chunks.sql";
+import tenant0088_4 from "../migrations/tenant/0088_4_drop_chunks.sql";
+import tenant0088_5 from "../migrations/tenant/0088_5_drop_packs.sql";
+import tenant0088_6 from "../migrations/tenant/0088_6_drop_snapshot_manifest_chunks.sql";
+import tenant0088_7 from "../migrations/tenant/0088_7_drop_snapshot_chunks.sql";
+import tenant0088 from "../migrations/tenant/0088_chunk_lists_in_object_storage.sql";
+import tenant0089 from "../migrations/tenant/0089_drop_alarm_bookkeeping.sql";
+import tenant0090 from "../migrations/tenant/0090_drop_bookkeeping.sql";
+import tenant0091 from "../migrations/tenant/0091_drop_transcript_tables.sql";
+import tenant0092 from "../migrations/tenant/0092_drop_ci_prebuilds.sql";
+import tenant0093 from "../migrations/tenant/0093_drop_build_providers.sql";
+import tenant0094 from "../migrations/tenant/0094_turns_offered.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -171,4 +186,19 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0083_turn_capacity_waits", sql: tenant0083 },
   { name: "0084_push_subscriptions", sql: tenant0084 },
   { name: "0085_push_delivery", sql: tenant0085 },
+  { name: "0087_retries", sql: tenant0087 },
+  { name: "0088_chunk_lists_in_object_storage", sql: tenant0088 },
+  { name: "0088_1_drop_chunk_releases", sql: tenant0088_1 },
+  { name: "0088_2_drop_snapshot_packs", sql: tenant0088_2 },
+  { name: "0088_3_drop_session_chunks", sql: tenant0088_3 },
+  { name: "0088_4_drop_chunks", sql: tenant0088_4 },
+  { name: "0088_5_drop_packs", sql: tenant0088_5 },
+  { name: "0088_6_drop_snapshot_manifest_chunks", sql: tenant0088_6 },
+  { name: "0088_7_drop_snapshot_chunks", sql: tenant0088_7 },
+  { name: "0089_drop_alarm_bookkeeping", sql: tenant0089 },
+  { name: "0090_drop_bookkeeping", sql: tenant0090 },
+  { name: "0091_drop_transcript_tables", sql: tenant0091 },
+  { name: "0092_drop_ci_prebuilds", sql: tenant0092 },
+  { name: "0093_drop_build_providers", sql: tenant0093 },
+  { name: "0094_turns_offered", sql: tenant0094 },
 ];

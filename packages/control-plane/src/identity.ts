@@ -7,6 +7,7 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { sha256Hex, TOKEN_PATTERN } from "./crypto";
+import type { TenantTier } from "./limits.ts";
 import { verifyTurnToken } from "./turn-token.ts";
 
 export type Whoami = z.infer<typeof WhoamiSchema>;
@@ -34,6 +35,7 @@ const LAST_USED_RESOLUTION_MS = 3_600_000;
 interface WhoamiRow {
   tenant_id: string;
   name: string;
+  tier: TenantTier;
   tenant_created_at: number;
   tenant_updated_at: number;
   principal_id: string;
@@ -44,7 +46,7 @@ interface WhoamiRow {
   joined_at: number;
 }
 
-const WHOAMI_SELECT = `SELECT t.tenant_id, t.name, t.created_at AS tenant_created_at, t.updated_at AS tenant_updated_at,
+const WHOAMI_SELECT = `SELECT t.tenant_id, t.name, t.tier, t.created_at AS tenant_created_at, t.updated_at AS tenant_updated_at,
     p.principal_id, p.email, m.role, p.created_at AS principal_created_at, p.updated_at AS principal_updated_at,
     m.created_at AS joined_at
   FROM memberships m JOIN principals p ON p.principal_id = m.principal_id JOIN tenants t ON t.tenant_id = m.tenant_id`;
@@ -54,6 +56,7 @@ const toWhoami = (row: WhoamiRow): Whoami =>
     tenant: {
       tenantId: row.tenant_id,
       name: row.name,
+      tier: row.tier,
       createdAt: row.tenant_created_at,
       updatedAt: row.tenant_updated_at,
     },
@@ -104,6 +107,7 @@ export const signUp = async (
   db: D1Database,
   email: string,
   name: string,
+  tier: TenantTier,
   now: number,
 ): Promise<{ whoami: Whoami; created: boolean }> => {
   const tenantId = crypto.randomUUID();
@@ -115,10 +119,10 @@ export const signUp = async (
       .bind(crypto.randomUUID(), email, now, now),
     db
       .prepare(
-        `INSERT INTO tenants (tenant_id, name, created_at, updated_at)
-        SELECT ?, ?, ?, ? WHERE NOT EXISTS (${OWNED_BY_NAME}) RETURNING tenant_id`,
+        `INSERT INTO tenants (tenant_id, name, tier, created_at, updated_at)
+        SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (${OWNED_BY_NAME}) RETURNING tenant_id`,
       )
-      .bind(tenantId, name, now, now, email, name),
+      .bind(tenantId, name, tier, now, now, email, name),
     db
       .prepare(
         `INSERT INTO memberships (tenant_id, principal_id, role, created_at)
@@ -194,6 +198,7 @@ export const proofCaller = async (
   db: D1Database,
   commonName: string,
   hostname: string,
+  tier: TenantTier,
   now: number,
 ): Promise<{ caller: Caller; created: boolean }> => {
   const tenantId = await derivedId("tenant", commonName);
@@ -202,10 +207,10 @@ export const proofCaller = async (
   const [tenant] = await db.batch([
     db
       .prepare(
-        `INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)
+        `INSERT INTO tenants (tenant_id, name, tier, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT DO NOTHING RETURNING tenant_id`,
       )
-      .bind(tenantId, PROOF_TENANT_NAME, now, now),
+      .bind(tenantId, PROOF_TENANT_NAME, tier, now, now),
     db
       .prepare(
         "INSERT INTO principals (principal_id, email, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",

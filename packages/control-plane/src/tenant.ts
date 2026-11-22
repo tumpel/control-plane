@@ -8,16 +8,30 @@ import {
   type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
+  TenantTierSchema,
 } from "@tumpel/schemas";
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import type { ConfigWrite } from "./configs.ts";
+import { tenantLimits, tenants } from "./db/central-schema.ts";
+import { centralDb } from "./db/client.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
-import { drainObjectCleanups } from "./object-cleanups.ts";
+import {
+  customProfileOf,
+  effectiveLimits,
+  limitsOf,
+  type TenantLimitsProfile,
+  type TenantLimitsView,
+  type TenantTier,
+  windowStart,
+} from "./limits.ts";
+import { meteredState } from "./metered-state.ts";
 import { type StoredFile, type StoredPersona, StoredPersonaSchema } from "./persona-files";
+import type { WriteRateRefusal } from "./rate-limit.ts";
 import {
   type MemberUpdate,
   memberWith,
@@ -33,11 +47,18 @@ import {
   type SupervisorUpdates,
   supervisorUpdatesByHost,
 } from "./supervisor-updates";
-import { serveTenantRequest, type TenantHandlers, type TenantRequest, type TenantResponse } from "./tenant-api.ts";
+import {
+  serveTenantRequest,
+  type TenantHandlers,
+  type TenantInput,
+  type TenantRequest,
+  type TenantResponse,
+} from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
-import { listEvents } from "./tenant-events.ts";
+import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
+import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
 export type PersonaWrite = Pick<
@@ -179,43 +200,144 @@ type HarnessPinRow = { harness: string; harness_version: string; updated_at: num
 const toPin = (row: HarnessPinRow): HarnessPin =>
   HarnessPinSchema.parse({ harness: row.harness, harnessVersion: row.harness_version, updatedAt: row.updated_at });
 
+const USAGE_KEY = "usage";
+
+type StoredLimits = { tier: TenantTier; custom: TenantLimitsProfile | null };
+
+const storedLimitsOf = async (db: D1Database, tenantId: string, fallback: TenantTier): Promise<StoredLimits> => {
+  const row = await centralDb(db)
+    .select({ tier: tenants.tier, profile: tenantLimits.profile })
+    .from(tenants)
+    .leftJoin(tenantLimits, eq(tenantLimits.tenantId, tenants.tenantId))
+    .where(eq(tenants.tenantId, tenantId))
+    .get();
+  if (row === undefined) return { tier: fallback, custom: null };
+  return { tier: TenantTierSchema.parse(row.tier), custom: customProfileOf(row.profile) };
+};
+
+type WriteWindow = { start: number; writes: number };
+
+const UNMETERED = new Set(["readUsage", "readLimits", "setLimits"]);
+
 export class Tenant extends TenantConnectors {
+  private readonly cursors: { readonly rowsRead: number; readonly rowsWritten: number }[];
+  private meter: UsageMeter | undefined;
+  private tier: TenantTier;
+  private limits: TenantLimitsView;
+  private writeWindow: WriteWindow = { start: 0, writes: 0 };
+  private tierRead: Promise<void> | null = null;
+  private readonly opened: Promise<void>;
+
   constructor(ctx: DurableObjectState, env: Env) {
+    const cursors: { readonly rowsRead: number; readonly rowsWritten: number }[] = [];
     super(ctx, env);
-    void ctx.blockConcurrencyWhile(async () => {
-      migrateDurableObject(ctx.storage.sql, TENANT_MIGRATIONS);
+    this.ctx = meteredState(this.ctx, cursors);
+    this.cursors = cursors;
+    this.tier = limitsOf(env).defaultTier;
+    this.limits = effectiveLimits(limitsOf(env), this.tier, null);
+    this.opened = this.ctx.blockConcurrencyWhile(async () => {
+      await migrateDurableObject(this.ctx.storage, TENANT_MIGRATIONS);
       await this.holdDataKey();
       await this.sealPlaintext();
+      await this.openMeter();
     });
   }
 
+  private async openMeter(): Promise<void> {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) return;
+    const saved = (await this.ctx.storage.get<SavedCounter[]>(USAGE_KEY)) ?? [];
+    this.meter = new UsageMeter(this.tier, this.limits.profile.usage, saved, this.cursors, Date.now());
+  }
+
+  private settleTier(): Promise<void> {
+    this.tierRead ??= this.readTier().catch((error: unknown) => {
+      this.tierRead = null;
+      throw error;
+    });
+    return this.tierRead;
+  }
+
+  private async readTier(): Promise<void> {
+    const { defaultTier } = limitsOf(this.env);
+    const stored = await storedLimitsOf(this.env.DB, this.tenantName(), defaultTier);
+    this.relimit(stored);
+  }
+
+  private relimit(stored: StoredLimits): void {
+    this.tier = stored.tier;
+    this.limits = effectiveLimits(limitsOf(this.env), stored.tier, stored.custom);
+    this.usageMeter().retier(stored.tier, this.limits.profile.usage, Date.now());
+  }
+
+  private writeRateRefusal(writes: number, now: number): WriteRateRefusal | null {
+    if (writes === 0) return null;
+    const start = windowStart("Minute", now);
+    if (this.writeWindow.start !== start) this.writeWindow = { start, writes: 0 };
+    const { writesPerMinute } = this.limits.profile;
+    if (this.writeWindow.writes + writes > writesPerMinute) {
+      return {
+        writeRateLimited: `tenant ${this.tenantName()} sent more than ${writesPerMinute} writing requests in a minute`,
+      };
+    }
+    this.writeWindow.writes += writes;
+    return null;
+  }
+
+  private async setLimits({ tenantId }: TenantInput<"setLimits">): Promise<TenantLimitsView> {
+    this.relimit(await storedLimitsOf(this.env.DB, tenantId, limitsOf(this.env).defaultTier));
+    return this.limits;
+  }
+
+  private usageMeter(): UsageMeter {
+    if (this.meter === undefined) throw new Error("the tenant Durable Object has no usage meter; it has no name");
+    return this.meter;
+  }
+
+  private async meterUsage(operation: string | null): Promise<void> {
+    const meter = this.usageMeter();
+    const now = Date.now();
+    for (const signal of meter.count(operation, now)) {
+      if (signal.event === "UsageLimitReached") {
+        console.error(
+          `UsageLimitReached: tenant ${this.tenantName()} on the ${signal.tier} tier spent its limit of ${signal.limit} ${signal.measure} per ${signal.window.toLowerCase()}; it is refused until ${signal.resetsAt}`,
+        );
+      }
+      appendEvent(this.ctx.storage.sql, signal, now);
+      this.eventsAppended = true;
+    }
+    const saved = meter.saveDue(now);
+    if (saved !== null) await this.ctx.storage.put(USAGE_KEY, saved);
+  }
+
   async handle(request: TenantRequest): Promise<TenantResponse> {
+    await this.opened;
+    await this.settleTier();
+    return this.serve(request, null);
+  }
+
+  async handleForTenant(request: TenantRequest, writes: number): Promise<TenantResponse | WriteRateRefusal> {
+    await this.opened;
+    const operation = typeof request.operation === "string" ? request.operation : "";
+    await this.settleTier();
+    const refused = this.writeRateRefusal(writes, Date.now());
+    if (refused !== null) return refused;
+    const spent = UNMETERED.has(operation) ? null : this.usageMeter().spent(operation, Date.now());
+    if (spent !== null) return spent;
+    return this.serve(request, operation);
+  }
+
+  private async serve(request: TenantRequest, operation: string | null): Promise<TenantResponse> {
+    this.expireSubscriptions(Date.now());
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.ctx.storage.setAlarm(Date.now());
+    await this.meterUsage(operation);
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
-    await this.armAlarm();
+    this.wakeWebhooks();
+    this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
     return response;
-  }
-
-  override async alarm(): Promise<void> {
-    const now = Date.now();
-    await this.ctx.storage.setAlarm(now);
-    await this.deliverPushes(this.tenantName(), now);
-    this.expireSubscriptions(now);
-    await this.startDeliveries(this.tenantName());
-    this.wakeEvents();
-    await this.wakeWebhooks();
-    this.drainObjects();
-    await this.armAlarm();
-  }
-
-  private drainObjects(): void {
-    this.ctx.waitUntil(drainObjectCleanups(this.ctx.storage.sql, this.env.STORE));
   }
 
   private tenantName(): string {
@@ -230,37 +352,13 @@ export class Tenant extends TenantConnectors {
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
   }
 
-  private async wakeWebhooks(): Promise<void> {
+  private wakeWebhooks(): void {
     const tenantId = this.tenantName();
-    const wakes = this.ctx.storage.sql
-      .exec<{ webhook_endpoint_id: string; start_event_id: number }>(
-        `SELECT w.webhook_endpoint_id, w.start_event_id FROM webhook_wakes
-        JOIN webhook_endpoints AS w USING (webhook_endpoint_id) ORDER BY w.created_at, w.webhook_endpoint_id`,
-      )
-      .toArray();
-    if (wakes.length === 0) return;
-    for (const wake of wakes) {
-      await this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhook_endpoint_id)).wake({
-        tenantId,
-        webhookEndpointId: wake.webhook_endpoint_id,
-        cursorEventId: wake.start_event_id,
-      });
-      this.ctx.storage.sql.exec("DELETE FROM webhook_wakes WHERE webhook_endpoint_id = ?", wake.webhook_endpoint_id);
+    for (const wake of this.takeWebhookWakes()) {
+      this.ctx.waitUntil(
+        this.env.WEBHOOKS.getByName(webhookSenderName(tenantId, wake.webhookEndpointId)).wake({ tenantId, ...wake }),
+      );
     }
-  }
-
-  private async armAlarm(): Promise<void> {
-    const [next] = this.ctx.storage.sql
-      .exec<{ at: number | null }>(`SELECT MIN(at) AS at FROM (
-        SELECT MIN(s.expires_at_ms) AS at FROM subscriptions AS s
-          WHERE NOT EXISTS (SELECT 1 FROM subscription_ends AS e WHERE e.subscription_id = s.subscription_id)
-        UNION ALL
-        SELECT MIN(w.next_attempt_at) AS at FROM push_wakes AS w
-          WHERE NOT EXISTS (SELECT 1 FROM push_wakes AS earlier
-            WHERE earlier.push_subscription_id = w.push_subscription_id AND earlier.event_id < w.event_id))`)
-      .toArray();
-    if (next?.at === null || next?.at === undefined) return this.ctx.storage.deleteAlarm();
-    return this.ctx.storage.setAlarm(next.at);
   }
 
   private readonly operations: TenantHandlers = {
@@ -350,39 +448,10 @@ export class Tenant extends TenantConnectors {
     getOpenRouterAuthorization: ({ tenantId, principalId, openRouterAuthorizationId }) => ({
       read: this.getOpenRouterAuthorization(tenantId, principalId, openRouterAuthorizationId),
     }),
-    openRouterCallback: async ({ tenantId, openRouterAuthorizationId, callback, now }) => ({
-      settled: await this.openRouterCallback(tenantId, openRouterAuthorizationId, callback, now),
+    openRouterCallback: async ({ openRouterAuthorizationId, callback, now }) => ({
+      settled: await this.openRouterCallback(openRouterAuthorizationId, callback, now),
     }),
-    openRouterAuthorizationDeadlineReached: ({ deadline }) => {
-      this.openRouterAuthorizationDeadlineReached(deadline);
-      return {};
-    },
     openRouterSecretSets: () => ({ names: this.openRouterSecretSets() }),
-    startCircleCIAuthorization: async ({ tenantId, principalId, now }) => ({
-      started: await this.startCircleCIAuthorization(tenantId, principalId, now),
-    }),
-    completeCircleCIAuthorization: async ({ tenantId, principalId, circleCIAuthorizationId, redirectedUrl, now }) => ({
-      stepped: await this.completeCircleCIAuthorization(
-        tenantId,
-        principalId,
-        circleCIAuthorizationId,
-        redirectedUrl,
-        now,
-      ),
-    }),
-    chooseCircleCIOrganization: async ({ tenantId, principalId, circleCIAuthorizationId, organizationId, now }) => ({
-      stepped: await this.chooseCircleCIOrganization(
-        tenantId,
-        principalId,
-        circleCIAuthorizationId,
-        organizationId,
-        now,
-      ),
-    }),
-    circleCIAuthorizationDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.circleCIAuthorizationDeadlineReached(tenantId, deadline);
-      return {};
-    },
     startClaudeSetup: async ({ tenantId, input, now }) => ({
       started: await this.startClaudeSetup(tenantId, input, now),
     }),
@@ -398,10 +467,6 @@ export class Tenant extends TenantConnectors {
     writeClaudeSetupToken: async ({ tenantId, claudeSetupId, credential, token, tokenExpiresAt, now }) => ({
       stored: await this.writeClaudeSetupToken(tenantId, claudeSetupId, credential, token, tokenExpiresAt, now),
     }),
-    claudeSetupDeadlineReached: async ({ tenantId, deadline }) => {
-      await this.claudeSetupDeadlineReached(tenantId, deadline);
-      return {};
-    },
     prepareClaudeSetup: async ({ tenantId, stored, hostId, now }) => ({
       prepared: await this.prepareClaudeSetup(tenantId, stored, hostId, now),
     }),
@@ -409,53 +474,10 @@ export class Tenant extends TenantConnectors {
     listLatestPrebuilds: ({ tenantId }) => ({ prebuilds: this.listLatestPrebuilds(tenantId) }),
     getPrebuild: ({ tenantId, prebuildId }) => ({ prebuild: this.getPrebuild(tenantId, prebuildId) }),
     heldPrebuild: ({ tenantId, key }) => ({ prebuild: this.heldPrebuild(tenantId, key) }),
-    recordPrebuildBuilding: async ({ tenantId, prebuildId, now }) => {
-      await this.recordPrebuildBuilding(tenantId, prebuildId, now);
-      return {};
-    },
-    jobInputsTarget: ({ tenantId, repository, headSha, runId }) => ({
-      target: this.jobInputsTarget(tenantId, repository, headSha, runId),
-    }),
-    bindJobRun: async ({ tenantId, prebuildId, runId, now }) => ({
-      bound: await this.bindJobRun(tenantId, prebuildId, runId, now),
-    }),
-    workflowRunReported: async ({ tenantId, event, now }) => {
-      await this.workflowRunReported(tenantId, event, now);
-      return {};
-    },
-    prebuildDeadlineReached: async ({ tenantId, due }) => {
-      await this.prebuildDeadlineReached(tenantId, due);
-      return {};
-    },
-    startGitHubActionsPrebuild: async ({ tenantId, start, now }) => ({
-      started: await this.startGitHubActionsPrebuild(tenantId, start, now),
-    }),
-    startHostPrebuild: async ({ tenantId, commit, provider, input, apiOrigin, now }) => ({
-      started: await this.startHostPrebuild(tenantId, commit, provider, input, apiOrigin, now),
-    }),
-    uploadTarget: ({ tenantId, prebuildId }) => ({ target: this.uploadTarget(tenantId, prebuildId) }),
-    bindCircleCIUploadJob: async ({ tenantId, prebuildId, upload, now }) => ({
-      bound: await this.bindCircleCIUploadJob(tenantId, prebuildId, upload, now),
-    }),
-    startPrebuildUpload: ({ tenantId, prebuildId, upload, now }) => ({
-      recorded: this.startPrebuildUpload(tenantId, prebuildId, upload, now),
-    }),
-    completePrebuildUpload: async ({ tenantId, prebuildId, upload, now }) => ({
-      recorded: await this.completePrebuildUpload(tenantId, prebuildId, upload, now),
+    startHostPrebuild: async ({ tenantId, commit, input, apiOrigin, now }) => ({
+      started: await this.startHostPrebuild(tenantId, commit, input, apiOrigin, now),
     }),
     getPrebuildFailure: ({ tenantId, prebuildId }) => ({ failure: this.getPrebuildFailure(tenantId, prebuildId) }),
-    dispatchCircleCIPrebuild: async ({ tenantId, start, project, parameters, now }) => ({
-      dispatched: await this.dispatchCircleCIPrebuild(tenantId, start, project, parameters, now),
-    }),
-    circleCIWorkflowCompleted: async ({ tenantId, event, now }) => {
-      const { pipelineId, projectId, ...rest } = event;
-      await this.circleCIWorkflowCompleted(
-        tenantId,
-        { ...rest, pipeline: { id: pipelineId }, project: { id: projectId } },
-        now,
-      );
-      return {};
-    },
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
       read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
     }),
@@ -469,9 +491,11 @@ export class Tenant extends TenantConnectors {
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),
-    steerTurn: ({ tenantId, turnId, steer, now }) => ({ sent: this.steerTurn(tenantId, turnId, steer.prompt, now) }),
+    steerTurn: async ({ tenantId, turnId, steer, now }) => ({
+      sent: await this.steerTurn(tenantId, turnId, steer.prompt, now),
+    }),
     listSteers: ({ tenantId, turnId }) => ({ steers: this.listSteers(tenantId, turnId) }),
-    takeSteers: ({ turnId, now }) => ({ taken: this.takeSteers(turnId, now) }),
+    takeSteers: ({ turnId }) => ({ taken: this.takeSteers(turnId) }),
     cancelTurn: ({ tenantId, turnId, cancelledBy, now }) => ({
       cancelled: this.cancelTurn(tenantId, turnId, cancelledBy, now),
     }),
@@ -526,11 +550,10 @@ export class Tenant extends TenantConnectors {
     deleteSession: async ({ tenantId, sessionId }) => ({
       deleted: await this.deleteSession(tenantId, sessionId, Date.now()),
     }),
-    getSession: ({ tenantId, sessionId }) => ({ session: this.getSession(tenantId, sessionId) }),
-    listSessions: ({ tenantId, filter }) => ({ sessions: this.listSessions(tenantId, filter) }),
-    listTurns: ({ tenantId, sessionId }) => ({ turns: this.listTurns(tenantId, sessionId) }),
-    getTurn: ({ tenantId, turnId }) => ({ turn: this.getTurn(tenantId, turnId) }),
-    waitTurns: ({ tenantId, turnIds }) => ({ waited: this.readTurns(tenantId, turnIds) }),
+    getSession: async ({ tenantId, sessionId }) => ({ session: await this.readSession(tenantId, sessionId) }),
+    listSessions: async ({ tenantId, filter }) => ({ sessions: await this.listSessions(tenantId, filter) }),
+    listTurns: async ({ tenantId, sessionId }) => ({ turns: await this.listTurns(tenantId, sessionId) }),
+    getTurn: async ({ tenantId, turnId }) => ({ turn: await this.readTurn(tenantId, turnId) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),
@@ -555,38 +578,16 @@ export class Tenant extends TenantConnectors {
       this.setWebhookEndpointStatus(webhookEndpointId, status);
       return {};
     },
-    getTurnFailure: ({ tenantId, turnId }) => ({ failure: this.getTurnFailure(tenantId, turnId) }),
+    getTurnFailure: async ({ tenantId, turnId }) => ({ failure: await this.getTurnFailure(tenantId, turnId) }),
     listStopFailures: ({ tenantId, sessionId }) => ({ failures: this.listStopFailures(tenantId, sessionId) }),
     listSnapshots: ({ tenantId, sessionId }) => ({ snapshots: this.listSnapshots(tenantId, sessionId) }),
     listCredentialHandovers: ({ tenantId, sessionId }) => ({
       handovers: this.listCredentialHandovers(tenantId, sessionId),
     }),
     getSnapshot: ({ tenantId, snapshotId }) => ({ snapshot: this.getSnapshot(tenantId, snapshotId) }),
-    transcriptCursor: ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
-      cursor: this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
+    transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
+      cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
-    connectedAccounts: () => ({ accounts: this.connectedAccounts() }),
-    deleteBuildConnection: ({ provider }) => ({ deleted: this.deleteBuildConnection(provider) }),
-    circleCIConnection: () => ({ connection: this.circleCIConnection() }),
-    circleCIToken: async () => ({ token: await this.circleCIToken() }),
-    connectCircleCI: async ({ start, now }) => ({ connection: await this.connectCircleCI(start, now) }),
-    listCircleCIProjects: ({ tenantId }) => ({ projects: this.listCircleCIProjects(tenantId) }),
-    circleCIProjectBoundTo: ({ tenantId, projectId }) => ({
-      project: this.circleCIProjectBoundTo(tenantId, projectId),
-    }),
-    circleCIProjectOf: ({ tenantId, repository }) => ({ project: this.circleCIProjectOf(tenantId, repository) }),
-    addCircleCIProject: async ({ tenantId, binding, now }) => ({
-      project: await this.addCircleCIProject(tenantId, binding, now),
-    }),
-    circleCIWebhooks: () => ({ webhooks: this.circleCIWebhooks() }),
-    circleCIWebhookSecret: async ({ projectId }) => ({ secret: await this.circleCIWebhookSecret(projectId) }),
-    deleteCircleCIProject: ({ circleCIProjectId }) => ({ deleted: this.deleteCircleCIProject(circleCIProjectId) }),
-    gitHubActionsConnection: ({ tenantId }) => ({ connection: this.gitHubActionsConnection(tenantId) }),
-    connectGitHubActions: ({ tenantId, start, now }) => ({
-      connection: this.connectGitHubActions(tenantId, start, now),
-    }),
-    namespaceConnection: () => ({ connection: this.namespaceConnection() }),
-    connectNamespace: ({ start, now }) => ({ connection: this.connectNamespace(start, now) }),
     offerSent: ({ turnId }) => {
       this.offerSent(turnId);
       return {};
@@ -595,12 +596,19 @@ export class Tenant extends TenantConnectors {
       this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
       return {};
     },
-    hostUsage: ({ hostId, usage, now }) => {
-      this.hostUsage(hostId, usage, now);
+    hostUsage: async ({ hostId, usage, now }) => {
+      await this.hostUsage(hostId, usage, now);
       return {};
     },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, now }) => {
+    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
       await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+      await this.failHostClaudeSetups(
+        hostId,
+        "NoHostOnline",
+        `host ${hostId} reconnected without the setup's box; start the setup again`,
+        now,
+        heldClaudeSetupIds,
+      );
       return {};
     },
     forgetHostUsage: ({ hostId }) => {
@@ -609,22 +617,45 @@ export class Tenant extends TenantConnectors {
     },
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
     listHostUsage: ({ tenantId }) => ({ usage: this.listHostUsage(tenantId) }),
-    deferredOffers: async ({ tenantId, hostId }) => ({ handoffs: await this.deferredOffers(tenantId, hostId) }),
+    readUsage: () => ({ usage: this.usageMeter().usage(Date.now()) }),
+    readLimits: () => ({ limits: this.limits }),
+    setLimits: async (input) => ({ limits: await this.setLimits(input) }),
     turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
     hostPresence: async ({ tenantId, hostId, presence, now }) => {
       await this.hostPresence(tenantId, hostId, presence, now);
+      if (presence === "Offline") {
+        await this.failHostClaudeSetups(
+          hostId,
+          "NoHostOnline",
+          `host ${hostId} went offline during the setup; check that its supervisor runs, then start the setup again`,
+          now,
+        );
+      }
+      return {};
+    },
+    hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
+      this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
+      if (health === "Healthy") return {};
+      if (health === "Degraded") {
+        await this.hostFellSilent(tenantId, hostId, now);
+        return {};
+      }
+      const failed = await this.failHostTurns(
+        tenantId,
+        hostId,
+        { turn: "RateLimited", snapshot: "RateLimited", turnDetail: detail, snapshotDetail: detail },
+        now,
+      );
+      await this.cancelHostTurns(hostId, failed);
+      await this.failHostClaudeSetups(hostId, "RateLimited", detail, now);
       return {};
     },
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),
-    deadlineReached: async ({ tenantId, due }) => {
-      await this.deadlineReached(tenantId, due);
-      return {};
-    },
   };
 
   protected supervisorUpdate(hostId: string, message: SupervisorUpdateMessage): void {

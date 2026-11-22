@@ -14,13 +14,11 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
-  TurnWaitQuerySchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
 import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
-import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import {
   GOAL_FOLDS,
@@ -34,7 +32,7 @@ import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
-import type { Unplaceable } from "./placement.ts";
+import { degradedOnly, type Unplaceable } from "./placement.ts";
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
@@ -133,6 +131,16 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
+  if (refused.reason === "NotHeard") {
+    return `${named} has not said hello since your tenant restarted, so its free room is unknown until it reconnects`;
+  }
+  if (refused.reason === "NotHealthy") {
+    if (refused.host.health === "Degraded") {
+      return `${named} missed its heartbeat and counts as Degraded until it sends one or reconnects`;
+    }
+    if (refused.host.health !== "Healthy") return `${named} is ${refused.host.health}`;
+    return `${named} reports itself ${refused.host.reportedHealth}`;
+  }
   if (refused.reason === "NoImage") {
     const { harness, harnessVersion, architectures } = refused.image;
     const carried =
@@ -187,6 +195,14 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
     });
   }
   const detail = hosts.map(why).join(", ");
+  if (degradedOnly(hosts)) {
+    return refuse(409, {
+      code: "HostDegraded",
+      title: "No healthy host",
+      detail: `no host of your tenant is healthy: ${detail}`,
+      fix: `Check that tumpel-supervisor runs on a host and reaches the control plane, then ${retry}`,
+    });
+  }
   if (hosts.some(({ reason }) => reason === "MemoryFull")) {
     return refuse(409, {
       code: "PoolExhausted",
@@ -313,7 +329,7 @@ const prepareStart = async (
   return ok({
     principalId: caller.principalId,
     startedBy: caller.origin,
-    hosts: await listHosts(env.DB, caller.tenantId),
+    hosts: await listHosts(env, caller.tenantId),
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
@@ -499,7 +515,7 @@ export const sendTurn = async (
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
-  const hosts = await listHosts(env.DB, caller.tenantId);
+  const hosts = await listHosts(env, caller.tenantId);
   const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
@@ -548,14 +564,6 @@ export const stopSession = async (
   if (stopped.kind === "Stopping") return ok(stopped.session);
   if (stopped.kind === "NotFound") return sessionNotFound(sessionId);
   if (stopped.kind === "Archived") return sessionArchived(sessionId, "stop");
-  if (stopped.kind === "CancelUnspoken") {
-    return refuse(409, {
-      code: "TurnInFlight",
-      title: "A turn is running",
-      detail: `session ${sessionId} is running turn ${stopped.turnId} on host ${stopped.host}, whose supervisor is too old to cancel a turn`,
-      fix: `Wait for turn ${stopped.turnId} to finish, then stop again; the host updates its supervisor on its own once no box runs`,
-    });
-  }
   return refuse(409, {
     code: "TurnInFlight",
     title: "A turn is running",
@@ -625,12 +633,7 @@ export const patchSessionTags = async (
   });
 };
 
-export const deleteSession = async (
-  env: Env,
-  caller: Caller,
-  sessionId: string,
-  now: number,
-): Promise<Outcome<null>> => {
+export const deleteSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<null>> => {
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
@@ -721,41 +724,6 @@ export const listSteers = async (env: Env, caller: Caller, turnId: string): Prom
   return steers === null ? turnNotFound(turnId) : ok(steers);
 };
 
-export const waitTurns = async (
-  env: Env,
-  caller: Caller,
-  turnIds: string[],
-  timeoutSeconds: number,
-): Promise<Outcome<Turn[]>> => {
-  const tenant = tenantOf(env, caller);
-  const { tenantId } = caller;
-  const { listed } = await tenant.call("listEvents", {
-    tenantId,
-    afterEventId: null,
-    triggerId: null,
-    events: [],
-    sessionId: null,
-    waitSeconds: 0,
-  });
-  if (listed.kind !== "Read") throw new Error(`tenant ${tenantId} refused a read from the end of its event log`);
-  const read = () => tenant.call("waitTurns", { tenantId, turnIds, timeoutSeconds: 0 });
-  const first = (await read()).waited;
-  if (first.kind === "NotFound") return turnNotFound(first.turnId);
-  if (timeoutSeconds === 0 || first.turns.some((turn) => !IN_FLIGHT_TURNS.includes(turn.state))) return ok(first.turns);
-  const subscription = {
-    tenantId,
-    cursor: listed.page.lastEventId,
-    events: ["TurnCompleted" as const, "TurnFailed" as const],
-    sessionId: null,
-    triggerId: null,
-  };
-  await waitOnChannel(env, subscription, timeoutSeconds, (event) => turnIds.includes(String(event.turnId)));
-  const next = (await read()).waited;
-  return next.kind === "Read" ? ok(next.turns) : turnNotFound(next.turnId);
-};
-
-const IN_FLIGHT_TURNS: readonly string[] = ["Offered", "Running"];
-
 export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<TurnFailure>> => {
   const tenant = tenantOf(env, caller);
   const { failure } = await tenant.call("getTurnFailure", { tenantId: caller.tenantId, turnId });
@@ -835,7 +803,7 @@ export const readTranscript = async (
   }
   let read = cursor;
   for (let pass = 1; ; pass += 1) {
-    const fetched = await linesOf(env, read);
+    const fetched = (await linesOf(env, read)).filter((line) => line.lineSeq > page.cursor);
     const paged = pageOf(page, fetched, compactor, limit, maxBytes);
     if (!paged.ok) {
       return refuse(422, {
@@ -937,7 +905,6 @@ const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const SESSION_TAG_METHODS = ["PUT", "PATCH"];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel|\/steers)?$/;
-const TURN_WAIT_PATH = "/v1/turns/wait";
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -975,7 +942,7 @@ const sessionRoute = async (
     return answer(await patchSessionTags(env, caller, sessionId, body.value, Date.now()));
   }
   if (request.method === "DELETE") {
-    const deleted = await deleteSession(env, caller, sessionId, Date.now());
+    const deleted = await deleteSession(env, caller, sessionId);
     return deleted.ok ? noContent() : answer(deleted);
   }
   if (action === "/turns") return answer(await listTurns(env, caller, sessionId));
@@ -1032,14 +999,6 @@ export const handleSessions = async (
   }
   if (session?.[1] !== undefined) {
     return sessionRoute(request, url, env, caller, decodeURIComponent(session[1]), session[2]);
-  }
-  if (pathname === TURN_WAIT_PATH) {
-    const query = TurnWaitQuerySchema.safeParse({
-      ...queryOf(url, ["timeoutSeconds"]),
-      turnId: url.searchParams.getAll("turnId"),
-    });
-    if (!query.success) return invalidQuery("turns.wait", query.error);
-    return answer(await waitTurns(env, caller, query.data.turnId, query.data.timeoutSeconds));
   }
   if (turn?.[1] !== undefined) {
     const raw = decodeURIComponent(turn[1]);

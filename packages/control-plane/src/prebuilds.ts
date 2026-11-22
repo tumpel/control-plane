@@ -7,7 +7,6 @@ import {
   PrebuildPreviewRequestSchema as PreviewRequestSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { CIRCLECI_PARAMETER_LIMIT, circleCIParameters, overLongParameter } from "./circleci.ts";
 import { type LifecycleCommand, readDevcontainer } from "./devcontainer.ts";
 import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { GUEST_TOOLCHAINS } from "./guest-toolchains.ts";
@@ -16,7 +15,6 @@ import { listHosts, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
-import type { ConfigSource } from "./prebuild-inputs.ts";
 import {
   DEVCONTAINER_CONFIGS,
   gitBlobSha,
@@ -26,13 +24,11 @@ import {
   readInputs,
 } from "./prebuild-inputs.ts";
 import { SHIPPED_TEMPLATES } from "./prebuild-templates.ts";
-import { signerOf } from "./presign";
 import { type ReleaseBaseImage, readRelease, releaseUnreadable, rootfsKey } from "./releases";
 import { placed } from "./sessions";
-import { settingsOf } from "./settings";
 import { TEMPLATE_PATH } from "./template-pull-request.ts";
 import { tenantApi } from "./tenant-api.ts";
-import type { BuildProvider, Prebuild, PrebuildFailure, PrebuildKey } from "./tenant-prebuilds";
+import type { Prebuild, PrebuildFailure } from "./tenant-prebuilds";
 import { PREBUILD_ARCHITECTURE } from "./tenant-sessions";
 import { toolchainFindings } from "./toolchain-files.ts";
 
@@ -65,217 +61,6 @@ const prebuildNotFound = (prebuildId: string): Refused =>
   });
 
 const notGitHub = (repository: string): Refused => refuse(422, notARepository(repository));
-
-export const noBuildProvider = (provider: BuildProvider, repository: string): Refused =>
-  refuse(409, {
-    code: "NoBuildProvider",
-    title: "Build provider not connected",
-    detail: `your tenant has not connected ${provider}, so no prebuild of ${repository} can run on it`,
-    fix: `Connect your own ${provider} account, or name a connected provider, then start the prebuild again`,
-  });
-
-const buildProviderUnavailable = (provider: BuildProvider, repository: string): Refused =>
-  refuse(409, {
-    code: "BuildProviderUnavailable",
-    title: "Build provider unavailable",
-    detail: `your tenant connected ${provider}, and this control plane cannot dispatch a prebuild to ${provider} yet, so no prebuild of ${repository} was started`,
-    fix: "Start the prebuild again once the operator deploys a control plane that dispatches to this provider",
-  });
-
-const circleCIProjectMissing = (repository: string): Refused =>
-  refuse(409, {
-    code: "CircleCIProjectMissing",
-    title: "Repository not bound to CircleCI",
-    detail: `your tenant has bound no CircleCI project to ${repository}, so CircleCI has no pipeline to run its prebuild`,
-    fix: "Bind the repository to its CircleCI project once, then start the prebuild again",
-  });
-
-const actionsDisabled = (target: GitHubRepository, detail: string): Refused =>
-  refuse(409, {
-    code: "DispatchRefused",
-    title: "GitHub Actions disabled",
-    detail,
-    fix: `On GitHub, open the settings of ${target.owner}/${target.name}, go to Actions, General, and allow actions and reusable workflows, at least tumpel/workflows; if the Actions tab lists the tumpel prebuild workflow as disabled, enable it there; then start the prebuild`,
-  });
-
-const tokenRefused = (target: GitHubRepository, detail: string): Refused =>
-  refuse(409, {
-    code: "DispatchRefused",
-    title: "GitHub refused the installation token",
-    detail,
-    fix: `On GitHub, open the settings of ${target.owner}, go to GitHub Apps, choose Configure next to the Tumpel app, and check that it is not suspended and has access to ${target.name}; if the App is gone, connect GitHub for ${target.owner} again`,
-  });
-
-const gitHubRefused = (detail: string): Refused =>
-  refuse(409, {
-    code: "DispatchRefused",
-    title: "GitHub refused the dispatch",
-    detail,
-    fix: "Fix what GitHub's answer in the detail names; a 5xx answer is an outage on GitHub's side, which https://www.githubstatus.com reports",
-  });
-
-const listed = (names: string[]): string =>
-  names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-
-const appPermissionMissing = (target: GitHubRepository, permissions: string[], appSlug: string): Refused =>
-  refuse(409, {
-    code: "GitHubAppPermissionMissing",
-    title: "GitHub App needs more access",
-    detail: `the GitHub App ${appSlug} asks for Read and write access to ${listed(permissions)}, which it needs to add its prebuild workflow to ${target.owner}/${target.name} and start it, and ${target.owner} has not accepted that request yet`,
-    fix: `On GitHub, open the settings of ${target.owner}, go to GitHub Apps, choose Configure next to ${appSlug}, then Review request and Accept new permissions; then start the prebuild again`,
-  });
-
-const appLacksPermission = (
-  target: GitHubRepository,
-  permissions: string[],
-  appSlug: string,
-  appOwner: string,
-): Refused =>
-  refuse(409, {
-    code: "GitHubAppPermissionMissing",
-    title: "GitHub App needs more access",
-    detail: `the GitHub App ${appSlug} itself holds less than Read and write access to ${listed(permissions)}, which it needs to add its prebuild workflow to ${target.owner}/${target.name} and start it, so no installation can grant it`,
-    fix: `${appOwner}, who owns the App, opens its settings on GitHub under Developer settings, GitHub Apps, ${appSlug}, Permissions and events, sets ${listed(permissions)} to Read and write under Repository permissions and saves; then ${target.owner} opens Settings, GitHub Apps, Configure next to ${appSlug}, Review request and accepts the new permissions; then start the prebuild again`,
-  });
-
-const callerWorkflowRefused = (detail: string): Refused =>
-  refuse(409, {
-    code: "CallerWorkflowRefused",
-    title: "Prebuild workflow not added",
-    detail: `Tumpel could not add its prebuild workflow to the repository: ${detail}`,
-    fix: "When the default branch is protected, let the Tumpel app push to it in the branch protection rule or ruleset, or commit the caller workflow the GitHub Actions connection shows at its path yourself; then start the prebuild",
-  });
-
-const pipelineRefused = (detail: string): Refused =>
-  refuse(409, {
-    code: "DispatchRefused",
-    title: "CircleCI refused the pipeline",
-    detail,
-    fix: "Commit the config that imports the orb tumpel/prebuild and declares the five tumpel_* parameters at the path the pipeline definition names, on the default branch, then start the prebuild again",
-  });
-
-export const presignRootfs = (env: Env, key: string, now: number): Promise<string> => {
-  const settings = settingsOf(env);
-  return signerOf(env, env.RELEASES_BUCKET_NAME, env.RELEASES_ACCESS_KEY_ID, env.RELEASES_SECRET_ACCESS_KEY).presign(
-    "GET",
-    key,
-    settings.prebuildDispatchBudgetSeconds + settings.prebuildBuildBudgetSeconds,
-    new Date(now),
-  );
-};
-
-export interface Dispatch {
-  prebuildId: string;
-  tenantId: string;
-  personaId: string;
-  key: PrebuildKey;
-  configSource: ConfigSource;
-  target: GitHubRepository;
-  defaultBranch: string;
-  headSha: string;
-  image: ReleaseBaseImage;
-  apiOrigin: string;
-}
-
-interface GitHubActionsRequest {
-  tenantId: string;
-  personaId: string;
-  target: GitHubRepository;
-  repository: string;
-  image: ReleaseBaseImage;
-  apiOrigin: string;
-  rebuild: boolean;
-}
-
-const startGitHubActions = async (env: Env, request: GitHubActionsRequest, now: number): Promise<Outcome<Prebuild>> => {
-  const { tenantId, target, repository, image } = request;
-  const tenant = tenantApi(env.TENANT, tenantId);
-  const connection = (await tenant.call("gitHubActionsConnection", { tenantId })).connection;
-  if (connection === null) return noBuildProvider("GitHubActions", repository);
-  const { started } = await tenantApi(env.TENANT, tenantId).call("startGitHubActionsPrebuild", {
-    tenantId,
-    start: {
-      prebuildId: crypto.randomUUID(),
-      personaId: request.personaId,
-      target,
-      repository,
-      guestImageDigest: image.imageDigest,
-      rootfsKey: rootfsKey(image),
-      callerWorkflow: connection.callerWorkflow,
-      apiOrigin: request.apiOrigin,
-      rebuild: request.rebuild,
-    },
-    now,
-  });
-  switch (started.kind) {
-    case "Started":
-      return ok(started.prebuild);
-    case "NoInstallation":
-      return refuse(409, {
-        code: "GitHubNotConnected",
-        title: "GitHub not connected",
-        detail: `your tenant has not installed the stage's GitHub App on ${target.owner}, and a GitHub Actions prebuild of ${repository} adds and starts its caller workflow with the App`,
-        fix: "Connect GitHub for the repository's owner, then start the prebuild",
-      });
-    case "TokenRefused":
-      return tokenRefused(target, started.detail);
-    case "Unreadable":
-      return installationUnreadable(target, started.detail);
-    case "PermissionMissing":
-      return appPermissionMissing(target, started.permissions, started.appSlug);
-    case "AppPermissionMissing":
-      return appLacksPermission(target, started.permissions, started.appSlug, started.appOwner);
-    case "CallerRefused":
-      return callerWorkflowRefused(started.detail);
-    case "ActionsDisabled":
-      return actionsDisabled(target, started.detail);
-    case "Refused":
-      return gitHubRefused(started.detail);
-  }
-};
-
-const dispatchCircleCI = async (env: Env, dispatch: Dispatch, now: number): Promise<Outcome<Prebuild>> => {
-  const { prebuildId, tenantId, key, image } = dispatch;
-  const tenant = tenantApi(env.TENANT, tenantId);
-  const project = (await tenant.call("circleCIProjectOf", { tenantId, repository: key.repository })).project;
-  if (project === null) return circleCIProjectMissing(key.repository);
-  const rootfsUrl = await presignRootfs(env, rootfsKey(image), now);
-  const parameters = circleCIParameters({
-    prebuildId,
-    tenantId,
-    apiOrigin: dispatch.apiOrigin,
-    rootfsUrl,
-    imageDigest: image.imageDigest,
-  });
-  const overLong = overLongParameter(parameters);
-  if (overLong !== null) {
-    return refuse(409, {
-      code: "DispatchRefused",
-      title: "Pipeline parameter too long",
-      detail: `pipeline parameter ${overLong.name} is ${overLong.length} characters, and CircleCI takes at most ${CIRCLECI_PARAMETER_LIMIT}; no pipeline was triggered`,
-      fix: "Ask the operator to serve the releases bucket under a shorter presigned URL, then start the prebuild again",
-    });
-  }
-  const { dispatched } = await tenantApi(env.TENANT, tenantId).call("dispatchCircleCIPrebuild", {
-    tenantId,
-    start: {
-      prebuildId,
-      personaId: dispatch.personaId,
-      key,
-      configSource: dispatch.configSource,
-      target: dispatch.target,
-      defaultBranch: dispatch.defaultBranch,
-      headSha: dispatch.headSha,
-      rootfsKey: rootfsKey(image),
-    },
-    project,
-    parameters,
-    now,
-  });
-  if (dispatched.kind === "NotConnected") return noBuildProvider("CircleCI", key.repository);
-  if (dispatched.kind === "Refused") return pipelineRefused(dispatched.detail);
-  return ok(dispatched.prebuild);
-};
 
 const baseImage = async (env: Env, now: number): Promise<Outcome<ReleaseBaseImage>> => {
   const release = await readRelease(env.RELEASES, now);
@@ -395,11 +180,10 @@ export const startPrebuild = async (
       headSha: inputs.headSha,
       rootfsKey: rootfsKey(entry.image),
     },
-    provider: start.provider,
     input: {
       principalId: caller.principalId,
       startedBy: { kind: "Person", principalId: caller.principalId },
-      hosts: await listHosts(env.DB, caller.tenantId),
+      hosts: await listHosts(env, caller.tenantId),
       harness: entry.harness,
       harnessVersion: entry.harnessVersion,
       endpoint: apiOrigin,
@@ -491,14 +275,6 @@ export const previewPrebuild = async (
     ],
   });
 };
-
-const installationUnreadable = (target: GitHubRepository, detail: string): Refused =>
-  refuse(409, {
-    code: "RepositoryUnreadable",
-    title: "Repository unreadable",
-    detail,
-    fix: `Give the GitHub App installation on ${target.owner} access to ${target.owner}/${target.name}, then start the prebuild again`,
-  });
 
 const repositoryUnreadable = (detail: string): Refused =>
   refuse(409, {

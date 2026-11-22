@@ -78,6 +78,8 @@ const liveHost = (hostId: string, state: string, labels: string[]) =>
     tenantId: "t1",
     name: hostId,
     state,
+    health: "Healthy",
+    reportedHealth: "Healthy",
     architecture: "Amd64",
     cpuCount: 4,
     memoryBytes: 1024,

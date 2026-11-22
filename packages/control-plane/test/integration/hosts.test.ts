@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   ChannelProtocol,
   CloseCode,
+  ControlPlaneLimitsSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
   EnrolmentTokenSchema,
@@ -39,6 +40,9 @@ type WorkerConfig = Extract<
 const { env: _stages, ...config }: WorkerConfig & { env?: unknown } = JSON.parse(
   readFileSync(fileURLToPath(new URL("../../wrangler.jsonc", import.meta.url)), "utf8"),
 );
+
+const LIMITS = ControlPlaneLimitsSchema.parse(config.vars?.TUMPEL_LIMITS);
+const RAISED = { ...LIMITS.ceiling, hostFramesPerMinute: 1200 };
 
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
@@ -128,6 +132,36 @@ const rawHost = (hostId: string, privateKey: KeyObject, boxCapacity: number, wel
   return { socket, closed };
 };
 
+const rawEnrol = async (name: string): Promise<{ hostId: string; privateKey: KeyObject }> => {
+  const keys = generateKeyPairSync("ed25519");
+  const publicKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x ?? "", "base64url").toString("base64");
+  const enrolled = await postJson("/v1/hosts/enrol", {
+    name,
+    architecture: "Amd64",
+    cpuCount: 1,
+    memoryBytes: 1024,
+    publicKey,
+    supervisorVersion: "0.1.0",
+    enrolmentToken: await mint(),
+  });
+  assert.equal(enrolled.status, 200);
+  return { hostId: HostSchema.parse(await enrolled.json()).hostId, privateKey: keys.privateKey };
+};
+
+const snapshotFailedFrame = (seq: number, snapshotId: string): string =>
+  JSON.stringify({
+    type: "Frame",
+    seq,
+    ack: 0,
+    message: {
+      type: "SnapshotFailed",
+      snapshotId,
+      reason: "BoxNotFound",
+      detail: "no box",
+      failedAt: "2026-11-15T10:00:00+01:00",
+    },
+  });
+
 interface Finished {
   code: number | null;
   stdout: string;
@@ -198,6 +232,7 @@ before(async () => {
           vars: {
             ...config.vars,
             TUMPEL_SETTINGS: TEST_SETTINGS,
+            TUMPEL_LIMITS: { ...LIMITS, ceiling: RAISED },
             ACCESS_ISSUER: issuer,
             ACCESS_AUD: AUDIENCE,
             SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
@@ -238,7 +273,7 @@ after(async () => {
 });
 
 suite("hosts", { concurrency: true }, () => {
-  test("a host enrols with a one-time token, holds its channel, drops to Offline when it falls silent, and stops on revoke", async () => {
+  test("a host enrols with a one-time token, holds its channel, reads Offline when it falls silent, and stops on revoke", async () => {
     const token = await mint();
     const first = await enrol("first", token);
     assert.equal(first.finished.code, 0, first.finished.stderr);
@@ -315,38 +350,49 @@ suite("hosts", { concurrency: true }, () => {
   });
 
   test("a frame the host sends the moment Welcome arrives is accepted while the tenant's hostHello is still in flight", async () => {
-    const keys = generateKeyPairSync("ed25519");
-    const publicKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x ?? "", "base64url").toString("base64");
-    const enrolled = await postJson("/v1/hosts/enrol", {
-      name: "eager",
-      architecture: "Amd64",
-      cpuCount: 1,
-      memoryBytes: 1024,
-      publicKey,
-      supervisorVersion: "0.1.0",
-      enrolmentToken: await mint(),
-    });
-    assert.equal(enrolled.status, 200);
-    const { hostId } = HostSchema.parse(await enrolled.json());
-
-    const frame = (seq: number): string =>
-      JSON.stringify({
-        type: "Frame",
-        seq,
-        ack: 0,
-        message: {
-          type: "SnapshotFailed",
-          snapshotId: "snapshot-eager",
-          reason: "BoxNotFound",
-          detail: "no box",
-          failedAt: "2026-11-15T10:00:00+01:00",
-        },
-      });
-    const { socket, closed } = rawHost(hostId, keys.privateKey, 1, (welcomed) => welcomed.send(frame(1)));
+    const { hostId, privateKey } = await rawEnrol("eager");
+    const { socket, closed } = rawHost(hostId, privateKey, 1, (welcomed) =>
+      welcomed.send(snapshotFailedFrame(1, "snapshot-eager")),
+    );
 
     await waitForState(hostId, "Online");
-    socket.send(frame(3));
+    socket.send(snapshotFailedFrame(3, "snapshot-eager"));
     assert.deepEqual(await closed, { code: CloseCode.ProtocolError, reason: "frame gap: expected seq 2, got 3" });
+  });
+
+  test("a host whose tenant raised its frame limit streams 700 frames in a minute with none rate limited once it reconnects, while its object stays resident", async () => {
+    const { hostId, privateKey } = await rawEnrol("busy");
+    const first = rawHost(hostId, privateKey, 1, () => undefined);
+    await waitForState(hostId, "Online");
+    first.socket.close();
+    await first.closed;
+
+    const raised = await server.fetch(`${origin}/v1/limits`, {
+      method: "PUT",
+      headers: { ...bearer, "content-type": "application/json" },
+      body: JSON.stringify(RAISED),
+    });
+    assert.equal(raised.status, 200);
+
+    const limited: number[] = [];
+    await new Promise<void>((resolve) => {
+      const second = rawHost(hostId, privateKey, 1, (welcomed) => {
+        for (let seq = 1; seq <= 700; seq++) welcomed.send(snapshotFailedFrame(seq, `snapshot-busy-${seq}`));
+        resolve();
+      });
+      second.socket.addEventListener("message", (event) => {
+        const envelope = ControlEnvelopeSchema.parse(JSON.parse(String(event.data)));
+        if (envelope.type === "FrameRateLimited") limited.push(envelope.seq);
+      });
+    });
+    const acked = await new Promise<number | undefined>((resolve) => {
+      rawHost(hostId, privateKey, 1, () => undefined).socket.addEventListener("message", (event) => {
+        const envelope = ControlEnvelopeSchema.parse(JSON.parse(String(event.data)));
+        if (envelope.type === "Welcome") resolve(envelope.ack);
+      });
+    });
+    assert.equal(acked, 700);
+    assert.deepEqual(limited, []);
   });
 
   test("a staged supervisor update is stored on the host and tumpel host get names its release and the boxes it waits on", async () => {

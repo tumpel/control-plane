@@ -12,6 +12,7 @@ import { type HostRecord, HostRecordSchema } from "./host-record";
 import type { Problem, ProblemStatus } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { settingsOf } from "./settings.ts";
 import { NO_SUPERVISOR_UPDATES } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
 
@@ -29,6 +30,8 @@ interface HostRow {
   tenant_id: string;
   name: string;
   state: string;
+  health: string;
+  reported_health: string;
   architecture: string;
   cpu_count: number;
   memory_bytes: number;
@@ -42,7 +45,7 @@ interface HostRow {
 const HOST_COLUMNS =
   "host_id, tenant_id, name, state, architecture, cpu_count, memory_bytes, public_key, supervisor_version, created_at, updated_at";
 
-const HOST_SELECT = `${HOST_COLUMNS}, labels`;
+const HOST_SELECT = `${HOST_COLUMNS}, labels, health, reported_health`;
 
 const toHost = (row: HostRow): HostRecord =>
   HostRecordSchema.parse({
@@ -50,6 +53,8 @@ const toHost = (row: HostRow): HostRecord =>
     tenantId: row.tenant_id,
     name: row.name,
     state: row.state,
+    health: row.health,
+    reportedHealth: row.reported_health,
     architecture: row.architecture,
     cpuCount: row.cpu_count,
     memoryBytes: row.memory_bytes,
@@ -258,13 +263,28 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
 };
 
-export const listHosts = async (db: D1Database, tenantId: string): Promise<HostRecord[]> => {
-  const { results } = await db
-    .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
+export type OfferSent = "Sent" | "RateLimited" | "Offline" | "Degraded";
+
+export const hostSilent = async (env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">, hostId: string): Promise<boolean> => {
+  const lastReceivedAt = await env.HOST.get(env.HOST.idFromName(hostId)).lastReceivedAt();
+  return lastReceivedAt === null || Date.now() - lastReceivedAt >= settingsOf(env).heartbeatDeadlineSeconds * 1000;
+};
+
+export const listHosts = async (
+  env: Pick<Env, "DB" | "HOST" | "TUMPEL_SETTINGS">,
+  tenantId: string,
+): Promise<HostRecord[]> => {
+  const { results } = await env.DB.prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
     .all<HostRow>();
-  return results.map(toHost);
+  return Promise.all(results.map((row) => withPresence(env, toHost(row))));
 };
+
+export const withPresence = async (
+  env: Pick<Env, "HOST" | "TUMPEL_SETTINGS">,
+  host: HostRecord,
+): Promise<HostRecord> =>
+  host.state === "Online" && (await hostSilent(env, host.hostId)) ? { ...host, health: "Degraded" } : host;
 
 export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostRecord | null> => {
   const row = await db
@@ -304,6 +324,21 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
   await tenantApi(env.TENANT, tenantId).call("forgetHostUsage", { hostId });
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
   return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS, state: "Revoked", updatedAt: now } };
+};
+
+export const restoreHostHealth = async (
+  env: Env,
+  tenantId: string,
+  hostId: string,
+  restoredBy: string,
+  now: number,
+): Promise<Outcome<Host>> => {
+  const host = await hostOf(env.DB, tenantId, hostId);
+  if (host === null) return hostNotFound(hostId);
+  await env.HOST.get(env.HOST.idFromName(hostId)).restoreHealth(`${restoredBy} restored host ${host.name}`);
+  const [read] = await hostReads(env, tenantId, [{ ...host, health: "Healthy", updatedAt: now }]);
+  if (read === undefined) throw new Error(`host ${hostId} was restored and then not read`);
+  return { ok: true, value: read };
 };
 
 const hostRevoked = (hostId: string): Refused =>

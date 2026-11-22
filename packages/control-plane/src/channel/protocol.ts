@@ -3,31 +3,23 @@ import {
   type ControlFrameSchema,
   HelloSchema,
   HostEnvelopeSchema,
-  HostFrameSchema,
-  HostHeartbeatSchema,
+  type HostFrameSchema,
+  type HostReportedHealthSchema,
   type HostUsageSchema,
 } from "@tumpel/schemas";
-import { z } from "zod";
+import type { z } from "zod";
 
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true });
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
-export const HELD_SESSIONS_VERSION = 22;
-export const HostEnvelopeBeforeHeldSessionsSchema = z.discriminatedUnion("type", [
-  HelloSchema,
-  HostHeartbeatSchema.omit({ heldSessionIds: true }),
-  HostFrameSchema,
-]);
-
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
 export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
-export const reportsHeldSessions = (heartbeat: Omit<HostHeartbeat, "heldSessionIds">): heartbeat is HostHeartbeat =>
-  "heldSessionIds" in heartbeat;
 export type HostUsage = z.infer<typeof HostUsageSchema>;
+export type HostReportedHealth = z.infer<typeof HostReportedHealthSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];
@@ -79,6 +71,9 @@ export interface Ledger<M> {
 export interface LedgerStore<M> {
   load(): Ledger<M>;
   save(ledger: Ledger<M>): void;
+  heard(): number;
+  skip(frame: Frame<unknown>): void;
+  refused(): ReadonlySet<number>;
 }
 
 export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });
@@ -108,9 +103,15 @@ export type Accepted<Own, Theirs> =
   | { kind: "Duplicate" }
   | { kind: "Gap"; expected: number; got: number };
 
-export const accept = <Own, Theirs>(ledger: Ledger<Own>, frame: Frame<Theirs>): Accepted<Own, Theirs> => {
-  if (frame.seq <= ledger.received) return { kind: "Duplicate" };
-  if (frame.seq !== ledger.received + 1) return { kind: "Gap", expected: ledger.received + 1, got: frame.seq };
+export const accept = <Own, Theirs>(
+  ledger: Ledger<Own>,
+  frame: Frame<Theirs>,
+  refused: ReadonlySet<number> = new Set(),
+): Accepted<Own, Theirs> => {
+  if (frame.seq <= ledger.received || refused.has(frame.seq)) return { kind: "Duplicate" };
+  let expected = ledger.received + 1;
+  while (refused.has(expected)) expected += 1;
+  if (frame.seq !== expected) return { kind: "Gap", expected, got: frame.seq };
   return {
     kind: "Accepted",
     ledger: {

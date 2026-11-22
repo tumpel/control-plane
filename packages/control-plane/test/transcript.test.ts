@@ -1,15 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type Compactor, compactorOf } from "../src/compact.ts";
-import {
-  emptyPage,
-  encodeChunk,
-  type Page,
-  type PageRead,
-  pageOf,
-  rangeAfter,
-  type TranscriptLine,
-} from "../src/transcript.ts";
+import { emptyPage, type Page, type PageRead, pageOf, type TranscriptLine } from "../src/transcript.ts";
 
 const line = (lineSeq: number, text: string): TranscriptLine => ({
   sessionId: "ses_1",
@@ -82,17 +74,6 @@ test("a compact page drops lines without ending early, and its cursor passes the
 test("a page with no line to read keeps the cursor it was given", () => {
   assert.deepEqual(read(pageOf(emptyPage(7), [], claudeCode(), 64, 100)), emptyPage(7));
   assert.deepEqual(read(pageOf(emptyPage(7), [], null, 64, 100)), emptyPage(7));
-});
-
-test("a raw read cuts a chunk on a line boundary at the byte cap and always holds one line", () => {
-  const lines = [line(4, "a".repeat(10)), line(5, "b".repeat(10)), line(6, "c".repeat(10)), line(7, "d".repeat(10))];
-  const { lineSeqs, offsets } = encodeChunk(lines);
-  const size = (offsets[1] ?? 0) - (offsets[0] ?? 0);
-  assert.deepEqual(rangeAfter(lineSeqs, offsets, 3, 10, size * 2 + 1), { offset: 0, length: size * 2 });
-  assert.deepEqual(rangeAfter(lineSeqs, offsets, 5, 10, size * 2), { offset: size * 2, length: size * 2 });
-  assert.deepEqual(rangeAfter(lineSeqs, offsets, 3, 10, 1), { offset: 0, length: size });
-  assert.deepEqual(rangeAfter(lineSeqs, offsets, 3, 3, null), { offset: 0, length: size * 3 });
-  assert.equal(rangeAfter(lineSeqs, offsets, 7, 10, null), null);
 });
 
 test("a compact cut leaves the dropped lines before the cut line behind the cursor", () => {
