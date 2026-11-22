@@ -89,7 +89,15 @@ const waitForState = (hostId: string, state: string) =>
     (read) => read === state,
   );
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 1024 };
+const USAGE = {
+  boxesWarm: 0,
+  loadAverage: 0,
+  memoryAvailableMib: 1024,
+  memoryBudgetMib: 1024,
+  memoryHeldMib: 0,
+  diskBudgetMib: 100000,
+  diskHeldMib: 0,
+};
 
 const rawHost = (hostId: string, privateKey: KeyObject, boxCapacity: number, welcomed: (socket: WebSocket) => void) => {
   const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${hostId}/channel`);

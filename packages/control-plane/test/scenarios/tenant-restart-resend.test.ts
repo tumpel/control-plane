@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
-import { World } from "./harness/world.ts";
+import { BUDGETS, World } from "./harness/world.ts";
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
+const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 
 test("a tenant that restarts while it holds transcript lines refuses the checkpoint, and the resent lines land without a gap", async (t) => {
   const world = await World.open();

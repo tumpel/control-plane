@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SETTINGS, World } from "./harness/world.ts";
+import { BUDGETS, SETTINGS, World } from "./harness/world.ts";
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
+const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 
 test("a turn whose transcript write fails ends as failed, and another turn on the same host is still stored, acked and completed with no row per line", async (t) => {
   const world = await World.open();

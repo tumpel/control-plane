@@ -14,6 +14,7 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
+  type UnplaceableNotHeardSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
@@ -128,12 +129,13 @@ const turnNotFound = (turnId: string): Refused =>
 export const credentialRefused = (refusal: CredentialRefusal, owner: string, harness: string, retry: string): Refused =>
   refuse(422, credentialProblem(refusal, owner, harness, retry));
 
-export const why = (refused: Unplaceable): string => {
+type HostRefusal = Unplaceable | z.infer<typeof UnplaceableNotHeardSchema>;
+
+export const why = (refused: HostRefusal): string => {
   const named = refused.host.name;
-  if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
-  if (refused.reason === "NotHeard") {
-    return `${named} has not said hello since your tenant restarted, so its free room is unknown until it reconnects`;
-  }
+  if ((refused.reason === "NotOnline" || refused.reason === "NotHeard") && refused.host.state === "Online")
+    return `${named} has sent your tenant no report of its room yet, so it counts as Offline until it says hello`;
+  if (refused.reason === "NotOnline" || refused.reason === "NotHeard") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NotHealthy") {
     if (refused.host.health === "Degraded") {
       return `${named} missed its heartbeat and counts as Degraded until it sends one or reconnects`;
@@ -164,7 +166,7 @@ export const why = (refused: Unplaceable): string => {
   return `${named} runs a turn in all ${refused.usage.boxCapacity} of its box slots`;
 };
 
-export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
+export const placeableFix = (hosts: HostRefusal[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoMemory")) {
     return `Lower the persona's boxMemoryMib toward the ${BoxMemoryLimit.DefaultMib} MiB default, free memory on a host, or enrol a host with more memory, then ${retry}`;
@@ -185,7 +187,7 @@ export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
 };
 
-const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
+const unplaced = (hosts: HostRefusal[], retry: string): Refused => {
   if (hosts.length === 0) {
     return refuse(409, {
       code: "NoHostAvailable",
@@ -345,7 +347,7 @@ const connectorDisconnected = (names: string[]): Refused =>
     fix: DISCONNECTED_FIX,
   });
 
-export const placed = <T>(started: SessionStarted<T>): Outcome<T> => {
+export const placed = <T>(started: SessionStarted<T> | { kind: "Unplaced"; hosts: HostRefusal[] }): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
   if (started.kind === "TagsOverLimit") {

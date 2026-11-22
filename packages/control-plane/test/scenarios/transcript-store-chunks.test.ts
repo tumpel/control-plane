@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
-import { type Host, SETTINGS, World } from "./harness/world.ts";
+import { BUDGETS, type Host, SETTINGS, World } from "./harness/world.ts";
 
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
+const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 
 const line = (host: Host, turnId: string, lineSeq: number) =>
   host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });

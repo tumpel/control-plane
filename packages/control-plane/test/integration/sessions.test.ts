@@ -289,7 +289,7 @@ class HostSide {
   }
 
   report(usage: HostUsage): void {
-    this.usage = usage;
+    this.usage = { ...this.usage, ...usage };
     this.beat();
   }
 
@@ -308,7 +308,8 @@ class HostSide {
     });
     const parsed = ControlEnvelopeSchema.parse(JSON.parse(challenge));
     assert.equal(parsed.type, "Challenge");
-    const side = new HostSide(socket, carried, resend, usage);
+    const budgeted = { memoryBudgetMib: boxCapacity * BoxMemoryLimit.DefaultMib, memoryHeldMib: 0, ...usage };
+    const side = new HostSide(socket, carried, resend, budgeted);
     side.raw({
       type: "Hello",
       hostId: id,
@@ -316,7 +317,7 @@ class HostSide {
       supervisorVersion: "0.1.0",
       signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
       boxCapacity,
-      usage,
+      usage: budgeted,
     });
     return side;
   }
@@ -1930,6 +1931,51 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(spent.tenantRead <= 2300, `the turn read ${spent.tenantRead} tenant rows`);
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
     assert.ok(spent.hostRead <= 520, `the turn read ${spent.hostRead} host rows`);
+  });
+
+  test("a tenant restart between a host's hello and the next start still places on that host and keeps its channel open", async () => {
+    const { tenantId, hostId, host, tool, sessionStart } = await tenant();
+    const restarted = await call(`/__fixture/restart/${tenantId}`);
+    assert.equal(restarted.status, 204);
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "after the restart" },
+      StartedSessionSchema,
+    );
+    assert.equal(started.session.hostId, hostId);
+    assert.equal((await host.next("TurnOffer")).turnId, started.turn.turnId);
+    await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
+    host.assertOpen("after the tenant restarted");
+  });
+
+  test("an idle heartbeat writes no tenant row until the host's stored report is 30 s old, then writes one", async () => {
+    const { tenantId, hostId, host } = await tenant();
+    const rowsWritten = async (): Promise<number> => {
+      const response = await call(`/__fixture/usage/${tenantId}`);
+      const { usage } = z.object({ usage: TenantUsageSchema }).parse(await response.json());
+      const counter = usage.counters.find((each) => each.measure === "RowsWritten");
+      if (counter === undefined) throw new Error("the tenant usage has no RowsWritten counter");
+      return counter.used;
+    };
+    const heardAt = async (): Promise<number> => {
+      const rows = await tenantSql(tenantId, "SELECT heard_at FROM host_reports WHERE host_id = ?", hostId);
+      const [row] = z.array(z.object({ heard_at: z.number() })).parse(rows);
+      if (row === undefined) throw new Error(`host ${hostId} has no stored report`);
+      return row.heard_at;
+    };
+    host.quiet();
+    const before = await rowsWritten();
+    for (let beat = 0; beat < 5; beat++) host.report(USAGE);
+    await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
+    const idle = await rowsWritten();
+    assert.equal(idle - before, 0);
+
+    const stale = (await heardAt()) - 31_000;
+    await tenantSql(tenantId, "UPDATE host_reports SET heard_at = ? WHERE host_id = ?", stale, hostId);
+    host.report(USAGE);
+    await until("the stale report refreshed", heardAt, (at) => at > stale);
+    const backdated = 1;
+    assert.equal((await rowsWritten()) - idle, backdated + 1);
   });
 
   test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
@@ -3550,8 +3596,8 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.match(failure.detail, /a box disk of 32768 MiB does not fit/);
   });
 
-  test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
-    const { bearer, host, hostId, refused, getJson, enrol, sessionStart, hostState } = await tenant();
+  test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes placed before the host reports them", async () => {
+    const { bearer, host, hostId, refused, enrol, sessionStart, hostState } = await tenant();
     host.close();
     await hostState(hostId, "Offline");
     const budgeted = await enrol("budgeted");
@@ -3581,13 +3627,6 @@ suite("sessions", { concurrency: 8 }, () => {
         `no host of your tenant has memory for another box: box is Offline, budgeted gives boxes ${budget} MiB of memory and its boxes hold ${2 * box} MiB of it, and the persona's boxes need ${box} MiB`,
       ],
     );
-    side.report({ ...USAGE, memoryBudgetMib: budget, memoryHeldMib: box });
-    await until(
-      "the host's report of one held box",
-      () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
-      (usages) => usages.find((usage) => usage.hostId === budgeted.id)?.memoryHeldMib === box,
-    );
-    assert.equal(await start("third"), budgeted.id);
     side.close();
   });
 
@@ -3702,11 +3741,11 @@ suite("sessions", { concurrency: 8 }, () => {
     const drift = await enrol("drift");
     const first = await connect(drift.id, drift.key);
     await hostState(drift.id, "Online");
-    first.report({ ...USAGE, loadAverage: 0.5 });
+    first.report({ ...USAGE, diskHeldMib: 40000 });
     await until(
       "the first heartbeat of the first connection",
       () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
-      (usages) => usages.find((usage) => usage.hostId === drift.id)?.loadAverage === 0.5,
+      (usages) => usages.find((usage) => usage.hostId === drift.id)?.diskHeldMib === 40000,
     );
     const snapshotted = async (sessionId: string) => {
       const request = await first.next("SnapshotRequest");

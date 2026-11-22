@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
-import { World } from "./harness/world.ts";
+import { BUDGETS, World } from "./harness/world.ts";
 
 const STEADY_ROWS_BUDGET = 100;
 const TURN_ROWS_BUDGET = 24;
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
+const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 const SESSIONS = 10;
 const LINE_EVERY_MS = 2_000;
 const HEARTBEAT_EVERY_MS = 10_000;

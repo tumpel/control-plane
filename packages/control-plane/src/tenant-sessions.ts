@@ -36,7 +36,7 @@ import {
 import type { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
-import { hostUnheard, linesLost } from "./channel/failure.ts";
+import { linesLost } from "./channel/failure.ts";
 import type {
   BootImage,
   DispatchConnector,
@@ -353,12 +353,39 @@ type PendingRow = {
 
 type HeldLines = { tenantId: string; sessionId: string; hostId: string; lines: TranscriptLine[] };
 
-type LiveHost = {
-  boxCapacity: number;
-  channelProtocol: number;
-  usage: HostUsage;
-  createdAt: number;
-  updatedAt: number;
+type HostReportRow = {
+  host_id: string;
+  box_capacity: number;
+  channel_protocol: number;
+  memory_budget_mib: number;
+  memory_held_mib: number;
+  memory_available_mib: number;
+  disk_budget_mib: number;
+  disk_held_mib: number;
+  load_average: number;
+  heard_at: number;
+  created_at: number;
+  boxes_running: number;
+  boxes_warm: number;
+  boxes_memory_mib: number;
+};
+
+const HEARD_REFRESH_MS = 30_000;
+
+type HostReport = Required<HostUsage>;
+
+const reportOf = (hostId: string, usage: HostUsage): HostReport => {
+  const { memoryBudgetMib, memoryHeldMib, diskBudgetMib, diskHeldMib } = usage;
+  if (
+    memoryBudgetMib === undefined ||
+    memoryHeldMib === undefined ||
+    diskBudgetMib === undefined ||
+    diskHeldMib === undefined
+  )
+    throw new Error(
+      `host ${hostId} reported usage without its memory and disk budgets; update the supervisor on that host`,
+    );
+  return { ...usage, memoryBudgetMib, memoryHeldMib, diskBudgetMib, diskHeldMib };
 };
 
 type TurnSpan = { first: number; last: number };
@@ -697,8 +724,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly runningTails = new Map<string, Promise<RunningTail>>();
   private readonly resentTurns = new Set<string>();
   private readonly heardHosts = new Set<string>();
-  private readonly liveHosts = new Map<string, LiveHost>();
-  private readonly unreportedBoxes = new Map<string, { hostId: string; boxMemoryMib: number }>();
   private readonly imageFetches = new Map<string, number>();
   private readonly claims = new Map<string, number>();
 
@@ -1502,17 +1527,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): { kind: "Composed"; offer: StoredTurnOffer } | { kind: "Uncomposable"; cause: string } {
     const prompt = this.offeredPrompt(session.harness, turn);
     if (prompt.kind === "Uncomposable") return prompt;
-    const [ran] = this.ctx.storage.sql
-      .exec(
-        "SELECT 1 FROM turns WHERE session_id = ? AND box_id = ? AND turn_id != ? LIMIT 1",
-        session.session_id,
-        session.box_id,
-        turn.turn_id,
-      )
-      .toArray();
-    if (ran === undefined && !this.unreportedBoxes.has(session.box_id)) {
-      this.unreportedBoxes.set(session.box_id, { hostId: session.host_id, boxMemoryMib: session.box_memory_mib });
-    }
     const prebuild = this.hostPrebuild(session.session_id);
     const offer: StoredTurnOffer = {
       type: "TurnOffer",
@@ -1581,43 +1595,57 @@ export abstract class TenantSessions extends DurableObject<Env> {
     now: number,
     channelProtocol: number,
   ): void {
-    this.keepHostUsage(hostId, boxCapacity, usage, now, channelProtocol);
+    const report = reportOf(hostId, usage);
+    this.ctx.storage.sql.exec(
+      `INSERT INTO host_reports (host_id, box_capacity, channel_protocol, memory_budget_mib, memory_held_mib,
+        memory_available_mib, disk_budget_mib, disk_held_mib, load_average, heard_at, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10)
+      ON CONFLICT (host_id) DO UPDATE SET box_capacity = excluded.box_capacity,
+        channel_protocol = excluded.channel_protocol, memory_budget_mib = excluded.memory_budget_mib,
+        memory_held_mib = excluded.memory_held_mib, memory_available_mib = excluded.memory_available_mib,
+        disk_budget_mib = excluded.disk_budget_mib, disk_held_mib = excluded.disk_held_mib,
+        load_average = excluded.load_average, heard_at = excluded.heard_at, updated_at = excluded.updated_at
+      WHERE host_reports.box_capacity != excluded.box_capacity
+        OR host_reports.channel_protocol != excluded.channel_protocol
+        OR host_reports.memory_budget_mib != excluded.memory_budget_mib
+        OR host_reports.memory_held_mib != excluded.memory_held_mib
+        OR host_reports.disk_budget_mib != excluded.disk_budget_mib
+        OR host_reports.disk_held_mib != excluded.disk_held_mib
+        OR host_reports.heard_at < excluded.heard_at - ?11`,
+      hostId,
+      boxCapacity,
+      channelProtocol,
+      report.memoryBudgetMib,
+      report.memoryHeldMib,
+      report.memoryAvailableMib,
+      report.diskBudgetMib,
+      report.diskHeldMib,
+      report.loadAverage,
+      now,
+      HEARD_REFRESH_MS,
+    );
     this.heardHosts.add(hostId);
     clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 
-  private keepHostUsage(
-    hostId: string,
-    boxCapacity: number,
-    usage: HostUsage,
-    now: number,
-    channelProtocol: number,
-  ): void {
-    this.liveHosts.set(hostId, {
-      boxCapacity,
-      channelProtocol,
-      usage,
-      createdAt: this.liveHosts.get(hostId)?.createdAt ?? now,
-      updatedAt: now,
-    });
-    this.forgetUnreportedBoxes(hostId);
-  }
-
-  private forgetUnreportedBoxes(hostId: string): void {
-    for (const [boxId, offer] of this.unreportedBoxes) {
-      if (offer.hostId === hostId) this.unreportedBoxes.delete(boxId);
-    }
-  }
-
   protected async hostUsage(hostId: string, usage: HostUsage, now: number): Promise<void> {
     await this.flushHeldLines(hostId);
-    const known = this.liveHosts.get(hostId);
-    if (known === undefined) {
-      throw hostUnheard(
-        `host ${hostId} reported usage to a tenant that restarted since the host's hello; the host must reconnect so its box capacity is known again`,
-      );
-    }
-    this.keepHostUsage(hostId, known.boxCapacity, usage, now, known.channelProtocol);
+    const report = reportOf(hostId, usage);
+    this.ctx.storage.sql.exec(
+      `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
+        disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, heard_at = ?8, updated_at = ?8
+      WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR disk_budget_mib != ?5
+        OR disk_held_mib != ?6 OR heard_at < ?8 - ?9)`,
+      hostId,
+      report.memoryBudgetMib,
+      report.memoryHeldMib,
+      report.memoryAvailableMib,
+      report.diskBudgetMib,
+      report.diskHeldMib,
+      report.loadAverage,
+      now,
+      HEARD_REFRESH_MS,
+    );
   }
 
   private runsTurns(hostId: string): boolean {
@@ -1739,8 +1767,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected forgetHostUsage(hostId: string): void {
-    this.liveHosts.delete(hostId);
-    this.forgetUnreportedBoxes(hostId);
+    this.ctx.storage.sql.exec("DELETE FROM host_reports WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
   }
 
@@ -1797,33 +1824,36 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected listHostUsage(tenantId: string): ReportedHostUsage[] {
-    const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
-    const unreported = new Map<string, number>();
-    for (const offer of this.unreportedBoxes.values()) {
-      unreported.set(offer.hostId, (unreported.get(offer.hostId) ?? 0) + offer.boxMemoryMib);
-    }
-    return [...this.liveHosts]
-      .sort(([leftId, left], [rightId, right]) => left.createdAt - right.createdAt || leftId.localeCompare(rightId))
-      .map(([hostId, live]) => ({
-        hostId,
+    return this.ctx.storage.sql
+      .exec<HostReportRow>(
+        `SELECT r.host_id, r.box_capacity, r.channel_protocol, r.memory_budget_mib, r.memory_held_mib,
+          r.memory_available_mib, r.disk_budget_mib, r.disk_held_mib, r.load_average, r.heard_at, r.created_at,
+          COALESCE(b.running, 0) AS boxes_running, COALESCE(b.warm, 0) AS boxes_warm,
+          COALESCE(b.memory_mib, 0) AS boxes_memory_mib
+        FROM host_reports r LEFT JOIN (
+          SELECT s.host_id, SUM(s.state = 'Running') AS running, SUM(s.state IN ('Idle', 'Stopping')) AS warm,
+            SUM(COALESCE(m.box_memory_mib, s.box_memory_mib)) AS memory_mib
+          FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
+          WHERE s.state IN ('Running', 'Idle', 'Stopping') GROUP BY s.host_id
+        ) b ON b.host_id = r.host_id
+        ORDER BY r.created_at, r.host_id`,
+      )
+      .toArray()
+      .map((row) => ({
+        hostId: row.host_id,
         tenantId,
-        boxCapacity: live.boxCapacity,
-        boxesRunning: running.get(hostId) ?? 0,
-        boxesWarm: live.usage.boxesWarm,
-        loadAverage: live.usage.loadAverage,
-        memoryAvailableMib: live.usage.memoryAvailableMib,
-        ...(live.usage.diskBudgetMib === undefined || live.usage.diskHeldMib === undefined
-          ? {}
-          : { diskBudgetMib: live.usage.diskBudgetMib, diskHeldMib: live.usage.diskHeldMib }),
-        ...(live.usage.memoryBudgetMib === undefined || live.usage.memoryHeldMib === undefined
-          ? {}
-          : {
-              memoryBudgetMib: live.usage.memoryBudgetMib,
-              memoryHeldMib: live.usage.memoryHeldMib + (unreported.get(hostId) ?? 0),
-            }),
-        channelProtocol: live.channelProtocol,
-        createdAt: live.createdAt,
-        updatedAt: live.updatedAt,
+        boxCapacity: row.box_capacity,
+        boxesRunning: row.boxes_running,
+        boxesWarm: row.boxes_warm,
+        loadAverage: row.load_average,
+        memoryAvailableMib: row.memory_available_mib,
+        diskBudgetMib: row.disk_budget_mib,
+        diskHeldMib: row.disk_held_mib,
+        memoryBudgetMib: row.memory_budget_mib,
+        memoryHeldMib: Math.max(row.memory_held_mib, row.boxes_memory_mib),
+        channelProtocol: row.channel_protocol,
+        createdAt: row.created_at,
+        updatedAt: row.heard_at,
       }));
   }
 
@@ -3431,7 +3461,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
     const now = Date.now();
-    if (message.reason === "PoolExhausted" && turn.state === "Offered") this.unreportedBoxes.delete(turn.box_id);
     if (message.reason === "HostUpdating" && turn.state === "Offered") {
       await this.offerElsewhere(tenantId, session, turn);
       return null;
@@ -3718,7 +3747,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, ended.lineCount, now);
       const unborn = sessionState === "Idle" && turn.state === "Offered" && this.boxUnborn(turn);
       const entered = unborn ? "Stopped" : sessionState;
-      if (unborn) this.unreportedBoxes.delete(turn.box_id);
       sql.exec(
         "UPDATE sessions SET state = ?, last_line_seq = ?, updated_at = ? WHERE session_id = ?",
         entered,

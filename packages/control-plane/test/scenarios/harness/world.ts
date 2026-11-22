@@ -80,6 +80,7 @@ type TenantOperations = Record<string, (input: never) => unknown>;
 const REPOSITORY = "https://github.com/acme/app";
 
 export const SETTINGS = TEST_SETTINGS;
+export const BUDGETS = { memoryBudgetMib: 30000, memoryHeldMib: 0, diskBudgetMib: 200000, diskHeldMib: 0 };
 
 export const LIMITS: ScenarioLimits = {
   defaultTier: "Configured",
@@ -424,7 +425,7 @@ export class World {
     await this.call("hostHello", {
       hostId,
       boxCapacity: 8,
-      usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+      usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
       now,
       channelProtocol: ChannelProtocol.Version,
     });

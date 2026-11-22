@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { ChannelProtocol, HostFrameSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
-import { type Host, PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
+import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
 const WARM_UPS = 8;
@@ -222,7 +222,7 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   await world.call("hostHello", {
     hostId: host.hostId,
     boxCapacity: 64,
-    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
   });

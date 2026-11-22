@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
 import { D1Database, DurableObjectState, migratedDatabase } from "./harness/runtime.ts";
-import { LIMITS, SETTINGS, TENANT_ID } from "./harness/world.ts";
+import { BUDGETS, LIMITS, SETTINGS, TENANT_ID } from "./harness/world.ts";
 
 type Channel = {
   register(hostId: string, publicKey: string): void;
@@ -14,7 +14,7 @@ const { HostChannel } = (await import(new URL("../../src/host-channel.ts", impor
   HostChannel: new (ctx: never, env: never) => Channel;
 };
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
+const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 
 test("an offer that waits on the tenant while a heartbeat stores the held frames does not bring those frames back, so the next frame keeps the socket open", async () => {
   Object.defineProperty(WebSocket, "READY_STATE_OPEN", { value: WebSocket.OPEN });
