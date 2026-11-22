@@ -14,6 +14,7 @@ export interface ImageAvailability {
 export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
   | { kind: "Unplaceable"; host: Host; reason: "NotHealthy" }
+  | { kind: "Unplaceable"; host: Host; reason: "NotHeard" }
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
   | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
   | { kind: "Unplaceable"; host: Host; reason: "MemoryFull"; usage: ReportedHostUsage; boxMemoryMib: number }
@@ -94,11 +95,7 @@ const assess = (
     return { kind: "Unplaceable", host, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
   const usage = usages.get(host.hostId);
-  if (usage === undefined) {
-    throw new Error(
-      `host ${host.name} (${host.hostId}) is Online but its tenant holds no usage from its Hello; restart tumpel-supervisor run on that host so its Hello carries its usage`,
-    );
-  }
+  if (usage === undefined) return { kind: "Unplaceable", host, reason: "NotHeard" };
   const freeMemory = freeMemoryMib(usage);
   if (freeMemory !== undefined && boxMemoryMib > freeMemory)
     return { kind: "Unplaceable", host, reason: "MemoryFull", usage, boxMemoryMib };

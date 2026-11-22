@@ -36,7 +36,7 @@ import {
 import type { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
-import { linesLost } from "./channel/failure.ts";
+import { hostUnheard, linesLost } from "./channel/failure.ts";
 import type {
   BootImage,
   DispatchConnector,
@@ -1614,7 +1614,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.flushHeldLines(hostId);
     const known = this.liveHosts.get(hostId);
     if (known === undefined) {
-      throw new Error(
+      throw hostUnheard(
         `host ${hostId} reported usage to a tenant that restarted since the host's hello; the host must reconnect so its box capacity is known again`,
       );
     }
