@@ -20,7 +20,9 @@
   ],
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics" }],
   "queues": {
-    "consumers": [{ "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0 }]
+    "consumers": [
+      { "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0, "dead_letter_queue": "tumpel-releases-dlq" }
+    ]
   },
   "vars": {
     "R2_BUCKET_NAME": "tumpel-sessions",
@@ -112,7 +114,14 @@
       ],
       "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics_dev" }],
       "queues": {
-        "consumers": [{ "queue": "tumpel-releases-dev", "max_batch_size": 10, "max_retries": 0 }]
+        "consumers": [
+          {
+            "queue": "tumpel-releases-dev",
+            "max_batch_size": 10,
+            "max_retries": 0,
+            "dead_letter_queue": "tumpel-releases-dev-dlq"
+          }
+        ]
       },
       "vars": {
         "R2_BUCKET_NAME": "tumpel-sessions-dev",

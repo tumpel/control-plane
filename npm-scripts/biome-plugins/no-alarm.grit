@@ -1,5 +1,8 @@
 language js(typescript)
 
-`setAlarm` as $found where {
-  register_diagnostic(span=$found, message="No alarms: send inline, check expiry at read time, and let a failure fail. SessionTimer holds the one setAlarm, excluded in biome.json.", severity="error")
+or {
+  `setAlarm`,
+  JsMethodClassMember(name=`alarm`)
+} as $found where {
+  register_diagnostic(span=$found, message="No alarms: send inline, check expiry at read time, and let a failure fail. SessionTimer holds the one alarm, excluded in biome.json.", severity="error")
 }
