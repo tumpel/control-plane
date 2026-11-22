@@ -124,12 +124,7 @@ export class HostChannel extends DurableObject<Env> {
   async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    const open = this.ctx
-      .getWebSockets()
-      .find(
-        (socket) =>
-          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
-      );
+    const open = this.openSocket();
     if (message.type === "TurnOffer") {
       const refused = await this.offerRefused(host.host_id, open);
       if (refused !== null) return refused;
@@ -138,10 +133,25 @@ export class HostChannel extends DurableObject<Env> {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null));
       return "Sent";
     }
-    const attachment = this.attachment(open);
-    await control.send(attachment.connection, message, this.context(open, host, attachment));
-    this.sent(open, attachment.lastSentAt);
+    const spoken = await control.prepare(message, this.context(null, host, null));
+    const current = this.openSocket();
+    if (current === undefined) {
+      control.sendPrepared({ phase: "Closed" }, message, spoken, this.context(null, host, null));
+      return "Sent";
+    }
+    const attachment = this.attachment(current);
+    control.sendPrepared(attachment.connection, message, spoken, this.context(current, host, attachment));
+    current.serializeAttachment(attachment);
     return "Sent";
+  }
+
+  private openSocket(): WebSocket | undefined {
+    return this.ctx
+      .getWebSockets()
+      .find(
+        (socket) =>
+          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
+      );
   }
 
   private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
@@ -432,11 +442,6 @@ export class HostChannel extends DurableObject<Env> {
     attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, stored.lastReceivedAt);
     attachment.lastSentAt = Math.max(attachment.lastSentAt, stored.lastSentAt);
     socket.serializeAttachment(attachment);
-  }
-
-  private sent(socket: WebSocket, lastSentAt: number): void {
-    const stored = this.attachment(socket);
-    socket.serializeAttachment({ ...stored, lastSentAt: Math.max(stored.lastSentAt, lastSentAt) });
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {

@@ -152,7 +152,7 @@ const verifies = async (publicKey: string, signature: string, bytes: Uint8Array<
   return crypto.subtle.verify({ name: "Ed25519" }, imported, signed, bytes);
 };
 
-const outbound = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
+export const prepare = async (stored: StoredControlMessage, context: ControlContext): Promise<ControlMessage> => {
   if (stored.type === "ClaudeSetupBoxOffer" || stored.type === "ClaudeSetupBoxCode") {
     return (await context.prepareClaudeSetup(stored)).message;
   }
@@ -208,7 +208,25 @@ export const send = async (
     store(message, context);
     return;
   }
-  const spoken = await outbound(message, context);
+  const spoken = await prepare(message, context);
+  context.port.send({ ...store(message, context), message: spoken });
+};
+
+export const sendPrepared = (
+  connection: ControlConnection,
+  message: StoredControlMessage,
+  spoken: ControlMessage,
+  context: ControlContext,
+): void => {
+  if (connection.phase !== "Open") {
+    store(message, context);
+    return;
+  }
+  const nextSeq = context.ledger.load().sent + 1;
+  if (unspoken(connection.protocolVersion, message.type, nextSeq, context) !== null) {
+    store(message, context);
+    return;
+  }
   context.port.send({ ...store(message, context), message: spoken });
 };
 
@@ -248,7 +266,7 @@ const hello = async (
     const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
     if (refused !== null) return refused;
   }
-  const resent = await resend(ledger, (stored) => outbound(stored, context));
+  const resent = await resend(ledger, (stored) => prepare(stored, context));
   context.port.send({
     type: "Welcome",
     hostId: context.host.hostId,
