@@ -435,15 +435,6 @@ export class World {
     this.tenants.restart(TENANT_ID);
   }
 
-  async tenantRowsRead(run: () => Promise<unknown>): Promise<number> {
-    const sql = this.tenantSql();
-    const meter = { rows: 0 };
-    sql.readMeter = meter;
-    await run();
-    sql.readMeter = null;
-    return meter.rows;
-  }
-
   tenantRowsWritten(): number {
     const { ctx } = this.tenants.instance(TENANT_ID) as { ctx: DurableObjectState };
     return ctx.storage.sql.totalRowsWritten();
