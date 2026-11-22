@@ -161,6 +161,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
           usage: USAGE,
+          heldTurnIds: [],
         });
       },
       oldHello: async () => {
@@ -605,6 +606,7 @@ test("only the first heartbeat after Welcome reports the held sessions, once per
     usage: USAGE,
     heldSessionIds,
     heldClaudeSetupIds: [],
+    heldTurnIds: [],
   });
   await first.deliver(beat(["session-1"]));
   await first.deliver(beat([]));

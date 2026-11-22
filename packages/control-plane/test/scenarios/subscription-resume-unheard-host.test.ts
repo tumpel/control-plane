@@ -68,11 +68,13 @@ test("a resumed subscription whose stopped session needs a box, after a tenant r
   const heartbeat = () => world.call("hostUsage", { hostId: host.hostId, usage, now: Date.now() });
   await assert.rejects(heartbeat(), /HostUnheard/);
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
     boxCapacity: 8,
     usage,
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
+    heldTurnIds: [],
   });
   await heartbeat();
   const next = await world.startSession({ prompt: "build part two", tags: [] });

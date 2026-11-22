@@ -116,11 +116,43 @@ export class Host {
   }
 
   async closesSocket(): Promise<void> {
-    this.world.db.sql.exec("UPDATE hosts SET state = 'Offline' WHERE host_id = ?", this.hostId);
+    this.world.db.sql.exec(
+      "UPDATE hosts SET state = 'Offline', updated_at = ? WHERE host_id = ?",
+      Date.now(),
+      this.hostId,
+    );
     await this.world.call("hostPresence", {
       tenantId: TENANT_ID,
       hostId: this.hostId,
       presence: "Offline",
+      now: Date.now(),
+    });
+  }
+
+  async reconnects(heldTurnIds: string[]): Promise<void> {
+    this.world.db.sql.exec(
+      "UPDATE hosts SET state = 'Online', updated_at = ? WHERE host_id = ?",
+      Date.now(),
+      this.hostId,
+    );
+    this.lastHeard = null;
+    await this.world.call("hostHello", {
+      tenantId: TENANT_ID,
+      hostId: this.hostId,
+      boxCapacity: 8,
+      usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+      now: Date.now(),
+      channelProtocol: ChannelProtocol.Version,
+      heldTurnIds,
+    });
+  }
+
+  async heartbeats(heldTurnIds: string[]): Promise<void> {
+    this.lastHeard = null;
+    await this.world.call("reconcileHeldTurns", {
+      tenantId: TENANT_ID,
+      hostId: this.hostId,
+      heldTurnIds,
       now: Date.now(),
     });
   }
@@ -422,11 +454,13 @@ export class World {
       now,
     );
     await this.call("hostHello", {
+      tenantId: TENANT_ID,
       hostId,
       boxCapacity: 8,
       usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
       now,
       channelProtocol: ChannelProtocol.Version,
+      heldTurnIds: [],
     });
     return this.host(hostId);
   }

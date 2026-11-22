@@ -110,12 +110,14 @@ export type ControlEvent =
       protocolVersion: number;
       channelProtocolOldest: Hello["channelProtocolOldest"];
       guestProtocol: Hello["guestProtocol"];
+      heldTurnIds: string[];
     }
-  | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
+  | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth; heldTurnIds: string[] }
   | {
       kind: "FirstHeartbeat";
       usage: HostUsage;
       health: HostReportedHealth;
+      heldTurnIds: string[];
       heldSessionIds: string[];
       heldClaudeSetupIds: string[];
     }
@@ -267,6 +269,7 @@ const hello = async (
       protocolVersion: envelope.protocolVersion,
       channelProtocolOldest: envelope.channelProtocolOldest,
       guestProtocol: envelope.guestProtocol,
+      heldTurnIds: envelope.heldTurnIds,
     },
   };
 };
@@ -338,7 +341,10 @@ export const receive = async (
   if (envelope.type === "Heartbeat") {
     const health = envelope.health ?? "Healthy";
     if (connection.heldReported) {
-      return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
+      return {
+        connection,
+        event: { kind: "Heartbeat", usage: envelope.usage, health, heldTurnIds: envelope.heldTurnIds },
+      };
     }
     return {
       connection: { ...connection, heldReported: true },
@@ -346,6 +352,7 @@ export const receive = async (
         kind: "FirstHeartbeat",
         usage: envelope.usage,
         health,
+        heldTurnIds: envelope.heldTurnIds,
         heldSessionIds: envelope.heldSessionIds,
         heldClaudeSetupIds: envelope.heldClaudeSetupIds,
       },

@@ -604,12 +604,12 @@ const lostTurnDetail = (lost: string): string =>
   `${lost} during the turn; check that its supervisor runs, then send the turn again`;
 
 const lostTurn = (row: TurnRow, lost: LostHosts, failedAt: string): TurnRow => {
-  const detail = row.state === "Running" ? lost.get(row.host_id) : undefined;
+  const detail = IN_FLIGHT.includes(row.state) ? lost.get(row.host_id) : undefined;
   return detail === undefined ? row : { ...row, state: "Failed", reason: "HostOffline", detail, failed_at: failedAt };
 };
 
 const lostSession = (row: SessionViewRow, lost: LostHosts, failedAt: string): SessionViewRow => {
-  const detail = row.last_turn_state === "Running" ? lost.get(row.last_turn_host_id) : undefined;
+  const detail = IN_FLIGHT.includes(row.last_turn_state) ? lost.get(row.last_turn_host_id) : undefined;
   return detail === undefined
     ? row
     : {
@@ -954,7 +954,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         ...IN_FLIGHT,
       )
       .toArray()
-      .filter((row) => !(row.state === "Running" && lost.has(row.host_id)));
+      .filter((row) => !lost.has(row.host_id));
   }
 
   private latestTurn(sessionId: string, state: string | null): TurnRow | null {
@@ -1473,7 +1473,47 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected offerSent(turnId: string): void {
-    this.ctx.storage.sql.exec("UPDATE turns SET offer_sent = 1 WHERE turn_id = ? AND state = 'Offered'", turnId);
+    this.ctx.storage.sql.exec(
+      "UPDATE turns SET offer_sent = 1, unheld_heartbeats = 0 WHERE turn_id = ? AND state = 'Offered'",
+      turnId,
+    );
+  }
+
+  protected async reconcileHeldTurns(
+    tenantId: string,
+    hostId: string,
+    heldTurnIds: string[],
+    report: "Hello" | "Heartbeat",
+    now: number,
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const held = JSON.stringify(heldTurnIds);
+    const heartbeat = report === "Heartbeat" ? 1 : 0;
+    const dropped = sql
+      .exec<{ turn_id: string; state: string }>(
+        `SELECT turn_id, state FROM turns WHERE host_id = ? AND turn_id NOT IN (SELECT value FROM json_each(?))
+        AND (state = 'Running' OR (? = 1 AND state = 'Offered' AND offer_sent = 1 AND unheld_heartbeats = 1))`,
+        hostId,
+        held,
+        heartbeat,
+      )
+      .toArray();
+    if (heartbeat === 1)
+      sql.exec(
+        `UPDATE turns SET unheld_heartbeats = 1 WHERE host_id = ? AND state = 'Offered' AND offer_sent = 1
+        AND unheld_heartbeats = 0 AND turn_id NOT IN (SELECT value FROM json_each(?))`,
+        hostId,
+        held,
+      );
+    if (dropped.length === 0) return;
+    const host = await this.hostName(tenantId, hostId);
+    for (const { turn_id, state } of dropped) {
+      const detail =
+        state === "Running"
+          ? `host ${host} no longer holds the turn it ran, for example after its supervisor restarted, so the turn's work since the last snapshot is gone; send the turn again`
+          : `host ${host} never took the turn's offer by its second heartbeat after the offer was sent, so the turn never ran; check that its supervisor runs, then send the turn again`;
+      await this.failTurn(tenantId, turn_id, "HostDropped", detail, iso(now));
+    }
   }
 
   private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer | null> {
@@ -2753,7 +2793,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private lostTurnFailure(tenantId: string, turnId: string, lost: LostHosts): TurnFailure | null {
     const turn = this.turnRow(turnId);
-    const detail = turn?.state === "Running" ? lost.get(turn.host_id) : undefined;
+    const detail = turn !== null && IN_FLIGHT.includes(turn.state) ? lost.get(turn.host_id) : undefined;
     if (turn === null || detail === undefined) return null;
     const now = Date.now();
     return TurnFailureSchema.parse({
@@ -3153,16 +3193,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return `host ${host} sent nothing for ${settingsOf(this.env).heartbeatDeadlineSeconds} seconds`;
   }
 
-  protected async hostPresence(
-    tenantId: string,
-    hostId: string,
-    presence: "Online" | "Offline",
-    now: number,
-  ): Promise<void> {
+  protected hostPresence(hostId: string, presence: "Online" | "Offline", now: number): void {
     this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
-    if (presence === "Online") return;
-    const host = await this.hostName(tenantId, hostId);
-    await this.failLostHost(tenantId, hostId, `host ${host} went offline`, now);
   }
 
   protected async lostHosts(tenantId: string): Promise<LostHosts> {
@@ -3194,12 +3226,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return host.name;
   }
 
-  private async hostReach(hostId: string): Promise<"Connected" | "Offline" | "Degraded"> {
-    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
+  private async hostReach(hostId: string): Promise<"Connected" | "Lost"> {
+    const row = await this.env.DB.prepare("SELECT state, updated_at FROM hosts WHERE host_id = ?")
       .bind(hostId)
-      .first<{ state: string }>();
-    if (row?.state !== "Online") return "Offline";
-    return (await hostSilent(this.env, hostId)) ? "Degraded" : "Connected";
+      .first<{ state: string; updated_at: number }>();
+    if (row?.state === "Offline")
+      return Date.now() - row.updated_at >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Lost" : "Connected";
+    if (row?.state !== "Online") return "Lost";
+    return (await hostSilent(this.env, hostId)) ? "Lost" : "Connected";
   }
 
   protected async hostMessage(

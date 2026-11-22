@@ -285,12 +285,10 @@ export class HostChannel extends DurableObject<Env> {
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      if (
-        !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
-        this.ledger.stalled() >= RETRY_LIMIT
-      )
-        return this.giveUp(socket, attachment, context);
+      const flushed = await this.flush(host.host_id, event.usage, now, attachment, context);
+      if (!flushed && this.ledger.stalled() >= RETRY_LIMIT) return this.giveUp(socket, attachment, context);
       if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
+      if (flushed) await this.reconcileHeldTurns(host.host_id, event.heldTurnIds, now);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -467,6 +465,12 @@ export class HostChannel extends DurableObject<Env> {
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
     const db = this.env.DB;
+    const away = await db
+      .prepare("SELECT state, updated_at FROM hosts WHERE host_id = ?")
+      .bind(hostId)
+      .first<{ state: string; updated_at: number }>();
+    if (away?.state === "Offline" && now - away.updated_at >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
+      await this.fellSilent(hostId, now - away.updated_at, now);
     const { channelProtocolOldest, guestProtocol } = welcomed;
     await db.batch([
       db
@@ -499,11 +503,13 @@ export class HostChannel extends DurableObject<Env> {
     ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
+      tenantId,
       hostId,
       boxCapacity: welcomed.boxCapacity,
       usage: welcomed.usage,
       now,
       channelProtocol: welcomed.protocolVersion,
+      heldTurnIds: welcomed.heldTurnIds,
     });
   }
 
@@ -582,6 +588,11 @@ export class HostChannel extends DurableObject<Env> {
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
+  }
+
+  private async reconcileHeldTurns(hostId: string, heldTurnIds: string[], now: number): Promise<void> {
+    const tenantId = await this.tenantOf(hostId);
+    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldTurns", { tenantId, hostId, heldTurnIds, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {

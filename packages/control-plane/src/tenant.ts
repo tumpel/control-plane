@@ -592,8 +592,9 @@ export class Tenant extends TenantConnectors {
       this.offerSent(turnId);
       return {};
     },
-    hostHello: ({ hostId, boxCapacity, usage, now, channelProtocol }) => {
+    hostHello: async ({ tenantId, hostId, boxCapacity, usage, now, channelProtocol, heldTurnIds }) => {
       this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
+      await this.reconcileHeldTurns(tenantId, hostId, heldTurnIds, "Hello", now);
       return {};
     },
     hostUsage: async ({ hostId, usage, now }) => {
@@ -611,6 +612,10 @@ export class Tenant extends TenantConnectors {
       );
       return {};
     },
+    reconcileHeldTurns: async ({ tenantId, hostId, heldTurnIds, now }) => {
+      await this.reconcileHeldTurns(tenantId, hostId, heldTurnIds, "Heartbeat", now);
+      return {};
+    },
     forgetHostUsage: ({ hostId }) => {
       this.forgetHostUsage(hostId);
       return {};
@@ -624,8 +629,8 @@ export class Tenant extends TenantConnectors {
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
-    hostPresence: async ({ tenantId, hostId, presence, now }) => {
-      await this.hostPresence(tenantId, hostId, presence, now);
+    hostPresence: async ({ hostId, presence, now }) => {
+      this.hostPresence(hostId, presence, now);
       if (presence === "Offline") {
         await this.failHostClaudeSetups(
           hostId,
