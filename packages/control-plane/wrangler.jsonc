@@ -21,7 +21,7 @@
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "tumpel_metrics" }],
   "queues": {
     "consumers": [
-      { "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0, "dead_letter_queue": "tumpel-releases-dlq" }
+      { "queue": "tumpel-releases", "max_batch_size": 10, "max_retries": 0, "dead_letter_queue": "tumpel-releases-prod-dlq" }
     ]
   },
   "vars": {
