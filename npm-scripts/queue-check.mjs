@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { experimental_readRawConfig } from "wrangler";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -10,7 +10,7 @@ const configs = execFileSync("git", ["ls-files", "--", "packages/*/wrangler.json
   .filter(Boolean);
 
 const consumers = configs.flatMap((file) => {
-  const config = JSON.parse(readFileSync(`${ROOT}${file}`, "utf8"));
+  const config = experimental_readRawConfig({ config: `${ROOT}${file}` }).rawConfig;
   const scopes = [["", config], ...Object.entries(config.env ?? {}).map(([name, env]) => [`env.${name}.`, env])];
   return scopes.flatMap(([prefix, scope]) =>
     (scope.queues?.consumers ?? []).map((consumer) => ({
