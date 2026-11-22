@@ -9,7 +9,7 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "biome check . && node npm-scripts/migration-check.mjs && node npm-scripts/db-schema.mjs --check",
+    "lint": "biome check . && node npm-scripts/queue-check.mjs && node npm-scripts/migration-check.mjs && node npm-scripts/db-schema.mjs --check",
     "fix": "biome check --write .",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
