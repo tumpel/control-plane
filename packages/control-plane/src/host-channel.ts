@@ -262,10 +262,10 @@ export class HostChannel extends DurableObject<Env> {
       this.ledger.take();
       attachment.usage = event.usage;
     }
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
+    if (event.kind === "Heartbeat") attachment.usage = event.usage;
     this.keep(socket, attachment);
     if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
+    if (event.kind === "Heartbeat") {
       await this.reportHealth(host.host_id, event.health);
       if (meter.recovered(now)) {
         await this.setHealth(
@@ -283,12 +283,11 @@ export class HostChannel extends DurableObject<Env> {
     if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
       await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
+    if (event.kind === "Heartbeat") {
       const flushed = await this.flush(host.host_id, event.usage, now, attachment, context);
       if (!flushed && this.ledger.stalled() >= RETRY_LIMIT) return this.giveUp(socket, attachment, context);
       if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
-      if (flushed) await this.reconcileHeldTurns(host.host_id, event.heldTurnIds, now);
+      if (flushed) await this.reconcileHostHoldings(host.host_id, event, now);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -581,18 +580,20 @@ export class HostChannel extends DurableObject<Env> {
     await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
   }
 
-  private async reconcileHeldBoxes(
+  private async reconcileHostHoldings(
     hostId: string,
-    held: { heldSessionIds: string[]; heldClaudeSetupIds: string[] },
+    { heldSessionIds, heldClaudeSetupIds, heldTurnIds }: Extract<control.ControlEvent, { kind: "Heartbeat" }>,
     now: number,
   ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
-  }
-
-  private async reconcileHeldTurns(hostId: string, heldTurnIds: string[], now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldTurns", { tenantId, hostId, heldTurnIds, now });
+    await tenantApi(this.env.TENANT, tenantId).call("reconcileHostHoldings", {
+      tenantId,
+      hostId,
+      heldSessionIds,
+      heldClaudeSetupIds,
+      heldTurnIds,
+      now,
+    });
   }
 
   private async tenantOf(hostId: string): Promise<string> {

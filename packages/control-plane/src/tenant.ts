@@ -601,18 +601,17 @@ export class Tenant extends TenantConnectors {
       await this.hostUsage(hostId, usage, now);
       return {};
     },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
-      await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
-      await this.failHostClaudeSetups(
-        hostId,
-        "NoHostOnline",
-        `host ${hostId} reconnected without the setup's box; start the setup again`,
-        now,
-        heldClaudeSetupIds,
-      );
-      return {};
-    },
-    reconcileHeldTurns: async ({ tenantId, hostId, heldTurnIds, now }) => {
+    reconcileHostHoldings: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, heldTurnIds, now }) => {
+      if (this.firstHoldings(hostId)) {
+        await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+        await this.failHostClaudeSetups(
+          hostId,
+          "NoHostOnline",
+          `host ${hostId} reconnected without the setup's box; start the setup again`,
+          now,
+          heldClaudeSetupIds,
+        );
+      }
       await this.reconcileHeldTurns(tenantId, hostId, heldTurnIds, "Heartbeat", now);
       return {};
     },

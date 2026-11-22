@@ -27,7 +27,6 @@ const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = 
   let connection: control.ControlConnection = {
     phase: "Open",
     protocolVersion: ChannelProtocol.Version,
-    heldReported: true,
   };
   const line = async (seq: number) => {
     const text = JSON.stringify({

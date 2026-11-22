@@ -697,6 +697,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private readonly runningTails = new Map<string, Promise<RunningTail>>();
   private readonly resentTurns = new Set<string>();
   private readonly heardHosts = new Set<string>();
+  private readonly holdingsUnreported = new Set<string>();
   private readonly liveHosts = new Map<string, LiveHost>();
   private readonly unreportedBoxes = new Map<string, { hostId: string; boxMemoryMib: number }>();
   private readonly imageFetches = new Map<string, number>();
@@ -1479,6 +1480,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
   }
 
+  protected firstHoldings(hostId: string): boolean {
+    return this.holdingsUnreported.delete(hostId);
+  }
+
   protected async reconcileHeldTurns(
     tenantId: string,
     hostId: string,
@@ -1623,6 +1628,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): void {
     this.keepHostUsage(hostId, boxCapacity, usage, now, channelProtocol);
     this.heardHosts.add(hostId);
+    this.holdingsUnreported.add(hostId);
     clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 

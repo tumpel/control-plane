@@ -149,9 +149,15 @@ export class Host {
 
   async heartbeats(heldTurnIds: string[]): Promise<void> {
     this.lastHeard = null;
-    await this.world.call("reconcileHeldTurns", {
+    await this.world.call("reconcileHostHoldings", {
       tenantId: TENANT_ID,
       hostId: this.hostId,
+      heldSessionIds: this.world
+        .tenantSql()
+        .exec("SELECT session_id FROM sessions WHERE host_id = ?", this.hostId)
+        .toArray()
+        .map((row) => String(row.session_id)),
+      heldClaudeSetupIds: [],
       heldTurnIds,
       now: Date.now(),
     });
