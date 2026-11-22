@@ -19,6 +19,8 @@ const BYTES_PER_PLACEMENT = DIGEST_BYTES + 8 + 4 + 4 + 4;
 const PACK_NAME_BYTES = 128;
 const LIVE_PAGE = 100;
 export const MAX_PACKS_PER_MANIFEST = 16_384;
+export const MAX_UNNAMED_REUSED_PACKS = 128;
+export const STORE_DELETE_BATCH = 1000;
 export const MAX_INDEX_BYTES = 32 * 1024 * 1024;
 
 export const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
@@ -398,6 +400,11 @@ export class SnapshotManifests {
   }
 }
 
+export type Claim =
+  | { kind: "Claimed" }
+  | { kind: "Gone"; packDigest: string }
+  | { kind: "TooManyUnnamed"; count: number };
+
 export type LiveNames = { has(packDigest: string): boolean; unreadable: string | undefined };
 
 type LiveState = { counts: Map<string, number>; members: Set<string>; unreadable: Map<string, string> };
@@ -457,35 +464,42 @@ export class LivePacks {
     storageKey: string,
     packs: ReadonlySet<string>,
     reused: ReadonlySet<string>,
-  ): Promise<string | null> {
-    return this.turn(async () => {
+  ): Promise<Claim> {
+    return this.turn(async (): Promise<Claim> => {
       const state = await this.loaded(store, tenantId);
       const unnamed = [...reused].sort().filter((packDigest) => !state.counts.has(packDigest));
+      if (unnamed.length > MAX_UNNAMED_REUSED_PACKS) return { kind: "TooManyUnnamed", count: unnamed.length };
       const held = await Promise.all(unnamed.map((packDigest) => store.head(packKey(tenantId, packDigest))));
       const gone = unnamed.find((_, at) => held[at] === null);
-      if (gone !== undefined) return gone;
-      if (state.members.has(storageKey)) return null;
+      if (gone !== undefined) return { kind: "Gone", packDigest: gone };
+      if (state.members.has(storageKey)) return { kind: "Claimed" };
       counted(state, storageKey, packs);
       await this.persist(store, tenantId, state);
-      return null;
+      return { kind: "Claimed" };
     });
   }
 
-  release(
-    store: R2Bucket,
-    tenantId: string,
-    storageKeys: string[],
-    freedPacks: (packDigests: string[]) => Promise<void>,
-  ): Promise<void> {
+  release(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<void> {
     return this.turn(async () => {
-      const freed = await this.released(store, tenantId, storageKeys).catch((error: unknown) => {
-        this.state = null;
-        console.error(
-          `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
-        );
-        return [];
-      });
-      await freedPacks(freed);
+      const freed = await this.unclaimed(store, tenantId, storageKeys);
+      const keys = freed.map((packDigest) => packKey(tenantId, packDigest));
+      for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
+        await store.delete(keys.slice(start, start + STORE_DELETE_BATCH));
+      }
+    });
+  }
+
+  async unclaim(store: R2Bucket, tenantId: string, storageKey: string): Promise<void> {
+    await this.turn(() => this.unclaimed(store, tenantId, [storageKey]));
+  }
+
+  private unclaimed(store: R2Bucket, tenantId: string, storageKeys: string[]): Promise<string[]> {
+    return this.released(store, tenantId, storageKeys).catch((error: unknown) => {
+      this.state = null;
+      console.error(
+        `tenant ${tenantId} could not release snapshots ${storageKeys.join(", ")} from its live pack names, so they are rebuilt from the snapshots table on next use: ${errorOf(error).message}`,
+      );
+      return [];
     });
   }
 

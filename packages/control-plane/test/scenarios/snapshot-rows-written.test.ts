@@ -17,6 +17,7 @@ const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_ROOT_PLACEMENTS = 700_000;
+const MAX_UNNAMED_REUSED_PACKS = 128;
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 type ManifestsModule = {
@@ -456,10 +457,10 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
   });
 });
 
-test("a snapshot that reuses a pack an unstored snapshot uploaded is stored while object storage holds the pack", async () => {
-  await inWorld(async (world, host) => {
+const reusesUnstoredPacks = (packs: number): Promise<{ state: string; detail?: string }[]> =>
+  inWorld(async (world, host) => {
     await world.holdsAgentCredentials();
-    const chunks = tree(DIGESTS_PER_PART, "uploaded before the host went offline");
+    const chunks = tree(packs * DIGESTS_PER_PART, "uploaded before the host went offline");
     const session = await world.startSession({ prompt: "build the tree", tags: [] });
     const offer = host.takeOffer();
     await host.claims(offer);
@@ -479,12 +480,22 @@ test("a snapshot that reuses a pack an unstored snapshot uploaded is stored whil
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
-    assert.deepEqual(
-      snapshots.map((snapshot) => snapshot.outcome.state),
-      ["Failed", "Stored"],
-      JSON.stringify(snapshots),
-    );
+    return snapshots.map((snapshot) => ({ state: snapshot.outcome.state, detail: snapshot.outcome.detail }));
   });
+
+test("a snapshot that reuses packs an unstored snapshot uploaded is stored while object storage holds them", async () => {
+  const outcomes = await reusesUnstoredPacks(MAX_UNNAMED_REUSED_PACKS);
+  assert.deepEqual(
+    outcomes.map((outcome) => outcome.state),
+    ["Failed", "Stored"],
+    JSON.stringify(outcomes),
+  );
+});
+
+test("a snapshot that reuses more unnamed packs than the control plane checks is rejected, naming the count", async () => {
+  const outcomes = await reusesUnstoredPacks(MAX_UNNAMED_REUSED_PACKS + 1);
+  assert.equal(outcomes[1]?.state, "Failed");
+  assert.match(outcomes[1]?.detail ?? "", new RegExp(`reuses ${MAX_UNNAMED_REUSED_PACKS + 1} packs`));
 });
 
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {

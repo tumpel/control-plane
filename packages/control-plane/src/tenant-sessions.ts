@@ -107,11 +107,13 @@ import {
   LivePacks,
   MAX_INDEX_BYTES,
   MAX_PACKS_PER_MANIFEST,
+  MAX_UNNAMED_REUSED_PACKS,
   type ManifestRead,
   packKey,
   packListKey,
   type SnapshotIndex,
   SnapshotManifests,
+  STORE_DELETE_BATCH,
 } from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
@@ -452,7 +454,6 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
 const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
-const STORE_DELETE_BATCH = 1000;
 
 export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
@@ -2371,7 +2372,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.env.STORE,
       tenantId,
       stored.map((snapshot) => snapshot.storage_key),
-      (freed) => this.deleteFreedPacks(tenantId, freed),
     );
     await this.deleteObjects([...keys, ...this.objectKeys(stored)]);
     this.ctx.storage.transactionSync(() => {
@@ -2412,7 +2412,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.env.STORE,
       tenantId,
       older.map((snapshot) => snapshot.storage_key),
-      (freed) => this.deleteFreedPacks(tenantId, freed),
     );
     await this.deleteObjects([...this.objectKeys(older), ...failed]);
     this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
@@ -2428,10 +2427,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private objectKeys(snapshots: { storage_key: string }[]): string[] {
     return snapshots.flatMap((snapshot) => [snapshot.storage_key, packListKey(snapshot.storage_key)]);
-  }
-
-  private deleteFreedPacks(tenantId: string, packDigests: string[]): Promise<void> {
-    return this.deleteObjects(packDigests.map((packDigest) => packKey(tenantId, packDigest)));
   }
 
   private async deleteObjects(keys: string[]): Promise<void> {
@@ -3866,22 +3861,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const reused = new Set(
       [...checked.packs].filter((packDigest) => !uploaded.has(packDigest) && !checked.rootPacks.has(packDigest)),
     );
-    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs, reused).then(
-      (gone) => ({ gone }),
-      (error: unknown) => ({ failed: storageFailed(error) }),
-    );
-    if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
-    if (claimed.gone !== null) {
+    const claimed = await this.live
+      .claim(this.env.STORE, tenantId, request.storage_key, checked.packs, reused)
+      .catch((error: unknown) => ({ kind: "Failed" as const, detail: storageFailed(error) }));
+    if (claimed.kind === "Failed") return { kind: "Rejected", detail: claimed.detail };
+    if (claimed.kind === "Gone") {
       return {
         kind: "Rejected",
-        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which object storage no longer holds, so the session keeps its previous snapshot`,
+        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.packDigest}, which object storage no longer holds, so the session keeps its previous snapshot`,
+      };
+    }
+    if (claimed.kind === "TooManyUnnamed") {
+      return {
+        kind: "Rejected",
+        detail: `snapshot ${request.snapshot_id} reuses ${claimed.count} packs that no stored snapshot names, above the ${MAX_UNNAMED_REUSED_PACKS} the control plane checks in object storage, so the session keeps its previous snapshot`,
       };
     }
     const [stillPending] = this.ctx.storage.sql
       .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
       .toArray();
     if (stillPending === undefined) {
-      await this.live.release(this.env.STORE, tenantId, [request.storage_key], () => Promise.resolve());
+      await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
       return { kind: "Answered" };
     }
     return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes, ended) };
