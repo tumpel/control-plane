@@ -86,7 +86,6 @@ import {
   TriggerPathSchema,
   TurnPathSchema,
   TurnSendSchema,
-  TurnWaitQuerySchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
@@ -104,7 +103,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\n5. For a long job, such as working through a list of issues, start a session, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\n6. To start a session whenever something happens on GitHub, such as a pull request leaving draft, a push, a commit status or a label on an issue, create a trigger with tumpel_trigger_create: the event type, conditions on the webhook payload, a persona, a model and a prompt with {{field}} placeholders. Check it first on a sample payload with tumpel_trigger_test. Tumpel only listens, so the prompt tells the session how to report back. Only an Owner creates, changes or deletes a trigger; an agent inside a tumpel box tells its person instead.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, then ends its turn: crew events wake it, so it never sleeps or polls inside a turn. It keeps each crew task small enough to finish well inside the turn limit, and when a crew turn ends TurnTimedOut it splits the work and resends it. It arms auto-merge on a crew pull request only after the review has passed, unless the repository ruleset requires the review check. It pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
+  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true follows the turn, and tumpel_turn_get reads its state; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box. Never wait for a turn inside your own turn: end your turn and let a subscription event wake you when it ends.\n5. For a long job, such as working through a list of issues, start a session, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\n6. To start a session whenever something happens on GitHub, such as a pull request leaving draft, a push, a commit status or a label on an issue, create a trigger with tumpel_trigger_create: the event type, conditions on the webhook payload, a persona, a model and a prompt with {{field}} placeholders. Check it first on a sample payload with tumpel_trigger_test. Tumpel only listens, so the prompt tells the session how to report back. Only an Owner creates, changes or deletes a trigger; an agent inside a tumpel box tells its person instead.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, then ends its turn: crew events wake it, so it never sleeps or polls inside a turn. It keeps each crew task small enough to finish well inside the turn limit, and when a crew turn ends TurnTimedOut it splits the work and resends it. It arms auto-merge on a crew pull request only after the review has passed, unless the repository ruleset requires the review check. It pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -959,13 +958,6 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/turns/{turnId}",
     TurnPathSchema,
     "Read one turn; state is Offered, Running, Completed or Failed.",
-  ),
-  rest(
-    "tumpel_turn_wait",
-    "GET",
-    "/v1/turns/wait",
-    TurnWaitQuerySchema,
-    "Wait on up to 50 turns of any of the tenant's sessions until the first one is Completed or Failed, or until timeoutSeconds (at most 50) pass; answers at once when one has already ended. Returns every turn in the order asked, with its state, and a Failed turn with its failure {reason, detail}. Call it again with the turns still Offered or Running to wait on. Refused NotFound, naming the turn, when a turnId names no turn of the tenant.",
   ),
   rest(
     "tumpel_events_wait",

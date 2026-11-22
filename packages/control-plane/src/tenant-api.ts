@@ -223,8 +223,6 @@ import {
   UpdateSecretSetResultSchema,
   UpdateTriggerInputSchema,
   UpdateTriggerResultSchema,
-  WaitTurnsInputSchema,
-  WaitTurnsResultSchema,
   WriteClaudeSetupTokenInputSchema,
   WriteClaudeSetupTokenResultSchema,
 } from "@tumpel/schemas";
@@ -322,7 +320,6 @@ export const TENANT_OPERATIONS = {
   listSessions: { input: ListSessionsInputSchema, result: ListSessionsResultSchema },
   listTurns: { input: ListTurnsInputSchema, result: ListTurnsResultSchema },
   getTurn: { input: GetTurnInputSchema, result: GetTurnResultSchema },
-  waitTurns: { input: WaitTurnsInputSchema, result: WaitTurnsResultSchema },
   listEvents: { input: ListEventsInputSchema, result: ListEventsResultSchema },
   listPushSubscriptions: { input: ListPushSubscriptionsInputSchema, result: ListPushSubscriptionsResultSchema },
   createPushSubscription: { input: CreatePushSubscriptionInputSchema, result: CreatePushSubscriptionResultSchema },

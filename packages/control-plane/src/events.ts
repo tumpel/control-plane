@@ -40,29 +40,6 @@ const subscriptionOf = (caller: Caller, query: EventQuery, cursor: number): Subs
 const openChannel = (env: Env, subscription: Subscription): Promise<Response> =>
   env.EVENTS.getByName(subscription.tenantId).fetch(channelUrl(subscription), { headers: { upgrade: "websocket" } });
 
-export const waitOnChannel = async (
-  env: Env,
-  subscription: Subscription,
-  waitSeconds: number,
-  wanted: (event: Record<string, unknown>) => boolean,
-): Promise<void> => {
-  const { webSocket } = await openChannel(env, subscription);
-  if (webSocket === null) throw new Error(`the event channel of tenant ${subscription.tenantId} answered no WebSocket`);
-  webSocket.accept();
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, waitSeconds * 1000);
-    const done = (): void => {
-      clearTimeout(timer);
-      resolve();
-    };
-    webSocket.addEventListener("message", (message) => {
-      if (wanted(JSON.parse(String(message.data)) as Record<string, unknown>)) done();
-    });
-    webSocket.addEventListener("close", done);
-  });
-  webSocket.close(1000, "the long poll ended");
-};
-
 export const listEvents = async (env: Env, caller: Caller, query: EventQuery): Promise<Response> => {
   const first = await read(env, caller, query, query.afterEventId ?? null);
   if (first.kind === "Expired") return first.response;

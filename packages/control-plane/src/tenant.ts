@@ -566,10 +566,6 @@ export class Tenant extends TenantConnectors {
       await this.failSilentHosts(tenantId, Date.now());
       return { turn: this.getTurn(tenantId, turnId) };
     },
-    waitTurns: async ({ tenantId, turnIds }) => {
-      await this.failSilentHosts(tenantId, Date.now());
-      return { waited: this.readTurns(tenantId, turnIds) };
-    },
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),

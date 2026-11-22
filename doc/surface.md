@@ -143,7 +143,6 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_listSteers`                       | `tumpel_turn_list_steers`                    | `tumpel turn list-steers`                    |
 | `Turns_send`                             | `tumpel_turn_send`                           | `tumpel turn send`                           |
 | `Turns_steer`                            | `tumpel_turn_steer`                          | `tumpel turn steer`                          |
-| `Turns_wait`                             | `tumpel_turn_wait`                           | `tumpel turn wait`                           |
 
 CLI only: tenant operations with a CLI command and no MCP tool:
 

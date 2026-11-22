@@ -229,8 +229,6 @@ export type Stop =
   | { kind: "CancelUnspoken"; turnId: string; host: string }
   | { kind: "Archived" };
 
-export type WaitedTurns = { kind: "Read"; turns: Turn[] } | { kind: "NotFound"; turnId: string };
-
 export type Archive =
   | { kind: "Archived"; session: Session }
   | { kind: "NotFound" }
@@ -2779,17 +2777,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
     });
-  }
-
-  protected readTurns(tenantId: string, turnIds: string[]): WaitedTurns {
-    const missing = turnIds.find((turnId) => this.turnRow(turnId) === null);
-    if (missing !== undefined) return { kind: "NotFound", turnId: missing };
-    const turns = turnIds.map((turnId) => {
-      const turn = this.getTurn(tenantId, turnId);
-      if (turn === null) throw new Error(`turn ${turnId} vanished while the read collected it`);
-      return turn;
-    });
-    return { kind: "Read", turns };
   }
 
   protected getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {

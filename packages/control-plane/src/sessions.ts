@@ -14,13 +14,11 @@ import {
   TranscriptQuerySchema,
   TurnPathSchema,
   TurnSendSchema,
-  TurnWaitQuerySchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { compactorOf } from "./compact.ts";
 import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
-import { waitOnChannel } from "./events.ts";
 import { githubRepository, notARepository, readIssue, repositoryUrl } from "./github.ts";
 import {
   GOAL_FOLDS,
@@ -736,40 +734,6 @@ export const listSteers = async (env: Env, caller: Caller, turnId: string): Prom
   return steers === null ? turnNotFound(turnId) : ok(steers);
 };
 
-export const waitTurns = async (
-  env: Env,
-  caller: Caller,
-  turnIds: string[],
-  timeoutSeconds: number,
-): Promise<Outcome<Turn[]>> => {
-  const tenant = tenantOf(env, caller);
-  const { tenantId } = caller;
-  const { listed } = await tenant.call("listEvents", {
-    tenantId,
-    afterEventId: null,
-    triggerId: null,
-    events: [],
-    sessionId: null,
-  });
-  if (listed.kind !== "Read") throw new Error(`tenant ${tenantId} refused a read from the end of its event log`);
-  const read = () => tenant.call("waitTurns", { tenantId, turnIds, timeoutSeconds: 0 });
-  const first = (await read()).waited;
-  if (first.kind === "NotFound") return turnNotFound(first.turnId);
-  if (timeoutSeconds === 0 || first.turns.some((turn) => !IN_FLIGHT_TURNS.includes(turn.state))) return ok(first.turns);
-  const subscription = {
-    tenantId,
-    cursor: listed.page.lastEventId,
-    events: ["TurnCompleted" as const, "TurnFailed" as const],
-    sessionId: null,
-    triggerId: null,
-  };
-  await waitOnChannel(env, subscription, timeoutSeconds, (event) => turnIds.includes(String(event.turnId)));
-  const next = (await read()).waited;
-  return next.kind === "Read" ? ok(next.turns) : turnNotFound(next.turnId);
-};
-
-const IN_FLIGHT_TURNS: readonly string[] = ["Offered", "Running"];
-
 export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): Promise<Outcome<TurnFailure>> => {
   const tenant = tenantOf(env, caller);
   const { failure } = await tenant.call("getTurnFailure", { tenantId: caller.tenantId, turnId });
@@ -951,7 +915,6 @@ const SESSION_POSTS = ["/turns", "/stop", "/archive"];
 const SESSION_TAG_METHODS = ["PUT", "PATCH"];
 const FROM_ISSUE_PATH = "/v1/sessions/from-issue";
 const TURN_PATH = /^\/v1\/turns\/([^/]+)(\/failure|\/cancel|\/steers)?$/;
-const TURN_WAIT_PATH = "/v1/turns/wait";
 const SNAPSHOT_PATH = /^\/v1\/snapshots\/([^/]+)$/;
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
@@ -1046,14 +1009,6 @@ export const handleSessions = async (
   }
   if (session?.[1] !== undefined) {
     return sessionRoute(request, url, env, caller, decodeURIComponent(session[1]), session[2]);
-  }
-  if (pathname === TURN_WAIT_PATH) {
-    const query = TurnWaitQuerySchema.safeParse({
-      ...queryOf(url, ["timeoutSeconds"]),
-      turnId: url.searchParams.getAll("turnId"),
-    });
-    if (!query.success) return invalidQuery("turns.wait", query.error);
-    return answer(await waitTurns(env, caller, query.data.turnId, query.data.timeoutSeconds));
   }
   if (turn?.[1] !== undefined) {
     const raw = decodeURIComponent(turn[1]);
