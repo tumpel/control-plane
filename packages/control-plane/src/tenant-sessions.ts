@@ -1270,9 +1270,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.offering.add(turn.turn_id);
     await this.armOffer(tenantId, session, turn)
       .then((offer) => (offer === null ? null : this.host(session.host_id).send(offer)))
-      .then((sent) => {
-        if (sent === "Sent") this.offerSent(turn.turn_id);
-      })
+      .then((sent) => (sent === null ? undefined : this.sendSettled(tenantId, turn.turn_id, session.host_id, sent)))
       .catch((error: unknown) =>
         this.failTurn(
           tenantId,
@@ -1421,8 +1419,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state === "Idle") {
       const handoff = await this.offerElsewhere(tenantId, move(session.host_id, session.box_id), turn);
       if (handoff === null) return;
-      if ((await this.host(handoff.hostId).send(handoff.offer)) === "Sent") this.offerSent(turnId);
-      return;
+      return this.sendSettled(tenantId, turnId, handoff.hostId, await this.host(handoff.hostId).send(handoff.offer));
     }
     if (session.state !== "Stopped") return;
     const hosts = await listHosts(this.env, tenantId);
@@ -1457,6 +1454,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (this.sessionRow(sessionId)?.state === "Stopping") return;
     const next = this.nextQueued(sessionId);
     if (next !== null) await this.runQueued(tenantId, next);
+  }
+
+  private async sendSettled(
+    tenantId: string,
+    turnId: string,
+    hostId: string,
+    sent: "Sent" | "Deferred",
+  ): Promise<void> {
+    if (sent === "Sent") return this.offerSent(turnId);
+    const host = await this.hostName(tenantId, hostId);
+    await this.failTurn(
+      tenantId,
+      turnId,
+      "RateLimited",
+      `host ${host} is rate limited and takes no offers, so the turn never reached it; send the turn again once its health recovers`,
+      iso(Date.now()),
+    );
   }
 
   protected offerSent(turnId: string): void {
@@ -2101,7 +2115,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     listed: readonly HostRecord[],
   ): Promise<TurnHandoff | null> {
     const now = Date.now();
-    const stay = (): null => null;
     const movable = this.unsnapshottedTurns(session.session_id).length === 0;
     const prebuild = this.hostPrebuild(session.session_id) !== null;
     const hosts = listed.filter(
@@ -2110,7 +2123,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
         (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
     );
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
-    if (image.kind === "ReleaseUnreadable") return stay();
+    if (image.kind === "ReleaseUnreadable") {
+      await this.failTurn(tenantId, turn.turn_id, "ImageNotReleased", image.detail, iso(now));
+      return null;
+    }
     const usages = this.listHostUsage(tenantId).map((usage) =>
       usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
     );
@@ -2122,7 +2138,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.usesConnectors(session.session_id),
       this.heldBoxes().filter((each) => each.sessionId !== session.session_id),
     );
-    if (placement.kind === "Refused") return stay();
+    if (placement.kind === "Refused") {
+      const healthy = !degradedOnly(placement.hosts);
+      const detail = `no host of your tenant ${healthy ? "has room for" : "is healthy enough to take"} the turn: ${placement.hosts.map(why).join(", ")}`;
+      await this.failTurn(tenantId, turn.turn_id, healthy ? "PoolExhausted" : "HostDegraded", detail, iso(now));
+      return null;
+    }
     if (placement.host.hostId === session.host_id) {
       if (placement.evict.length > 0) return this.evictFirst(tenantId, session, turn, placement.evict);
       const offer = await this.armOffer(tenantId, session, turn);
@@ -3450,19 +3471,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
     const now = Date.now();
-    if (message.reason === "PoolExhausted" && turn.state === "Offered") {
-      this.unreportedBoxes.delete(turn.box_id);
-      this.ctx.storage.sql.exec(
-        `INSERT INTO turn_refusals (turn_id, host_id, detail, refused_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id, detail = excluded.detail, refused_at = excluded.refused_at`,
-        turn.turn_id,
-        hostId,
-        message.detail,
-        now,
-      );
-      this.ctx.storage.sql.exec("UPDATE turns SET offer_sent = 0 WHERE turn_id = ?", turn.turn_id);
-      return null;
-    }
+    if (message.reason === "PoolExhausted" && turn.state === "Offered") this.unreportedBoxes.delete(turn.box_id);
     if (message.reason === "HostUpdating" && turn.state === "Offered")
       return this.offerElsewhere(tenantId, session, turn);
     const handedOver =

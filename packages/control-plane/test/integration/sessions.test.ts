@@ -3233,36 +3233,6 @@ suite("sessions", { concurrency: 8 }, () => {
     for (const side of sides.values()) side.close();
   });
 
-  test("a turn the only host refuses HostUpdating stays Offered and is claimed after the host's next Hello", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("updating-only");
-    const swapping = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during a swap" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal((await swapping.next("TurnOffer")).turnId, turn.turnId);
-    swapping.send({
-      type: "TurnFailed",
-      turnId: turn.turnId,
-      reason: "HostUpdating",
-      detail: "this host is swapping to a new supervisor binary",
-      failedAt: new Date().toISOString(),
-    });
-    swapping.close();
-    await hostState(only.id, "Offline");
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
-    const swapped = await connect(only.id, only.key, 32, swapping.carried());
-    const offer = await swapped.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    swapped.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await swapped.next("TurnClaimed")).turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
-    swapped.close();
-  });
-
   test("a claimed turn whose box a handover keeps warm is offered again to the same host in the same box, not to another host", async () => {
     const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
     const first = await enrol("handover-1");
@@ -3452,93 +3422,28 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal((await host.next("TurnOffer")).boxMemoryMib, 512);
   });
 
-  test("a turn the only host keeps refusing PoolExhausted ends Undelivered at its first offer's deadline, naming the refusal", async () => {
+  test("a turn the only host refuses PoolExhausted fails at once, naming the refusal", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "never fits" }, bearer);
     assert.equal(response.status, 200, await response.clone().text());
-    const { session, turn } = StartedSessionSchema.parse(await response.json());
-    await tenantSql(
-      session.tenantId,
-      "UPDATE turns SET created_at = ? WHERE turn_id = ?",
-      Date.now() - (SETTINGS.turnTotalBudgetSeconds - 2) * 1000,
-      turn.turnId,
-    );
+    const { turn } = StartedSessionSchema.parse(await response.json());
     const refusal =
       "this host gives box disks 70000 MiB, its 80000 MiB of free disk and the 0 MiB its boxes wrote less the 10000 MiB it keeps free; its 2 boxes hold 65536 MiB of it, so a box disk of 32768 MiB does not fit; free disk on the host, or lower the persona's boxDiskMib";
-    const refuse = (turnId: string): void =>
-      host.send({
-        type: "TurnFailed",
-        turnId,
-        reason: "PoolExhausted",
-        detail: refusal,
-        failedAt: new Date().toISOString(),
-      });
-    refuse((await host.next("TurnOffer")).turnId);
-    refuse((await host.next("TurnOffer")).turnId);
+    host.send({
+      type: "TurnFailed",
+      turnId: (await host.next("TurnOffer")).turnId,
+      reason: "PoolExhausted",
+      detail: refusal,
+      failedAt: new Date().toISOString(),
+    });
     await until(
       "the turn reading Failed",
       () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
       (read) => read.state === "Failed",
     );
     const failure = await getJson(`/v1/turns/${turn.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "Undelivered");
-    assert.ok(failure.detail.endsWith(`last refused it: ${refusal}`), failure.detail);
-  });
-
-  test("a turn a host refuses PoolExhausted goes to an idle host on the refusing host's next heartbeat, in a new box", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "too big here" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { session, turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal(session.hostId, hostId);
-    const idle = await enrol("idle-host");
-    const idleSide = await connect(idle.id, idle.key, 32);
-    await hostState(idle.id, "Online");
-    const offer = await host.next("TurnOffer");
-    host.send({
-      type: "TurnFailed",
-      turnId: offer.turnId,
-      reason: "PoolExhausted",
-      detail:
-        "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
-      failedAt: new Date().toISOString(),
-    });
-    const moved = await idleSide.next("TurnOffer");
-    assert.equal(moved.turnId, turn.turnId);
-    assert.notEqual(moved.boxId, offer.boxId);
-    const read = await getJson(`/v1/sessions/${session.sessionId}`, SessionSchema);
-    assert.deepEqual({ hostId: read.hostId, boxId: read.boxId }, { hostId: idle.id, boxId: moved.boxId });
-    idleSide.send({ type: "TurnClaim", turnId: moved.turnId, boxId: moved.boxId });
-    assert.equal((await idleSide.next("TurnClaimed")).turnId, turn.turnId);
-    idleSide.close();
-  });
-
-  test("a turn the only host refuses PoolExhausted stays Offered and is offered again on a later heartbeat", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("short-of-memory");
-    const side = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "under pressure" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal((await side.next("TurnOffer")).turnId, turn.turnId);
-    side.send({
-      type: "TurnFailed",
-      turnId: turn.turnId,
-      reason: "PoolExhausted",
-      detail:
-        "this host has 2048 MiB of memory available and keeps 14848 MiB of it free, so a box of 4096 MiB does not fit now",
-      failedAt: new Date().toISOString(),
-    });
-    const offer = await side.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Offered");
-    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
-    side.close();
+    assert.equal(failure.reason, "PoolExhausted");
+    assert.match(failure.detail, /a box disk of 32768 MiB does not fit/);
   });
 
   test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
@@ -3882,40 +3787,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     assert.deepEqual(await host.next("TurnWithdrawn"), { type: "TurnWithdrawn", turnId: offer.turnId });
     assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Completed");
-  });
-
-  test("a turn the only host refuses HostUpdating is offered again when its swap fails", async () => {
-    const { bearer, host, hostId, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("update-fails");
-    const side = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "swap fails" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { turn } = StartedSessionSchema.parse(await response.json());
-    assert.equal((await side.next("TurnOffer")).turnId, turn.turnId);
-    side.send({
-      type: "TurnFailed",
-      turnId: turn.turnId,
-      reason: "HostUpdating",
-      detail: "this host is swapping to a new supervisor binary",
-      failedAt: new Date().toISOString(),
-    });
-    side.send({
-      type: "SupervisorUpdateFailed",
-      fromSha256: "a".repeat(64),
-      toSha256: "b".repeat(64),
-      reason: "SupervisorUpdateSwapFailed",
-      detail: "renaming the candidate over the binary failed",
-      outputTail: [],
-      failedAt: new Date().toISOString(),
-    });
-    const offer = await side.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await side.next("TurnClaimed")).turnId, turn.turnId);
-    side.close();
   });
 
   test("a turn sent while the only host restarts for an update waits in its channel and is claimed after its Hello", async () => {

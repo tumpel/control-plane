@@ -122,7 +122,13 @@ export type ControlEvent =
       guestProtocol: Hello["guestProtocol"];
     }
   | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
-  | { kind: "FirstHeartbeat"; usage: HostUsage; health: HostReportedHealth; heldSessionIds: string[] }
+  | {
+      kind: "FirstHeartbeat";
+      usage: HostUsage;
+      health: HostReportedHealth;
+      heldSessionIds: string[];
+      heldClaudeSetupIds?: string[];
+    }
   | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "FrameRateLimited"; seq: number; reason: string }
@@ -355,7 +361,13 @@ export const receive = async (
     }
     return {
       connection: { ...connection, heldReported: true },
-      event: { kind: "FirstHeartbeat", usage: envelope.usage, health, heldSessionIds: envelope.heldSessionIds },
+      event: {
+        kind: "FirstHeartbeat",
+        usage: envelope.usage,
+        health,
+        heldSessionIds: envelope.heldSessionIds,
+        ...(envelope.heldClaudeSetupIds === undefined ? {} : { heldClaudeSetupIds: envelope.heldClaudeSetupIds }),
+      },
     };
   }
   const needed = HOST_MESSAGE_VERSIONS[envelope.message.type];

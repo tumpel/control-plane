@@ -547,12 +547,12 @@ export class World {
     });
   }
 
-  async sendTurn(sessionId: string, prompt: string): Promise<void> {
+  async sendTurn(sessionId: string, prompt: string): Promise<{ turnId: string }> {
     const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
       "hosts.ts",
       "listHosts",
     );
-    z.object({ sent: z.object({ kind: z.literal("Sent") }) }).parse(
+    return z.object({ sent: z.object({ kind: z.literal("Sent"), turn: z.object({ turnId: z.string() }) }) }).parse(
       await this.call("sendTurn", {
         tenantId: TENANT_ID,
         sessionId,
@@ -560,7 +560,7 @@ export class World {
         hosts: await listHosts(this.env, TENANT_ID),
         now: Date.now(),
       }),
-    );
+    ).sent.turn;
   }
 
   async session(sessionId: string): Promise<Session> {

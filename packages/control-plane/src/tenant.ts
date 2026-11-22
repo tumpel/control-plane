@@ -622,8 +622,17 @@ export class Tenant extends TenantConnectors {
       await this.hostUsage(hostId, usage, now);
       return {};
     },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, now }) => {
+    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
       await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
+      if (heldClaudeSetupIds !== undefined) {
+        await this.failHostClaudeSetups(
+          hostId,
+          "NoHostOnline",
+          `host ${hostId} reconnected without the setup's box; start the setup again`,
+          now,
+          heldClaudeSetupIds,
+        );
+      }
       return {};
     },
     forgetHostUsage: ({ hostId }) => {

@@ -238,14 +238,13 @@ export class HostChannel extends DurableObject<Env> {
     if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
       await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
+    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
       if (
         !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
         this.ledger.stalled() >= RETRY_LIMIT
       )
         return this.giveUp(socket, attachment, context);
-      await this.sendDeferredOffers(host.host_id, attachment, context);
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -368,7 +367,6 @@ export class HostChannel extends DurableObject<Env> {
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
     if (reply === null) return;
     if (reply.type === "TurnHandoff") {
       const sent = await this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
@@ -525,9 +523,13 @@ export class HostChannel extends DurableObject<Env> {
     await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
   }
 
-  private async reconcileHeldBoxes(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
+  private async reconcileHeldBoxes(
+    hostId: string,
+    held: { heldSessionIds: string[]; heldClaudeSetupIds?: string[] },
+    now: number,
+  ): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, heldSessionIds, now });
+    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {
