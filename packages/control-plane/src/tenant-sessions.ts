@@ -1733,7 +1733,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const held = JSON.stringify(heldSessionIds);
     const gone = this.ctx.storage.sql
       .exec<{ session_id: string }>(
-        "UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state = 'Idle' AND session_id NOT IN (SELECT value FROM json_each(?)) RETURNING session_id",
+        `UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND session_id NOT IN (SELECT value FROM json_each(?))
+          AND (state = 'Idle' OR (state = 'Stopping' AND session_id NOT IN (SELECT session_id FROM snapshot_requests)))
+        RETURNING session_id`,
         now,
         hostId,
         held,
@@ -1741,11 +1743,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     for (const { session_id } of gone) this.sessionEntered(session_id, "Stopped", now);
     for (const { session_id } of gone) await this.evictionSettled(tenantId, session_id);
-    await this.failGoneSnapshots(tenantId, hostId, held, now);
-    await this.offerRoomed(tenantId, hostId);
-  }
-
-  private async failGoneSnapshots(tenantId: string, hostId: string, held: string, now: number): Promise<void> {
     const requests = this.ctx.storage.sql
       .exec<SnapshotRequestRow>(
         `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
@@ -1755,17 +1752,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
         held,
       )
       .toArray();
-    if (requests.length === 0) return;
-    const host = await this.hostName(tenantId, hostId);
-    const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
-    for (const request of requests) {
-      this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
-      await this.snapshotNotStored(tenantId, request, detail);
-      const session = this.sessionRow(request.session_id);
-      if (session === null) continue;
-      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
-      await this.prebuildUnstored(session, detail);
+    if (requests.length > 0) {
+      const host = await this.hostName(tenantId, hostId);
+      const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
+      for (const request of requests) {
+        this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
+        await this.snapshotNotStored(tenantId, request, detail);
+        const session = this.sessionRow(request.session_id);
+        if (session === null) continue;
+        if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
+        await this.prebuildUnstored(session, detail);
+      }
     }
+    await this.offerRoomed(tenantId, hostId);
   }
 
   private async releaseUnneededBoxes(
@@ -3423,8 +3422,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       message.reason === "HostUpdating" && turn.state === "Running" && (await this.lineCount(tenantId, turn)) === 0;
     if (handedOver || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
       this.ctx.storage.sql.exec(
-        "UPDATE turns SET state = 'Offered', offer_sent = ?, unheld_heartbeats = 0, updated_at = ? WHERE turn_id = ?",
-        handedOver ? 0 : 1,
+        "UPDATE turns SET state = 'Offered', offer_sent = 1, unheld_heartbeats = 0, updated_at = ? WHERE turn_id = ?",
         now,
         turn.turn_id,
       );
