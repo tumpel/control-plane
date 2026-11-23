@@ -51,7 +51,6 @@ export const uploadsChunks = async (
     const answer = PackUploadsSchema.parse(
       await host.says({
         type: "SnapshotPacks",
-        reusedPackDigests: [],
         snapshotId,
         part: at + 1,
         packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],

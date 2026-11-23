@@ -151,7 +151,6 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
     const answer = z.object({ reply: z.object({ uploads: z.array(z.object({ packDigest: z.string() })) }) }).parse(
       await host.says({
         type: "SnapshotPacks",
-        reusedPackDigests: [],
         snapshotId: request.snapshotId,
         part: at + 1,
         packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
@@ -183,7 +182,6 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
   );
   await host.says({
     type: "SnapshotDone",
-    chunkCount: chunks.length,
     snapshotId: request.snapshotId,
     uploadedBytes: chunks.length * CHUNK_BYTES,
   });
