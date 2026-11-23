@@ -943,11 +943,18 @@ suite("sessions", () => {
       CompactTranscriptPageSchema,
     );
     assert.deepEqual(capped.turns, []);
-    assert.equal(capped.cursor, 16, "eight reads of two lines each, then the page answers");
+    assert.equal(capped.cursor, 8, "eight reads of the one-line chunks a 36 host writes, then the page answers");
     assert.equal(capped.finished, false);
-    const next = await tool(
+    const again = await tool(
       "tumpel_transcript_read",
       { sessionId, compact: true, limit: 2, after: capped.cursor },
+      CompactTranscriptPageSchema,
+    );
+    assert.deepEqual(again.turns, []);
+    assert.equal(again.cursor, 16);
+    const next = await tool(
+      "tumpel_transcript_read",
+      { sessionId, compact: true, limit: 2, after: again.cursor },
       CompactTranscriptPageSchema,
     );
     assert.deepEqual(next.turns, [{ turnId, lines: [{ lineSeq: 19, text: "done thinking" }] }]);

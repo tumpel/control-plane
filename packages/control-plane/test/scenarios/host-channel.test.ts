@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CloseCode, PersonaSchema } from "@tumpel/schemas";
+import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
 import { request } from "./harness/server.ts";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { World } from "./harness/world.ts";
@@ -59,30 +60,26 @@ test("a tenant that restarts mid-turn keeps the host channel open, and the turn 
   );
 });
 
-test("a host channel that hibernates between two heartbeats while it holds frames closes 4400 on the next frame, naming the frames it lost", async (t) => {
+test("a 37 host has each frame acked once stored, so a hibernation between heartbeats loses nothing and the next frame lands", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
-  await world.startSession({ prompt: "write a line", tags: [] });
+  const host = await world.online(world.owner, "host-1", { protocolVersion: STORED_FRAMES_PROTOCOL });
+  const session = await world.startSession({ prompt: "write two lines", tags: [] });
   const offer = host.takeOffer();
   await host.claims(offer);
-  host.report(DEFAULT_USAGE);
+  await host.writes(offer.turnId, 1, [assistant(1)]);
   await world.settle();
-  const held = host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: assistant(1) });
-  await world.settle();
+  assert.deepEqual(host.unackedSeqs(), []);
 
   world.hibernateHostChannel(host.hostId);
-  host.report(DEFAULT_USAGE);
-
-  const closed = await host.closed();
+  await host.writes(offer.turnId, 2, [RESULT]);
+  await world.settle();
+  assert.equal(host.closure(), null);
+  assert.deepEqual(host.unackedSeqs(), []);
   assert.deepEqual(
-    { code: closed.code, reason: closed.reason },
-    {
-      code: CloseCode.ProtocolError,
-      reason: `the control plane slept and lost frames ${held} onward before it stored them; reconnect and resend them`,
-    },
+    (await world.transcript(session.sessionId, {})).lines.map((line) => line.lineSeq),
+    [1, 2],
   );
-  assert.deepEqual(host.unackedSeqs(), [held]);
 });
 
 test("a host that reconnects with frames the control plane never acked resends them after Welcome, and they land in the transcript once", async (t) => {

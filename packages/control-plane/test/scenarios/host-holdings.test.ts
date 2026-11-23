@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
-import { SPOKEN_CHANNEL_PROTOCOL } from "../../src/channel/protocol.ts";
+import { UNSTORED_FRAMES_PROTOCOL } from "./harness/supervisor.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const GRACE_MS = SETTINGS.heartbeatDeadlineSeconds * 1000;
@@ -174,7 +174,7 @@ test("a Hello never fails an offered turn, however often it leaves the turn out"
   assert.equal((await world.turn(turnId)).state, "Offered");
 });
 
-for (const protocolVersion of [ChannelProtocol.Oldest, SPOKEN_CHANNEL_PROTOCOL]) {
+for (const protocolVersion of [ChannelProtocol.Oldest, UNSTORED_FRAMES_PROTOCOL, ChannelProtocol.Version]) {
   test(`a channel ${protocolVersion} host connects and its heartbeats judge its turns`, async (t) => {
     const world = await World.open();
     t.after(() => world.close());
@@ -190,12 +190,12 @@ for (const protocolVersion of [ChannelProtocol.Oldest, SPOKEN_CHANNEL_PROTOCOL])
   });
 }
 
-test(`a channel ${ChannelProtocol.Version} Hello is welcomed on ${SPOKEN_CHANNEL_PROTOCOL}, the newest this control plane speaks`, async (t) => {
+test(`a channel ${ChannelProtocol.Version} Hello is welcomed on ${ChannelProtocol.Version}, the newest this control plane speaks`, async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await quietHost(world, { protocolVersion: ChannelProtocol.Version });
 
-  assert.equal(host.welcomedVersion(), SPOKEN_CHANNEL_PROTOCOL);
+  assert.equal(host.welcomedVersion(), ChannelProtocol.Version);
   await host.beats();
   assert.equal(host.closure(), null);
 });

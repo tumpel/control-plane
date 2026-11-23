@@ -1,12 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
 import { z } from "zod";
-import { errorOf, RETRY_LIMIT } from "./backoff.ts";
+import { errorOf } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
+import { refusal, resendable } from "./channel/failure.ts";
 import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
 import { HostLedger } from "./channel/ledger.ts";
-import type { ControlEnvelope, Frame, HostMessage, StoredControlMessage, TelemetryBatch } from "./channel/protocol.ts";
+import type { ControlEnvelope, Frame, HostMessage, MetricBatch, StoredControlMessage } from "./channel/protocol.ts";
 import { durableDb } from "./db/client.ts";
 import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
@@ -16,13 +16,13 @@ import { problem } from "./http";
 import type { Env } from "./index";
 import { hostLimitsOf, limitsOf } from "./limits.ts";
 import { METRICS_LIMITS, metricBatches } from "./metrics-store.ts";
-import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
 import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
 const CLOSE_REASON_LIMIT = 120;
+const STORE_FAILED = 1011;
 
 interface HostRow {
   host_id: string;
@@ -32,14 +32,12 @@ interface HostRow {
 
 interface Attachment {
   connection: control.ControlConnection;
-  lastSentAt: number;
   boxCapacity: number | null;
-  heldFrom: number | null;
 }
 
 type Heartbeat = Extract<control.ControlEvent, { kind: "Heartbeat" }>;
 
-type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
+type Handled = { kind: "Stored"; reply: HostReply | null } | { kind: "Unstored"; error: unknown };
 
 const boxCapacityOf = (attachment: Attachment): number => {
   if (attachment.boxCapacity === null) throw new Error("a host channel took a Heartbeat on a connection with no Hello");
@@ -47,13 +45,7 @@ const boxCapacityOf = (attachment: Attachment): number => {
 };
 
 const isAttachment = (value: unknown): value is Attachment =>
-  typeof value === "object" &&
-  value !== null &&
-  "connection" in value &&
-  "lastSentAt" in value &&
-  typeof value.lastSentAt === "number" &&
-  "boxCapacity" in value &&
-  "heldFrom" in value;
+  typeof value === "object" && value !== null && "connection" in value && "boxCapacity" in value;
 
 export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
@@ -166,13 +158,7 @@ export class HostChannel extends DurableObject<Env> {
     await this.relimitFrames(host.host_id);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
-    const now = Date.now();
-    const attachment: Attachment = {
-      connection: { phase: "Closed" },
-      lastSentAt: now,
-      boxCapacity: null,
-      heldFrom: null,
-    };
+    const attachment: Attachment = { connection: { phase: "Closed" }, boxCapacity: null };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
     return new Response(null, { status: 101, webSocket: client });
@@ -196,105 +182,70 @@ export class HostChannel extends DurableObject<Env> {
       control.close(context.port, CloseCode.ProtocolError, "channel messages are JSON text, not binary");
       return;
     }
-    if (attachment.heldFrom !== null && !this.ledger.holding()) {
-      control.close(
-        context.port,
-        CloseCode.ProtocolError,
-        `the control plane slept and lost frames ${attachment.heldFrom} onward before it stored them; reconnect and resend them`,
-      );
-      return;
-    }
     const now = Date.now();
     const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
-    if (event.kind === "Welcomed") {
-      this.ledger.take();
-      attachment.boxCapacity = event.boxCapacity;
-    }
-    this.keep(socket, attachment);
+    if (event.kind === "Welcomed") attachment.boxCapacity = event.boxCapacity;
+    socket.serializeAttachment(attachment);
     if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
-    if (event.kind === "Heartbeat") {
-      if (meter.recovered(now)) {
-        await this.setHealth(
-          host.host_id,
-          "Healthy",
-          `host ${host.host_id} sent no more than ${meter.framesPerMinute} frames a minute for a full minute`,
-        );
-        meter.settle("Healthy");
-      }
-    }
-    if (event.kind === "Message") await this.take(host.host_id, event.frame, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
-    if (event.kind === "Closed") return;
-    if (event.kind === "Heartbeat") {
-      if (
-        !(await this.heartbeat(host.host_id, event, now, attachment, context)) &&
-        this.ledger.stalled() >= RETRY_LIMIT
-      )
-        return this.giveUp(attachment, context);
-      if (attachment.connection.phase === "Closed") return;
-    }
-    if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
-    if (
-      connection.phase === "Open" &&
-      now - attachment.lastSentAt >= (settingsOf(this.env).heartbeatIntervalSeconds * 1000) / 2
-    )
-      control.beat(context);
-    this.keep(socket, attachment);
+    if (event.kind === "Message") return this.take(socket, host.host_id, event.frame, attachment, context);
+    if (event.kind === "Heartbeat") return this.heartbeat(host.host_id, event, now, meter, attachment, context);
     if (event.kind !== "Welcomed") return;
+    await this.hello(host.host_id, event, now);
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
   }
 
   private async take(
+    socket: WebSocket,
     hostId: string,
     frame: Frame<HostMessage>,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    if (this.ledger.queued().length > 0) return this.queue(frame);
-    const ordered = frame.message.type !== "TurnLine" && this.ledger.holding();
-    if (ordered && !(await this.settle(hostId, attachment, context))) return this.queue(frame);
-    const delivered = await this.reply(hostId, frame);
-    if (!delivered.ok) return this.queue(frame);
-    if (frame.message.type !== "TurnLine") {
-      this.checkpoint(attachment, context, [frame]);
-      return this.answer(hostId, frame, delivered.reply, attachment, context);
-    }
-    await this.answer(hostId, frame, delivered.reply, attachment, context);
-    this.ledger.hold(frame, true);
-  }
-
-  private queue(frame: Frame<HostMessage>): void {
-    this.ledger.hold(frame, false);
-  }
-
-  private giveUp(attachment: Attachment, context: control.ControlContext): void {
-    const first = this.ledger.first();
-    this.ledger.take();
-    attachment.heldFrom = null;
-    control.close(
-      context.port,
-      CloseCode.ProtocolError,
-      `the control plane failed to store frames ${first ?? "none"} onward on ${RETRY_LIMIT} heartbeats in a row; reconnect and resend them`,
+    const handled = await this.forward(hostId, frame.message).then(
+      (reply): Handled => ({ kind: "Stored", reply }),
+      (error: unknown): Handled =>
+        resendable(error) ? { kind: "Unstored", error } : { kind: "Stored", reply: refusal(frame.message.type, error) },
     );
+    if (handled.kind === "Unstored") {
+      const reason = `the control plane failed to store frame ${frame.seq} (${frame.message.type}): ${errorOf(handled.error).message}`;
+      console.error(`FrameUnstored: host ${hostId}: ${reason}`);
+      control.close(context.port, STORE_FAILED, reason);
+      return;
+    }
+    if (attachment.connection.phase !== "Open") return;
+    attachment.connection = control.stored(attachment.connection, frame.seq, context);
+    socket.serializeAttachment(attachment);
+    await this.answer(hostId, frame, handled.reply, attachment, context);
+    control.answered(attachment.connection, frame, context);
   }
 
   private async heartbeat(
     hostId: string,
     beat: Heartbeat,
     now: number,
+    meter: HostFrameMeter,
     attachment: Attachment,
     context: control.ControlContext,
-  ): Promise<boolean> {
-    if (!(await this.settle(hostId, attachment, context))) return false;
-    if (attachment.connection.phase !== "Open") return false;
+  ): Promise<void> {
+    if (attachment.connection.phase !== "Open") return;
+    if (meter.recovered(now)) {
+      await this.setHealth(
+        hostId,
+        "Healthy",
+        `host ${hostId} sent no more than ${meter.framesPerMinute} frames a minute for a full minute`,
+      );
+      meter.settle("Healthy");
+    }
     const tenantId = await this.tenantOf(hostId);
-    const reported = await tenantApi(this.env.TENANT, tenantId)
+    await this.telemetry(tenantId, hostId, beat.telemetry);
+    await tenantApi(this.env.TENANT, tenantId)
       .call("hostHeartbeat", {
         tenantId,
         hostId,
@@ -305,46 +256,15 @@ export class HostChannel extends DurableObject<Env> {
         channelProtocol: attachment.connection.protocolVersion,
         heldSessionIds: beat.heldSessionIds,
         heldClaudeSetupIds: beat.heldClaudeSetupIds,
-        heldTurns: beat.heldTurns,
+        heldTurnIds: beat.heldTurnIds,
       })
-      .then(
-        () => true,
-        (error: unknown) => this.undelivered("Heartbeat", error),
-      );
-    if (reported) this.checkpoint(attachment, context, []);
-    return reported;
-  }
-
-  private checkpoint(attachment: Attachment, context: control.ControlContext, frames: Frame<HostMessage>[]): void {
-    const acked = [...this.ledger.take(), ...frames];
-    attachment.heldFrom = this.ledger.first();
-    if (acked.length > 0) control.acknowledge(context, acked);
-  }
-
-  private async settle(hostId: string, attachment: Attachment, context: control.ControlContext): Promise<boolean> {
-    for (const frame of this.ledger.queued()) {
-      const delivered = await this.reply(hostId, frame);
-      if (!delivered.ok) return false;
-      this.ledger.forwarded(frame.seq);
-      await this.answer(hostId, frame, delivered.reply, attachment, context);
-    }
-    return true;
-  }
-
-  private undelivered(type: string, error: unknown): false {
-    console.error(`FrameQueued: ${type} was not stored and waits for the next heartbeat: ${errorOf(error).message}`);
-    if (lost(error)) this.ledger.requeue();
-    return false;
-  }
-
-  private reply(hostId: string, frame: Frame<HostMessage>): Promise<Delivered> {
-    return this.forward(hostId, frame.message).then(
-      (reply): Delivered => ({ ok: true, reply }),
-      (error: unknown): Delivered =>
-        resendable(error)
-          ? { ok: this.undelivered(frame.message.type, error) }
-          : { ok: true, reply: refusedOrResent(frame.message.type, error) },
-    );
+      .catch((error: unknown) => {
+        console.error(
+          `HeartbeatUnstored: host ${hostId}: ${errorOf(error).message}; the next heartbeat reports it again`,
+        );
+      });
+    control.checkpoint(attachment.connection, context);
+    control.beat(context);
   }
 
   private async answer(
@@ -362,13 +282,6 @@ export class HostChannel extends DurableObject<Env> {
       return control.refuseFrame(context.port, frame.seq, reply.reason);
     }
     return control.send(attachment.connection, reply, context);
-  }
-
-  private keep(socket: WebSocket, attachment: Attachment): void {
-    const stored = this.attachment(socket);
-    attachment.heldFrom = this.ledger.first();
-    attachment.lastSentAt = Math.max(attachment.lastSentAt, stored.lastSentAt);
-    socket.serializeAttachment(attachment);
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
@@ -411,7 +324,7 @@ export class HostChannel extends DurableObject<Env> {
       usage: welcomed.usage,
       now,
       channelProtocol: welcomed.channelProtocol,
-      heldTurns: welcomed.heldTurns,
+      heldTurnIds: welcomed.heldTurnIds,
     });
   }
 
@@ -492,8 +405,9 @@ export class HostChannel extends DurableObject<Env> {
   private async telemetry(
     tenantId: string,
     hostId: string,
-    { instruments, samples, turns }: TelemetryBatch,
+    { instruments, samples, turns }: MetricBatch,
   ): Promise<void> {
+    if (instruments.length === 0 && samples.length === 0 && turns.length === 0) return;
     const signed = <Point extends { dimensions: Record<string, string> }>(point: Point): Point => ({
       ...point,
       dimensions: { ...point.dimensions, hostId },
@@ -537,10 +451,7 @@ export class HostChannel extends DurableObject<Env> {
       };
     }
     return {
-      send: (envelope: ControlEnvelope) => {
-        socket.send(JSON.stringify(envelope));
-        attachment.lastSentAt = Date.now();
-      },
+      send: (envelope: ControlEnvelope) => socket.send(JSON.stringify(envelope)),
       close: (code: number, reason: string) => socket.close(code, reason.slice(0, CLOSE_REASON_LIMIT)),
     };
   }

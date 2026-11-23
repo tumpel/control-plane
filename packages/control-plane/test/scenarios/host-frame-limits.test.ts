@@ -9,7 +9,7 @@ import {
   type HostMessage,
   helloBytes,
   type Ledger,
-  SPOKEN_CHANNEL_PROTOCOL,
+  STORED_FRAMES_PROTOCOL,
   type StoredControlMessage,
 } from "../../src/channel/protocol.ts";
 
@@ -32,7 +32,7 @@ const savedTrips = () => {
 
 const healthyMeter = () => new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], savedTrips().store);
 
-const openChannel = async (meter: HostFrameMeter, protocolVersion: number = SPOKEN_CHANNEL_PROTOCOL) => {
+const openChannel = async (meter: HostFrameMeter, protocolVersion: number = STORED_FRAMES_PROTOCOL - 1) => {
   const clock = { now: START };
   const trips: string[] = [];
   const pair = generateKeyPairSync("ed25519");
@@ -57,11 +57,6 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = SPOK
       save: (next) => {
         ledger = structuredClone(next);
       },
-      heard: () => ledger.received,
-      skip: (frame) => {
-        ledger = { ...ledger, received: frame.seq };
-      },
-      refused: () => new Set<number>(),
     },
     prepareOffer: async () => ({ kind: "Withdrawn" }),
     prepareClaudeSetup: async (stored) => ({
@@ -87,10 +82,11 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = SPOK
   const receive = async (envelope: unknown) => {
     const received = await control.receive(channel.connection, JSON.stringify(envelope), context);
     channel.connection = received.connection;
-    if (received.event.kind === "Message") {
-      control.acknowledge(context, [received.event.frame]);
+    if (received.event.kind === "Message" && channel.connection.phase === "Open") {
+      channel.connection = control.stored(channel.connection, received.event.frame.seq, context);
       channel.delivered.push(received.event.frame.seq);
     }
+    control.checkpoint(channel.connection, context);
     return received.event;
   };
   channel.connection = control.challenge(context.port);
@@ -104,6 +100,7 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = SPOK
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), pair.privateKey).toString("base64"),
     boxCapacity: 8,
     heldTurnIds: [],
+    ...(protocolVersion >= STORED_FRAMES_PROTOCOL ? { resendFrom: 1 } : {}),
     usage: {
       boxesWarm: 0,
       loadAverage: 0,
@@ -144,6 +141,12 @@ test("a host frame over the 4 MB bound is refused and the channel stays open for
 });
 
 const turnLine = (lineSeq: number): HostMessage => ({ type: "TurnLine", turnId: "turn-1", lineSeq, text: "line" });
+const turnLines = (lineSeq: number): HostMessage => ({
+  type: "TurnLines",
+  turnId: "turn-1",
+  firstLineSeq: lineSeq,
+  lines: ["line"],
+});
 const stream = async (frame: (seq: number, message: HostMessage) => Promise<unknown>, from: number, count: number) => {
   for (let seq = from; seq < from + count; seq++) await frame(seq, turnLine(seq));
 };
@@ -165,6 +168,26 @@ test("a host streaming 700 lines in a minute has the 100 past the limit refused 
   });
   assert.equal(received(), 700);
   assert.deepEqual(trips, ["RateLimited"]);
+  assert.equal(channel.closed, null);
+});
+
+test("on 37 the frames past the limit stay unacked for the host to resend after retryAfter, and each lands once", async () => {
+  const { channel, clock, frame, rateLimited, received } = await openChannel(healthyMeter(), STORED_FRAMES_PROTOCOL);
+  for (let seq = 1; seq <= 610; seq++) await frame(seq, turnLines(seq));
+
+  assert.equal(channel.delivered.length, 600);
+  assert.deepEqual(
+    rateLimited().map((limited) => limited.seq),
+    [601, 602, 603, 604, 605, 606, 607, 608, 609, 610],
+  );
+  assert.equal(received(), 0);
+  clock.now += 60_000;
+  for (let seq = 601; seq <= 610; seq++) await frame(seq, turnLines(seq));
+
+  assert.deepEqual(
+    channel.delivered,
+    Array.from({ length: 610 }, (_, at) => at + 1),
+  );
   assert.equal(channel.closed, null);
 });
 

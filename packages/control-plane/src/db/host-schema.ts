@@ -17,7 +17,3 @@ export const ledger = sqliteTable("ledger", {
   sent: integer("sent").notNull(),
   unacked: text("unacked").notNull(),
 });
-
-export const refusedFrames = sqliteTable("refused_frames", {
-  seq: integer("seq").primaryKey(),
-});
