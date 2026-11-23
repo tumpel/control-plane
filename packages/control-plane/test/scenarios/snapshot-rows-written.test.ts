@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 import { z } from "zod";
 import type { R2Bucket } from "./harness/runtime.ts";
 import {
@@ -11,6 +11,7 @@ import {
   PackUploadsSchema,
   type Placement,
   parts,
+  sha256,
   snapshotAsked,
   TENANT_ID,
   tree,
@@ -26,6 +27,7 @@ const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_CHUNKS = 700_000;
+const OVER_CAP_ROOT_PLACEMENTS = 700_000;
 
 type ManifestsModule = {
   MAX_INDEX_BYTES: number;
@@ -447,6 +449,36 @@ test("a snapshot whose chunk count would pass the index cap is not stored, and t
   });
 });
 
+test("a snapshot root whose own placements would pass the index cap is rejected at SnapshotDone", async () => {
+  await inWorld(async (world, host) => {
+    const session = await world.startSession({ prompt: "build a root of one-byte chunks", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    const request = snapshotAsked(host, session.sessionId);
+    const packDigest = sha256("one-byte pack");
+    const manifest = Array.from({ length: OVER_CAP_ROOT_PLACEMENTS }, (_, at) => ({
+      digest: sha256("one-byte chunk"),
+      packDigest,
+      offset: at,
+      length: 1,
+    }));
+    await world.store.put(request.storageKey, JSON.stringify({ manifest }));
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: OVER_CAP_ROOT_PLACEMENTS,
+      chunkCount: 1,
+    });
+
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+    );
+    assert.equal(snapshots[0]?.outcome.state, "Failed");
+    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take/);
+  });
+});
+
 test("a snapshot whose root places its manifest in a pack no part named is not stored, naming the pack", async () => {
   await inWorld(async (world, host) => {
     const chunks = tree(DIGESTS_PER_PART, "unnamed manifest");
@@ -510,20 +542,19 @@ test("a snapshot of 3 new packs and 2 reused ones lists all 5 and its manifest p
         await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
     }
     const root = await storesRoot(world, host, request, [...base, ...fresh], parts(fresh).length + 1);
-    const gets = mock.method(world.store, "get");
+    world.store.failure = {
+      operation: "get",
+      prefix: `${TENANT_ID}/packs/`,
+      error: new Error("SnapshotDone read a pack of the manifest"),
+    };
     await host.says({
       type: "SnapshotDone",
       snapshotId: request.snapshotId,
       uploadedBytes: fresh.length * CHUNK_BYTES,
       chunkCount: base.length + fresh.length,
     });
-    const read = gets.mock.calls.map((call) => call.arguments[0]);
-    gets.mock.restore();
+    world.store.failure = null;
 
-    assert.deepEqual(
-      read.filter((key) => key.startsWith(`${TENANT_ID}/packs/`)),
-      [],
-    );
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );

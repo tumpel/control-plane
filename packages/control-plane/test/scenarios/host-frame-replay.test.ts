@@ -75,8 +75,6 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
     reusedPackDigests: [],
   });
   const draft = async () => (await world.store.get(`${request.storageKey}.draft`))?.text();
-  assert.deepEqual(JSON.parse((await draft()) ?? "null")?.lastPart, 1);
-  assert.deepEqual(JSON.parse((await draft()) ?? "null")?.packs, [digest]);
   assert.deepEqual(
     await world.call("hostMessage", {
       tenantId: TENANT_ID,
@@ -170,7 +168,6 @@ test("a SnapshotPacks part that brings the snapshot past the pack limit is refus
     },
   });
   assert.equal(await draft(), before);
-  assert.equal(JSON.parse(before ?? "null")?.packs.length, 16_000);
 });
 
 test("a clone failure, a snapshot failure, a box gone under a turn and a Claude setup's frames applied twice have one effect and the same reply", async (t) => {

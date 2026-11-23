@@ -106,11 +106,11 @@ import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
-  indexBytesOf,
+  indexBytesFor,
   LivePacks,
   MAX_INDEX_BYTES,
-  MAX_PACKS_PER_MANIFEST,
   type ManifestRead,
+  mergedDraft,
   packKey,
   packListKey,
   type SnapshotIndex,
@@ -3340,33 +3340,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} listed pack ${twice} of snapshot ${message.snapshotId} in part ${message.part} as both written and reused`,
       );
     }
-    const draft = await snapshotDraft(this.env.STORE, window.request.storage_key);
-    const lastHash = await sha256Hex(
-      new Uint8Array(
-        new TextEncoder().encode(JSON.stringify([message.packs, message.chunks, message.reusedPackDigests])),
-      ),
-    );
-    const replayed = draft?.lastPart === message.part && draft.lastHash === lastHash;
-    const expected = draft === null ? 1 : draft.lastPart + 1;
-    if (!replayed && message.part !== 1 && message.part !== expected) {
+    const merged = mergedDraft(await snapshotDraft(this.env.STORE, window.request.storage_key), message.part, [
+      ...listed,
+      ...message.reusedPackDigests,
+    ]);
+    if (merged.kind === "Refused") {
       return refused(
-        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, but the control plane expects part ${expected}, so the snapshot cannot name its packs`,
-      );
-    }
-    const kept = message.part === 1 || draft === null ? [] : draft.packs;
-    const packs = new Set([...kept, ...listed, ...message.reusedPackDigests]);
-    if (packs.size > MAX_PACKS_PER_MANIFEST) {
-      return refused(
-        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, which brings it to ${packs.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the snapshot cannot name its packs`,
+        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, ${merged.detail}`,
       );
     }
     const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
-    if (!replayed) {
-      await this.env.STORE.put(
-        draftKey(window.request.storage_key),
-        JSON.stringify({ lastPart: message.part, lastHash, packs: [...packs] }),
-      );
-    }
+    await this.env.STORE.put(draftKey(window.request.storage_key), JSON.stringify(merged.draft));
     const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
     const signer = signerOf(
       this.env,
@@ -3820,7 +3804,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
       );
     }
-    const indexBytes = indexBytesOf(parsed.data.manifest, chunkCount);
+    const indexBytes = indexBytesFor(chunkCount + parsed.data.manifest.length);
     if (indexBytes > MAX_INDEX_BYTES) {
       return rejected(
         `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,

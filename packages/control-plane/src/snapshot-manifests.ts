@@ -27,14 +27,13 @@ export const packListKey = (storageKey: string): string => `${storageKey}.packs`
 
 export const draftKey = (storageKey: string): string => `${storageKey}.draft`;
 
-const manifestPlacementsOf = (root: Placement[]): number =>
-  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON);
+const placementsOf = (root: Placement[]): number =>
+  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) + root.length;
 
-const placementsOf = (root: Placement[]): number => manifestPlacementsOf(root) + root.length;
+export const indexBytesFor = (placements: number): number =>
+  placements * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
 
-export const indexBytesOf = (root: Placement[], chunkCount: number): number =>
-  (Math.max(chunkCount, manifestPlacementsOf(root)) + root.length) * BYTES_PER_PLACEMENT +
-  MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
+const indexBytesOf = (root: Placement[]): number => indexBytesFor(placementsOf(root));
 
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -54,11 +53,32 @@ const packList = async (
 
 const SnapshotDraftSchema = z.object({
   lastPart: z.number().int().min(1),
-  lastHash: z.string(),
   packs: z.array(z.string()),
 });
 
-export type SnapshotDraft = z.infer<typeof SnapshotDraftSchema>;
+type SnapshotDraft = z.infer<typeof SnapshotDraftSchema>;
+
+export const mergedDraft = (
+  draft: SnapshotDraft | null,
+  part: number,
+  packs: string[],
+): { kind: "Merged"; draft: SnapshotDraft } | { kind: "Refused"; detail: string } => {
+  const continues = draft !== null && (part === draft.lastPart || part === draft.lastPart + 1);
+  if (part !== 1 && !continues) {
+    return {
+      kind: "Refused",
+      detail: `but the control plane expects part ${draft === null ? 1 : draft.lastPart + 1}, so the snapshot cannot name its packs`,
+    };
+  }
+  const merged = new Set([...(part === 1 || draft === null ? [] : draft.packs), ...packs]);
+  if (merged.size > MAX_PACKS_PER_MANIFEST) {
+    return {
+      kind: "Refused",
+      detail: `which brings it to ${merged.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the snapshot cannot name its packs`,
+    };
+  }
+  return { kind: "Merged", draft: { lastPart: part, packs: [...merged] } };
+};
 
 export const snapshotDraft = async (store: R2Bucket, storageKey: string): Promise<SnapshotDraft | null> => {
   const draft = await store.get(draftKey(storageKey));
@@ -342,7 +362,7 @@ export class SnapshotManifests {
     const read = await this.oneAtATime(async (): Promise<ManifestRead<ReadonlySet<string>>> => {
       const root = await this.root(store, storageKey);
       if (root.kind !== "Read") return root;
-      if (indexBytesOf(root.value, 0) > MAX_INDEX_BYTES) {
+      if (indexBytesOf(root.value) > MAX_INDEX_BYTES) {
         console.error(
           `snapshot ${storageKey} has a manifest whose index would pass the ${MAX_INDEX_BYTES} bytes the control plane holds, so no restore or dedup can use it; retention keeps the packs it names`,
         );
@@ -373,7 +393,7 @@ export class SnapshotManifests {
   private async load(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<SnapshotIndex>> {
     const root = await this.root(store, storageKey);
     if (root.kind !== "Read") return root;
-    const needed = indexBytesOf(root.value, 0);
+    const needed = indexBytesOf(root.value);
     if (needed > MAX_INDEX_BYTES) {
       return {
         kind: "Unreadable",
