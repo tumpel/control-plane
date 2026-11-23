@@ -102,7 +102,12 @@ const openChannel = async () => {
   return { channel, clock, frame, refusals, rateLimited };
 };
 
-const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
+const snapshotDone = (snapshotId: string): HostMessage => ({
+  type: "SnapshotDone",
+  snapshotId,
+  uploadedBytes: 10,
+  chunkCount: 1,
+});
 
 test("a host frame over the 4 MB bound is refused and the channel stays open for the next frame", async () => {
   const { channel, frame, refusals } = await openChannel();

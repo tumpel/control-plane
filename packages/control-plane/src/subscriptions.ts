@@ -60,6 +60,13 @@ const notOwnSession = (subscription: Subscription): Response =>
 const invalid = (title: string, detail: string, fix: string): Response =>
   refused(400, { code: "InvalidRequest", title, detail, fix });
 
+const personaLacksTumpelMcp = (personaId: string, personaName: string): Response =>
+  invalid(
+    "Persona lacks tumpelMcp",
+    `persona ${personaName} (${personaId}) has tumpelMcp disabled, and a crew subscription delivers its events through it`,
+    `Enable tumpelMcp on persona ${personaName}, then try again`,
+  );
+
 const create = async (request: Request, env: Env, caller: Caller): Promise<Response> => {
   if (caller.origin.kind === "Turn") return personOnly("subscriptions.create");
   const body = await parseBody(request, SubscriptionCreateSchema, "subscriptions.create");
@@ -86,6 +93,7 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   const { created } = await tenant.call("createSubscription", { tenantId: caller.tenantId, subscription, now });
   if (created.kind === "Created") return json(created.subscription);
   if (created.kind === "NotFound") return sessionNotFound(subscription.sessionId);
+  if (created.kind === "PersonaLacksTumpelMcp") return personaLacksTumpelMcp(created.personaId, created.personaName);
   if (created.kind === "Archived") {
     return refused(409, {
       code: "SessionArchived",
@@ -168,6 +176,7 @@ const one = async (
     return changed(completed, subscriptionId);
   }
   const { resumed } = await tenant.call("resumeSubscription", { tenantId, subscriptionId, now });
+  if (resumed.kind === "PersonaLacksTumpelMcp") return personaLacksTumpelMcp(resumed.personaId, resumed.personaName);
   if (resumed.kind !== "CursorExpired") return changed(resumed, subscriptionId);
   return refused(410, {
     code: "SubscriptionCursorExpired",

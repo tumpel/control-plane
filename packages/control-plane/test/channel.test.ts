@@ -13,6 +13,7 @@ import {
   type Ledger,
   type LedgerStore,
   type PreparedOffer,
+  SNAPSHOT_PACKS_PROTOCOL,
   type StoredControlMessage,
 } from "../src/channel/protocol.ts";
 
@@ -77,7 +78,12 @@ const turnOffer: StoredControlMessage = {
   idleSeconds: 900,
 };
 
-const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
+const snapshotDone = (snapshotId: string): HostMessage => ({
+  type: "SnapshotDone",
+  snapshotId,
+  uploadedBytes: 10,
+  chunkCount: 1,
+});
 
 const frame = (seq: number, ack: number, message: HostMessage): HostEnvelope => ({ type: "Frame", seq, ack, message });
 
@@ -154,7 +160,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
       },
       hello: async (
         privateKey: KeyObject = keys.privateKey,
-        protocolVersion: number = ChannelProtocol.Oldest,
+        protocolVersion: number = SNAPSHOT_PACKS_PROTOCOL,
         resendFrom = 1,
       ) => {
         const [challenge] = sent;
@@ -208,8 +214,8 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       boxCapacity: 8,
       usage: USAGE,
       supervisorVersion: "0.1.0",
-      protocolVersion: ChannelProtocol.Oldest,
-      channelProtocol: ChannelProtocol.Oldest,
+      protocolVersion: SNAPSHOT_PACKS_PROTOCOL,
+      channelProtocol: SNAPSHOT_PACKS_PROTOCOL,
       channelProtocolOldest: undefined,
       guestProtocol: undefined,
       heldTurnIds: [],
@@ -228,13 +234,13 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.equal(link.closed, null);
 });
 
-for (const version of [ChannelProtocol.Oldest - 2, ChannelProtocol.Oldest - 1]) {
-  test(`a Hello on ${version}, below the stored frames of 37, is refused and the supervisor told to update`, async () => {
+for (const version of [SNAPSHOT_PACKS_PROTOCOL - 2, SNAPSHOT_PACKS_PROTOCOL - 1]) {
+  test(`a Hello on ${version}, below the snapshot packs of 39, is refused and the supervisor told to update`, async () => {
     const link = setup().connect();
     await link.hello(undefined, version);
     assert.deepEqual(link.closed, {
       code: CloseCode.UnsupportedVersion,
-      reason: `protocol version ${version} is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+      reason: `protocol version ${version} is not supported; this control plane speaks ${SNAPSHOT_PACKS_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
     });
     assert.equal(link.connection.phase, "Closed");
   });
@@ -260,7 +266,7 @@ test("a Hello on protocol version 1, without the fields later versions added, is
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
   assert.equal(
     link.closed?.reason,
-    `protocol version 1 is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+    `protocol version 1 is not supported; this control plane speaks ${SNAPSHOT_PACKS_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
   );
   assert.equal(link.connection.phase, "Closed");
 });
@@ -399,7 +405,7 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   assert.equal(JSON.stringify(channel.ledger.current).includes("secret-"), false);
 
   const second = channel.connect();
-  await second.hello(undefined, ChannelProtocol.Oldest, 2);
+  await second.hello(undefined, SNAPSHOT_PACKS_PROTOCOL, 2);
   const resent = frames(second.sent);
   assert.deepEqual(
     resent.map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.ack, envelope.message.type]),
@@ -499,7 +505,7 @@ test("a Hello below an unacked frame's version is closed as an unsupported versi
   await link.hello();
   assert.deepEqual(link.closed, {
     code: CloseCode.UnsupportedVersion,
-    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${ChannelProtocol.Oldest}, update the supervisor`,
+    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${SNAPSHOT_PACKS_PROTOCOL}, update the supervisor`,
   });
   assert.equal(link.connection.phase, "Closed");
   assert.deepEqual(frames(link.sent), []);
@@ -589,7 +595,7 @@ test("every heartbeat reports what the host holds", async () => {
   assert.deepEqual(current.events.slice(1), [reported(["turn-1"]), reported([])]);
 });
 
-test("a Hello offering 35 to 37, as supervisor rc.25 sends, is welcomed on 37 with no ack and its resendFrom as the cursor", async () => {
+test("a Hello offering 37 to 39 is welcomed on 39 with no ack and its resendFrom as the cursor", async () => {
   const channel = setup();
   const link = channel.connect();
   const [challenge] = link.sent;
@@ -597,8 +603,8 @@ test("a Hello offering 35 to 37, as supervisor rc.25 sends, is welcomed on 37 wi
   await link.deliver({
     type: "Hello",
     hostId: HOST_ID,
-    protocolVersion: 37,
-    channelProtocolOldest: 35,
+    protocolVersion: 39,
+    channelProtocolOldest: 37,
     supervisorVersion: "0.1.0",
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), channel.keys.privateKey).toString("base64"),
     boxCapacity: 8,
@@ -606,23 +612,23 @@ test("a Hello offering 35 to 37, as supervisor rc.25 sends, is welcomed on 37 wi
     heldTurnIds: [],
     resendFrom: 4,
   } as HostEnvelope);
-  assert.deepEqual(link.connection, { phase: "Open", protocolVersion: 37, cursor: 3 });
+  assert.deepEqual(link.connection, { phase: "Open", protocolVersion: 39, cursor: 3 });
   assert.deepEqual(link.sent.at(-1), {
     type: "Welcome",
     hostId: HOST_ID,
-    protocolVersion: 37,
+    protocolVersion: 39,
   });
 });
 
-const stored37 = async () => {
+const stored39 = async () => {
   const channel = setup();
   const link = channel.connect();
-  await link.hello(undefined, ChannelProtocol.Oldest, 3);
+  await link.hello(undefined, SNAPSHOT_PACKS_PROTOCOL, 3);
   return { channel, link };
 };
 
-test("on 37 a frame below resendFrom is a duplicate acked again, the next is acked once its effect is stored", async () => {
-  const { link } = await stored37();
+test("on 39 a frame below resendFrom is a duplicate acked again, the next is acked once its effect is stored", async () => {
+  const { link } = await stored39();
   await link.deliver(frame(2, 0, snapshotDone("snap-2")));
   await link.deliver(frame(3, 0, snapshotDone("snap-3")));
   await link.deliver(frame(3, 0, snapshotDone("snap-3")));
@@ -637,8 +643,8 @@ test("on 37 a frame below resendFrom is a duplicate acked again, the next is ack
   assert.match(closure(link)?.reason ?? "", /expected seq 4, got 5/);
 });
 
-test("on 37 a Heartbeat ack drops the stored outbound frames up to it and carries its telemetry", async () => {
-  const { channel, link } = await stored37();
+test("on 39 a Heartbeat ack drops the stored outbound frames up to it and carries its telemetry", async () => {
+  const { channel, link } = await stored39();
   await control.send(link.connection, snapshotRequest("snap-1"), link.context);
   await control.send(link.connection, snapshotRequest("snap-2"), link.context);
   const telemetry = {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
 import { z } from "zod";
+import { SNAPSHOT_PACKS_PROTOCOL } from "../../src/channel/protocol.ts";
 import { snapshotAsked } from "./harness/snapshot-chunks.ts";
 import { UNMETERED, World } from "./harness/world.ts";
 
@@ -11,7 +11,7 @@ const HOST_REPORT = "host host-1 answered BoxGone for box";
 test("a BoxGone for the box of a Running session fails its snapshot and its turn with the host's report", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
-  const host = await world.online(world.owner, "host-1", { protocolVersion: ChannelProtocol.Oldest });
+  const host = await world.online(world.owner, "host-1", { protocolVersion: SNAPSHOT_PACKS_PROTOCOL });
   host.quiet();
   const session = await world.startSession({ prompt: "lose the box after the turn", tags: [] });
   const offer = host.takeOffer();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { z } from "zod";
 import type { R2Bucket } from "./harness/runtime.ts";
 import {
@@ -12,7 +12,6 @@ import {
   type Placement,
   parts,
   type SnapshotRequestSchema,
-  sha256,
   snapshotAsked,
   TENANT_ID,
   tree,
@@ -27,7 +26,7 @@ const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
-const OVER_CAP_ROOT_PLACEMENTS = 700_000;
+const OVER_CAP_CHUNKS = 700_000;
 
 type ManifestsModule = {
   MAX_INDEX_BYTES: number;
@@ -130,8 +129,24 @@ const storesSnapshot = async (
   const request = snapshotAsked(host, sessionId);
   await uploadsChunks(world, host, request.snapshotId, chunks);
   const root = await storesRoot(world, request.storageKey, chunks);
-  await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: chunks.length * CHUNK_BYTES });
+  await host.says({
+    type: "SnapshotDone",
+    snapshotId: request.snapshotId,
+    uploadedBytes: chunks.length * CHUNK_BYTES,
+    chunkCount: chunks.length,
+  });
   return { storageKey: request.storageKey, root };
+};
+
+const reusesPacks = async (host: Host, snapshotId: string, chunks: Placement[]): Promise<void> => {
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId,
+    part: 1,
+    packs: [],
+    chunks: [],
+    reusedPackDigests: [...new Set(chunks.map((chunk) => chunk.packDigest))],
+  });
 };
 
 const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
@@ -151,6 +166,36 @@ const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
       assert.equal(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, "no snapshot holds the pack");
     }
     return written;
+  });
+
+const rowsOfSecondSnapshot = (reusing: boolean): Promise<number> =>
+  inWorld(async (world, host) => {
+    await world.holdsAgentCredentials();
+    const chunks = tree(2 * DIGESTS_PER_PART, "first");
+    const session = await world.startSession({ prompt: "build the tree", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    await storesSnapshot(world, host, session.sessionId, chunks);
+    await world.sendTurn(session.sessionId, "change the tree");
+    const next = host.takeOffer();
+    await host.claims(next);
+    await host.completes(next);
+    const before = world.tenantRowsWritten();
+    if (!reusing) {
+      await storesSnapshot(world, host, session.sessionId, tree(2 * DIGESTS_PER_PART, "second"));
+      return world.tenantRowsWritten() - before;
+    }
+    const request = snapshotAsked(host, session.sessionId);
+    await storesRoot(world, request.storageKey, chunks);
+    await reusesPacks(host, request.snapshotId, chunks);
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: 0,
+      chunkCount: chunks.length,
+    });
+    return world.tenantRowsWritten() - before;
   });
 
 const rowsOfFork = (chunks: Placement[]): Promise<number> =>
@@ -187,6 +232,12 @@ test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot
   const small = await rowsOfStoredSnapshot(tree(1));
   assert.equal(large, small);
   assert.ok(small <= ROWS_PER_STORED_SNAPSHOT, `a stored snapshot wrote ${small} rows`);
+});
+
+test("a snapshot that reuses every pack of the one before writes no more rows than one that writes new packs", async () => {
+  const reusing = await rowsOfSecondSnapshot(true);
+  const writing = await rowsOfSecondSnapshot(false);
+  assert.ok(reusing <= writing, `a reusing snapshot wrote ${reusing} rows and a writing one ${writing}`);
 });
 
 test("a session forked from a prebuild of 100000 chunks writes the rows of a fork from a one-chunk prebuild", async () => {
@@ -235,7 +286,7 @@ test("sessions that snapshot at once read each manifest once, however many parts
   });
 });
 
-test("a manifest the control plane cannot read is rejected at SnapshotDone, and one stored before keeps every pack it names", async () => {
+test("a manifest the control plane cannot read is stored unread at SnapshotDone, and one stored before keeps every pack it names", async () => {
   await inWorld(async (world, host) => {
     const chunks = tree(2_000, "newer host");
     const unknownEntry = {
@@ -265,14 +316,16 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
       type: "SnapshotDone",
       snapshotId: request.snapshotId,
       uploadedBytes: chunks.length * CHUNK_BYTES,
+      chunkCount: chunks.length,
     });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
-    const rejected = snapshots.find((snapshot) => snapshot.outcome.state === "Failed");
-    assert.equal(rejected?.outcome.reason, "UploadRejected");
-    assert.match(rejected?.outcome.detail ?? "", /cannot read/);
+    assert.deepEqual(
+      snapshots.map((snapshot) => snapshot.outcome.state),
+      ["Stored"],
+    );
     for (const packDigest of new Set([manifestPack, ...chunks.map((chunk) => chunk.packDigest)])) {
       assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, `pack ${packDigest} is kept`);
     }
@@ -298,6 +351,7 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
       type: "SnapshotDone",
       snapshotId: request.snapshotId,
       uploadedBytes: chunks.length * CHUNK_BYTES,
+      chunkCount: chunks.length,
     });
     world.store.failure = null;
 
@@ -341,11 +395,12 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
         type: "SnapshotPacks",
         snapshotId: request.snapshotId,
         part: 1,
-        packs: [{ packDigest: sharedPack, sizeBytes: shared.length * CHUNK_BYTES }],
-        chunks: shared,
+        packs: [],
+        chunks: [],
+        reusedPackDigests: [sharedPack],
       }),
     );
-    assert.deepEqual(reused.reply.uploads, [], "the first session's live snapshot names the pack");
+    assert.deepEqual(reused.reply.uploads, []);
 
     await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: first.sessionId, now: Date.now() });
     assert.equal(await world.store.get(`${TENANT_ID}/packs/${sharedPack}`), null, "the archive freed the pack");
@@ -354,6 +409,7 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
       type: "SnapshotDone",
       snapshotId: request.snapshotId,
       uploadedBytes: shared.length * CHUNK_BYTES,
+      chunkCount: shared.length,
     });
 
     const { snapshots } = SnapshotsSchema.parse(
@@ -384,7 +440,13 @@ test("a snapshot that reuses packs an unstored snapshot of the session uploaded 
     await host.completes(next);
     const request = snapshotAsked(host, session.sessionId);
     await storesRoot(world, request.storageKey, chunks);
-    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0 });
+    await reusesPacks(host, request.snapshotId, chunks);
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: 0,
+      chunkCount: chunks.length,
+    });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -417,7 +479,13 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
     await host.completes(next);
     const request = snapshotAsked(host, session.sessionId);
     await storesRoot(world, request.storageKey, chunks);
-    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0 });
+    await reusesPacks(host, request.snapshotId, chunks);
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: 0,
+      chunkCount: chunks.length,
+    });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -446,27 +514,95 @@ test("a manifest of 500000 chunks loads into an index within the memory the cont
   }
 });
 
-test("a snapshot root whose own placements would pass the index cap is rejected at SnapshotDone", async () => {
+test("a snapshot whose chunk count would pass the index cap is not stored, and the session keeps its previous snapshot", async () => {
   await inWorld(async (world, host) => {
-    const session = await world.startSession({ prompt: "build a root of one-byte chunks", tags: [] });
+    const chunks = tree(1, "over the cap");
+    const session = await world.startSession({ prompt: "build a tree past the index cap", tags: [] });
     const offer = host.takeOffer();
     await host.claims(offer);
     await host.completes(offer);
     const request = snapshotAsked(host, session.sessionId);
-    const packDigest = sha256("one-byte pack");
-    const manifest = Array.from({ length: OVER_CAP_ROOT_PLACEMENTS }, (_, at) => ({
-      digest: sha256("one-byte chunk"),
-      packDigest,
-      offset: at,
-      length: 1,
-    }));
-    await world.store.put(request.storageKey, JSON.stringify({ manifest }));
-    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: OVER_CAP_ROOT_PLACEMENTS });
+    await uploadsChunks(world, host, request.snapshotId, chunks);
+    await storesRoot(world, request.storageKey, chunks);
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: CHUNK_BYTES,
+      chunkCount: OVER_CAP_CHUNKS,
+    });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
     assert.equal(snapshots[0]?.outcome.state, "Failed");
-    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take/);
+    assert.equal(snapshots[0]?.outcome.reason, "UploadRejected");
+    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take \d+ bytes, above the \d+ bytes/);
+    assert.equal(await world.store.get(`${request.storageKey}.packs`), null);
+  });
+});
+
+test("a snapshot of 3 new packs and 2 reused ones lists all 5 in its pack list without reading its manifest", async () => {
+  await inWorld(async (world, host) => {
+    const base = tree(2 * DIGESTS_PER_PART, "base");
+    const fresh = tree(3 * DIGESTS_PER_PART, "fresh");
+    const reused = [...new Set(base.map((chunk) => chunk.packDigest))];
+    const written = [...new Set(fresh.map((chunk) => chunk.packDigest))];
+    await world.holdsAgentCredentials();
+    const session = await world.startSession({ prompt: "build the base", tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    await storesSnapshot(world, host, session.sessionId, base);
+
+    await world.sendTurn(session.sessionId, "add to the base");
+    const next = host.takeOffer();
+    await host.claims(next);
+    await host.completes(next);
+    const request = snapshotAsked(host, session.sessionId);
+    for (const [at, part] of parts(fresh).entries()) {
+      const answer = PackUploadsSchema.parse(
+        await host.says({
+          type: "SnapshotPacks",
+          snapshotId: request.snapshotId,
+          part: at + 1,
+          packs: [{ packDigest: part[0]?.packDigest ?? "", sizeBytes: part.length * CHUNK_BYTES }],
+          chunks: part,
+          reusedPackDigests: at === 0 ? reused : [],
+        }),
+      );
+      for (const upload of answer.reply.uploads)
+        await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
+    }
+    await storesRoot(world, request.storageKey, [...base, ...fresh]);
+    const gets = mock.method(world.store, "get");
+    await host.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: fresh.length * CHUNK_BYTES,
+      chunkCount: base.length + fresh.length,
+    });
+    const read = gets.mock.calls.map((call) => call.arguments[0]);
+    gets.mock.restore();
+
+    assert.deepEqual(
+      read.filter((key) => key.startsWith(`${TENANT_ID}/packs/`)),
+      [],
+    );
+    const { snapshots } = SnapshotsSchema.parse(
+      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+    );
+    assert.deepEqual(
+      snapshots.map((snapshot) => snapshot.outcome.state),
+      ["Stored"],
+    );
+    const listed = await world.store.get(`${request.storageKey}.packs`);
+    assert.deepEqual(JSON.parse((await listed?.text()) ?? "[]"), [...reused, ...written].sort());
+    for (const packDigest of reused) {
+      assert.notEqual(
+        await world.store.get(`${TENANT_ID}/packs/${packDigest}`),
+        null,
+        `reused pack ${packDigest} is kept`,
+      );
+    }
   });
 });

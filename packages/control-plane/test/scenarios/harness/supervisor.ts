@@ -8,6 +8,7 @@ import {
   helloBytes,
   type MetricBatch,
   type ReportedUsage,
+  SNAPSHOT_PACKS_PROTOCOL,
 } from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
 
@@ -147,8 +148,8 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      protocolVersion: ChannelProtocol.Oldest,
-      channelProtocolOldest: ChannelProtocol.Oldest,
+      protocolVersion: ChannelProtocol.Version,
+      channelProtocolOldest: SNAPSHOT_PACKS_PROTOCOL,
       carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
       usage: DEFAULT_USAGE,
@@ -500,13 +501,19 @@ export class Supervisor {
       part: 1,
       packs: [{ packDigest: digest, sizeBytes: manifest.length }],
       chunks: [{ digest, packDigest: digest, offset: 0, length: manifest.length }],
+      reusedPackDigests: [],
     });
     await store.put(`${request.storageKey.split("/")[0]}/packs/${digest}`, manifest);
     await store.put(
       request.storageKey,
       JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
     );
-    await this.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: manifest.length });
+    await this.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: manifest.length,
+      chunkCount: 0,
+    });
   }
 
   async dropsIdleBox(offer: TurnOffer): Promise<void> {

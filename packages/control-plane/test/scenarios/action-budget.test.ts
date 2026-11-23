@@ -155,6 +155,7 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
         part: at + 1,
         packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
         chunks: part,
+        reusedPackDigests: [],
       }),
     );
     for (const upload of answer.reply.uploads) await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
@@ -184,6 +185,7 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
     type: "SnapshotDone",
     snapshotId: request.snapshotId,
     uploadedBytes: chunks.length * CHUNK_BYTES,
+    chunkCount: chunks.length,
   });
 };
 

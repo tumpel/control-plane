@@ -72,10 +72,17 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
     part: 1,
     packs: [{ packDigest: digest, sizeBytes: manifest.length }],
     chunks: [chunk],
+    reusedPackDigests: [],
   });
   await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [chunk] }));
-  await once(world, host.hostId, { type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+  await once(world, host.hostId, {
+    type: "SnapshotDone",
+    snapshotId: request.snapshotId,
+    uploadedBytes: 14,
+    chunkCount: 1,
+  });
+  assert.equal(await (await world.store.get(`${request.storageKey}.packs`))?.text(), JSON.stringify([digest]));
   assert.equal((await world.turn(turnId)).state, "Completed");
   assert.equal((await world.session(session.sessionId)).state, "Idle");
 

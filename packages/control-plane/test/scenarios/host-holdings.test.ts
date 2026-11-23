@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
+import { SNAPSHOT_PACKS_PROTOCOL } from "../../src/channel/protocol.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const GRACE_MS = SETTINGS.heartbeatDeadlineSeconds * 1000;
@@ -173,14 +174,14 @@ test("a Hello never fails an offered turn, however often it leaves the turn out"
   assert.equal((await world.turn(turnId)).state, "Offered");
 });
 
-test(`a channel ${ChannelProtocol.Oldest} host connects and its heartbeats judge its turns`, async (t) => {
+test(`a channel ${SNAPSHOT_PACKS_PROTOCOL} host connects and its heartbeats judge its turns`, async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await quietHost(world, {
-    protocolVersion: ChannelProtocol.Oldest,
-    channelProtocolOldest: ChannelProtocol.Oldest,
+    protocolVersion: SNAPSHOT_PACKS_PROTOCOL,
+    channelProtocolOldest: SNAPSHOT_PACKS_PROTOCOL,
   });
-  assert.equal(host.welcomedVersion(), ChannelProtocol.Oldest);
+  assert.equal(host.welcomedVersion(), SNAPSHOT_PACKS_PROTOCOL);
   const offer = await running(world, host);
 
   await host.beats();

@@ -28,8 +28,10 @@ export const packListKey = (storageKey: string): string => `${storageKey}.packs`
 const placementsOf = (root: Placement[]): number =>
   Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) + root.length;
 
-export const indexBytesOf = (root: Placement[]): number =>
-  placementsOf(root) * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
+export const indexBytesFor = (chunkCount: number): number =>
+  chunkCount * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
+
+const indexBytesOf = (root: Placement[]): number => indexBytesFor(placementsOf(root));
 
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -402,6 +404,7 @@ type LiveState = {
   counts: Map<string, number>;
   members: Set<string>;
   held: Map<string, Map<string, boolean>>;
+  pending: Map<string, Set<string>>;
   unreadable: Map<string, string>;
 };
 
@@ -409,6 +412,7 @@ const LivePacksSchema = z.object({
   members: z.array(z.string()),
   counts: z.array(z.tuple([z.string(), z.number().int().min(1)])),
   held: z.array(z.tuple([z.string(), z.array(z.tuple([z.string(), z.boolean()]))])).default([]),
+  pending: z.array(z.tuple([z.string(), z.array(z.string())])).default([]),
 });
 
 type SavedLivePacks = z.infer<typeof LivePacksSchema>;
@@ -435,8 +439,9 @@ const uncounted = (state: LiveState, storageKey: string, packs: ReadonlySet<stri
   return [...packs].flatMap((packDigest) => decrement(state, packDigest));
 };
 
-const heldFrom = (state: LiveState, saved: SavedLivePacks["held"]): void => {
-  for (const [sessionId, packs] of saved) {
+const heldFrom = (state: LiveState, saved: Pick<SavedLivePacks, "held" | "pending">): void => {
+  state.pending = new Map(saved.pending.map(([storageKey, packs]) => [storageKey, new Set(packs)]));
+  for (const [sessionId, packs] of saved.held) {
     state.held.set(sessionId, new Map(packs));
     for (const [packDigest] of packs) increment(state, packDigest);
   }
@@ -479,7 +484,14 @@ export class LivePacks {
     });
   }
 
-  hold(store: R2Bucket, tenantId: string, sessionId: string, packDigests: string[]): Promise<string[]> {
+  hold(
+    store: R2Bucket,
+    tenantId: string,
+    sessionId: string,
+    storageKey: string,
+    packDigests: string[],
+    reusedPackDigests: string[],
+  ): Promise<string[]> {
     return this.turn(() =>
       this.changing(store, tenantId, async (state) => {
         const held = state.held.get(sessionId) ?? new Map<string, boolean>();
@@ -487,7 +499,12 @@ export class LivePacks {
         const uploading = packDigests.filter(
           (packDigest) => held.get(packDigest) === false || !state.counts.has(packDigest),
         );
-        if (unnamed.length === 0) return uploading;
+        const listed = state.pending.get(storageKey);
+        const pending = listed ?? new Set<string>();
+        const unlisted = [...packDigests, ...reusedPackDigests].filter((packDigest) => !pending.has(packDigest));
+        for (const packDigest of unlisted) pending.add(packDigest);
+        state.pending.set(storageKey, pending);
+        if (unnamed.length === 0 && unlisted.length === 0 && listed !== undefined) return uploading;
         for (const packDigest of unnamed) {
           held.set(packDigest, false);
           increment(state, packDigest);
@@ -499,17 +516,20 @@ export class LivePacks {
     );
   }
 
-  claim(
-    store: R2Bucket,
-    tenantId: string,
-    storageKey: string,
-    packs: ReadonlySet<string>,
-    reused: ReadonlySet<string>,
-  ): Promise<string | null> {
+  pendingPacks(store: R2Bucket, tenantId: string, storageKey: string): Promise<ReadonlySet<string> | null> {
+    return this.turn(() =>
+      this.changing(store, tenantId, async (state) => {
+        const pending = state.pending.get(storageKey);
+        return pending === undefined ? null : new Set(pending);
+      }),
+    );
+  }
+
+  claim(store: R2Bucket, tenantId: string, storageKey: string, packs: ReadonlySet<string>): Promise<string | null> {
     return this.turn(() =>
       this.changing(store, tenantId, async (state) => {
         const held = holders(state);
-        const sorted = [...reused].sort();
+        const sorted = [...packs].sort();
         const gone = sorted.find((packDigest) => !state.counts.has(packDigest));
         if (gone !== undefined) return gone;
         const unproven = sorted.filter((packDigest) => {
@@ -520,7 +540,9 @@ export class LivePacks {
         const missing = unproven.find((_, at) => found[at] === null);
         if (missing !== undefined) return missing;
         for (const packDigest of unproven) markUploaded(state, packDigest);
+        await store.put(packListKey(storageKey), JSON.stringify(sorted));
         if (!state.members.has(storageKey)) counted(state, storageKey, packs);
+        state.pending.delete(storageKey);
         await this.persist(store, tenantId, state);
         return null;
       }),
@@ -567,6 +589,7 @@ export class LivePacks {
   ): Promise<string[]> {
     const freed: string[] = [];
     for (const storageKey of storageKeys) {
+      state.pending.delete(storageKey);
       if (state.unreadable.delete(storageKey) || !state.members.has(storageKey)) continue;
       const read = await this.manifests.packs(store, tenantId, storageKey);
       if (read.kind === "Gone") {
@@ -584,7 +607,7 @@ export class LivePacks {
     const saved = await this.saved(store, tenantId);
     const state =
       (saved === null ? null : await this.reconciled(store, tenantId, saved)) ??
-      (await this.rebuilt(store, tenantId, saved?.held ?? []));
+      (await this.rebuilt(store, tenantId, saved ?? { held: [], pending: [] }));
     this.state = state;
     return state;
   }
@@ -602,6 +625,7 @@ export class LivePacks {
       counts: new Map(saved.counts),
       members: new Set(saved.members),
       held: new Map(saved.held.map(([sessionId, packs]) => [sessionId, new Map(packs)])),
+      pending: new Map(saved.pending.map(([storageKey, packs]) => [storageKey, new Set(packs)])),
       unreadable: new Map(),
     };
     const live = new Set<string>();
@@ -622,9 +646,19 @@ export class LivePacks {
     return state;
   }
 
-  private async rebuilt(store: R2Bucket, tenantId: string, held: SavedLivePacks["held"]): Promise<LiveState> {
-    const state: LiveState = { counts: new Map(), members: new Set(), held: new Map(), unreadable: new Map() };
-    heldFrom(state, held);
+  private async rebuilt(
+    store: R2Bucket,
+    tenantId: string,
+    saved: Pick<SavedLivePacks, "held" | "pending">,
+  ): Promise<LiveState> {
+    const state: LiveState = {
+      counts: new Map(),
+      members: new Set(),
+      held: new Map(),
+      pending: new Map(),
+      unreadable: new Map(),
+    };
+    heldFrom(state, saved);
     await this.eachLive(async (storageKey) => {
       await this.counts(store, tenantId, state, storageKey);
     });
@@ -655,6 +689,7 @@ export class LivePacks {
       members: [...state.members],
       counts: [...state.counts],
       held: [...state.held].map(([sessionId, packs]) => [sessionId, [...packs]]),
+      pending: [...state.pending].map(([storageKey, packs]) => [storageKey, [...packs]]),
     });
     return store.put(livePacksKey(tenantId), body).then(() => undefined);
   }
