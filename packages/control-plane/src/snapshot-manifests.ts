@@ -520,7 +520,12 @@ export class LivePacks {
     return this.turn(() =>
       this.changing(store, tenantId, async (state) => {
         const pending = state.pending.get(storageKey);
-        return pending === undefined ? null : new Set(pending);
+        if (pending !== undefined) return new Set(pending);
+        const claimed = await store.get(packListKey(storageKey));
+        if (claimed === null) return null;
+        const parsed = PackListSchema.safeParse(parsedJson(await claimed.text()));
+        if (!parsed.success) throw new Error(`the pack list of ${storageKey} is no list: ${issues(parsed.error)}`);
+        return new Set(parsed.data);
       }),
     );
   }

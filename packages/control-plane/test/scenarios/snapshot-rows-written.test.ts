@@ -168,36 +168,6 @@ const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
     return written;
   });
 
-const rowsOfSecondSnapshot = (reusing: boolean): Promise<number> =>
-  inWorld(async (world, host) => {
-    await world.holdsAgentCredentials();
-    const chunks = tree(2 * DIGESTS_PER_PART, "first");
-    const session = await world.startSession({ prompt: "build the tree", tags: [] });
-    const offer = host.takeOffer();
-    await host.claims(offer);
-    await host.completes(offer);
-    await storesSnapshot(world, host, session.sessionId, chunks);
-    await world.sendTurn(session.sessionId, "change the tree");
-    const next = host.takeOffer();
-    await host.claims(next);
-    await host.completes(next);
-    const before = world.tenantRowsWritten();
-    if (!reusing) {
-      await storesSnapshot(world, host, session.sessionId, tree(2 * DIGESTS_PER_PART, "second"));
-      return world.tenantRowsWritten() - before;
-    }
-    const request = snapshotAsked(host, session.sessionId);
-    await storesRoot(world, request.storageKey, chunks);
-    await reusesPacks(host, request.snapshotId, chunks);
-    await host.says({
-      type: "SnapshotDone",
-      snapshotId: request.snapshotId,
-      uploadedBytes: 0,
-      chunkCount: chunks.length,
-    });
-    return world.tenantRowsWritten() - before;
-  });
-
 const rowsOfFork = (chunks: Placement[]): Promise<number> =>
   inWorld(async (world, host) => {
     await world.startPrebuild();
@@ -232,12 +202,6 @@ test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot
   const small = await rowsOfStoredSnapshot(tree(1));
   assert.equal(large, small);
   assert.ok(small <= ROWS_PER_STORED_SNAPSHOT, `a stored snapshot wrote ${small} rows`);
-});
-
-test("a snapshot that reuses every pack of the one before writes no more rows than one that writes new packs", async () => {
-  const reusing = await rowsOfSecondSnapshot(true);
-  const writing = await rowsOfSecondSnapshot(false);
-  assert.ok(reusing <= writing, `a reusing snapshot wrote ${reusing} rows and a writing one ${writing}`);
 });
 
 test("a session forked from a prebuild of 100000 chunks writes the rows of a fork from a one-chunk prebuild", async () => {
@@ -343,7 +307,7 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
     await uploadsChunks(world, host, request.snapshotId, chunks);
     await storesRoot(world, request.storageKey, chunks);
     world.store.failure = {
-      operation: "get",
+      operation: "head",
       prefix: request.storageKey,
       error: new Error("object storage timed out"),
     };

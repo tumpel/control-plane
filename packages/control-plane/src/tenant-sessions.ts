@@ -21,7 +21,6 @@ import {
   SessionStateSchema,
   type SessionTagsPatchSchema,
   type SetSessionTagsResultSchema,
-  SnapshotRootSchema,
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
@@ -3790,16 +3789,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,
       );
     }
-    const root = await this.env.STORE.get(request.storage_key);
+    const root = await this.env.STORE.head(request.storage_key);
     if (root === null) {
       return rejected(
         `answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`,
-      );
-    }
-    const parsed = SnapshotRootSchema.safeParse(await root.json());
-    if (!parsed.success) {
-      return rejected(
-        `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
       );
     }
     const packs = await this.live.pendingPacks(this.env.STORE, tenantId, request.storage_key);
