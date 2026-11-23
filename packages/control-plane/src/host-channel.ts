@@ -1,20 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
-import { z } from "zod";
-import { errorOf, RETRY_LIMIT } from "./backoff.ts";
+import { CloseCode } from "@tumpel/schemas";
+import { errorOf } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { lost, refusedOrResent, resendable, unheard } from "./channel/failure.ts";
-import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
+import { refusal, resendable } from "./channel/failure.ts";
+import { admit, type FrameWindow, openWindow, rateLimitDetail } from "./channel/frame-rate.ts";
 import { HostLedger } from "./channel/ledger.ts";
-import type {
-  ControlEnvelope,
-  Frame,
-  HostMessage,
-  HostReportedHealth,
-  HostUsage,
-  StoredControlMessage,
-  TelemetryBatch,
-} from "./channel/protocol.ts";
+import type { ControlEnvelope, Frame, HostMessage, MetricBatch, StoredControlMessage } from "./channel/protocol.ts";
 import { durableDb } from "./db/client.ts";
 import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
@@ -24,13 +15,13 @@ import { problem } from "./http";
 import type { Env } from "./index";
 import { hostLimitsOf, limitsOf } from "./limits.ts";
 import { METRICS_LIMITS, metricBatches } from "./metrics-store.ts";
-import { settingsOf } from "./settings";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
 import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
 const CLOSE_REASON_LIMIT = 120;
+const STORE_FAILED = 1011;
 
 interface HostRow {
   host_id: string;
@@ -40,40 +31,26 @@ interface HostRow {
 
 interface Attachment {
   connection: control.ControlConnection;
-  lastReceivedAt: number;
-  lastSentAt: number;
-  usage: HostUsage | null;
-  heldFrom: number | null;
+  boxCapacity: number | null;
+  frames: FrameWindow;
 }
 
-type Presence = "Online" | "Offline";
+type Heartbeat = Extract<control.ControlEvent, { kind: "Heartbeat" }>;
 
-type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
+type Handled = { kind: "Stored"; reply: HostReply | null } | { kind: "Unstored"; error: unknown };
 
-const usageOf = (attachment: Attachment): HostUsage => {
-  if (attachment.usage === null)
-    throw new Error("a host channel holds transcript lines from a connection that sent no usage");
-  return attachment.usage;
+const boxCapacityOf = (attachment: Attachment): number => {
+  if (attachment.boxCapacity === null) throw new Error("a host channel took a Heartbeat on a connection with no Hello");
+  return attachment.boxCapacity;
 };
 
 const isAttachment = (value: unknown): value is Attachment =>
-  typeof value === "object" &&
-  value !== null &&
-  "connection" in value &&
-  "lastReceivedAt" in value &&
-  typeof value.lastReceivedAt === "number" &&
-  "lastSentAt" in value &&
-  typeof value.lastSentAt === "number" &&
-  "usage" in value &&
-  "heldFrom" in value;
+  typeof value === "object" && value !== null && "connection" in value && "boxCapacity" in value && "frames" in value;
 
 export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
   private inbound: Promise<void> = Promise.resolve();
   private readonly ledger: HostLedger;
-  private meter: HostFrameMeter | null = null;
-  private tripped: HostHealth | null = null;
-  private reported: HostReportedHealth | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -110,69 +87,35 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
-  lastReceivedAt(): number | null {
-    const received = this.ctx
-      .getWebSockets()
-      .filter(
-        (socket) =>
-          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
-      )
-      .map((socket) => this.attachment(socket).lastReceivedAt);
-    return received.length === 0 ? null : Math.max(...received);
-  }
-
   async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    const open = this.ctx
+    if (message.type === "TurnOffer" && this.openSocket() === undefined) return "Offline";
+    if (this.openSocket() === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
+      return "Sent";
+    }
+    const spoken = await control.prepare(message, this.context(null, host, null));
+    const open = this.openSocket();
+    if (message.type === "TurnOffer" && open === undefined) return "Offline";
+    if (open === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
+      return "Sent";
+    }
+    const attachment = this.attachment(open);
+    const sent = control.send(attachment.connection, message, this.context(open, host, attachment), spoken);
+    open.serializeAttachment(attachment);
+    await sent;
+    return "Sent";
+  }
+
+  private openSocket(): WebSocket | undefined {
+    return this.ctx
       .getWebSockets()
       .find(
         (socket) =>
           socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
       );
-    if (message.type === "TurnOffer") {
-      const refused = await this.offerRefused(host.host_id, open);
-      if (refused !== null) return refused;
-    }
-    if (open === undefined) {
-      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
-      return "Sent";
-    }
-    const attachment = this.attachment(open);
-    await control.send(attachment.connection, message, this.context(open, host, attachment));
-    open.serializeAttachment(attachment);
-    return "Sent";
-  }
-
-  private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so its running work failed`;
-    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", {
-      tenantId,
-      hostId,
-      health: "Degraded",
-      detail,
-      now,
-    });
-  }
-
-  private async offerRefused(hostId: string, open: WebSocket | undefined): Promise<OfferSent | null> {
-    if (await this.offersPaused(hostId)) return "RateLimited";
-    if (open === undefined) return "Offline";
-    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ state: string }>();
-    if (row?.state !== "Online") return "Offline";
-    const silentFor = Date.now() - this.attachment(open).lastReceivedAt;
-    return silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000 ? "Degraded" : null;
-  }
-
-  async restoreHealth(detail: string): Promise<void> {
-    const host = this.host();
-    if (host === null) throw new Error("a health restore reached a host object that was never registered");
-    const meter = await this.frameMeter(host.host_id);
-    await this.setHealth(host.host_id, "Healthy", detail);
-    meter.restore();
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -193,16 +136,15 @@ export class HostChannel extends DurableObject<Env> {
         fix: "Connect with tumpel-supervisor run",
       });
     }
-    await this.relimitFrames(host.host_id);
+    const limits = await hostLimitsOf(this.env.DB, limitsOf(this.env), host.host_id);
+    if (limits === null)
+      throw new Error(`host ${host.host_id} has a channel but no row in the hosts table; enrol it again`);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
-    const now = Date.now();
     const attachment: Attachment = {
       connection: { phase: "Closed" },
-      lastReceivedAt: now,
-      lastSentAt: now,
-      usage: null,
-      heldFrom: null,
+      boxCapacity: null,
+      frames: openWindow(limits.hostFramesPerMinute),
     };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
@@ -225,180 +167,72 @@ export class HostChannel extends DurableObject<Env> {
     const context = this.context(socket, host, attachment);
     if (typeof message !== "string") {
       control.close(context.port, CloseCode.ProtocolError, "channel messages are JSON text, not binary");
-      return this.refreshPresence(socket);
-    }
-    if (attachment.heldFrom !== null && !this.ledger.holding()) {
-      control.close(
-        context.port,
-        CloseCode.ProtocolError,
-        `the control plane slept and lost frames ${attachment.heldFrom} onward before it stored them; reconnect and resend them`,
-      );
-      return this.refreshPresence(socket);
+      return;
     }
     const now = Date.now();
-    const silentFor = now - attachment.lastReceivedAt;
-    attachment.lastReceivedAt = now;
-    if (attachment.connection.phase === "Open" && silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
-      await this.fellSilent(host.host_id, silentFor, now);
-    const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
-    if (event.kind === "Welcomed") {
-      this.ledger.take();
-      attachment.usage = event.usage;
-    }
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
-    this.keep(socket, attachment);
-    if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.reportHealth(host.host_id, event.health);
-      if (meter.recovered(now)) {
-        await this.setHealth(
-          host.host_id,
-          "Healthy",
-          `host ${host.host_id} sent no more than ${meter.framesPerMinute} frames a minute for a full minute`,
-        );
-        meter.settle("Healthy");
-      }
-    }
-    if (event.kind === "Message") await this.take(host.host_id, event.frame, now, attachment, context);
+    if (event.kind === "Welcomed") attachment.boxCapacity = event.boxCapacity;
+    socket.serializeAttachment(attachment);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
-    if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
-      await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
-    if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      if (
-        !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
-        this.ledger.stalled() >= RETRY_LIMIT
-      )
-        return this.giveUp(socket, attachment, context);
-      if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
-    }
-    if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
-    if (
-      connection.phase === "Open" &&
-      now - attachment.lastSentAt >= (settingsOf(this.env).heartbeatIntervalSeconds * 1000) / 2
-    )
-      control.beat(context);
-    this.keep(socket, attachment);
+    if (event.kind === "Message") return this.take(socket, host.host_id, event.frame, attachment, context);
+    if (event.kind === "Heartbeat") return this.heartbeat(host.host_id, event, now, attachment, context);
     if (event.kind !== "Welcomed") return;
+    await this.hello(host.host_id, event, now);
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
-    await this.presence("Online");
   }
 
   private async take(
+    socket: WebSocket,
     hostId: string,
     frame: Frame<HostMessage>,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
+    const handled = await this.forward(hostId, frame.message).then(
+      (reply): Handled => ({ kind: "Stored", reply }),
+      (error: unknown): Handled =>
+        resendable(error) ? { kind: "Unstored", error } : { kind: "Stored", reply: refusal(frame.message.type, error) },
+    );
+    if (handled.kind === "Unstored") {
+      const reason = `the control plane failed to store frame ${frame.seq} (${frame.message.type}): ${errorOf(handled.error).message}`;
+      console.error(`FrameUnstored: host ${hostId}: ${reason}`);
+      control.close(context.port, STORE_FAILED, reason);
+      return;
+    }
+    await this.answer(hostId, frame, handled.reply, attachment, context);
+    if (attachment.connection.phase !== "Open") return;
+    attachment.connection = control.acknowledge(attachment.connection, frame.seq, context);
+    socket.serializeAttachment(attachment);
+  }
+
+  private async heartbeat(
+    hostId: string,
+    beat: Heartbeat,
     now: number,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    const bytes = JSON.stringify(frame.message).length;
-    if (this.ledger.queued().length > 0) return this.queue(frame, bytes, attachment, context);
-    if (frame.message.type !== "TurnLine" && this.ledger.holding()) {
-      if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context)))
-        return this.queue(frame, bytes, attachment, context);
-    }
-    const delivered = await this.reply(hostId, frame);
-    if (!delivered.ok) return this.queue(frame, bytes, attachment, context);
-    if (frame.message.type !== "TurnLine") {
-      control.acknowledge(context, [frame]);
-      return this.answer(hostId, frame, delivered.reply, attachment, context);
-    }
-    await this.answer(hostId, frame, delivered.reply, attachment, context);
-    this.ledger.hold(frame, true, bytes);
-    if (!this.ledger.full()) return;
-    if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context))) this.overflow(attachment, context);
-  }
-
-  private queue(
-    frame: Frame<HostMessage>,
-    bytes: number,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): void {
-    this.ledger.hold(frame, false, bytes);
-    if (this.ledger.full()) this.overflow(attachment, context);
-  }
-
-  private overflow(attachment: Attachment, context: control.ControlContext): void {
-    const first = this.ledger.first();
-    this.ledger.take();
-    attachment.heldFrom = null;
-    control.close(
-      context.port,
-      CloseCode.ProtocolError,
-      `the control plane could not store frames ${first ?? "none"} onward in time; reconnect and resend them`,
-    );
-  }
-
-  private giveUp(socket: WebSocket, attachment: Attachment, context: control.ControlContext): Promise<void> {
-    const first = this.ledger.first();
-    this.ledger.take();
-    attachment.heldFrom = null;
-    control.close(
-      context.port,
-      CloseCode.ProtocolError,
-      `the control plane failed to store frames ${first ?? "none"} onward on ${RETRY_LIMIT} heartbeats in a row; reconnect and resend them`,
-    );
-    return this.refreshPresence(socket);
-  }
-
-  private async flush(
-    hostId: string,
-    usage: HostUsage,
-    now: number,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): Promise<boolean> {
-    for (const frame of this.ledger.queued()) {
-      const delivered = await this.reply(hostId, frame);
-      if (!delivered.ok) return false;
-      this.ledger.forwarded(frame.seq);
-      await this.answer(hostId, frame, delivered.reply, attachment, context);
-    }
-    const reported = await this.report(hostId, usage, now).then(
-      () => true,
-      (error: unknown) => this.unreported(error, attachment, context),
-    );
-    if (!reported) return false;
-    const held = this.ledger.take();
-    attachment.heldFrom = this.ledger.first();
-    if (held.length > 0) control.acknowledge(context, held);
-    return true;
-  }
-
-  private unreported(error: unknown, attachment: Attachment, context: control.ControlContext): false {
-    if (!unheard(error)) return this.undelivered("Heartbeat", error);
-    this.ledger.take();
-    attachment.heldFrom = null;
-    attachment.connection = control.close(
-      context.port,
-      CloseCode.ProtocolError,
-      "the tenant restarted and lost this host's Hello; reconnect so the Hello carries its usage again",
-    ).connection;
-    return false;
-  }
-
-  private undelivered(type: string, error: unknown): false {
-    console.error(`FrameQueued: ${type} was not stored and waits for the next heartbeat: ${errorOf(error).message}`);
-    if (lost(error)) this.ledger.requeue();
-    return false;
-  }
-
-  private reply(hostId: string, frame: Frame<HostMessage>): Promise<Delivered> {
-    return this.forward(hostId, frame.message).then(
-      (reply): Delivered => ({ ok: true, reply }),
-      (error: unknown): Delivered =>
-        resendable(error)
-          ? { ok: this.undelivered(frame.message.type, error) }
-          : { ok: true, reply: refusedOrResent(frame.message.type, error) },
-    );
+    if (attachment.connection.phase !== "Open") return;
+    const tenantId = await this.tenantOf(hostId);
+    await this.telemetry(tenantId, hostId, beat.telemetry);
+    await tenantApi(this.env.TENANT, tenantId).call("hostHeartbeat", {
+      tenantId,
+      hostId,
+      boxCapacity: boxCapacityOf(attachment),
+      usage: beat.usage,
+      reportedHealth: beat.reportedHealth,
+      now,
+      channelProtocol: attachment.connection.protocolVersion,
+      heldSessionIds: beat.heldSessionIds,
+      heldClaudeSetupIds: beat.heldClaudeSetupIds,
+      heldTurnIds: beat.heldTurnIds,
+    });
+    control.beat(context);
   }
 
   private async answer(
@@ -416,20 +250,6 @@ export class HostChannel extends DurableObject<Env> {
       return control.refuseFrame(context.port, frame.seq, reply.reason);
     }
     return control.send(attachment.connection, reply, context);
-  }
-
-  override async webSocketClose(socket: WebSocket): Promise<void> {
-    await this.refreshPresence(socket);
-  }
-
-  override async webSocketError(socket: WebSocket): Promise<void> {
-    await this.refreshPresence(socket);
-  }
-
-  private keep(socket: WebSocket, attachment: Attachment): void {
-    attachment.heldFrom = this.ledger.first();
-    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
-    socket.serializeAttachment(attachment);
   }
 
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
@@ -466,89 +286,14 @@ export class HostChannel extends DurableObject<Env> {
     ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
+      tenantId,
       hostId,
       boxCapacity: welcomed.boxCapacity,
       usage: welcomed.usage,
       now,
-      channelProtocol: welcomed.protocolVersion,
+      channelProtocol: welcomed.channelProtocol,
+      heldTurnIds: welcomed.heldTurnIds,
     });
-  }
-
-  private async relimitFrames(hostId: string): Promise<void> {
-    if (this.meter === null) return;
-    const limits = await hostLimitsOf(this.env.DB, limitsOf(this.env), hostId);
-    if (limits !== null) this.meter.relimit(limits.hostFramesPerMinute);
-  }
-
-  private async frameMeter(hostId: string): Promise<HostFrameMeter> {
-    if (this.meter !== null) return this.meter;
-    const row = await hostLimitsOf(this.env.DB, limitsOf(this.env), hostId);
-    if (row === null) throw new Error(`host ${hostId} has a channel but no row in the hosts table; enrol it again`);
-    const sql = this.ctx.storage.sql;
-    const [saved] = sql.exec<{ trips: string }>("SELECT trips FROM frame_trips WHERE frame_trips_id = 1").toArray();
-    const trips = z.array(z.number()).parse(saved === undefined ? [] : JSON.parse(saved.trips));
-    this.meter ??= new HostFrameMeter(row.hostFramesPerMinute, HostHealthSchema.parse(row.health), trips, {
-      save: (next) =>
-        sql.exec(
-          "INSERT INTO frame_trips (frame_trips_id, trips) VALUES (1, ?) ON CONFLICT (frame_trips_id) DO UPDATE SET trips = excluded.trips",
-          JSON.stringify(next),
-        ),
-      clear: () => sql.exec("DELETE FROM frame_trips WHERE frame_trips_id = 1"),
-    });
-    return this.meter;
-  }
-
-  private async offersPaused(hostId: string): Promise<boolean> {
-    return (await this.frameMeter(hostId)).health() !== "Healthy" || this.reported === "RateLimited";
-  }
-
-  private async trip(hostId: string, health: HostHealth, framesPerMinute: number): Promise<void> {
-    this.tripped = null;
-    const over = rateLimitDetail(hostId, framesPerMinute);
-    const detail =
-      health === "Unhealthy"
-        ? `${over} three times within an hour, so it gets no offers until a person restores its health`
-        : `${over}, so the control plane failed its running work and offers it nothing until a full minute passes under the limit`;
-    console.error(`Host${health}: ${detail}`);
-    await this.setHealth(hostId, health, detail);
-    (await this.frameMeter(hostId)).settle(health);
-  }
-
-  private async setHealth(hostId: string, health: HostHealth, detail: string): Promise<void> {
-    const now = Date.now();
-    const stored = await this.env.DB.prepare("SELECT health FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ health: string }>();
-    if (stored?.health === health) return;
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", { tenantId, hostId, health, detail, now });
-    await this.env.DB.prepare("UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1")
-      .bind(health, now, hostId)
-      .run();
-  }
-
-  private async reportHealth(hostId: string, health: HostReportedHealth): Promise<void> {
-    if (this.reported === health) return;
-    this.reported = health;
-    await this.env.DB.prepare(
-      "UPDATE hosts SET reported_health = ?1, updated_at = ?2 WHERE host_id = ?3 AND reported_health IS NOT ?1",
-    )
-      .bind(health, Date.now(), hostId)
-      .run();
-  }
-
-  private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
-  }
-
-  private async reconcileHeldBoxes(
-    hostId: string,
-    held: { heldSessionIds: string[]; heldClaudeSetupIds: string[] },
-    now: number,
-  ): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {
@@ -563,16 +308,10 @@ export class HostChannel extends DurableObject<Env> {
 
   private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
     const tenantId = await this.tenantOf(hostId);
-    if (message.type === "TelemetryBatch") {
-      await this.telemetry(tenantId, hostId, message);
-      return null;
-    }
     const tenant = tenantApi(this.env.TENANT, tenantId);
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
       await tenant.call("supervisorUpdate", { hostId, message });
-      if (message.type === "SupervisorUpdateStep" && message.phase === "Restarting") await this.presence("Offline");
-      else await this.refreshPresence();
       return null;
     }
     return (await tenant.call("hostMessage", { tenantId, hostId, message })).reply;
@@ -581,19 +320,15 @@ export class HostChannel extends DurableObject<Env> {
   private async telemetry(
     tenantId: string,
     hostId: string,
-    { instruments, samples, turns }: TelemetryBatch,
+    { instruments, samples, turns }: MetricBatch,
   ): Promise<void> {
+    if (instruments.length === 0 && samples.length === 0 && turns.length === 0) return;
     const signed = <Point extends { dimensions: Record<string, string> }>(point: Point): Point => ({
       ...point,
       dimensions: { ...point.dimensions, hostId },
     });
-    const turnIds = [...new Set(turns.map((point) => point.turnId))];
-    const offered =
-      turnIds.length === 0
-        ? {}
-        : (await tenantApi(this.env.TENANT, tenantId).call("turnMetricDimensions", { turnIds })).dimensions;
     const metrics = this.env.TENANT_METRICS.getByName(tenantId);
-    const batch = { instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) };
+    const batch = { instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, hostId) };
     for (const part of metricBatches(batch, METRICS_LIMITS)) {
       await metrics.record(part).catch((error: unknown) => {
         console.error(
@@ -626,10 +361,7 @@ export class HostChannel extends DurableObject<Env> {
       };
     }
     return {
-      send: (envelope: ControlEnvelope) => {
-        socket.send(JSON.stringify(envelope));
-        attachment.lastSentAt = Date.now();
-      },
+      send: (envelope: ControlEnvelope) => socket.send(JSON.stringify(envelope)),
       close: (code: number, reason: string) => socket.close(code, reason.slice(0, CLOSE_REASON_LIMIT)),
     };
   }
@@ -660,50 +392,19 @@ export class HostChannel extends DurableObject<Env> {
         return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-      admitFrame: (seq) => {
-        if (this.meter === null) throw new Error("a frame reached the host channel before its frame meter loaded");
-        const admission = this.meter.admit(seq, Date.now());
-        if (admission.kind === "Admitted") return null;
-        if (admission.tripped !== null) this.tripped = admission.tripped;
-        const retryAfter = new Date(admission.retryAfter);
+      admitFrame: () => {
+        if (attachment === null) throw new Error("a frame reached a host channel with no connection");
+        const { window, refused } = admit(attachment.frames, Date.now());
+        attachment.frames = window;
+        if (refused === null) return null;
+        const retryAfter = new Date(refused.retryAfter);
         return {
-          reason: `${rateLimitDetail(host.host_id, admission.framesPerMinute)}, so the control plane recorded nothing of this frame; send no frames until ${retryAfter.toISOString()}`,
-          framesPerMinute: admission.framesPerMinute,
+          reason: `${rateLimitDetail(host.host_id, refused.framesPerMinute)}, so the control plane recorded nothing of this frame; send no frames until ${retryAfter.toISOString()}`,
+          framesPerMinute: refused.framesPerMinute,
           retryAfter,
         };
       },
       now: () => new Date(),
     };
-  }
-
-  private async refreshPresence(closing?: WebSocket): Promise<void> {
-    const open = this.ctx
-      .getWebSockets()
-      .some(
-        (socket) =>
-          socket !== closing &&
-          socket.readyState === WebSocket.READY_STATE_OPEN &&
-          this.attachment(socket).connection.phase === "Open",
-      );
-    await this.presence(open ? "Online" : "Offline");
-  }
-
-  private async presence(state: Presence): Promise<void> {
-    const host = this.host();
-    if (host === null) throw new Error("presence changed on a host object that was never registered");
-    const now = Date.now();
-    const changed = await this.env.DB.prepare(
-      "UPDATE hosts SET state = ?, updated_at = ? WHERE host_id = ? AND state NOT IN ('Revoked', ?)",
-    )
-      .bind(state, now, host.host_id, state)
-      .run();
-    if (changed.meta.changes === 0) return;
-    const tenantId = await this.tenantOf(host.host_id);
-    await tenantApi(this.env.TENANT, tenantId).call("hostPresence", {
-      tenantId,
-      hostId: host.host_id,
-      presence: state,
-      now,
-    });
   }
 }

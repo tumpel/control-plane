@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { offeredDimensions, stampTurnPoints } from "../src/turn-metrics.ts";
+import { stampTurnPoints } from "../src/turn-metrics.ts";
 
 const point = (metric: string, turnId: string, dimensions: Record<string, string>) => ({
   metric,
@@ -11,30 +11,21 @@ const point = (metric: string, turnId: string, dimensions: Record<string, string
   sessionId: "session-1",
 });
 
-test("a turn offers its persona and secret set as dimensions", () => {
-  assert.deepEqual(offeredDimensions("persona-1", "set-1"), { personaId: "persona-1", secretSetId: "set-1" });
-});
-
-test("spend points get the turn's offered dimensions and the signed host, and a not reported turn keeps its tokens and loses its cost", () => {
-  const dimensions = {
-    billed: { personaId: "p", secretSetId: "s", provider: "Anthropic", costBasis: "NotBilled" },
-    tokensOnly: { personaId: "p", secretSetId: "s", provider: "OpenAi", costBasis: "NotReported" },
-  };
+test("turn points get the signed host over a forged one, and a not reported turn keeps its tokens and loses its cost", () => {
   const stamped = stampTurnPoints(
     [
-      point("turn.cost", "billed", { hostId: "forged" }),
-      point("turn.tokens", "tokensOnly", { tokenKind: "Input" }),
-      point("turn.cost", "tokensOnly", {}),
+      point("turn.cost", "billed", { hostId: "forged", costBasis: "NotBilled" }),
+      point("turn.tokens", "tokensOnly", { tokenKind: "Input", costBasis: "NotReported" }),
+      point("turn.cost", "tokensOnly", { costBasis: "NotReported" }),
       point("turn.phase", "billed", { phase: "Boot" }),
     ],
-    dimensions,
     "host-1",
   );
   assert.deepEqual(
     stamped.map((each) => [each.metric, each.turnId, each.dimensions]),
     [
-      ["turn.cost", "billed", { ...dimensions.billed, hostId: "host-1" }],
-      ["turn.tokens", "tokensOnly", { tokenKind: "Input", ...dimensions.tokensOnly, hostId: "host-1" }],
+      ["turn.cost", "billed", { costBasis: "NotBilled", hostId: "host-1" }],
+      ["turn.tokens", "tokensOnly", { tokenKind: "Input", costBasis: "NotReported", hostId: "host-1" }],
       ["turn.phase", "billed", { phase: "Boot", hostId: "host-1" }],
     ],
   );

@@ -8,7 +8,7 @@ import {
 } from "@tumpel/schemas";
 import { z } from "zod";
 import { DELIVERY_PROMPT_LIMIT } from "../../src/delivery-prompt.ts";
-import { TENANT_ID, World } from "./harness/world.ts";
+import { BUDGETS, TENANT_ID, World } from "./harness/world.ts";
 
 type EventLog = { appendEvent(event: Record<string, unknown>, now: number): number };
 
@@ -45,15 +45,17 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   failed("turn-3", "the harness exited");
 
   const before = world.tenantRowsWritten();
-  world.restartTenant();
+  await world.restartTenant();
   await world.runtime.settle();
   assert.equal(world.tenantRowsWritten() - before, 0, "the restart rewrites no stored event");
   await world.call("hostHello", {
+    tenantId: TENANT_ID,
     hostId: host.hostId,
+    heldTurnIds: host.holding().heldTurnIds,
     boxCapacity: 8,
-    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
     now: Date.now(),
-    channelProtocol: ChannelProtocol.Version,
+    channelProtocol: ChannelProtocol.Oldest,
   });
 
   const resumed = await world.fetch(world.owner, "POST", `${path}/resume`);

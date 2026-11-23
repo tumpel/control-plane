@@ -84,10 +84,10 @@ test("an hour of nine boxes' heartbeats and turns writes every point to Analytic
   for (let elapsed = 0, tick = 1; elapsed < HOUR_MS; elapsed += HEARTBEAT_MS, tick++) {
     for (let box = 0; box < BOXES; box++) {
       const batch = heartbeat(box, tick, Date.now());
-      const rowsBefore = sql.totalRowsWritten();
+      const rowsBefore = sql.rowsWritten;
       const pointsBefore = written.length;
       await metrics.record(batch);
-      rowsPerBatch.add(sql.totalRowsWritten() - rowsBefore);
+      rowsPerBatch.add(sql.rowsWritten - rowsBefore);
       largestCall = Math.max(largestCall, written.length - pointsBefore);
       points += batch.samples.length + batch.turns.length;
     }

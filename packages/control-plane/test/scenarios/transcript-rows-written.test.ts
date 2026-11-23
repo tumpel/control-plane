@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SETTINGS, World } from "./harness/world.ts";
+import { SETTINGS, UNMETERED, World } from "./harness/world.ts";
 
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
 
 const rowsFor = async (lines: number) => {
-  const world = await World.open();
+  const world = await World.open({ limits: UNMETERED });
   try {
     const host = await world.hostOnline("host-1");
     const session = await world.startSession({ prompt: "write a long answer", tags: [] });
@@ -13,10 +13,15 @@ const rowsFor = async (lines: number) => {
     await host.claims(offer);
     const start = world.tenantRowsWritten();
     for (let lineSeq = 1; lineSeq <= lines; lineSeq++) {
-      await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+      await host.says({
+        type: "TurnLines",
+        turnId: offer.turnId,
+        firstLineSeq: lineSeq,
+        lines: [`{"type":"assistant","n":${lineSeq}}`],
+      });
     }
     const streamed = world.tenantRowsWritten() - start;
-    await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq: lines + 1, text: RESULT });
+    await host.says({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: lines + 1, lines: [RESULT] });
     await host.says({
       type: "TurnComplete",
       turnId: offer.turnId,
@@ -28,7 +33,7 @@ const rowsFor = async (lines: number) => {
     assert.equal(turn.lineCount, lines + 1);
     return { streamed, turn: world.tenantRowsWritten() - start };
   } finally {
-    world.close();
+    await world.close();
   }
 };
 

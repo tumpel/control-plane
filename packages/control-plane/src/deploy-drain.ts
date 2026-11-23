@@ -4,6 +4,7 @@ import { sameSecret } from "./crypto";
 import { issues, json, type Problem, problem } from "./http";
 import { bearerOf } from "./identity";
 import type { Env } from "./index";
+import { presenceGraceMs, settingsOf } from "./settings";
 import { tenantApi } from "./tenant-api.ts";
 
 export type ReleaseRollout = z.infer<typeof ReleaseRolloutSchema>;
@@ -67,21 +68,29 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
   }
   if (!sameSecret(bearerOf(request), drainToken(await object.text()))) return tokenRefused();
   const { results } = await env.DB.prepare("SELECT DISTINCT tenant_id FROM hosts").all<{ tenant_id: string }>();
-  const hosts = (
-    await Promise.all(
-      results.map(async ({ tenant_id }) =>
-        (
-          await tenantApi(env.TENANT, tenant_id).call("runningTurnsByHost", {})
-        ).running.map((each) => ({
-          ...each,
-          tenantId: tenant_id,
-        })),
-      ),
-    )
-  ).flat();
-  const { results: channelProtocols } = await env.DB.prepare(
-    "SELECT p.channel_protocol_version AS channelProtocolVersion, COUNT(*) AS hostCount FROM host_channel_protocols AS p JOIN hosts AS h ON h.host_id = p.host_id WHERE h.state = 'Online' GROUP BY p.channel_protocol_version ORDER BY p.channel_protocol_version",
-  ).all<{ channelProtocolVersion: number; hostCount: number }>();
+  const heardSince = Date.now() - presenceGraceMs(settingsOf(env));
+  const tenants = await Promise.all(
+    results.map(async ({ tenant_id }) => {
+      const tenant = tenantApi(env.TENANT, tenant_id);
+      const [{ running }, { usage }] = await Promise.all([
+        tenant.call("runningTurnsByHost", {}),
+        tenant.call("listHostUsage", { tenantId: tenant_id }),
+      ]);
+      const heard = usage.filter((report) => report.updatedAt >= heardSince);
+      const heardIds = new Set(heard.map((report) => report.hostId));
+      return {
+        running: running.filter((each) => heardIds.has(each.hostId)).map((each) => ({ ...each, tenantId: tenant_id })),
+        protocols: heard.map((report) => report.channelProtocol),
+      };
+    }),
+  );
+  const hosts = tenants.flatMap((tenant) => tenant.running);
+  const counts = new Map<number, number>();
+  for (const version of tenants.flatMap((tenant) => tenant.protocols))
+    counts.set(version, (counts.get(version) ?? 0) + 1);
+  const channelProtocols = [...counts]
+    .map(([channelProtocolVersion, hostCount]) => ({ channelProtocolVersion, hostCount }))
+    .sort((left, right) => left.channelProtocolVersion - right.channelProtocolVersion);
   const rollout: ReleaseRollout = {
     deployedCommit: env.DEPLOYED_COMMIT,
     drained: hosts.length === 0,

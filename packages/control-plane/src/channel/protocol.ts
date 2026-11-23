@@ -6,25 +6,28 @@ import {
   type HostFrameSchema,
   type HostReportedHealthSchema,
   type HostUsageSchema,
+  type MetricBatchSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
 
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
-export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true });
+export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true, channelProtocolOldest: true });
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
 export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
-export type HostUsage = z.infer<typeof HostUsageSchema>;
+
+export type ReportedUsage = z.infer<typeof HostUsageSchema>;
+export type MetricBatch = z.infer<typeof MetricBatchSchema>;
 export type HostReportedHealth = z.infer<typeof HostReportedHealthSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];
 export type ControlMessage = ControlFrame["message"];
-export type TelemetryBatch = Extract<HostMessage, { type: "TelemetryBatch" }>;
+export type TurnLines = Extract<HostMessage, { type: "TurnLines" }>;
 export type TurnOffer = Extract<ControlMessage, { type: "TurnOffer" }>;
 export type DispatchGrant = TurnOffer["credential"];
 export type SnapshotDownload = TurnOffer["snapshots"][number];
@@ -63,7 +66,6 @@ export interface Frame<M> {
 }
 
 export interface Ledger<M> {
-  received: number;
   sent: number;
   unacked: Frame<M>[];
 }
@@ -71,12 +73,9 @@ export interface Ledger<M> {
 export interface LedgerStore<M> {
   load(): Ledger<M>;
   save(ledger: Ledger<M>): void;
-  heard(): number;
-  skip(frame: Frame<unknown>): void;
-  refused(): ReadonlySet<number>;
 }
 
-export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });
+export const emptyLedger = <M>(): Ledger<M> => ({ sent: 0, unacked: [] });
 
 const HELLO_CONTEXT = "tumpel-channel-hello-v1";
 
@@ -93,43 +92,32 @@ export const helloBytes = (nonce: string, hostId: string): Uint8Array<ArrayBuffe
   return bytes;
 };
 
-export const sequence = <M>(ledger: Ledger<M>, message: M): { ledger: Ledger<M>; frame: Frame<M> } => {
-  const frame: Frame<M> = { type: "Frame", seq: ledger.sent + 1, ack: ledger.received, message };
+export const sequence = <M>(ledger: Ledger<M>, message: M, ack: number): { ledger: Ledger<M>; frame: Frame<M> } => {
+  const frame: Frame<M> = { type: "Frame", seq: ledger.sent + 1, ack, message };
   return { ledger: { ...ledger, sent: frame.seq, unacked: [...ledger.unacked, frame] }, frame };
 };
 
-export type Accepted<Own, Theirs> =
-  | { kind: "Accepted"; ledger: Ledger<Own>; message: Theirs }
-  | { kind: "Duplicate" }
-  | { kind: "Gap"; expected: number; got: number };
+export type Arrival = { kind: "Next" } | { kind: "Duplicate" } | { kind: "Gap"; expected: number; got: number };
 
-export const accept = <Own, Theirs>(
-  ledger: Ledger<Own>,
-  frame: Frame<Theirs>,
-  refused: ReadonlySet<number> = new Set(),
-): Accepted<Own, Theirs> => {
-  if (frame.seq <= ledger.received || refused.has(frame.seq)) return { kind: "Duplicate" };
-  let expected = ledger.received + 1;
-  while (refused.has(expected)) expected += 1;
-  if (frame.seq !== expected) return { kind: "Gap", expected, got: frame.seq };
-  return {
-    kind: "Accepted",
-    ledger: {
-      received: frame.seq,
-      sent: ledger.sent,
-      unacked: ledger.unacked.filter((own) => own.seq > frame.ack),
-    },
-    message: frame.message,
-  };
+export const arrival = (cursor: number, seq: number): Arrival => {
+  if (seq <= cursor) return { kind: "Duplicate" };
+  if (seq !== cursor + 1) return { kind: "Gap", expected: cursor + 1, got: seq };
+  return { kind: "Next" };
 };
+
+export const acked = <M>(ledger: Ledger<M>, ack: number): Ledger<M> => ({
+  ...ledger,
+  unacked: ledger.unacked.filter((own) => own.seq > ack),
+});
 
 export const resend = async <Stored, M>(
   ledger: Ledger<Stored>,
+  ack: number,
   restore: (stored: Stored) => Promise<M>,
 ): Promise<Frame<M>[]> => {
   const frames: Frame<M>[] = [];
   for (const frame of ledger.unacked) {
-    frames.push({ ...frame, ack: ledger.received, message: await restore(frame.message) });
+    frames.push({ ...frame, ack, message: await restore(frame.message) });
   }
   return frames;
 };

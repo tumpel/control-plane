@@ -29,7 +29,7 @@ import {
   TRIGGER_STEPS,
 } from "./configs.ts";
 import { effectiveVersions } from "./harness-catalog.ts";
-import { hostOf, listHosts, setHostLabels } from "./hosts.ts";
+import { hostOf, listHostRecords, setHostLabels } from "./hosts.ts";
 import { json, type Problem, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";
@@ -303,7 +303,7 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
       ),
       secretSets: secretSets.secretSets,
       pins: effectiveVersions((await api.call("listPins", {})).pins),
-      hosts: await listHosts(env, tenantId),
+      hosts: await listHostRecords(env, tenantId),
       sessions: (await api.call("listSessions", { tenantId, filter: {} })).sessions,
       triggers: (await api.call("listTriggers", { tenantId })).triggers,
     },

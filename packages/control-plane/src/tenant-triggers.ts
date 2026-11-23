@@ -12,7 +12,7 @@ import {
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
-import { listHosts, type Outcome, type Refused } from "./hosts.ts";
+import type { Outcome, Refused } from "./hosts.ts";
 import { placed } from "./sessions.ts";
 import { apiOriginOf } from "./settings.ts";
 import type { NewSession } from "./tenant-sessions.ts";
@@ -146,7 +146,7 @@ export abstract class TenantTriggers extends TenantWebhooks {
     const session: NewSession = {
       principalId: trigger.principalId,
       startedBy: origin,
-      hosts: await listHosts(this.env, tenantId),
+      hosts: await this.hostRecords(tenantId),
       harness: entry.harness,
       harnessVersion: entry.harnessVersion,
       endpoint: apiOriginOf(this.env),

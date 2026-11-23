@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SETTINGS, World } from "./harness/world.ts";
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 };
-
 test("a turn whose transcript write fails ends as failed, and another turn on the same host is still stored, acked and completed with no row per line", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
@@ -15,8 +13,8 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const b = host.takeOffer();
   await host.claims(b);
   const line = (turnId: string, lineSeq: number) =>
-    host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
-  const heartbeat = () => world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+    host.says({ type: "TurnLines", turnId, firstLineSeq: lineSeq, lines: [`{"type":"assistant","n":${lineSeq}}`] });
+  const heartbeat = () => host.beats();
   const put = world.store.put.bind(world.store);
   world.store.put = (async (key: string, ...rest: unknown[]) => {
     if (key.includes(a.turnId)) throw new Error("the store refuses turn a");
@@ -35,10 +33,10 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const before = world.tenantRowsWritten();
   for (let lineSeq = 2; lineSeq < lines; lineSeq++) await line(b.turnId, lineSeq);
   await host.says({
-    type: "TurnLine",
+    type: "TurnLines",
     turnId: b.turnId,
-    lineSeq: lines,
-    text: '{"type":"result","subtype":"success","is_error":false}',
+    firstLineSeq: lines,
+    lines: ['{"type":"result","subtype":"success","is_error":false}'],
   });
   await heartbeat();
   assert.ok(world.tenantRowsWritten() - before < lines / 4, "turn b writes rows per chunk, not per line");
