@@ -3353,16 +3353,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, but the control plane expects part ${expected}, so the snapshot cannot name its packs`,
       );
     }
+    const kept = message.part === 1 || draft === null ? [] : draft.packs;
+    const packs = new Set([...kept, ...listed, ...message.reusedPackDigests]);
+    if (packs.size > MAX_PACKS_PER_MANIFEST) {
+      return refused(
+        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, which brings it to ${packs.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the snapshot cannot name its packs`,
+      );
+    }
     const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
     if (!replayed) {
-      const kept = message.part === 1 || draft === null ? [] : draft.packs;
       await this.env.STORE.put(
         draftKey(window.request.storage_key),
-        JSON.stringify({
-          lastPart: message.part,
-          lastHash,
-          packs: [...new Set([...kept, ...listed, ...message.reusedPackDigests])],
-        }),
+        JSON.stringify({ lastPart: message.part, lastHash, packs: [...packs] }),
       );
     }
     const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
@@ -3828,11 +3830,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (packs === null) {
       return rejected(
         `answered SnapshotDone for snapshot ${request.snapshot_id} without sending SnapshotPacks part 1, so the control plane cannot name its packs and the session keeps its previous snapshot; update the supervisor`,
-      );
-    }
-    if (packs.size > MAX_PACKS_PER_MANIFEST) {
-      return rejected(
-        `stored snapshot ${request.snapshot_id} with chunks in ${packs.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the session keeps its previous snapshot`,
       );
     }
     return { kind: "Checked", packs };
