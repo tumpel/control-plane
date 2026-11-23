@@ -78,6 +78,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Personas_delete`                        | `tumpel_persona_delete`                      | `tumpel persona delete`                      |
 | `Personas_get`                           | `tumpel_persona_get`                         | `tumpel persona get`                         |
 | `Personas_list`                          | `tumpel_persona_list`                        | `tumpel persona list`                        |
+| `Personas_listMetadata`                  | `tumpel_persona_list`                        | `tumpel persona list`                        |
 | `Personas_patch`                         | `tumpel_persona_patch`                       | `tumpel persona patch`                       |
 | `Personas_patchFile`                     | `tumpel_persona_patch_file`                  | `tumpel persona patch-file`                  |
 | `Personas_update`                        | `tumpel_persona_update`                      | `tumpel persona update`                      |

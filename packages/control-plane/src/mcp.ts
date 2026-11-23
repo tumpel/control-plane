@@ -410,7 +410,7 @@ export const TOOLS: ToolDefinition[] = [
   rest(
     "tumpel_persona_list",
     "GET",
-    "/v1/personas",
+    "/v2/personas",
     NO_ARGUMENTS,
     "List the tenant's personas with file paths, digests, sizes and timestamps. Use tumpel_persona_get to read file content.",
   ),

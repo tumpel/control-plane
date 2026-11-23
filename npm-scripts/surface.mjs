@@ -45,6 +45,7 @@ const NOUNS = {
   Triggers: "trigger",
 };
 const VERBS = {
+  Personas_listMetadata: "list",
   Identity_listTenants: "tenants",
   EnrolmentTokens_mint: "mint-token",
   EnrolmentTokens_list: "list-tokens",
