@@ -7,32 +7,42 @@ import {
   HostFrameSchema,
   HostHeartbeatSchema,
   type HostReportedHealthSchema,
-  type HostUsageSchema,
+  HostUsageSchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
 
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true, channelProtocolOldest: true });
-export const HELD_TURNS_PROTOCOL = 35;
-const HeldTurnsUnreportedEnvelopeSchema = z.discriminatedUnion("type", [
-  HelloSchema.omit({ heldTurnIds: true }),
-  HostHeartbeatSchema.omit({ heldTurnIds: true }),
+export const SPOKEN_CHANNEL_PROTOCOL = 36;
+export const STORED_FRAMES_PROTOCOL = 37;
+const UnstoredFramesUsageSchema = HostUsageSchema.partial({
+  diskBudgetMib: true,
+  diskHeldMib: true,
+  memoryBudgetMib: true,
+  memoryHeldMib: true,
+});
+const UnstoredFramesEnvelopeSchema = z.discriminatedUnion("type", [
+  HelloSchema.omit({ resendFrom: true }).extend({ usage: UnstoredFramesUsageSchema }),
+  HostHeartbeatSchema.omit({ ack: true, telemetry: true }).extend({ usage: UnstoredFramesUsageSchema }),
   HostFrameSchema,
 ]);
 export const hostEnvelopeSchema = (protocolVersion: number) =>
-  protocolVersion >= HELD_TURNS_PROTOCOL ? HostEnvelopeSchema : HeldTurnsUnreportedEnvelopeSchema;
+  protocolVersion >= STORED_FRAMES_PROTOCOL ? HostEnvelopeSchema : UnstoredFramesEnvelopeSchema;
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
-export type HostEnvelope = z.infer<typeof HostEnvelopeSchema> | z.infer<typeof HeldTurnsUnreportedEnvelopeSchema>;
+export type HostEnvelope = z.infer<typeof HostEnvelopeSchema> | z.infer<typeof UnstoredFramesEnvelopeSchema>;
 export type HeldTurns = z.infer<typeof HeldTurnsSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
 export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
 
-export const heldTurnsOf = (envelope: Hello | HostHeartbeat): HeldTurns =>
-  "heldTurnIds" in envelope ? { state: "Reported", heldTurnIds: envelope.heldTurnIds } : { state: "NotReported" };
-export type HostUsage = z.infer<typeof HostUsageSchema>;
+export const heldTurnsOf = (envelope: Hello | HostHeartbeat): HeldTurns => ({
+  state: "Reported",
+  heldTurnIds: envelope.heldTurnIds,
+});
+export type HostUsage = z.infer<typeof UnstoredFramesUsageSchema>;
+export type ReportedUsage = z.infer<typeof HostUsageSchema>;
 export type HostReportedHealth = z.infer<typeof HostReportedHealthSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;

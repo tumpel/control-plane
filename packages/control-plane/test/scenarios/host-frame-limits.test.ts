@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
 import * as control from "../../src/channel/control.ts";
 import { HostFrameMeter, rateLimitDetail } from "../../src/channel/host-health.ts";
 import {
@@ -10,6 +9,7 @@ import {
   type HostMessage,
   helloBytes,
   type Ledger,
+  SPOKEN_CHANNEL_PROTOCOL,
   type StoredControlMessage,
 } from "../../src/channel/protocol.ts";
 
@@ -32,7 +32,7 @@ const savedTrips = () => {
 
 const healthyMeter = () => new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], savedTrips().store);
 
-const openChannel = async (meter: HostFrameMeter, protocolVersion: number = ChannelProtocol.Version) => {
+const openChannel = async (meter: HostFrameMeter, protocolVersion: number = SPOKEN_CHANNEL_PROTOCOL) => {
   const clock = { now: START };
   const trips: string[] = [];
   const pair = generateKeyPairSync("ed25519");

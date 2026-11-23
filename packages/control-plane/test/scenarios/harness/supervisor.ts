@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
-import { ChannelProtocol, type HostUsageSchema, StoredTurnOfferSchema } from "@tumpel/schemas";
+import { ChannelProtocol, StoredTurnOfferSchema } from "@tumpel/schemas";
 import type { WebSocket } from "ws";
 import { z } from "zod";
-import { ControlEnvelopeSchema, HELD_TURNS_PROTOCOL, helloBytes } from "../../../src/channel/protocol.ts";
+import {
+  ControlEnvelopeSchema,
+  type HostUsage,
+  helloBytes,
+  SPOKEN_CHANNEL_PROTOCOL,
+} from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
 
 const REPLIES = new Set([
@@ -23,7 +28,8 @@ export type Clock = {
   tick(ms: number): Promise<void>;
 };
 
-export type HostUsage = z.infer<typeof HostUsageSchema>;
+export type { HostUsage };
+
 type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 export type HostMessage = { type: string } & Record<string, unknown>;
@@ -34,7 +40,6 @@ type SentFrame = { type: "Frame"; seq: number; ack: number; message: HostMessage
 export type Closed = { code: number; reason: string; wasClean: boolean };
 
 export const DEFAULT_USAGE: HostUsage = {
-  boxesWarm: 0,
   loadAverage: 0,
   memoryAvailableMib: 30000,
   memoryBudgetMib: 30000,
@@ -70,6 +75,7 @@ export const hostKey = (): { privateKey: KeyObject; publicKey: string } => {
 export type SupervisorOptions = {
   boxCapacity: number;
   protocolVersion: number;
+  channelProtocolOldest: number;
   carried: Carried;
   resend: HostMessage[];
   usage: HostUsage;
@@ -96,6 +102,7 @@ export class Supervisor {
   private unacked: SentFrame[];
   private usage: HostUsage;
   private welcomed = false;
+  private welcomedOn: number | null = null;
   private challenged = false;
   private readonly inbox: ControlMessage[] = [];
   private readonly refusals: { seq: number; reason: string }[] = [];
@@ -137,7 +144,8 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      protocolVersion: ChannelProtocol.Version,
+      protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
+      channelProtocolOldest: ChannelProtocol.Oldest,
       carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
       usage: DEFAULT_USAGE,
@@ -180,12 +188,8 @@ export class Supervisor {
       usage: this.usage,
       heldSessionIds: holding.heldSessionIds,
       heldClaudeSetupIds: holding.heldClaudeSetupIds,
-      ...this.heldTurnIds(holding.heldTurnIds),
+      heldTurnIds: holding.heldTurnIds,
     });
-  }
-
-  private heldTurnIds(heldTurnIds: string[]): { heldTurnIds?: string[] } {
-    return this.options.protocolVersion >= HELD_TURNS_PROTOCOL ? { heldTurnIds } : {};
   }
 
   holding(): Holding {
@@ -238,16 +242,18 @@ export class Supervisor {
         type: "Hello",
         hostId: this.hostId,
         protocolVersion: this.options.protocolVersion,
+        channelProtocolOldest: this.options.channelProtocolOldest,
         supervisorVersion: this.options.supervisorVersion,
         signature: sign(null, helloBytes(envelope.nonce, this.hostId), this.key).toString("base64"),
         boxCapacity: this.options.boxCapacity,
         usage: this.usage,
-        ...this.heldTurnIds([...this.turns]),
+        heldTurnIds: [...this.turns],
       });
       return;
     }
     if (envelope.type === "Welcome") {
       this.welcomed = true;
+      this.welcomedOn = envelope.protocolVersion;
       for (const frame of this.unacked) this.raw({ ...frame, ack: this.heard });
       for (const message of this.options.resend) this.send(message);
       return;
@@ -350,6 +356,10 @@ export class Supervisor {
 
   isWelcomed(): boolean {
     return this.welcomed;
+  }
+
+  welcomedVersion(): number | null {
+    return this.welcomedOn;
   }
 
   assertOpen(when: string): void {

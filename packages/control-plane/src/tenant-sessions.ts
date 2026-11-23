@@ -50,6 +50,7 @@ import type {
   SnapshotDownload,
   StoredControlMessage,
 } from "./channel/protocol.ts";
+import { SPOKEN_CHANNEL_PROTOCOL, STORED_FRAMES_PROTOCOL } from "./channel/protocol.ts";
 import { successResultOf } from "./compact.ts";
 import { TURN_TOKEN_PURPOSE, turnToken } from "./connector-oauth.ts";
 import {
@@ -487,7 +488,7 @@ type TurnFailed = Extract<SessionHostMessage, { type: "TurnFailed" }>;
 type TurnClaim = Extract<SessionHostMessage, { type: "TurnClaim" }>;
 type HostEvent = Exclude<
   SessionHostMessage,
-  ChunkAsk | CloneFailed | TurnFailed | TurnClaim | { type: "SnapshotDone" | "SnapshotFailed" }
+  ChunkAsk | CloneFailed | TurnFailed | TurnClaim | { type: "SnapshotDone" | "SnapshotFailed" | "TurnLines" }
 >;
 type TurnEvent = Exclude<HostEvent, { type: "BoxGone" | "BoxTeardownFailed" }>;
 type ChunkReply = Extract<
@@ -3263,6 +3264,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     hostId: string,
     message: SessionHostMessage,
   ): Promise<HostReply | null> {
+    if (message.type === "TurnLines") {
+      return refused(
+        `host ${hostId} sent TurnLines for turn ${message.turnId}, which needs channel protocol ${STORED_FRAMES_PROTOCOL}; this control plane speaks ${SPOKEN_CHANNEL_PROTOCOL}`,
+      );
+    }
     if (message.type !== "TurnLine") await this.flushHeldLines(hostId);
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
