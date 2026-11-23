@@ -314,7 +314,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts/usage",
     NO_ARGUMENTS,
-    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them when the host reports them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
+    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm (its Idle and Stopping boxes), loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
   ),
   rest(
     "tumpel_host_get",

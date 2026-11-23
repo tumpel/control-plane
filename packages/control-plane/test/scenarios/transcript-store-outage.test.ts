@@ -13,7 +13,7 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const b = host.takeOffer();
   await host.claims(b);
   const line = (turnId: string, lineSeq: number) =>
-    host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+    host.says({ type: "TurnLines", turnId, firstLineSeq: lineSeq, lines: [`{"type":"assistant","n":${lineSeq}}`] });
   const heartbeat = () => host.beats();
   const put = world.store.put.bind(world.store);
   world.store.put = (async (key: string, ...rest: unknown[]) => {
@@ -33,10 +33,10 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   const before = world.tenantRowsWritten();
   for (let lineSeq = 2; lineSeq < lines; lineSeq++) await line(b.turnId, lineSeq);
   await host.says({
-    type: "TurnLine",
+    type: "TurnLines",
     turnId: b.turnId,
-    lineSeq: lines,
-    text: '{"type":"result","subtype":"success","is_error":false}',
+    firstLineSeq: lines,
+    lines: ['{"type":"result","subtype":"success","is_error":false}'],
   });
   await heartbeat();
   assert.ok(world.tenantRowsWritten() - before < lines / 4, "turn b writes rows per chunk, not per line");

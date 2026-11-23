@@ -161,7 +161,6 @@ export const pastBound = (profile: TenantLimitsProfile, bound: TenantLimitsProfi
     .map((budget) => `usage needs ${budget.measure} per ${budget.window.toLowerCase()} at most ${budget.limit}`),
 ];
 
-const READ_OPERATION =
-  /^(list|get|read)[A-Z]|^(transcriptCursor|connectedAccounts|runningTurnsByHost|turnMetricDimensions)$/;
+const READ_OPERATION = /^(list|get|read)[A-Z]|^(transcriptCursor|connectedAccounts|runningTurnsByHost)$/;
 
 export const writes = (operation: string): boolean => !READ_OPERATION.test(operation);

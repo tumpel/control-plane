@@ -54,7 +54,7 @@ const R2_STUB_ORIGIN = "https://r2.example.test";
 const DASHBOARD_ORIGIN = "https://app.tumpel.test";
 type HostSide = Supervisor;
 
-const USAGE: HostUsage = {
+const USAGE: Omit<HostUsage, "memoryBudgetMib" | "memoryHeldMib"> = {
   loadAverage: 0.25,
   memoryAvailableMib: 6144,
   diskBudgetMib: 200000,
@@ -186,7 +186,7 @@ const connect = (
   boxCapacity = 8,
   carried: Carried = { received: 0, sent: 0, held: [], turns: [] },
   resend: HostMessage[] = [],
-  usage: HostUsage = USAGE,
+  usage: Partial<HostUsage> = {},
 ): Promise<HostSide> =>
   world.connect(
     id,
@@ -195,7 +195,7 @@ const connect = (
       boxCapacity,
       carried,
       resend,
-      usage: { memoryBudgetMib: boxCapacity * BoxMemoryLimit.DefaultMib, memoryHeldMib: 0, ...usage },
+      usage: { memoryBudgetMib: boxCapacity * BoxMemoryLimit.DefaultMib, memoryHeldMib: 0, ...USAGE, ...usage },
     },
   );
 
@@ -391,10 +391,10 @@ const tenant = async () => {
     assert.equal(offer.sessionId, started.session.sessionId);
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     return { session: started.session, offer };
@@ -735,9 +735,9 @@ suite("sessions", () => {
       }),
     ];
     texts.forEach((text, index) => {
-      host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
+      host.send({ type: "TurnLines", turnId, firstLineSeq: index + 1, lines: [text] });
     });
-    host.send({ type: "TurnLine", turnId, lineSeq: 2, text: "a resent line" });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 2, lines: ["a resent line"] });
     const expected = texts.map((text, index) => ({ lineSeq: index + 1, text }));
     await until(
       "three lines in the transcript",
@@ -772,7 +772,7 @@ suite("sessions", () => {
     assert.equal(pending.finished, false);
 
     const result = JSON.stringify({ type: "result", subtype: "success", is_error: false });
-    host.send({ type: "TurnLine", turnId, lineSeq: 4, text: result });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 4, lines: [result] });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 4, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
@@ -865,7 +865,7 @@ suite("sessions", () => {
     );
     const result = JSON.stringify({ type: "result", subtype: "success", is_error: false });
     [...texts, result].forEach((text, index) => {
-      host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
+      host.send({ type: "TurnLines", turnId, firstLineSeq: index + 1, lines: [text] });
     });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 8, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
@@ -929,9 +929,15 @@ suite("sessions", () => {
     );
     const dropped = Array.from({ length: 18 }, () => JSON.stringify({ type: "system", subtype: "status" }));
     const kept = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "done thinking" }] } });
-    [...dropped, kept].forEach((text, index) => {
-      host.send({ type: "TurnLine", turnId, lineSeq: index + 1, text });
-    });
+    const texts = [...dropped, kept];
+    for (let at = 0; at < texts.length; at += SETTINGS.transcriptChunkLines) {
+      host.send({
+        type: "TurnLines",
+        turnId,
+        firstLineSeq: at + 1,
+        lines: texts.slice(at, at + SETTINGS.transcriptChunkLines),
+      });
+    }
     await until(
       "nineteen lines in the transcript",
       () => readAll(sessionId, turnId, 20),
@@ -1265,7 +1271,12 @@ suite("sessions", () => {
     assert.equal(running.code, "SessionNotStopped");
     assert.match(running.detail, /is Running/);
 
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({
+      type: "TurnLines",
+      turnId,
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
+    });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
@@ -1338,7 +1349,7 @@ suite("sessions", () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result"}' });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 1, lines: ['{"type":"result"}'] });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const warm = await host.next("SnapshotRequest");
     await storeRoot(warm.storageKey);
@@ -1392,12 +1403,14 @@ suite("sessions", () => {
     host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
     let lineSeq = 0;
     for (let round = 0; round < 5; round++) {
-      for (let index = 0; index < 40; index++) {
-        lineSeq += 1;
-        host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
-      }
       host.send({
-        type: "TelemetryBatch",
+        type: "TurnLines",
+        turnId: offer.turnId,
+        firstLineSeq: lineSeq + 1,
+        lines: Array.from({ length: 40 }, (_, at) => `{"type":"assistant","n":${lineSeq + 1 + at}}`),
+      });
+      lineSeq += 40;
+      host.measures({
         instruments: [{ metric: "turn.tokens", unit: "1", kind: "Turn", description: "tokens" }],
         samples: [{ metric: "host.load.1m", at: new Date().toISOString(), value: 0.5, dimensions: {} }],
         turns: [
@@ -1415,10 +1428,10 @@ suite("sessions", () => {
     }
     lineSeq += 1;
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: lineSeq,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     host.send({
       type: "TurnComplete",
@@ -1582,7 +1595,7 @@ suite("sessions", () => {
     };
     const finish = async (offer: Extract<ControlMessage, { type: "TurnOffer" }>): Promise<void> => {
       const result = '{"type":"turn.completed"}';
-      host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: offer.lastLineSeq + 1, text: result });
+      host.send({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: offer.lastLineSeq + 1, lines: [result] });
       host.send({
         type: "TurnComplete",
         turnId: offer.turnId,
@@ -1723,7 +1736,7 @@ suite("sessions", () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"assistant"}' });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 1, lines: ['{"type":"assistant"}'] });
     await until(
       "the turn reading Running",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1734,7 +1747,7 @@ suite("sessions", () => {
     const stopping = await tool("tumpel_session_stop", { sessionId, cancelTurn: true }, SessionSchema);
     assert.equal(stopping.state, "Stopping");
     assert.deepEqual(await host.next("TurnCancel"), { type: "TurnCancel", turnId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 2, text: '{"type":"assistant"}' });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 2, lines: ['{"type":"assistant"}'] });
     host.send({
       type: "TurnFailed",
       turnId,
@@ -1812,7 +1825,12 @@ suite("sessions", () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({
+      type: "TurnLines",
+      turnId,
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
+    });
     await until(
       "the turn reading Running",
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
@@ -1870,10 +1888,10 @@ suite("sessions", () => {
     assert.equal(host.holds("TurnOffer"), false);
     host.send({ type: "TurnClaim", turnId: second.turnId, boxId: secondOffer.boxId });
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: second.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     host.send({ type: "TurnComplete", turnId: second.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const snapshot = await host.next("SnapshotRequest");
@@ -1960,7 +1978,12 @@ suite("sessions", () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({
+      type: "TurnLines",
+      turnId,
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
+    });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.turnId, turnId);
@@ -1994,7 +2017,12 @@ suite("sessions", () => {
     const offer = await host.next("TurnOffer");
     const { turnId } = offer;
     host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
+    host.send({
+      type: "TurnLines",
+      turnId,
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
+    });
     host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
 
@@ -2150,10 +2178,10 @@ suite("sessions", () => {
     const lineSeq = offer.lastLineSeq + 1;
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: lineSeq,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     host.send({
       type: "TurnComplete",
@@ -2204,10 +2232,10 @@ suite("sessions", () => {
     const offer = await host.next("TurnOffer");
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"error_during_execution","is_error":false}',
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"error_during_execution","is_error":false}'],
     });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
 
@@ -2255,10 +2283,10 @@ suite("sessions", () => {
     await host.next("TurnClaimed");
     await wait(500);
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const snapshot = await host.next("SnapshotRequest");
@@ -2527,10 +2555,10 @@ suite("sessions", () => {
     const warning =
       "the box disk of 32096 MiB is full, 12 MiB free; give the persona a larger boxDiskMib, up to 262144 MiB, or have it delete build output it no longer needs";
     host.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     host.send({
       type: "TurnComplete",
@@ -2687,10 +2715,10 @@ suite("sessions", () => {
     assert.equal(offer.sessionId, started.session.sessionId);
     side.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     side.send({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
+      firstLineSeq: 1,
+      lines: ['{"type":"result","subtype":"success","is_error":false}'],
     });
     side.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     return { session: started.session, offer };
@@ -2943,7 +2971,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   const read = () => getJson(`/v1/prebuilds/${started.prebuildId}`, PrebuildSchema);
   await until("the prebuild reading Building", read, (prebuild) => prebuild.status.state === "Building");
   host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
-  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+  host.send({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: 1, lines: ["prebuild: running onCreateCommand"] });
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
   assert.equal(request.sessionId, offer.sessionId);
@@ -2984,7 +3012,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
 
   host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
   await host.next("TurnClaimed");
-  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
+  host.send({ type: "TurnLines", turnId: consumer.turnId, firstLineSeq: 1, lines: ["{}"] });
   host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const own = await host.next("SnapshotRequest");
   assert.equal(own.sessionId, consumer.sessionId);
@@ -3019,7 +3047,12 @@ test("a newer prebuild archives the older one only once no session still restore
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     await host.next("TurnClaimed");
     host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
-    host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+    host.send({
+      type: "TurnLines",
+      turnId: offer.turnId,
+      firstLineSeq: 1,
+      lines: ["prebuild: running onCreateCommand"],
+    });
     host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     await storeRoot(request.storageKey);
@@ -3052,7 +3085,7 @@ test("a newer prebuild archives the older one only once no session still restore
 
   host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
   await host.next("TurnClaimed");
-  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
+  host.send({ type: "TurnLines", turnId: consumer.turnId, firstLineSeq: 1, lines: ["{}"] });
   host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const own = await host.next("SnapshotRequest");
   await storeRoot(own.storageKey);
@@ -3077,7 +3110,7 @@ test("archiving the current prebuild by hand keeps its root until the session re
   host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
   await host.next("TurnClaimed");
   host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
-  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+  host.send({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: 1, lines: ["prebuild: running onCreateCommand"] });
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
   await storeRoot(request.storageKey);
@@ -3104,7 +3137,7 @@ test("archiving the current prebuild by hand keeps its root until the session re
 
   host.send({ type: "TurnClaim", turnId: consumer.turnId, boxId: consumer.boxId });
   await host.next("TurnClaimed");
-  host.send({ type: "TurnLine", turnId: consumer.turnId, lineSeq: 1, text: "{}" });
+  host.send({ type: "TurnLines", turnId: consumer.turnId, firstLineSeq: 1, lines: ["{}"] });
   host.send({ type: "TurnComplete", turnId: consumer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const own = await host.next("SnapshotRequest");
   await storeRoot(own.storageKey);
@@ -3131,7 +3164,7 @@ test("a prebuild whose snapshot fails reads Failed and its box is discarded over
   host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
   await host.next("TurnClaimed");
   host.send({ type: "TurnRepositoryReady", turnId: offer.turnId });
-  host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "prebuild: running onCreateCommand" });
+  host.send({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: 1, lines: ["prebuild: running onCreateCommand"] });
   host.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
   const request = await host.next("SnapshotRequest");
   host.send({

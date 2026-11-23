@@ -5,9 +5,10 @@ import type { WebSocket } from "ws";
 import { z } from "zod";
 import {
   ControlEnvelopeSchema,
-  type HostUsage,
   helloBytes,
-  SPOKEN_CHANNEL_PROTOCOL,
+  type MetricBatch,
+  type ReportedUsage,
+  STORED_FRAMES_PROTOCOL,
 } from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
 
@@ -21,6 +22,7 @@ const REPLIES = new Set([
 ]);
 
 export const GIVE_UP_MS = 60_000;
+export const LINES_PER_BATCH = 200;
 const STEP_MS = 50;
 
 export type Clock = {
@@ -28,7 +30,7 @@ export type Clock = {
   tick(ms: number): Promise<void>;
 };
 
-export type { HostUsage };
+export type HostUsage = ReportedUsage;
 
 type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
@@ -108,6 +110,7 @@ export class Supervisor {
   private readonly refusals: { seq: number; reason: string }[] = [];
   private readonly limited: number[] = [];
   private readonly lineSeqs = new Map<string, number>();
+  private telemetry: MetricBatch = { instruments: [], samples: [], turns: [] };
   private closedWith: Closed | null = null;
   private broken: Error | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
@@ -144,7 +147,7 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
+      protocolVersion: STORED_FRAMES_PROTOCOL,
       channelProtocolOldest: ChannelProtocol.Oldest,
       carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
@@ -182,6 +185,8 @@ export class Supervisor {
   }
 
   private heartbeatWith(holding: Holding): void {
+    const telemetry = this.telemetry;
+    this.telemetry = { instruments: [], samples: [], turns: [] };
     this.raw({
       type: "Heartbeat",
       sentAt: new Date().toISOString(),
@@ -189,7 +194,17 @@ export class Supervisor {
       heldSessionIds: holding.heldSessionIds,
       heldClaudeSetupIds: holding.heldClaudeSetupIds,
       heldTurnIds: holding.heldTurnIds,
+      ack: this.heard,
+      telemetry,
     });
+  }
+
+  measures(batch: MetricBatch): void {
+    this.telemetry = {
+      instruments: [...this.telemetry.instruments, ...batch.instruments],
+      samples: [...this.telemetry.samples, ...batch.samples],
+      turns: [...this.telemetry.turns, ...batch.turns],
+    };
   }
 
   holding(): Holding {
@@ -217,7 +232,7 @@ export class Supervisor {
     this.beat();
   }
 
-  report(usage: HostUsage): void {
+  report(usage: Partial<HostUsage>): void {
     this.usage = { ...this.usage, ...usage };
     this.beat();
   }
@@ -235,7 +250,11 @@ export class Supervisor {
   }
 
   private accept(envelope: ControlEnvelope): void {
-    if ("ack" in envelope && typeof envelope.ack === "number") this.acknowledged(envelope.ack);
+    if (envelope.type === "Ack") {
+      this.acknowledged(envelope.seq);
+      return;
+    }
+    if (envelope.type === "Frame") this.acknowledged(envelope.ack);
     if (envelope.type === "Challenge") {
       this.challenged = true;
       this.raw({
@@ -248,6 +267,7 @@ export class Supervisor {
         boxCapacity: this.options.boxCapacity,
         usage: this.usage,
         heldTurnIds: [...this.turns],
+        resendFrom: this.unacked[0]?.seq ?? this.sent + 1,
       });
       return;
     }
@@ -431,10 +451,24 @@ export class Supervisor {
     await this.answersSnapshot(offer.sessionId);
   }
 
+  async writes(turnId: string, firstLineSeq: number, texts: string[]): Promise<number[]> {
+    const seqs: number[] = [];
+    for (let at = 0; at < texts.length; at += LINES_PER_BATCH) {
+      await this.says({
+        type: "TurnLines",
+        turnId,
+        firstLineSeq: firstLineSeq + at,
+        lines: texts.slice(at, at + LINES_PER_BATCH),
+      });
+      seqs.push(this.sent);
+    }
+    return seqs;
+  }
+
   async completes(offer: TurnOffer): Promise<void> {
     const lineSeq = (this.lineSeqs.get(offer.sessionId) ?? 0) + 1;
     this.lineSeqs.set(offer.sessionId, lineSeq);
-    await this.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: RESULT });
+    await this.writes(offer.turnId, lineSeq, [RESULT]);
     await this.says({
       type: "TurnComplete",
       turnId: offer.turnId,

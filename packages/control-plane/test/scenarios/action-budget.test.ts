@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { HostFrameSchema } from "@tumpel/schemas";
 import { z } from "zod";
-import { SPOKEN_CHANNEL_PROTOCOL } from "../../src/channel/protocol.ts";
+import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
@@ -223,11 +223,11 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   await world.call("hostHello", {
     tenantId: TENANT_ID,
     hostId: host.hostId,
-    heldTurns: { state: "Reported", heldTurnIds: [] },
+    heldTurnIds: [],
     boxCapacity: 64,
     usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
     now: Date.now(),
-    channelProtocol: SPOKEN_CHANNEL_PROTOCOL,
+    channelProtocol: STORED_FRAMES_PROTOCOL,
   });
   const lineSeqs = new Map<string, number>();
   const runTurn = async (sessionId: string, lines: number, chunks: Placement[] | null): Promise<void> => {
@@ -236,15 +236,15 @@ const seeded = async (t: { after(fn: () => void): void }) => {
     const first = lineSeqs.get(sessionId) ?? 0;
     for (let at = 1; at <= lines; at++) {
       await host.says({
-        type: "TurnLine",
+        type: "TurnLines",
         turnId: offer.turnId,
-        lineSeq: first + at,
-        text: `{"type":"assistant","n":${first + at}}`,
+        firstLineSeq: first + at,
+        lines: [`{"type":"assistant","n":${first + at}}`],
       });
     }
     const last = first + lines + 1;
     lineSeqs.set(sessionId, last);
-    await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq: last, text: RESULT });
+    await host.says({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: last, lines: [RESULT] });
     await host.says({
       type: "TurnComplete",
       turnId: offer.turnId,
@@ -331,19 +331,15 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
   const members = HostFrameSchema.shape.message as unknown as z.ZodType as unknown;
   for (const option of defOf(members).options as unknown[]) {
     const type = String((defOf((defOf(option).shape as Record<string, unknown>).type).values as unknown[])[0]);
+    if (type === "TelemetryBatch" || type === "TurnLine") continue;
     const operation =
-      type === "SupervisorUpdateStep" || type === "SupervisorUpdateFailed"
-        ? "supervisorUpdate"
-        : type === "TelemetryBatch"
-          ? "turnMetricDimensions"
-          : "hostMessage";
+      type === "SupervisorUpdateStep" || type === "SupervisorUpdateFailed" ? "supervisorUpdate" : "hostMessage";
     await timed(
       world,
       operation,
       () => {
         const message = generate(option, known, "message");
         if (operation === "supervisorUpdate") return { hostId: known.hostId, message };
-        if (operation === "turnMetricDimensions") return { turnIds: [known.turnId] };
         return { tenantId: TENANT_ID, hostId: known.hostId, message };
       },
       results,

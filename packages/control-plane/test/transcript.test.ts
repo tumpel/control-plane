@@ -1,17 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type Compactor, compactorOf } from "../src/compact.ts";
-import {
-  type ChunkLedger,
-  type ChunkStore,
-  ChunkWriter,
-  decodeLines,
-  emptyPage,
-  type Page,
-  type PageRead,
-  pageOf,
-  type TranscriptLine,
-} from "../src/transcript.ts";
+import { emptyPage, type Page, type PageRead, pageOf, type TranscriptLine } from "../src/transcript.ts";
 
 const line = (lineSeq: number, text: string): TranscriptLine => ({
   sessionId: "ses_1",
@@ -111,76 +101,4 @@ test("a compact page without a limit keeps every line up to the byte cap", () =>
   const page = read(pageOf(emptyPage(0), lines, claudeCode(), null, 1048576));
   assert.equal(page.lines.length, 1500);
   assert.equal(page.full, false);
-});
-
-const signal = (): { promise: Promise<void>; resolve: () => void } => {
-  let resolve = (): void => undefined;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-};
-
-test("lines that arrive during a slow chunk write go into the next chunk, and every line is stored once in order", async () => {
-  const tenantId = "ten_serial";
-  const sessionId = "ses_serial";
-  const turnId = "trn_serial";
-  const pending: TranscriptLine[] = [];
-  const index: { storageKey: string; lineSeqs: number[] }[] = [];
-  const ledger: ChunkLedger = {
-    pending: () => [...pending],
-    record: (_sessionId, _turnId, storageKey, chunk) => {
-      const last = chunk.lineSeqs.at(-1) ?? 0;
-      pending.splice(0, pending.filter((line) => line.lineSeq <= last).length);
-      index.push({ storageKey, lineSeqs: chunk.lineSeqs });
-    },
-  };
-  const stored = new Map<string, string>();
-  const puts: string[] = [];
-  const writing = signal();
-  const held = signal();
-  const spied: ChunkStore = {
-    put: async (key, body) => {
-      puts.push(key);
-      if (puts.length === 1) {
-        writing.resolve();
-        await held.promise;
-      }
-      stored.set(key, new TextDecoder().decode(body));
-    },
-  };
-  const writer = new ChunkWriter(ledger, spied);
-  const writes: Promise<void>[] = [];
-  const deliver = (lineSeq: number): void => {
-    pending.push({ sessionId, lineSeq, tenantId, turnId, text: `line ${lineSeq}`, createdAt: Date.now() });
-    if (pending.length >= 2) writes.push(writer.write(tenantId, sessionId, turnId, 2));
-  };
-  deliver(1);
-  deliver(2);
-  await writing.promise;
-  deliver(3);
-  deliver(4);
-  deliver(5);
-  writes.push(writer.write(tenantId, sessionId, turnId, 1));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(puts.length, 1);
-  held.resolve();
-  await Promise.all(writes);
-  assert.deepEqual(
-    index.map((entry) => entry.lineSeqs),
-    [
-      [1, 2],
-      [3, 4, 5],
-    ],
-  );
-  assert.deepEqual(pending, []);
-  const chunks = index.map(({ storageKey }) => {
-    const text = stored.get(storageKey);
-    assert.ok(text !== undefined, `chunk ${storageKey} is stored`);
-    return decodeLines(text);
-  });
-  assert.deepEqual(
-    chunks.flat().map(({ lineSeq, text }) => ({ lineSeq, text })),
-    [1, 2, 3, 4, 5].map((lineSeq) => ({ lineSeq, text: `line ${lineSeq}` })),
-  );
 });
