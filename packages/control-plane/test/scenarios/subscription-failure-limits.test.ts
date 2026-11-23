@@ -2,9 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { World } from "./harness/world.ts";
 
-const CREW_FAILURE_LIMIT = 10;
-const DELIVERY_FAILURE_LIMIT = 3;
-
 test("a foreman pauses CrewFailing only after the limit of crew failures in a row, and a crew success resets the count", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
@@ -42,8 +39,8 @@ test("a foreman pauses CrewFailing only after the limit of crew failures in a ro
     return [read.state, read.crewFailuresInARow];
   };
 
-  for (let failure = 1; failure < CREW_FAILURE_LIMIT; failure++) await fails();
-  assert.deepEqual(await read(), ["Active", CREW_FAILURE_LIMIT - 1]);
+  for (let failure = 1; failure <= 9; failure++) await fails();
+  assert.deepEqual(await read(), ["Active", 9]);
 
   await host.claims(crewTurn);
   await host.finishes(crewTurn);
@@ -51,13 +48,13 @@ test("a foreman pauses CrewFailing only after the limit of crew failures in a ro
   await world.sendTurn(crew.sessionId, "build part two");
   crewTurn = host.takeOffer();
 
-  for (let failure = 1; failure < CREW_FAILURE_LIMIT; failure++) await fails();
-  assert.deepEqual(await read(), ["Active", CREW_FAILURE_LIMIT - 1]);
+  for (let failure = 1; failure <= 9; failure++) await fails();
+  assert.deepEqual(await read(), ["Active", 9]);
   await fails();
   const paused = await world.subscription(subscription.subscriptionId);
   assert.equal(paused.state, "Paused");
   assert.deepEqual(paused.state === "Paused" && paused.reason, { kind: "CrewFailing" });
-  assert.equal(paused.crewFailuresInARow, CREW_FAILURE_LIMIT);
+  assert.equal(paused.crewFailuresInARow, 10);
 });
 
 test("a foreman pauses DeliveryFailed only after the limit of delivery failures in a row, and a delivered turn resets the count", async (t) => {
@@ -109,8 +106,8 @@ test("a foreman pauses DeliveryFailed only after the limit of delivery failures 
   await host.claims(delivery);
   await host.finishes(delivery);
 
-  for (let failure = 1; failure < DELIVERY_FAILURE_LIMIT; failure++) await deliveryFails(`build part ${failure}`);
-  assert.deepEqual(await read(), ["Active", DELIVERY_FAILURE_LIMIT - 1]);
+  for (let failure = 1; failure <= 2; failure++) await deliveryFails(`build part ${failure}`);
+  assert.deepEqual(await read(), ["Active", 2]);
 
   await crewCompletes("build the next part");
   const delivered = host.takeOffer();
@@ -119,11 +116,11 @@ test("a foreman pauses DeliveryFailed only after the limit of delivery failures 
   await host.finishes(delivered);
   assert.deepEqual(await read(), ["Active", 0]);
 
-  for (let failure = 1; failure < DELIVERY_FAILURE_LIMIT; failure++) await deliveryFails(`fix part ${failure}`);
-  assert.deepEqual(await read(), ["Active", DELIVERY_FAILURE_LIMIT - 1]);
+  for (let failure = 1; failure <= 2; failure++) await deliveryFails(`fix part ${failure}`);
+  assert.deepEqual(await read(), ["Active", 2]);
   await deliveryFails("fix the last part");
   const paused = await world.subscription(subscription.subscriptionId);
   assert.equal(paused.state, "Paused");
   assert.equal(paused.state === "Paused" && paused.reason.kind, "DeliveryFailed");
-  assert.equal(paused.deliveryFailuresInARow, DELIVERY_FAILURE_LIMIT);
+  assert.equal(paused.deliveryFailuresInARow, 3);
 });
