@@ -3,7 +3,9 @@ import {
   SubscriptionListQuerySchema,
   SubscriptionPathSchema,
   SubscriptionPauseSchema,
+  type SubscriptionPersonaLacksTumpelMcpSchema,
 } from "@tumpel/schemas";
+import type { z } from "zod";
 import { DELIVERY_PROMPT_LIMIT, subscriptionPrompt, widestReference } from "./delivery-prompt.ts";
 import { issues, json, type Problem, type ProblemStatus, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
@@ -60,6 +62,13 @@ const notOwnSession = (subscription: Subscription): Response =>
 const invalid = (title: string, detail: string, fix: string): Response =>
   refused(400, { code: "InvalidRequest", title, detail, fix });
 
+const personaLacksTumpelMcp = (outcome: z.infer<typeof SubscriptionPersonaLacksTumpelMcpSchema>): Response =>
+  invalid(
+    "Persona lacks tumpelMcp",
+    `persona ${outcome.personaName} has no tumpelMcp, so it cannot start the crew that crewTags names`,
+    `Set tumpelMcp: true on persona ${outcome.personaName}, or create the subscription without crewTags`,
+  );
+
 const create = async (request: Request, env: Env, caller: Caller): Promise<Response> => {
   if (caller.origin.kind === "Turn") return personOnly("subscriptions.create");
   const body = await parseBody(request, SubscriptionCreateSchema, "subscriptions.create");
@@ -74,22 +83,6 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
     );
   }
   const tenant = tenantApi(env.TENANT, caller.tenantId);
-  if (subscription.crewTags.length > 0) {
-    const { session } = await tenant.call("getSession", {
-      tenantId: caller.tenantId,
-      sessionId: subscription.sessionId,
-    });
-    if (session === null) return sessionNotFound(subscription.sessionId);
-    const { persona } = await tenant.call("getPersona", { tenantId: caller.tenantId, personaId: session.personaId });
-    if (persona?.tumpelMcp !== true) {
-      const name = persona?.name ?? session.personaId;
-      return invalid(
-        "Persona lacks tumpelMcp",
-        `session ${subscription.sessionId} runs persona ${name}, which has no tumpelMcp, so it cannot start the crew that crewTags names`,
-        `Set tumpelMcp: true on persona ${name}, or create the subscription without crewTags`,
-      );
-    }
-  }
   const leanest = `${subscription.prompt}\n\n${widestReference(subscription.events)}`;
   const length = subscriptionPrompt(leanest, subscription.goal).length;
   if (length > DELIVERY_PROMPT_LIMIT) {
@@ -101,6 +94,7 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   }
   const { created } = await tenant.call("createSubscription", { tenantId: caller.tenantId, subscription, now });
   if (created.kind === "Created") return json(created.subscription);
+  if (created.kind === "PersonaLacksTumpelMcp") return personaLacksTumpelMcp(created);
   if (created.kind === "NotFound") return sessionNotFound(subscription.sessionId);
   if (created.kind === "Archived") {
     return refused(409, {
@@ -184,6 +178,7 @@ const one = async (
     return changed(completed, subscriptionId);
   }
   const { resumed } = await tenant.call("resumeSubscription", { tenantId, subscriptionId, now });
+  if (resumed.kind === "PersonaLacksTumpelMcp") return personaLacksTumpelMcp(resumed);
   if (resumed.kind !== "CursorExpired") return changed(resumed, subscriptionId);
   return refused(410, {
     code: "SubscriptionCursorExpired",

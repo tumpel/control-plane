@@ -151,6 +151,7 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
     const answer = z.object({ reply: z.object({ uploads: z.array(z.object({ packDigest: z.string() })) }) }).parse(
       await host.says({
         type: "SnapshotPacks",
+        reusedPackDigests: [],
         snapshotId: request.snapshotId,
         part: at + 1,
         packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
@@ -182,6 +183,7 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
   );
   await host.says({
     type: "SnapshotDone",
+    chunkCount: chunks.length,
     snapshotId: request.snapshotId,
     uploadedBytes: chunks.length * CHUNK_BYTES,
   });
@@ -271,6 +273,13 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   }
   for (const [at, sessionId] of sessions.entries()) {
     const session = await world.session(sessionId);
+    const enabled = await world.fetch(
+      world.owner,
+      "PATCH",
+      `/v1/personas/${session.personaId}`,
+      JSON.stringify({ tumpelMcp: true }),
+    );
+    assert.equal(enabled.status, 200);
     for (let each = 0; each < SUBSCRIPTIONS_PER_SESSION; each++) {
       await world.subscribe(session, {
         prompt: `hand out step ${each}`,

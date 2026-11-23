@@ -496,6 +496,7 @@ export class Supervisor {
     const digest = createHash("sha256").update(manifest).digest("hex");
     await this.says({
       type: "SnapshotPacks",
+      reusedPackDigests: [],
       snapshotId: request.snapshotId,
       part: 1,
       packs: [{ packDigest: digest, sizeBytes: manifest.length }],
@@ -506,7 +507,12 @@ export class Supervisor {
       request.storageKey,
       JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
     );
-    await this.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: manifest.length });
+    await this.says({
+      type: "SnapshotDone",
+      chunkCount: 1,
+      snapshotId: request.snapshotId,
+      uploadedBytes: manifest.length,
+    });
   }
 
   async dropsIdleBox(offer: TurnOffer): Promise<void> {

@@ -8,7 +8,9 @@ import {
   type SubscriptionPauseReasonSchema,
   SubscriptionSchema,
 } from "@tumpel/schemas";
+import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
+import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
 import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
@@ -122,12 +124,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected createSubscription(tenantId: string, create: SubscriptionCreate, now: number): Created {
     const sql = this.ctx.storage.sql;
-    const [session] = sql
-      .exec<{ state: string }>("SELECT state FROM sessions WHERE session_id = ?", create.sessionId)
-      .toArray();
+    const session = this.subscriptionSession(create.sessionId);
     if (session === undefined) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
     if (session.state === "Failed") return { kind: "Failed" };
+    if (create.crewTags.length > 0 && session.tumpelMcp !== 1) {
+      return { kind: "PersonaLacksTumpelMcp", personaId: session.personaId, personaName: session.personaName };
+    }
     const subscriptionId = crypto.randomUUID();
     this.ctx.storage.transactionSync(() => {
       sql.exec(
@@ -168,6 +171,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (row === null) return { kind: "NotFound" };
     if (row.state === "Ended") return { kind: "Ended", subscription: toSubscription(tenantId, row) };
     const sql = this.ctx.storage.sql;
+    if (JSON.parse(row.crew_tags).length > 0) {
+      const session = this.subscriptionSession(row.session_id);
+      if (session === undefined) throw new Error(`subscription ${subscriptionId} has no session ${row.session_id}`);
+      if (session.tumpelMcp !== 1) {
+        return { kind: "PersonaLacksTumpelMcp", personaId: session.personaId, personaName: session.personaName };
+      }
+    }
     if (row.state === "Paused") {
       const oldest = oldestKept(sql, endOfLog(sql));
       if (row.cursor_event_id < oldest - 1) {
@@ -185,6 +195,18 @@ export abstract class TenantSubscriptions extends TenantSessions {
       });
     }
     return { kind: "Changed", subscription: this.presentSubscription(tenantId, subscriptionId) };
+  }
+
+  private subscriptionSession(
+    sessionId: string,
+  ): { state: string; personaId: string; personaName: string; tumpelMcp: number } | undefined {
+    return durableDb(this.ctx.storage, {}).get<{
+      state: string;
+      personaId: string;
+      personaName: string;
+      tumpelMcp: number;
+    }>(query`SELECT s.state, p.persona_id AS personaId, p.name AS personaName, p.tumpel_mcp AS tumpelMcp
+      FROM sessions AS s JOIN personas AS p ON p.persona_id = s.persona_id WHERE s.session_id = ${sessionId}`);
   }
 
   protected completeSubscription(tenantId: string, subscriptionId: string, now: number): Completed {

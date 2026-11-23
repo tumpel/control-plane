@@ -130,7 +130,12 @@ const storesSnapshot = async (
   const request = snapshotAsked(host, sessionId);
   await uploadsChunks(world, host, request.snapshotId, chunks);
   const root = await storesRoot(world, request.storageKey, chunks);
-  await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: chunks.length * CHUNK_BYTES });
+  await host.says({
+    type: "SnapshotDone",
+    chunkCount: chunks.length,
+    snapshotId: request.snapshotId,
+    uploadedBytes: chunks.length * CHUNK_BYTES,
+  });
   return { storageKey: request.storageKey, root };
 };
 
@@ -263,6 +268,7 @@ test("a manifest the control plane cannot read is rejected at SnapshotDone, and 
     await storesRoot(world, request.storageKey, chunks, [unknownEntry]);
     await host.says({
       type: "SnapshotDone",
+      chunkCount: chunks.length,
       snapshotId: request.snapshotId,
       uploadedBytes: chunks.length * CHUNK_BYTES,
     });
@@ -296,6 +302,7 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
     };
     await host.says({
       type: "SnapshotDone",
+      chunkCount: chunks.length,
       snapshotId: request.snapshotId,
       uploadedBytes: chunks.length * CHUNK_BYTES,
     });
@@ -339,6 +346,7 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
     const reused = PackUploadsSchema.parse(
       await host.says({
         type: "SnapshotPacks",
+        reusedPackDigests: [],
         snapshotId: request.snapshotId,
         part: 1,
         packs: [{ packDigest: sharedPack, sizeBytes: shared.length * CHUNK_BYTES }],
@@ -352,6 +360,7 @@ test("a snapshot that reuses a pack another session's archive frees while it is 
     await storesRoot(world, request.storageKey, shared);
     await host.says({
       type: "SnapshotDone",
+      chunkCount: shared.length,
       snapshotId: request.snapshotId,
       uploadedBytes: shared.length * CHUNK_BYTES,
     });
@@ -384,7 +393,7 @@ test("a snapshot that reuses packs an unstored snapshot of the session uploaded 
     await host.completes(next);
     const request = snapshotAsked(host, session.sessionId);
     await storesRoot(world, request.storageKey, chunks);
-    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0 });
+    await host.says({ type: "SnapshotDone", chunkCount: 0, snapshotId: request.snapshotId, uploadedBytes: 0 });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -417,7 +426,7 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
     await host.completes(next);
     const request = snapshotAsked(host, session.sessionId);
     await storesRoot(world, request.storageKey, chunks);
-    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0 });
+    await host.says({ type: "SnapshotDone", chunkCount: 0, snapshotId: request.snapshotId, uploadedBytes: 0 });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -461,7 +470,12 @@ test("a snapshot root whose own placements would pass the index cap is rejected 
       length: 1,
     }));
     await world.store.put(request.storageKey, JSON.stringify({ manifest }));
-    await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: OVER_CAP_ROOT_PLACEMENTS });
+    await host.says({
+      type: "SnapshotDone",
+      chunkCount: 1,
+      snapshotId: request.snapshotId,
+      uploadedBytes: OVER_CAP_ROOT_PLACEMENTS,
+    });
 
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
