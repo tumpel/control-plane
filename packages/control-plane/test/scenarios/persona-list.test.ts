@@ -13,10 +13,10 @@ test("MCP lists persona file metadata without content or writes and reads the or
   const [initial] = defaults;
   assert.ok(initial);
   const personas = [];
-  for (const [name, text] of [
-    ["reviewer", "Review each change carefully.\n"],
-    ["writer", "Write plain sentences.\n"],
-    ["builder", "Build café tools.\n\u0000"],
+  for (const { name, text } of [
+    { name: "reviewer", text: "Review each change carefully.\n" },
+    { name: "writer", text: "Write plain sentences.\n" },
+    { name: "builder", text: "Build café tools.\n\u0000" },
   ]) {
     const response = await world.fetch(
       world.owner,
