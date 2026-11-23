@@ -22,4 +22,6 @@ Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architec
 
 ## Releases
 
+Dashboard publishers must dispatch only after the checks workflow for the exact released main SHA completes successfully. The control plane queries that run once as provenance and refuses a missing, pending or unsuccessful run.
+
 Dashboard dependency updates must use one bot pull request. Required checks, review and branch protection govern squash auto-merge; dependency updates must never commit directly to main.

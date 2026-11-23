@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dashboardVersion, releaseNeedsUpdate } from "./dashboard-release.mjs";
+import { compareVersions, dashboardVersion, releaseNeedsUpdate } from "./dashboard-release.mjs";
 
 const REPOSITORY = "tumpel/control-plane";
 const BRANCH = "bot/update-dashboard";
@@ -71,18 +71,22 @@ export const updateDashboard = async ({ root, token, github, release }) => {
       dashboardVersion(JSON.parse(git("show", `${ref}:${path}`)).dependencies[dependency]),
     );
   git("fetch", "origin", "main:refs/remotes/origin/main");
+  if (!releaseNeedsUpdate(release, versionsAt("origin/main"))) return { status: "unchanged" };
   const pulls = await github(`/repos/${REPOSITORY}/pulls?head=tumpel:${BRANCH}&base=main&state=open`);
   if (pulls.length > 1) throw new Error("Multiple dashboard bot pull requests exist; retain one before retrying.");
   const remote = git("ls-remote", "origin", `refs/heads/${BRANCH}`);
   const expected = remote.split(/\s/)[0];
   if (expected && !/^[0-9a-f]{40}$/.test(expected))
     throw new Error("Dashboard bot branch has an invalid SHA; inspect the remote branch.");
-  const versions = [versionsAt("origin/main")];
   if (expected && pulls[0]) {
     git("fetch", "origin", expected);
-    versions.push(versionsAt(expected));
+    const versions = versionsAt(expected);
+    if (versions.some((version) => compareVersions(release.version, version) < 0)) return { status: "unchanged" };
+    if (!releaseNeedsUpdate(release, versions)) {
+      await upsertDashboardPull(github, release, pulls[0]);
+      return { status: "pending" };
+    }
   }
-  if (!releaseNeedsUpdate(release, versions)) return { status: "unchanged" };
   git("switch", "--force-create", BRANCH, "origin/main");
   writeDashboardDependencies(root, release);
   run("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"]);

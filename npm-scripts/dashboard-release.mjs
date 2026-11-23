@@ -77,13 +77,13 @@ export const dashboardIntegrity = (url, bytes, checksum) => {
   return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 };
 
-export const verifyDashboardRelease = async ({ event, github, download, clock }) => {
+export const verifyDashboardRelease = async ({ event, github, download }) => {
   const release = dashboardReleaseEvent(event);
   const commit = await github(`/repos/${REPOSITORY}/commits/${event.tag}`);
   const ancestry = await github(`/repos/${REPOSITORY}/compare/${release.sha}...main`);
   const published = await github(`/repos/${REPOSITORY}/releases/tags/${event.tag}`);
   verifyDashboardProvenance(release, { commit, ancestry, published });
-  await exactChecks(github, REPOSITORY, release.sha, clock);
+  await exactChecks(github, REPOSITORY, release.sha);
   const integrity = {};
   for (const [name, url] of Object.entries(release.urls)) {
     const bytes = await download(url);
@@ -94,8 +94,5 @@ export const verifyDashboardRelease = async ({ event, github, download, clock })
 };
 
 export const releaseNeedsUpdate = (release, versions) =>
-  !versions.some(
-    (versions) =>
-      versions.some((version) => compareVersions(release.version, version) < 0) ||
-      versions.every((version) => compareVersions(release.version, version) === 0),
-  );
+  !versions.some((version) => compareVersions(release.version, version) < 0) &&
+  !versions.every((version) => compareVersions(release.version, version) === 0);

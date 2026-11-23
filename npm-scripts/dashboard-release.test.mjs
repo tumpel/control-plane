@@ -12,20 +12,7 @@ import {
   verifyDashboardProvenance,
 } from "./dashboard-release.mjs";
 import { dispatchDeploy } from "./dispatch-deploy.mjs";
-import { exactChecks, githubApi, waitFor } from "./release-github.mjs";
-
-const fakeClock = () => {
-  let now = 0;
-  const sleeps = [];
-  return {
-    sleeps,
-    now: () => now,
-    sleep: async (ms) => {
-      sleeps.push(ms);
-      now += ms;
-    },
-  };
-};
+import { exactChecks, githubApi } from "./release-github.mjs";
 
 test("published dashboard tags resolve to the checked main commit even when target_commitish is main", () => {
   const sha = "a".repeat(40);
@@ -73,24 +60,13 @@ test("published dashboard tags resolve to the checked main commit even when targ
     assert.throws(() => dashboardReleaseEvent({ ...event, ...change }), /provenance|assets differ/);
 });
 
-test("stale and duplicate releases preserve main and open pending updates", () => {
+test("stale and duplicate releases preserve installed versions while partial updates finish", () => {
   const release = { version: "0.10.0-rc.2" };
-  assert.equal(releaseNeedsUpdate(release, [["0.9.0", "0.7.0"]]), true);
-  assert.equal(releaseNeedsUpdate(release, [["0.10.0-rc.2", "0.10.0-rc.2"]]), false);
-  assert.equal(
-    releaseNeedsUpdate(release, [
-      ["0.9.0", "0.7.0"],
-      ["0.10.0-rc.3", "0.10.0-rc.3"],
-    ]),
-    false,
-  );
-  assert.equal(
-    releaseNeedsUpdate(release, [
-      ["0.9.0", "0.7.0"],
-      ["0.10.0-rc.2", "0.10.0-rc.2"],
-    ]),
-    false,
-  );
+  assert.equal(releaseNeedsUpdate(release, ["0.9.0", "0.7.0"]), true);
+  assert.equal(releaseNeedsUpdate(release, ["0.10.0-rc.2", "0.10.0-rc.2"]), false);
+  assert.equal(releaseNeedsUpdate(release, ["0.10.0-rc.3", "0.10.0-rc.3"]), false);
+  assert.equal(releaseNeedsUpdate(release, ["0.10.0-rc.2", "0.7.0"]), true);
+  assert.equal(releaseNeedsUpdate(release, ["0.10.0-rc.3", "0.7.0"]), false);
   assert.equal(compareVersions("0.10.0", "0.10.0-rc.100"), 1);
   assert.equal(compareVersions("0.10.0-rc.10", "0.10.0-rc.9"), 1);
 });
@@ -107,66 +83,44 @@ test("checksums bind the exact published bytes and filename", () => {
   assert.throws(() => dashboardIntegrity(url, bytes, checksum.replace("dashboard-", "other-")), /checksum failed/);
 });
 
-test("historical green checks never replace missing exact-SHA checks", async () => {
+test("dispatch provenance requires successful checks for the exact main push SHA", async () => {
   const sha = "e".repeat(40);
-  const clock = fakeClock();
-  let observations = 0;
-  await assert.rejects(
-    exactChecks(
-      async () => {
-        observations += 1;
-        return {
-          workflow_runs: [
-            {
-              id: 1,
-              head_sha: "f".repeat(40),
-              event: "push",
-              head_branch: "main",
-              status: "completed",
-              conclusion: "success",
-            },
-          ],
-        };
-      },
-      "tumpel/dashboard",
-      sha,
-      clock,
-    ),
-    /timed out after 10 observations/,
-  );
-  assert.equal(observations, 10);
-  assert.deepEqual(clock.sleeps, [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000]);
+  const success = {
+    id: 1,
+    head_sha: sha,
+    event: "push",
+    head_branch: "main",
+    status: "completed",
+    conclusion: "success",
+  };
+  const github = githubApi("test-update", async (url) => {
+    assert.equal(
+      url,
+      `https://api.github.com/repos/tumpel/dashboard/actions/workflows/checks.yml/runs?head_sha=${sha}&event=push&per_page=100`,
+    );
+    return Response.json({ workflow_runs: [success] });
+  });
+  assert.deepEqual(await exactChecks(github, "tumpel/dashboard", sha), success);
+  for (const runs of [
+    [],
+    [{ ...success, head_sha: "f".repeat(40) }],
+    [{ ...success, event: "pull_request" }],
+    [{ ...success, head_branch: "feature" }],
+    [{ ...success, status: "in_progress", conclusion: null }],
+    [{ ...success, id: 2, conclusion: "failure" }, success],
+  ])
+    await assert.rejects(
+      exactChecks(async () => ({ workflow_runs: runs }), "tumpel/dashboard", sha),
+      /dispatch only after that exact main SHA passes checks/,
+    );
 });
 
-test("the wait observes ten times, sleeps nine times, and accepts success on observation ten", async () => {
-  const clock = fakeClock();
-  let observations = 0;
-  assert.equal(await waitFor(async () => (++observations === 10 ? "ready" : null), clock), "ready");
-  assert.equal(observations, 10);
-  assert.deepEqual(clock.sleeps, [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000]);
-});
-
-test("failed checks and authentication errors abort on the first observation", async () => {
+test("authentication and transport errors abort provenance verification", async () => {
   const sha = "1".repeat(40);
-  const checks = [
-    { id: 12, head_sha: sha, event: "push", head_branch: "main", status: "completed", conclusion: "failure" },
-    { id: 11, head_sha: sha, event: "push", head_branch: "main", status: "completed", conclusion: "success" },
-  ];
-  const clock = fakeClock();
-  await assert.rejects(
-    exactChecks(async () => ({ workflow_runs: checks }), "tumpel/dashboard", sha, clock),
-    /ended failure/,
-  );
   for (const status of [401, 403, 500]) {
-    let observations = 0;
-    const github = githubApi("test-update", async () => {
-      observations += 1;
-      return new Response("failed", { status });
-    });
-    await assert.rejects(exactChecks(github, "tumpel/dashboard", sha, clock), new RegExp(`answered ${status}`));
-    assert.equal(observations, 1);
+    const github = githubApi("test-update", async () => new Response("failed", { status }));
+    await assert.rejects(exactChecks(github, "tumpel/dashboard", sha), new RegExp(`answered ${status}`));
   }
-  assert.deepEqual(clock.sleeps, []);
 });
 
 test("empty secrets skip both entry points despite other token variables", async () => {

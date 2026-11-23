@@ -1,5 +1,3 @@
-import { setTimeout } from "node:timers/promises";
-
 export const githubApi =
   (token, transport = fetch) =>
   async (path, options = {}) => {
@@ -20,29 +18,16 @@ export const githubApi =
     return response.json();
   };
 
-export const waitFor = async (observe, clock = { now: Date.now, sleep: setTimeout }) => {
-  const started = clock.now();
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const result = await observe();
-    if (result !== null) return result;
-    if (attempt === 9)
-      throw new Error(
-        `Release readiness timed out after 10 observations (${clock.now() - started} ms); check the exact source SHA's checks and retry.`,
-      );
-    await clock.sleep(1000 * 2 ** attempt);
-  }
-};
-
-export const exactChecks = async (github, repository, sha, clock) =>
-  waitFor(async () => {
-    const { workflow_runs: runs } = await github(
-      `/repos/${repository}/actions/workflows/checks.yml/runs?head_sha=${sha}&event=push&per_page=100`,
+export const exactChecks = async (github, repository, sha) => {
+  const { workflow_runs: runs } = await github(
+    `/repos/${repository}/actions/workflows/checks.yml/runs?head_sha=${sha}&event=push&per_page=100`,
+  );
+  const run = runs
+    .filter((entry) => entry.head_sha === sha && entry.event === "push" && entry.head_branch === "main")
+    .sort((a, b) => b.id - a.id)[0];
+  if (run === undefined || run.status !== "completed" || run.conclusion !== "success")
+    throw new Error(
+      `Checks for ${repository}@${sha} have not completed successfully; dispatch only after that exact main SHA passes checks.`,
     );
-    const run = runs
-      .filter((entry) => entry.head_sha === sha && entry.event === "push" && entry.head_branch === "main")
-      .sort((a, b) => b.id - a.id)[0];
-    if (run === undefined || run.status !== "completed") return null;
-    if (run.conclusion !== "success")
-      throw new Error(`Checks for ${repository}@${sha} ended ${run.conclusion}; fix that commit before releasing.`);
-    return run;
-  }, clock);
+  return run;
+};
