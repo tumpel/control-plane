@@ -13,7 +13,6 @@ import type { z } from "zod";
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true, channelProtocolOldest: true });
-export const STORED_FRAMES_PROTOCOL = 37;
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
@@ -28,7 +27,6 @@ export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];
 export type ControlMessage = ControlFrame["message"];
-export type TelemetryBatch = Extract<HostMessage, { type: "TelemetryBatch" }>;
 export type TurnLines = Extract<HostMessage, { type: "TurnLines" }>;
 export type TurnOffer = Extract<ControlMessage, { type: "TurnOffer" }>;
 export type DispatchGrant = TurnOffer["credential"];

@@ -30,7 +30,6 @@ interface HostRow {
   tenant_id: string;
   name: string;
   state: string;
-  health: string;
   architecture: string;
   cpu_count: number;
   memory_bytes: number;
@@ -44,7 +43,7 @@ interface HostRow {
 const HOST_COLUMNS =
   "host_id, tenant_id, name, state, architecture, cpu_count, memory_bytes, public_key, supervisor_version, created_at, updated_at";
 
-const HOST_SELECT = `${HOST_COLUMNS}, labels, health`;
+const HOST_SELECT = `${HOST_COLUMNS}, labels`;
 
 const toHost = (row: HostRow): HostEntry =>
   HostEntrySchema.parse({
@@ -52,7 +51,7 @@ const toHost = (row: HostRow): HostEntry =>
     tenantId: row.tenant_id,
     name: row.name,
     state: row.state,
-    health: row.health,
+    health: "Healthy",
     architecture: row.architecture,
     cpuCount: row.cpu_count,
     memoryBytes: row.memory_bytes,
@@ -374,21 +373,6 @@ export const revokeHost = async (env: Env, tenantId: string, hostId: string, now
       presence: "Offline",
     },
   };
-};
-
-export const restoreHostHealth = async (
-  env: Env,
-  tenantId: string,
-  hostId: string,
-  restoredBy: string,
-  now: number,
-): Promise<Outcome<Host>> => {
-  const host = await hostOf(env.DB, tenantId, hostId);
-  if (host === null) return hostNotFound(hostId);
-  await env.HOST.get(env.HOST.idFromName(hostId)).restoreHealth(`${restoredBy} restored host ${host.name}`);
-  const [read] = await hostReads(env, tenantId, [{ ...host, health: "Healthy", updatedAt: now }]);
-  if (read === undefined) throw new Error(`host ${hostId} was restored and then not read`);
-  return { ok: true, value: read };
 };
 
 const hostRevoked = (hostId: string): Refused =>

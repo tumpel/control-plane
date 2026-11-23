@@ -610,18 +610,8 @@ export class Tenant extends TenantConnectors {
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
-    hostHealth: ({ hostId, health, detail, now }) => {
-      this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
-      return {};
-    },
     hostMessage: async ({ tenantId, hostId, message }) => ({
-      reply:
-        message.type === "TurnLine"
-          ? {
-              type: "Refused",
-              reason: `host ${hostId} sent TurnLine, which protocol version 37 replaced with TurnLines`,
-            }
-          : await this.hostMessage(tenantId, hostId, message),
+      reply: await this.hostMessage(tenantId, hostId, message),
     }),
   };
 

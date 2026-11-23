@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { HostFrameSchema } from "@tumpel/schemas";
+import { ChannelProtocol, HostFrameSchema } from "@tumpel/schemas";
 import { z } from "zod";
-import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
@@ -227,7 +226,7 @@ const seeded = async (t: { after(fn: () => void): void }) => {
     boxCapacity: 64,
     usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
     now: Date.now(),
-    channelProtocol: STORED_FRAMES_PROTOCOL,
+    channelProtocol: ChannelProtocol.Oldest,
   });
   const lineSeqs = new Map<string, number>();
   const runTurn = async (sessionId: string, lines: number, chunks: Placement[] | null): Promise<void> => {

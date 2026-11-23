@@ -80,7 +80,7 @@ const assess = (
   const usage = usages.get(host.hostId);
   if (host.state !== "Online" || usage === undefined || usage.updatedAt < heardSince)
     return { kind: "Unplaceable", host, reason: "NotOnline" };
-  if (host.health !== "Healthy" || usage.reportedHealth !== "Healthy")
+  if (usage.reportedHealth !== "Healthy")
     return { kind: "Unplaceable", host: { ...host, reportedHealth: usage.reportedHealth }, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
   if (boxMemoryMib > freeMemoryMib(usage))

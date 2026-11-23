@@ -134,10 +134,7 @@ export const why = (refused: Unplaceable): string => {
   if (refused.reason === "NotOnline" && refused.host.state === "Offline")
     return `${named} has not reported to the control plane within its heartbeat grace and counts as Degraded until it sends a heartbeat`;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
-  if (refused.reason === "NotHealthy") {
-    if (refused.host.health !== "Healthy") return `${named} is ${refused.host.health}`;
-    return `${named} reports itself ${refused.host.reportedHealth}`;
-  }
+  if (refused.reason === "NotHealthy") return `${named} reports itself ${refused.host.reportedHealth}`;
   if (refused.reason === "NoImage") {
     const { harness, harnessVersion, architectures } = refused.image;
     const carried =
@@ -724,7 +721,7 @@ export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): 
 };
 
 const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLine[]> => {
-  if (cursor.kind === "Lines") return cursor.lines;
+  if (cursor.kind === "Lines") return [];
   const object = await env.STORE.get(cursor.storageKey, { range: cursor.range });
   if (object === null) throw new Error(`transcript chunk ${cursor.storageKey} is indexed but missing from the store`);
   return decodeLines(await object.text());
@@ -770,8 +767,6 @@ export const readTranscript = async (
         sessionId,
         after: page.cursor,
         turnId: query.turnId ?? null,
-        limit: compact || limit === null ? chunkLines : limit - page.lines.length,
-        ...(compact ? {} : { maxBytes: Math.max(1, maxBytes - page.bytes) }),
       })
     ).cursor;
   let page = emptyPage(query.after ?? 0);

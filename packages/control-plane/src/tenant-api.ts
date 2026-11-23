@@ -73,8 +73,6 @@ import {
   GetWebhookEndpointResultSchema,
   HeldPrebuildInputSchema,
   HeldPrebuildResultSchema,
-  HostHealthInputSchema,
-  HostHealthResultSchema,
   HostHeartbeatInputSchema,
   HostHeartbeatResultSchema,
   HostHelloInputSchema,
@@ -331,7 +329,6 @@ export const TENANT_OPERATIONS = {
   readLimits: { input: ReadLimitsInputSchema, result: ReadLimitsResultSchema },
   setLimits: { input: SetLimitsInputSchema, result: SetLimitsResultSchema },
   prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
-  hostHealth: { input: HostHealthInputSchema, result: HostHealthResultSchema },
   hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
 } as const;
 

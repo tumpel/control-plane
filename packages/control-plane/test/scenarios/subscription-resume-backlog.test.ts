@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GetTurnFailureResultSchema, ListEventsResultSchema, SubscriptionSchema } from "@tumpel/schemas";
+import {
+  ChannelProtocol,
+  GetTurnFailureResultSchema,
+  ListEventsResultSchema,
+  SubscriptionSchema,
+} from "@tumpel/schemas";
 import { z } from "zod";
-import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
 import { DELIVERY_PROMPT_LIMIT } from "../../src/delivery-prompt.ts";
 import { BUDGETS, TENANT_ID, World } from "./harness/world.ts";
 
@@ -51,7 +55,7 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
     boxCapacity: 8,
     usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
     now: Date.now(),
-    channelProtocol: STORED_FRAMES_PROTOCOL,
+    channelProtocol: ChannelProtocol.Oldest,
   });
 
   const resumed = await world.fetch(world.owner, "POST", `${path}/resume`);

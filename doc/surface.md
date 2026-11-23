@@ -54,7 +54,6 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Hosts_list`                             | `tumpel_host_list`                           | `tumpel host list`                           |
 | `Hosts_listUsage`                        | `tumpel_host_list_usage`                     | `tumpel host list-usage`                     |
 | `Hosts_patchLabels`                      | `tumpel_host_patch_labels`                   | `tumpel host patch-labels`                   |
-| `Hosts_restoreHealth`                    | `tumpel_host_restore_health`                 | `tumpel host restore-health`                 |
 | `Hosts_revoke`                           | `tumpel_host_revoke`                         | `tumpel host revoke`                         |
 | `Hosts_setLabels`                        | `tumpel_host_set_labels`                     | `tumpel host set-labels`                     |
 | `Identity_listTenants`                   | `tumpel_tenants`                             | `tumpel tenants`                             |
