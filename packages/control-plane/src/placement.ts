@@ -14,6 +14,7 @@ export interface ImageAvailability {
 export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
   | { kind: "Unplaceable"; host: Host; reason: "NotHealthy" }
+  | { kind: "Unplaceable"; host: Host; reason: "NotHeard" }
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
   | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
   | { kind: "Unplaceable"; host: Host; reason: "MemoryFull"; usage: ReportedHostUsage; boxMemoryMib: number }
@@ -120,7 +121,7 @@ const evicting = (
   return null;
 };
 
-export const degradedOnly = (hosts: readonly { reason: string; host: Host }[]): boolean =>
+export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
   hosts.some(({ reason, host }) => reason === "NotHealthy" && host.health === "Degraded") &&
   hosts.every(({ reason }) => reason === "NotOnline" || reason === "NotHealthy");
 

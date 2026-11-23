@@ -1948,7 +1948,7 @@ suite("sessions", { concurrency: 8 }, () => {
     host.assertOpen("after the tenant restarted");
   });
 
-  test("an idle heartbeat writes no tenant row until the host's stored report is 30 s old, then writes one", async () => {
+  test("a heartbeat whose load, free memory and disk move writes no tenant row until the host's stored report is 30 s old, then writes one", async () => {
     const { tenantId, hostId, host } = await tenant();
     const rowsWritten = async (): Promise<number> => {
       const response = await call(`/__fixture/usage/${tenantId}`);
@@ -1965,14 +1965,20 @@ suite("sessions", { concurrency: 8 }, () => {
     };
     host.quiet();
     const before = await rowsWritten();
-    for (let beat = 0; beat < 5; beat++) host.report(USAGE);
+    const moving = (beat: number): HostUsage => ({
+      ...USAGE,
+      loadAverage: beat / 10,
+      memoryAvailableMib: 6000 - beat,
+      diskHeldMib: 32768 + beat,
+    });
+    for (let beat = 1; beat <= 5; beat++) host.report(moving(beat));
     await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
     const idle = await rowsWritten();
     assert.equal(idle - before, 0);
 
     const stale = (await heardAt()) - 31_000;
     await tenantSql(tenantId, "UPDATE host_reports SET heard_at = ? WHERE host_id = ?", stale, hostId);
-    host.report(USAGE);
+    host.report(moving(6));
     await until("the stale report refreshed", heardAt, (at) => at > stale);
     const backdated = 1;
     assert.equal((await rowsWritten()) - idle, backdated + 1);
@@ -3741,11 +3747,11 @@ suite("sessions", { concurrency: 8 }, () => {
     const drift = await enrol("drift");
     const first = await connect(drift.id, drift.key);
     await hostState(drift.id, "Online");
-    first.report({ ...USAGE, diskHeldMib: 40000 });
+    first.report({ ...USAGE, memoryHeldMib: 1024 });
     await until(
       "the first heartbeat of the first connection",
       () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
-      (usages) => usages.find((usage) => usage.hostId === drift.id)?.diskHeldMib === 40000,
+      (usages) => usages.find((usage) => usage.hostId === drift.id)?.memoryHeldMib === 1024,
     );
     const snapshotted = async (sessionId: string) => {
       const request = await first.next("SnapshotRequest");

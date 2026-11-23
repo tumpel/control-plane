@@ -11,7 +11,6 @@ import type {
   Frame,
   HostMessage,
   HostReportedHealth,
-  HostUsage,
   StoredControlMessage,
   TelemetryBatch,
 } from "./channel/protocol.ts";
@@ -42,18 +41,20 @@ interface Attachment {
   connection: control.ControlConnection;
   lastReceivedAt: number;
   lastSentAt: number;
-  usage: HostUsage | null;
+  report: HostReport | null;
   heldFrom: number | null;
 }
+
+type HostReport = { boxCapacity: number; channelProtocol: number; usage: control.ReportedUsage };
 
 type Presence = "Online" | "Offline";
 
 type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
 
-const usageOf = (attachment: Attachment): HostUsage => {
-  if (attachment.usage === null)
+const reportOf = (attachment: Attachment): HostReport => {
+  if (attachment.report === null)
     throw new Error("a host channel holds transcript lines from a connection that sent no usage");
-  return attachment.usage;
+  return attachment.report;
 };
 
 const isAttachment = (value: unknown): value is Attachment =>
@@ -64,7 +65,7 @@ const isAttachment = (value: unknown): value is Attachment =>
   typeof value.lastReceivedAt === "number" &&
   "lastSentAt" in value &&
   typeof value.lastSentAt === "number" &&
-  "usage" in value &&
+  "report" in value &&
   "heldFrom" in value;
 
 export class HostChannel extends DurableObject<Env> {
@@ -216,7 +217,7 @@ export class HostChannel extends DurableObject<Env> {
       connection: { phase: "Closed" },
       lastReceivedAt: now,
       lastSentAt: now,
-      usage: null,
+      report: null,
       heldFrom: null,
     };
     attachment.connection = control.challenge(this.port(server, attachment));
@@ -260,9 +261,14 @@ export class HostChannel extends DurableObject<Env> {
     attachment.connection = connection;
     if (event.kind === "Welcomed") {
       this.ledger.take();
-      attachment.usage = event.usage;
+      attachment.report = {
+        boxCapacity: event.boxCapacity,
+        channelProtocol: event.protocolVersion,
+        usage: event.usage,
+      };
     }
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
+    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat")
+      attachment.report = { ...reportOf(attachment), usage: event.usage };
     this.keep(socket, attachment);
     if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
@@ -281,12 +287,12 @@ export class HostChannel extends DurableObject<Env> {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
     if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
-      await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
+      await this.flush(host.host_id, reportOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
     if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
     if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
       if (
-        !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
+        !(await this.flush(host.host_id, reportOf(attachment), now, attachment, context)) &&
         this.ledger.stalled() >= RETRY_LIMIT
       )
         return this.giveUp(socket, attachment, context);
@@ -316,7 +322,7 @@ export class HostChannel extends DurableObject<Env> {
     const bytes = JSON.stringify(frame.message).length;
     if (this.ledger.queued().length > 0) return this.queue(frame, bytes, attachment, context);
     const ordered = frame.message.type !== "TurnLine" && this.ledger.holding();
-    if (ordered && !(await this.settle(hostId, usageOf(attachment), now, attachment, context)))
+    if (ordered && !(await this.settle(hostId, reportOf(attachment), now, attachment, context)))
       return this.queue(frame, bytes, attachment, context);
     const delivered = await this.reply(hostId, frame);
     if (!delivered.ok) {
@@ -330,7 +336,7 @@ export class HostChannel extends DurableObject<Env> {
     await this.answer(hostId, frame, delivered.reply, attachment, context);
     this.ledger.hold(frame, true, bytes);
     if (!this.ledger.full()) return;
-    if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context))) this.overflow(attachment, context);
+    if (!(await this.flush(hostId, reportOf(attachment), now, attachment, context))) this.overflow(attachment, context);
   }
 
   private queue(
@@ -368,12 +374,12 @@ export class HostChannel extends DurableObject<Env> {
 
   private async flush(
     hostId: string,
-    usage: HostUsage,
+    report: HostReport,
     now: number,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<boolean> {
-    if (!(await this.settle(hostId, usage, now, attachment, context))) return false;
+    if (!(await this.settle(hostId, report, now, attachment, context))) return false;
     this.checkpoint(attachment, context, []);
     return true;
   }
@@ -386,7 +392,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private async settle(
     hostId: string,
-    usage: HostUsage,
+    report: HostReport,
     now: number,
     attachment: Attachment,
     context: control.ControlContext,
@@ -397,7 +403,7 @@ export class HostChannel extends DurableObject<Env> {
       this.ledger.forwarded(frame.seq);
       await this.answer(hostId, frame, delivered.reply, attachment, context);
     }
-    return this.report(hostId, usage, now).then(
+    return this.report(hostId, report, now).then(
       () => true,
       (error: unknown) => this.undelivered("Heartbeat", error),
     );
@@ -551,9 +557,14 @@ export class HostChannel extends DurableObject<Env> {
       .run();
   }
 
-  private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
+  private async report(
+    hostId: string,
+    { boxCapacity, channelProtocol, usage }: HostReport,
+    now: number,
+  ): Promise<void> {
+    const tenant = tenantApi(this.env.TENANT, await this.tenantOf(hostId));
+    await tenant.call("hostUsage", { hostId, usage, now });
+    await tenant.call("hostHello", { hostId, boxCapacity, usage, now, channelProtocol });
   }
 
   private async reconcileHeldBoxes(

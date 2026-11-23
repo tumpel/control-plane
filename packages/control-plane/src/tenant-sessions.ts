@@ -368,25 +368,10 @@ type HostReportRow = {
   boxes_running: number;
   boxes_warm: number;
   boxes_memory_mib: number;
+  boxes_disk_mib: number;
 };
 
 const HEARD_REFRESH_MS = 30_000;
-
-type HostReport = Required<HostUsage>;
-
-const reportOf = (hostId: string, usage: HostUsage): HostReport => {
-  const { memoryBudgetMib, memoryHeldMib, diskBudgetMib, diskHeldMib } = usage;
-  if (
-    memoryBudgetMib === undefined ||
-    memoryHeldMib === undefined ||
-    diskBudgetMib === undefined ||
-    diskHeldMib === undefined
-  )
-    throw new Error(
-      `host ${hostId} reported usage without its memory and disk budgets; update the supervisor on that host`,
-    );
-  return { ...usage, memoryBudgetMib, memoryHeldMib, diskBudgetMib, diskHeldMib };
-};
 
 type TurnSpan = { first: number; last: number };
 
@@ -1595,32 +1580,29 @@ export abstract class TenantSessions extends DurableObject<Env> {
     now: number,
     channelProtocol: number,
   ): void {
-    const report = reportOf(hostId, usage);
     this.ctx.storage.sql.exec(
       `INSERT INTO host_reports (host_id, box_capacity, channel_protocol, memory_budget_mib, memory_held_mib,
-        memory_available_mib, disk_budget_mib, disk_held_mib, load_average, heard_at, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10)
+        memory_available_mib, disk_budget_mib, disk_held_mib, load_average, heard_at, created_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
       ON CONFLICT (host_id) DO UPDATE SET box_capacity = excluded.box_capacity,
         channel_protocol = excluded.channel_protocol, memory_budget_mib = excluded.memory_budget_mib,
         memory_held_mib = excluded.memory_held_mib, memory_available_mib = excluded.memory_available_mib,
         disk_budget_mib = excluded.disk_budget_mib, disk_held_mib = excluded.disk_held_mib,
-        load_average = excluded.load_average, heard_at = excluded.heard_at, updated_at = excluded.updated_at
+        load_average = excluded.load_average, heard_at = excluded.heard_at
       WHERE host_reports.box_capacity != excluded.box_capacity
         OR host_reports.channel_protocol != excluded.channel_protocol
         OR host_reports.memory_budget_mib != excluded.memory_budget_mib
         OR host_reports.memory_held_mib != excluded.memory_held_mib
-        OR host_reports.disk_budget_mib != excluded.disk_budget_mib
-        OR host_reports.disk_held_mib != excluded.disk_held_mib
         OR host_reports.heard_at < excluded.heard_at - ?11`,
       hostId,
       boxCapacity,
       channelProtocol,
-      report.memoryBudgetMib,
-      report.memoryHeldMib,
-      report.memoryAvailableMib,
-      report.diskBudgetMib,
-      report.diskHeldMib,
-      report.loadAverage,
+      usage.memoryBudgetMib ?? null,
+      usage.memoryHeldMib ?? null,
+      usage.memoryAvailableMib,
+      usage.diskBudgetMib ?? null,
+      usage.diskHeldMib ?? null,
+      usage.loadAverage,
       now,
       HEARD_REFRESH_MS,
     );
@@ -1628,24 +1610,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 
-  protected async hostUsage(hostId: string, usage: HostUsage, now: number): Promise<void> {
+  protected async hostUsage(hostId: string): Promise<void> {
     await this.flushHeldLines(hostId);
-    const report = reportOf(hostId, usage);
-    this.ctx.storage.sql.exec(
-      `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
-        disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, heard_at = ?8, updated_at = ?8
-      WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR disk_budget_mib != ?5
-        OR disk_held_mib != ?6 OR heard_at < ?8 - ?9)`,
-      hostId,
-      report.memoryBudgetMib,
-      report.memoryHeldMib,
-      report.memoryAvailableMib,
-      report.diskBudgetMib,
-      report.diskHeldMib,
-      report.loadAverage,
-      now,
-      HEARD_REFRESH_MS,
-    );
   }
 
   private runsTurns(hostId: string): boolean {
@@ -1829,12 +1795,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `SELECT r.host_id, r.box_capacity, r.channel_protocol, r.memory_budget_mib, r.memory_held_mib,
           r.memory_available_mib, r.disk_budget_mib, r.disk_held_mib, r.load_average, r.heard_at, r.created_at,
           COALESCE(b.running, 0) AS boxes_running, COALESCE(b.warm, 0) AS boxes_warm,
-          COALESCE(b.memory_mib, 0) AS boxes_memory_mib
+          COALESCE(b.memory_mib, 0) AS boxes_memory_mib, COALESCE(b.disk_mib, 0) AS boxes_disk_mib
         FROM host_reports r LEFT JOIN (
-          SELECT s.host_id, SUM(s.state = 'Running') AS running, SUM(s.state IN ('Idle', 'Stopping')) AS warm,
-            SUM(COALESCE(m.box_memory_mib, s.box_memory_mib)) AS memory_mib
+          SELECT s.host_id, SUM(s.state IN ('Starting', 'Running')) AS running,
+            SUM(s.state IN ('Idle', 'Stopping')) AS warm,
+            SUM(COALESCE(m.box_memory_mib, s.box_memory_mib)) AS memory_mib, SUM(s.box_disk_mib) AS disk_mib
           FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
-          WHERE s.state IN ('Running', 'Idle', 'Stopping') GROUP BY s.host_id
+          WHERE s.state IN ('Starting', 'Running', 'Idle', 'Stopping') GROUP BY s.host_id
         ) b ON b.host_id = r.host_id
         ORDER BY r.created_at, r.host_id`,
       )
@@ -1848,7 +1815,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         loadAverage: row.load_average,
         memoryAvailableMib: row.memory_available_mib,
         diskBudgetMib: row.disk_budget_mib,
-        diskHeldMib: row.disk_held_mib,
+        diskHeldMib: Math.max(row.disk_held_mib, row.boxes_disk_mib),
         memoryBudgetMib: row.memory_budget_mib,
         memoryHeldMib: Math.max(row.memory_held_mib, row.boxes_memory_mib),
         channelProtocol: row.channel_protocol,

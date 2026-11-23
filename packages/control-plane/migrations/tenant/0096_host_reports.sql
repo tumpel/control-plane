@@ -10,6 +10,5 @@ CREATE TABLE host_reports (
   disk_held_mib INTEGER NOT NULL CHECK (disk_held_mib >= 0),
   load_average REAL NOT NULL CHECK (load_average >= 0),
   heard_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL
 );

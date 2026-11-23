@@ -80,7 +80,7 @@ type TenantOperations = Record<string, (input: never) => unknown>;
 const REPOSITORY = "https://github.com/acme/app";
 
 export const SETTINGS = TEST_SETTINGS;
-export const BUDGETS = { memoryBudgetMib: 30000, memoryHeldMib: 0, diskBudgetMib: 200000, diskHeldMib: 0 };
+export const BUDGETS = { memoryBudgetMib: 30000, memoryHeldMib: 0, diskBudgetMib: 1_000_000, diskHeldMib: 0 };
 
 export const LIMITS: ScenarioLimits = {
   defaultTier: "Configured",
