@@ -32,7 +32,6 @@ interface HostRow {
 
 interface Attachment {
   connection: control.ControlConnection;
-  lastReceivedAt: number;
   lastSentAt: number;
   boxCapacity: number | null;
   heldFrom: number | null;
@@ -51,8 +50,6 @@ const isAttachment = (value: unknown): value is Attachment =>
   typeof value === "object" &&
   value !== null &&
   "connection" in value &&
-  "lastReceivedAt" in value &&
-  typeof value.lastReceivedAt === "number" &&
   "lastSentAt" in value &&
   typeof value.lastSentAt === "number" &&
   "boxCapacity" in value &&
@@ -172,7 +169,6 @@ export class HostChannel extends DurableObject<Env> {
     const now = Date.now();
     const attachment: Attachment = {
       connection: { phase: "Closed" },
-      lastReceivedAt: now,
       lastSentAt: now,
       boxCapacity: null,
       heldFrom: null,
@@ -209,7 +205,6 @@ export class HostChannel extends DurableObject<Env> {
       return;
     }
     const now = Date.now();
-    attachment.lastReceivedAt = now;
     const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
@@ -372,7 +367,6 @@ export class HostChannel extends DurableObject<Env> {
   private keep(socket: WebSocket, attachment: Attachment): void {
     const stored = this.attachment(socket);
     attachment.heldFrom = this.ledger.first();
-    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, stored.lastReceivedAt);
     attachment.lastSentAt = Math.max(attachment.lastSentAt, stored.lastSentAt);
     socket.serializeAttachment(attachment);
   }

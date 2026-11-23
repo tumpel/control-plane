@@ -76,18 +76,21 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
         tenant.call("runningTurnsByHost", {}),
         tenant.call("listHostUsage", { tenantId: tenant_id }),
       ]);
+      const heard = usage.filter((report) => report.updatedAt >= heardSince);
+      const heardIds = new Set(heard.map((report) => report.hostId));
       return {
-        running: running.map((each) => ({ ...each, tenantId: tenant_id })),
-        heard: usage.filter((report) => report.updatedAt >= heardSince).map((report) => report.hostId),
+        running: running.filter((each) => heardIds.has(each.hostId)).map((each) => ({ ...each, tenantId: tenant_id })),
+        protocols: heard.map((report) => report.channelProtocol),
       };
     }),
   );
   const hosts = tenants.flatMap((tenant) => tenant.running);
-  const { results: channelProtocols } = await env.DB.prepare(
-    "SELECT channel_protocol_version AS channelProtocolVersion, COUNT(*) AS hostCount FROM host_channel_protocols WHERE host_id IN (SELECT value FROM json_each(?)) GROUP BY channel_protocol_version ORDER BY channel_protocol_version",
-  )
-    .bind(JSON.stringify(tenants.flatMap((tenant) => tenant.heard)))
-    .all<{ channelProtocolVersion: number; hostCount: number }>();
+  const counts = new Map<number, number>();
+  for (const version of tenants.flatMap((tenant) => tenant.protocols))
+    counts.set(version, (counts.get(version) ?? 0) + 1);
+  const channelProtocols = [...counts]
+    .map(([channelProtocolVersion, hostCount]) => ({ channelProtocolVersion, hostCount }))
+    .sort((left, right) => left.channelProtocolVersion - right.channelProtocolVersion);
   const rollout: ReleaseRollout = {
     deployedCommit: env.DEPLOYED_COMMIT,
     drained: hosts.length === 0,

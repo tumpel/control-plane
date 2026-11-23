@@ -124,7 +124,7 @@ export const placementRefusals = (hosts: readonly TenantUnplaceable[]): Unplacea
   });
 
 export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
-  hosts.some(({ reason, host }) => reason === "NotOnline" && host.state === "Online") &&
+  hosts.some(({ reason, host }) => reason === "NotOnline" && host.state === "Offline") &&
   hosts.every(({ reason }) => reason === "NotOnline" || reason === "NotHealthy");
 
 export const placeSession = (

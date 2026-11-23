@@ -598,8 +598,8 @@ export class Tenant extends TenantConnectors {
       await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },
-    forgetHostUsage: ({ hostId }) => {
-      this.forgetHostUsage(hostId);
+    forgetHostUsage: async ({ hostId }) => {
+      await this.forgetHostUsage(hostId, Date.now());
       return {};
     },
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),

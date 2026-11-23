@@ -94,7 +94,7 @@ test("a host enrols with a one-time token, holds its channel, reads Degraded whe
   supervisor.quiet();
   await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
   const silent = await readHost(host.hostId);
-  assert.equal(silent.state, "Online");
+  assert.equal(silent.state, "Offline");
   assert.equal(silent.presence, "Degraded");
   supervisor.resumes();
   await world.until(

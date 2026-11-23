@@ -546,7 +546,9 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
   const report = async () => {
     const response = await call("/v1/releases/rollout", { headers: drainBearer });
     assert.equal(response.status, 200, await response.clone().text());
-    return ReleaseRolloutSchema.parse(await response.json());
+    const { channelProtocols, ...rollout } = ReleaseRolloutSchema.parse(await response.json());
+    assert.ok(channelProtocols.some((protocol) => protocol.hostCount > 0));
+    return rollout;
   };
 
   const idle = await call("/v1/releases/rollout", { headers: drainBearer });
@@ -569,7 +571,6 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       deployedCommit: DEPLOYED_COMMIT,
       drained: false,
       hosts: [{ hostId, tenantId: started.session.tenantId, runningTurns: 1 }],
-      channelProtocols: [],
     });
 
     const start = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during the drain" }, bearer);
@@ -595,7 +596,6 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       deployedCommit: DEPLOYED_COMMIT,
       drained: true,
       hosts: [],
-      channelProtocols: [],
     });
 
     const send = await postJson(`/v1/sessions/${started.session.sessionId}/turns`, { prompt: "draining" }, bearer);
