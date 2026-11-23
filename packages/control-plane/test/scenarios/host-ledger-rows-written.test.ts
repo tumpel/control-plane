@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
 import { RETRY_LIMIT } from "../../src/backoff.ts";
 import * as control from "../../src/channel/control.ts";
 import { HostLedger } from "../../src/channel/ledger.ts";
+import { SPOKEN_CHANNEL_PROTOCOL } from "../../src/channel/protocol.ts";
 import { durableDb } from "../../src/db/client.ts";
 import * as hostSchema from "../../src/db/host-schema.ts";
 import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
@@ -26,7 +26,7 @@ const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = 
   };
   let connection: control.ControlConnection = {
     phase: "Open",
-    protocolVersion: ChannelProtocol.Version,
+    protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
   };
   const line = async (seq: number) => {
     const text = JSON.stringify({

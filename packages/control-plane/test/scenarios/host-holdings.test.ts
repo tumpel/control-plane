@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
-import { HELD_TURNS_PROTOCOL } from "../../src/channel/protocol.ts";
+import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
+import { SPOKEN_CHANNEL_PROTOCOL } from "../../src/channel/protocol.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const GRACE_MS = SETTINGS.heartbeatDeadlineSeconds * 1000;
@@ -16,7 +16,10 @@ const running = async (world: World, host: Host): Promise<TurnOffer> => {
   return offer;
 };
 
-const quietHost = async (world: World, options: { protocolVersion?: number } = {}): Promise<Host> => {
+const quietHost = async (
+  world: World,
+  options: { protocolVersion?: number; channelProtocolOldest?: number } = {},
+): Promise<Host> => {
   await world.holdsAgentCredentials();
   const host = await world.online(world.owner, "host-1", options);
   host.quiet();
@@ -171,16 +174,30 @@ test("a Hello never fails an offered turn, however often it leaves the turn out"
   assert.equal((await world.turn(turnId)).state, "Offered");
 });
 
-test("a channel 34 host's heartbeats judge no turn", async (t) => {
+for (const protocolVersion of [ChannelProtocol.Oldest, SPOKEN_CHANNEL_PROTOCOL]) {
+  test(`a channel ${protocolVersion} host connects and its heartbeats judge its turns`, async (t) => {
+    const world = await World.open();
+    t.after(() => world.close());
+    const host = await quietHost(world, { protocolVersion, channelProtocolOldest: protocolVersion });
+    assert.equal(host.welcomedVersion(), protocolVersion);
+    const offer = await running(world, host);
+
+    await host.beats();
+    assert.equal((await world.turn(offer.turnId)).state, "Running");
+
+    await host.beats({ heldTurnIds: [] });
+    assert.equal(reasonOf(await world.turn(offer.turnId)), "HostDropped");
+  });
+}
+
+test(`a channel ${ChannelProtocol.Version} Hello is welcomed on ${SPOKEN_CHANNEL_PROTOCOL}, the newest this control plane speaks`, async (t) => {
   const world = await World.open();
   t.after(() => world.close());
-  const host = await quietHost(world, { protocolVersion: HELD_TURNS_PROTOCOL - 1 });
-  const offer = await running(world, host);
+  const host = await quietHost(world, { protocolVersion: ChannelProtocol.Version });
 
-  await host.beats({ heldTurnIds: [] });
-  await host.beats({ heldTurnIds: [] });
-
-  assert.equal((await world.turn(offer.turnId)).state, "Running");
+  assert.equal(host.welcomedVersion(), SPOKEN_CHANNEL_PROTOCOL);
+  await host.beats();
+  assert.equal(host.closure(), null);
 });
 
 test("a host reads Online within the grace of its last report, Degraded after, and Offline once revoked", async (t) => {

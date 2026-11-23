@@ -9,19 +9,18 @@ import {
   type ControlEnvelope,
   emptyLedger,
   type Frame,
-  HELD_TURNS_PROTOCOL,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
   type Ledger,
   type LedgerStore,
   type PreparedOffer,
+  SPOKEN_CHANNEL_PROTOCOL,
   type StoredControlMessage,
 } from "../src/channel/protocol.ts";
 
 const HOST_ID = "host-1";
 const USAGE = {
-  boxesWarm: 1,
   loadAverage: 0.5,
   memoryAvailableMib: 4096,
   memoryBudgetMib: 4096,
@@ -159,7 +158,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
         if (received.event.kind === "Message") control.acknowledge(link.context, [received.event.frame]);
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
+      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = SPOKEN_CHANNEL_PROTOCOL) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
@@ -170,7 +169,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
           usage: USAGE,
-          ...(protocolVersion >= HELD_TURNS_PROTOCOL ? { heldTurnIds: [] } : {}),
+          heldTurnIds: [],
         });
       },
       oldHello: async () => {
@@ -208,8 +207,8 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       boxCapacity: 8,
       usage: USAGE,
       supervisorVersion: "0.1.0",
-      protocolVersion: ChannelProtocol.Version,
-      channelProtocol: ChannelProtocol.Version,
+      protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
+      channelProtocol: SPOKEN_CHANNEL_PROTOCOL,
       channelProtocolOldest: undefined,
       guestProtocol: undefined,
       heldTurns: { state: "Reported", heldTurnIds: [] },
@@ -240,7 +239,7 @@ test("Welcome acks the host frames an earlier connection delivered, so the host 
   assert.deepEqual(second.sent.at(-1), {
     type: "Welcome",
     hostId: HOST_ID,
-    protocolVersion: ChannelProtocol.Version,
+    protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
     ack: 2,
   });
 });
@@ -264,18 +263,18 @@ test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () =
     channelProtocol: ChannelProtocol.Oldest,
     channelProtocolOldest: undefined,
     guestProtocol: undefined,
-    heldTurns: { state: "NotReported" },
+    heldTurns: { state: "Reported", heldTurnIds: [] },
   });
 });
 
-test("a Hello on ChannelProtocol.Version is welcomed on that version", async () => {
+test("a channel 36 Hello is welcomed on that version", async () => {
   const link = setup().connect();
-  await link.hello(undefined, ChannelProtocol.Version);
+  await link.hello(undefined, SPOKEN_CHANNEL_PROTOCOL);
   assert.equal(link.connection.phase, "Open");
   assert.deepEqual(link.sent.at(-1), {
     type: "Welcome",
     hostId: HOST_ID,
-    protocolVersion: ChannelProtocol.Version,
+    protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
     ack: 0,
   });
 });
@@ -287,9 +286,9 @@ test("a Hello one below ChannelProtocol.Oldest is refused as an unsupported vers
   assert.equal(link.connection.phase, "Closed");
 });
 
-test("a Hello one above ChannelProtocol.Version is refused as an unsupported version", async () => {
+test("a channel 37 Hello that names no older version it speaks is refused as an unsupported version", async () => {
   const link = setup().connect();
-  await link.hello(undefined, ChannelProtocol.Version + 1);
+  await link.hello(undefined, SPOKEN_CHANNEL_PROTOCOL + 1);
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
   assert.equal(link.connection.phase, "Closed");
 });
@@ -307,7 +306,7 @@ test("a Hello on protocol version 1, without the fields later versions added, is
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
   assert.equal(
     link.closed?.reason,
-    `protocol version 1 is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+    `protocol version 1 is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${SPOKEN_CHANNEL_PROTOCOL}, update the supervisor`,
   );
   assert.equal(link.connection.phase, "Closed");
 });
@@ -539,7 +538,7 @@ test("two sends never take the same seq, and a frame sent while an offer is prep
 });
 
 test("a Hello below an unacked frame's version is closed as an unsupported version, and the frames stay for a newer one", async () => {
-  const channel = setup(false, { TurnWithdrawn: ChannelProtocol.Version + 1 });
+  const channel = setup(false, { TurnWithdrawn: SPOKEN_CHANNEL_PROTOCOL + 1 });
   const offline = channel.connect();
   await control.send({ phase: "Closed" }, snapshotRequest("snap-1"), offline.context);
   await control.send({ phase: "Closed" }, { type: "TurnWithdrawn", turnId: "turn-1" }, offline.context);
@@ -548,7 +547,7 @@ test("a Hello below an unacked frame's version is closed as an unsupported versi
   await link.hello();
   assert.deepEqual(link.closed, {
     code: CloseCode.UnsupportedVersion,
-    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${ChannelProtocol.Version}, update the supervisor`,
+    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${SPOKEN_CHANNEL_PROTOCOL + 1}; this connection speaks ${SPOKEN_CHANNEL_PROTOCOL}, update the supervisor`,
   });
   assert.equal(link.connection.phase, "Closed");
   assert.deepEqual(frames(link.sent), []);
@@ -559,7 +558,7 @@ test("a Hello below an unacked frame's version is closed as an unsupported versi
 });
 
 test("a live frame newer than the connection's protocol version closes the connection as an unsupported version", async () => {
-  const channel = setup(false, { TurnWithdrawn: ChannelProtocol.Version + 1 });
+  const channel = setup(false, { TurnWithdrawn: SPOKEN_CHANNEL_PROTOCOL + 1 });
   const link = channel.connect();
   await link.hello();
   await control.send(link.connection, { type: "TurnWithdrawn", turnId: "turn-1" }, link.context);
@@ -609,21 +608,21 @@ test("revoke closes a live connection, and a revoked host's next Hello is closed
   assert.deepEqual(channel.ledger.current, before);
 });
 
-test("every heartbeat reports what the host holds, and a channel 34 host's reports no held turns", async () => {
+test("every heartbeat reports what the host holds, on ChannelProtocol.Oldest too", async () => {
   const channel = setup();
   const current = channel.connect();
   await current.hello();
-  const beat = (held: Record<string, unknown>) =>
+  const beat = (heldTurnIds: string[]) =>
     ({
       type: "Heartbeat",
       sentAt: "2026-11-18T10:00:00+01:00",
       usage: USAGE,
       heldSessionIds: ["session-1"],
       heldClaudeSetupIds: [],
-      ...held,
+      heldTurnIds,
     }) as HostEnvelope;
-  await current.deliver(beat({ heldTurnIds: ["turn-1"] }));
-  await current.deliver(beat({ heldTurnIds: [] }));
+  await current.deliver(beat(["turn-1"]));
+  await current.deliver(beat([]));
   const reported = (heldTurns: unknown) => ({
     kind: "Heartbeat",
     usage: USAGE,
@@ -638,12 +637,12 @@ test("every heartbeat reports what the host holds, and a channel 34 host's repor
   ]);
 
   const old = channel.connect();
-  await old.hello(undefined, HELD_TURNS_PROTOCOL - 1);
-  await old.deliver(beat({}));
-  assert.deepEqual(old.events.at(-1), reported({ state: "NotReported" }));
+  await old.hello(undefined, ChannelProtocol.Oldest);
+  await old.deliver(beat(["turn-2"]));
+  assert.deepEqual(old.events.at(-1), reported({ state: "Reported", heldTurnIds: ["turn-2"] }));
 });
 
-test("a Hello that offers a range of versions is welcomed on the newest both sides speak", async () => {
+test("a channel 37 Hello that offers a range of versions is welcomed on 36, the newest both sides speak", async () => {
   const channel = setup();
   const link = channel.connect();
   const [challenge] = link.sent;
@@ -651,19 +650,20 @@ test("a Hello that offers a range of versions is welcomed on the newest both sid
   await link.deliver({
     type: "Hello",
     hostId: HOST_ID,
-    protocolVersion: ChannelProtocol.Version + 3,
+    protocolVersion: ChannelProtocol.Version,
     channelProtocolOldest: ChannelProtocol.Oldest,
     supervisorVersion: "0.1.0",
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), channel.keys.privateKey).toString("base64"),
     boxCapacity: 8,
     usage: USAGE,
     heldTurnIds: [],
+    resendFrom: 1,
   } as HostEnvelope);
   assert.equal(link.connection.phase, "Open");
   assert.deepEqual(link.sent.at(-1), {
     type: "Welcome",
     hostId: HOST_ID,
-    protocolVersion: ChannelProtocol.Version,
+    protocolVersion: SPOKEN_CHANNEL_PROTOCOL,
     ack: 0,
   });
 });

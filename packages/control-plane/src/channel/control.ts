@@ -21,8 +21,11 @@ import {
   type PreparedClaudeSetup,
   type PreparedOffer,
   parseEnvelope,
+  type ReportedUsage,
   randomNonce,
   resend,
+  SPOKEN_CHANNEL_PROTOCOL,
+  STORED_FRAMES_PROTOCOL,
   type StoredClaudeSetupCode,
   type StoredClaudeSetupOffer,
   type StoredControlMessage,
@@ -77,6 +80,7 @@ export const HOST_MESSAGE_VERSIONS: HostMessageVersions = {
   SupervisorUpdateStep: ChannelProtocol.Oldest,
   SupervisorUpdateFailed: ChannelProtocol.Oldest,
   TelemetryBatch: ChannelProtocol.Oldest,
+  TurnLines: STORED_FRAMES_PROTOCOL,
 };
 
 export interface ControlHost {
@@ -101,8 +105,6 @@ export interface FrameRateRefusal {
   framesPerMinute: number;
   retryAfter: Date;
 }
-
-export type ReportedUsage = Required<HostUsage>;
 
 const budgeted = (usage: HostUsage): usage is ReportedUsage =>
   usage.memoryBudgetMib !== undefined &&
@@ -302,15 +304,15 @@ const inbound = (context: ControlContext): Ledger<StoredControlMessage> => ({
 const helloVersion = (connection: ControlConnection, text: string, context: ControlContext): number | Received => {
   if (connection.phase === "Open") return connection.protocolVersion;
   const greeting = parseEnvelope(HelloVersionSchema, text);
-  if (!greeting.ok) return ChannelProtocol.Version;
+  if (!greeting.ok) return SPOKEN_CHANNEL_PROTOCOL;
   const { protocolVersion, channelProtocolOldest } = greeting.value;
   const oldest = channelProtocolOldest ?? protocolVersion;
-  const negotiated = Math.min(protocolVersion, ChannelProtocol.Version);
+  const negotiated = Math.min(protocolVersion, SPOKEN_CHANNEL_PROTOCOL);
   if (negotiated >= Math.max(oldest, ChannelProtocol.Oldest)) return negotiated;
   return close(
     context.port,
     CloseCode.UnsupportedVersion,
-    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${SPOKEN_CHANNEL_PROTOCOL}, update the supervisor`,
   );
 };
 

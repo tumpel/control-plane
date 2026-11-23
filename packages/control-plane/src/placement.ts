@@ -3,7 +3,7 @@ import type { z } from "zod";
 import type { HostRecord as Host } from "./host-record.ts";
 import type { HostArchitecture } from "./releases.ts";
 
-export type ReportedHostUsage = Required<z.infer<typeof ReportedHostUsageSchema>>;
+export type ReportedHostUsage = Required<z.infer<typeof ReportedHostUsageSchema>> & { boxesWarm: number };
 
 type TenantUnplaceable = z.infer<typeof UnplaceableSchema>;
 

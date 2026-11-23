@@ -11,7 +11,6 @@ import {
   EventPageSchema,
   FailedTurnSchema,
   HostSchema,
-  type HostUsageSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
@@ -43,7 +42,7 @@ import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
 import { TEST_SETTINGS } from "../timing.ts";
 import { GITHUB_TOKEN_PREFIX, installApp, PREBUILT_HEAD, storeApp } from "./harness/github.ts";
 import { openSocket, type RequestInit } from "./harness/server.ts";
-import type { Carried, ControlMessage, HostMessage, Supervisor } from "./harness/supervisor.ts";
+import type { Carried, ControlMessage, HostMessage, HostUsage, Supervisor } from "./harness/supervisor.ts";
 import { LIMITS, World } from "./harness/world.ts";
 
 const DEPLOYED_COMMIT = "7".repeat(40);
@@ -53,11 +52,9 @@ const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
 const R2_STUB_ORIGIN = "https://r2.example.test";
 const DASHBOARD_ORIGIN = "https://app.tumpel.test";
-type HostUsage = z.infer<typeof HostUsageSchema>;
 type HostSide = Supervisor;
 
 const USAGE: HostUsage = {
-  boxesWarm: 0,
   loadAverage: 0.25,
   memoryAvailableMib: 6144,
   diskBudgetMib: 200000,
