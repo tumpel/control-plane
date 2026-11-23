@@ -32,15 +32,12 @@ interface HostRow {
 
 interface Attachment {
   connection: control.ControlConnection;
-  lastReceivedAt: number;
   lastSentAt: number;
   boxCapacity: number | null;
   heldFrom: number | null;
 }
 
 type Heartbeat = Extract<control.ControlEvent, { kind: "Heartbeat" }>;
-
-type Presence = "Online" | "Offline";
 
 type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
 
@@ -53,8 +50,6 @@ const isAttachment = (value: unknown): value is Attachment =>
   typeof value === "object" &&
   value !== null &&
   "connection" in value &&
-  "lastReceivedAt" in value &&
-  typeof value.lastReceivedAt === "number" &&
   "lastSentAt" in value &&
   typeof value.lastSentAt === "number" &&
   "boxCapacity" in value &&
@@ -137,12 +132,8 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private async offerRefused(hostId: string): Promise<OfferSent | null> {
-    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ state: string }>();
     if ((await this.frameMeter(hostId)).health() !== "Healthy") return "RateLimited";
-    const open = this.openSocket();
-    if (row?.state !== "Online" || open === undefined) return "Offline";
+    if (this.openSocket() === undefined) return "Offline";
     return null;
   }
 
@@ -178,7 +169,6 @@ export class HostChannel extends DurableObject<Env> {
     const now = Date.now();
     const attachment: Attachment = {
       connection: { phase: "Closed" },
-      lastReceivedAt: now,
       lastSentAt: now,
       boxCapacity: null,
       heldFrom: null,
@@ -204,7 +194,7 @@ export class HostChannel extends DurableObject<Env> {
     const context = this.context(socket, host, attachment);
     if (typeof message !== "string") {
       control.close(context.port, CloseCode.ProtocolError, "channel messages are JSON text, not binary");
-      return this.refreshPresence(socket);
+      return;
     }
     if (attachment.heldFrom !== null && !this.ledger.holding()) {
       control.close(
@@ -212,10 +202,9 @@ export class HostChannel extends DurableObject<Env> {
         CloseCode.ProtocolError,
         `the control plane slept and lost frames ${attachment.heldFrom} onward before it stored them; reconnect and resend them`,
       );
-      return this.refreshPresence(socket);
+      return;
     }
     const now = Date.now();
-    attachment.lastReceivedAt = now;
     const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
@@ -239,14 +228,14 @@ export class HostChannel extends DurableObject<Env> {
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
-    if (event.kind === "Closed") return this.refreshPresence(socket);
+    if (event.kind === "Closed") return;
     if (event.kind === "Heartbeat") {
       if (
         !(await this.heartbeat(host.host_id, event, now, attachment, context)) &&
         this.ledger.stalled() >= RETRY_LIMIT
       )
-        return this.giveUp(socket, attachment, context);
-      if (attachment.connection.phase === "Closed") return this.refreshPresence(socket);
+        return this.giveUp(attachment, context);
+      if (attachment.connection.phase === "Closed") return;
     }
     if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
     if (
@@ -259,7 +248,6 @@ export class HostChannel extends DurableObject<Env> {
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
-    await this.presence("Online");
   }
 
   private async take(
@@ -285,7 +273,7 @@ export class HostChannel extends DurableObject<Env> {
     this.ledger.hold(frame, false);
   }
 
-  private giveUp(socket: WebSocket, attachment: Attachment, context: control.ControlContext): Promise<void> {
+  private giveUp(attachment: Attachment, context: control.ControlContext): void {
     const first = this.ledger.first();
     this.ledger.take();
     attachment.heldFrom = null;
@@ -294,7 +282,6 @@ export class HostChannel extends DurableObject<Env> {
       CloseCode.ProtocolError,
       `the control plane failed to store frames ${first ?? "none"} onward on ${RETRY_LIMIT} heartbeats in a row; reconnect and resend them`,
     );
-    return this.refreshPresence(socket);
   }
 
   private async heartbeat(
@@ -377,18 +364,9 @@ export class HostChannel extends DurableObject<Env> {
     return control.send(attachment.connection, reply, context);
   }
 
-  override async webSocketClose(socket: WebSocket): Promise<void> {
-    await this.refreshPresence(socket);
-  }
-
-  override async webSocketError(socket: WebSocket): Promise<void> {
-    await this.refreshPresence(socket);
-  }
-
   private keep(socket: WebSocket, attachment: Attachment): void {
     const stored = this.attachment(socket);
     attachment.heldFrom = this.ledger.first();
-    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, stored.lastReceivedAt);
     attachment.lastSentAt = Math.max(attachment.lastSentAt, stored.lastSentAt);
     socket.serializeAttachment(attachment);
   }
@@ -506,8 +484,6 @@ export class HostChannel extends DurableObject<Env> {
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
       await tenant.call("supervisorUpdate", { hostId, message });
-      if (message.type === "SupervisorUpdateStep" && message.phase === "Restarting") await this.presence("Offline");
-      else await this.refreshPresence();
       return null;
     }
     return (await tenant.call("hostMessage", { tenantId, hostId, message })).reply;
@@ -609,36 +585,5 @@ export class HostChannel extends DurableObject<Env> {
       },
       now: () => new Date(),
     };
-  }
-
-  private async refreshPresence(closing?: WebSocket): Promise<void> {
-    const open = this.ctx
-      .getWebSockets()
-      .some(
-        (socket) =>
-          socket !== closing &&
-          socket.readyState === WebSocket.READY_STATE_OPEN &&
-          this.attachment(socket).connection.phase === "Open",
-      );
-    await this.presence(open ? "Online" : "Offline");
-  }
-
-  private async presence(state: Presence): Promise<void> {
-    const host = this.host();
-    if (host === null) throw new Error("presence changed on a host object that was never registered");
-    const now = Date.now();
-    const changed = await this.env.DB.prepare(
-      "UPDATE hosts SET state = ?, updated_at = ? WHERE host_id = ? AND state NOT IN ('Revoked', ?)",
-    )
-      .bind(state, now, host.host_id, state)
-      .run();
-    if (changed.meta.changes === 0) return;
-    const tenantId = await this.tenantOf(host.host_id);
-    await tenantApi(this.env.TENANT, tenantId).call("hostPresence", {
-      tenantId,
-      hostId: host.host_id,
-      presence: state,
-      now,
-    });
   }
 }

@@ -272,12 +272,17 @@ export const listHosts = async (env: Pick<Env, "DB">, tenantId: string): Promise
   return results.map(toHost);
 };
 
-type HostPresence = { presence: "Offline" } | { presence: "Online" | "Degraded"; heardAt: string };
+type HostPresence =
+  | { state: HostEntry["state"]; presence: "Offline" }
+  | { state: "Online" | "Offline"; presence: "Online" | "Degraded"; heardAt: string };
 
 const presenceOf = (host: HostEntry, usage: { updatedAt: number } | undefined, heardSince: number): HostPresence => {
-  if (usage === undefined || host.state === "Revoked") return { presence: "Offline" };
+  if (host.state === "Revoked") return { state: "Revoked", presence: "Offline" };
+  if (usage === undefined) return { state: host.state === "Enrolled" ? "Enrolled" : "Offline", presence: "Offline" };
   const heardAt = new Date(usage.updatedAt).toISOString();
-  return usage.updatedAt < heardSince ? { presence: "Degraded", heardAt } : { presence: "Online", heardAt };
+  return usage.updatedAt < heardSince
+    ? { state: "Offline", presence: "Degraded", heardAt }
+    : { state: "Online", presence: "Online", heardAt };
 };
 
 export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostEntry | null> => {
@@ -290,23 +295,33 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
 
 export const withReportedHealth = (
   hosts: HostEntry[],
-  reports: { hostId: string; reportedHealth: HostRecord["reportedHealth"] }[],
+  reports: { hostId: string; reportedHealth: HostRecord["reportedHealth"]; updatedAt: number }[],
+  heardSince: number,
 ): HostRecord[] => {
-  const health = new Map(reports.map((report) => [report.hostId, report.reportedHealth]));
-  return hosts.map((host) => ({ ...host, reportedHealth: health.get(host.hostId) ?? "Healthy" }));
+  const byHost = new Map(reports.map((report) => [report.hostId, report]));
+  return hosts.map((host) => {
+    const report = byHost.get(host.hostId);
+    return {
+      ...host,
+      state: presenceOf(host, report, heardSince).state,
+      reportedHealth: report?.reportedHealth ?? "Healthy",
+    };
+  });
 };
 
 export const hostRecords = async (
-  env: Pick<Env, "TENANT">,
+  env: Pick<Env, "TENANT" | "TUMPEL_SETTINGS">,
   tenantId: string,
   hosts: HostEntry[],
 ): Promise<HostRecord[]> => {
   const { usage } = await tenantApi(env.TENANT, tenantId).call("listHostUsage", { tenantId });
-  return withReportedHealth(hosts, usage);
+  return withReportedHealth(hosts, usage, Date.now() - presenceGraceMs(settingsOf(env)));
 };
 
-export const listHostRecords = async (env: Pick<Env, "DB" | "TENANT">, tenantId: string): Promise<HostRecord[]> =>
-  hostRecords(env, tenantId, await listHosts(env, tenantId));
+export const listHostRecords = async (
+  env: Pick<Env, "DB" | "TENANT" | "TUMPEL_SETTINGS">,
+  tenantId: string,
+): Promise<HostRecord[]> => hostRecords(env, tenantId, await listHosts(env, tenantId));
 
 export const hostReads = async (env: Env, tenantId: string, hosts: HostEntry[]): Promise<Host[]> => {
   const hostIds = hosts.map((host) => host.hostId);

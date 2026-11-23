@@ -29,7 +29,7 @@ export type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["messag
 export type HostMessage = { type: string } & Record<string, unknown>;
 export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 export type Carried = { received: number; sent: number; held: string[]; turns: string[] };
-export type Holding = { heldTurnIds: string[]; heldSessionIds: string[] };
+export type Holding = { heldTurnIds: string[]; heldSessionIds: string[]; heldClaudeSetupIds: string[] };
 type SentFrame = { type: "Frame"; seq: number; ack: number; message: HostMessage };
 export type Closed = { code: number; reason: string; wasClean: boolean };
 
@@ -179,7 +179,7 @@ export class Supervisor {
       sentAt: new Date().toISOString(),
       usage: this.usage,
       heldSessionIds: holding.heldSessionIds,
-      heldClaudeSetupIds: [],
+      heldClaudeSetupIds: holding.heldClaudeSetupIds,
       ...this.heldTurnIds(holding.heldTurnIds),
     });
   }
@@ -189,7 +189,11 @@ export class Supervisor {
   }
 
   holding(): Holding {
-    return { heldTurnIds: [...this.turns], heldSessionIds: [...this.held].filter((id) => !this.released.has(id)) };
+    return {
+      heldTurnIds: [...this.turns],
+      heldSessionIds: [...this.held].filter((id) => !this.released.has(id)),
+      heldClaudeSetupIds: [],
+    };
   }
 
   async beats(holding: Partial<Holding> = {}): Promise<void> {

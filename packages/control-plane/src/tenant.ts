@@ -598,8 +598,8 @@ export class Tenant extends TenantConnectors {
       await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },
-    forgetHostUsage: ({ hostId }) => {
-      this.forgetHostUsage(hostId);
+    forgetHostUsage: async ({ hostId }) => {
+      await this.forgetHostUsage(hostId, Date.now());
       return {};
     },
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
@@ -611,18 +611,6 @@ export class Tenant extends TenantConnectors {
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
-    hostPresence: async ({ tenantId, hostId, presence, now }) => {
-      await this.hostPresence(tenantId, hostId, presence, now);
-      if (presence === "Offline") {
-        await this.failHostClaudeSetups(
-          hostId,
-          "NoHostOnline",
-          `host ${hostId} went offline during the setup; check that its supervisor runs, then start the setup again`,
-          now,
-        );
-      }
-      return {};
-    },
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};

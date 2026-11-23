@@ -246,8 +246,6 @@ const connectorToken = async (tenantId: string, email: string): Promise<string> 
   return OAuthTokenSchema.parse(await token.json()).access_token;
 };
 
-const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
-
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
@@ -365,6 +363,11 @@ const tenant = async () => {
 
   const deletePersona = (personaId: string) => call(`/v1/personas/${personaId}`, { method: "DELETE", headers: bearer });
 
+  const revoke = async (id: string) => {
+    const revoked = await postJson(`/v1/hosts/${id}/revoke`, {}, bearer);
+    assert.equal(revoked.status, 200, await revoked.clone().text());
+  };
+
   const hostState = (id: string, state: string) =>
     until(
       `host ${id} reading ${state}`,
@@ -472,6 +475,7 @@ const tenant = async () => {
     createPersona,
     deletePersona,
     hostState,
+    revoke,
     completedTurn,
     storedSnapshot,
     storedChunks,
@@ -542,7 +546,9 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
   const report = async () => {
     const response = await call("/v1/releases/rollout", { headers: drainBearer });
     assert.equal(response.status, 200, await response.clone().text());
-    return ReleaseRolloutSchema.parse(await response.json());
+    const { channelProtocols, ...rollout } = ReleaseRolloutSchema.parse(await response.json());
+    assert.ok(channelProtocols.some((protocol) => protocol.hostCount > 0));
+    return rollout;
   };
 
   const idle = await call("/v1/releases/rollout", { headers: drainBearer });
@@ -565,7 +571,6 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       deployedCommit: DEPLOYED_COMMIT,
       drained: false,
       hosts: [{ hostId, tenantId: started.session.tenantId, runningTurns: 1 }],
-      channelProtocols: [],
     });
 
     const start = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "during the drain" }, bearer);
@@ -591,7 +596,6 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
       deployedCommit: DEPLOYED_COMMIT,
       drained: true,
       hosts: [],
-      channelProtocols: [],
     });
 
     const send = await postJson(`/v1/sessions/${started.session.sessionId}/turns`, { prompt: "draining" }, bearer);
@@ -1983,27 +1987,6 @@ suite("sessions", () => {
     assert.match(failure.detail, /UploadRejected: the store refused the upload/);
   });
 
-  test("a finished turn whose host goes offline before its snapshot lands fails SnapshotNotStored, never Completed", async () => {
-    const { host, tool, sessionStart } = await tenant();
-    await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "drop my host" }, StartedSessionSchema);
-    const offer = await host.next("TurnOffer");
-    const { turnId } = offer;
-    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    assert.equal((await host.next("SnapshotRequest")).turnId, turnId);
-
-    host.close();
-    await until(
-      "the turn reading Failed",
-      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await tool("tumpel_turn_failure", { turnId }, TurnFailureSchema);
-    assert.equal(failure.reason, "SnapshotNotStored");
-    assert.match(failure.detail, /went offline during the turn/);
-  });
-
   test("a stop with cancelTurn while a finished turn awaits its snapshot fails it SnapshotNotStored, never Completed", async () => {
     const { host, tool, sessionStart } = await tenant();
     const started = await tool(
@@ -2461,43 +2444,6 @@ suite("sessions", () => {
     }
   });
 
-  test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {
-    const { bearer, host, refused, getJson, sessionStart, readAll } = await tenant();
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "host goes away" }, bearer);
-    assert.equal(response.status, 200);
-    const started = StartedSessionSchema.parse(await response.json());
-    const offer = await host.next("TurnOffer");
-    assert.equal(offer.turnId, started.turn.turnId);
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    host.send({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: "{}" });
-    await until(
-      "the turn reading Running",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Running",
-    );
-    await until(
-      "the line in the transcript",
-      () => readAll(started.session.sessionId, offer.turnId, 10),
-      (lines) => lines.length === 1,
-    );
-
-    host.close();
-    await until(
-      "the turn reading Failed",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "HostOffline");
-    assert.match(failure.detail, /^host box went offline during the turn/);
-    assert.doesNotMatch(failure.detail, UUID);
-
-    const offline = await refused(`/v1/sessions/${started.session.sessionId}/stop`);
-    assert.equal(offline.code, "HostOffline");
-    assert.match(offline.detail, /runs on host box, which is Offline/);
-    assert.doesNotMatch(offline.detail, UUID);
-  });
-
   test("two sessions started at once on two equal hosts land on different hosts, since each counts the other's turn", async () => {
     const { bearer, getJson, enrol, sessionStart } = await tenant();
     const first = await enrol("equal-1");
@@ -2704,9 +2650,8 @@ suite("sessions", () => {
   });
 
   test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes placed before the host reports them", async () => {
-    const { bearer, host, hostId, refused, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
+    const { bearer, hostId, revoke, refused, enrol, sessionStart, hostState } = await tenant();
+    await revoke(hostId);
     const budgeted = await enrol("budgeted");
     const box = BoxMemoryLimit.DefaultMib;
     const budget = 2 * box + 1024;
@@ -2731,7 +2676,7 @@ suite("sessions", () => {
       [full.code, full.detail],
       [
         "PoolExhausted",
-        `no host of your tenant has memory for another box: box is Offline, budgeted gives boxes ${budget} MiB of memory and its boxes hold ${2 * box} MiB of it, and the persona's boxes need ${box} MiB`,
+        `no host of your tenant has memory for another box: box is Revoked, budgeted gives boxes ${budget} MiB of memory and its boxes hold ${2 * box} MiB of it, and the persona's boxes need ${box} MiB`,
       ],
     );
     side.close();
@@ -2808,9 +2753,8 @@ suite("sessions", () => {
   });
 
   test("an Off session whose teardown fails returns to Idle with no snapshot, and the first heartbeat after a reconnect discards the boxes a host still holds for Stopped and archived sessions and keeps Warm and Auto boxes", async () => {
-    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
+    const { bearer, hostId, revoke, getJson, tool, enrol, sessionStart, hostState } = await tenant();
+    await revoke(hostId);
     const drift = await enrol("drift");
     const first = await connect(drift.id, drift.key);
     await hostState(drift.id, "Online");
@@ -2880,7 +2824,6 @@ suite("sessions", () => {
     await snapshotted(auto.session.sessionId);
 
     first.close();
-    await hostState(drift.id, "Offline");
     const back = await connect(drift.id, drift.key, 8, first.carried());
     const released = [await back.next("BoxDiscard"), await back.next("BoxDiscard")];
     assert.deepEqual(
@@ -2924,9 +2867,8 @@ suite("sessions", () => {
   });
 
   test("two hosts refusing their turns HostUpdating at the same moment each hand the turn to the other", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
+    const { bearer, hostId, revoke, getJson, enrol, sessionStart, hostState } = await tenant();
+    await revoke(hostId);
     const first = await enrol("crossing-1");
     const second = await enrol("crossing-2");
     const sides = new Map([

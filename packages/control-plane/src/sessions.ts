@@ -104,14 +104,16 @@ const sessionArchived = (sessionId: string, refused: string): Refused =>
 
 const hostOffline = async (env: Env, caller: Caller, session: Session, retry: string): Promise<Refused | null> => {
   const host = await hostOf(env.DB, caller.tenantId, session.hostId);
-  if (host?.state === "Online") return null;
+  if (host !== null && host.state !== "Revoked" && session.state !== "Unknown") return null;
   return refuse(409, {
     code: "HostOffline",
     title: "Host offline",
     detail:
       host === null
         ? "the session's host is no longer enrolled"
-        : `the session runs on host ${host.name}, which is ${host.state}`,
+        : host.state === "Revoked"
+          ? `the session runs on host ${host.name}, which is Revoked`
+          : `the session runs on host ${host.name}, which has not reported to the control plane within its heartbeat grace`,
     fix: `Start tumpel-supervisor run on that host, then ${retry}`,
   });
 };
@@ -129,7 +131,7 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
 
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
-  if (refused.reason === "NotOnline" && refused.host.state === "Online")
+  if (refused.reason === "NotOnline" && refused.host.state === "Offline")
     return `${named} has not reported to the control plane within its heartbeat grace and counts as Degraded until it sends a heartbeat`;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NotHealthy") {
@@ -564,7 +566,7 @@ export const archiveSession = async (
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
-  if (session.state === "Idle") {
+  if (session.state === "Idle" || session.state === "Unknown") {
     const offline = await hostOffline(env, caller, session, "archive the session again");
     if (offline !== null) return offline;
   }
@@ -620,7 +622,7 @@ export const deleteSession = async (env: Env, caller: Caller, sessionId: string)
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
-  if (session.state === "Idle") {
+  if (session.state === "Idle" || session.state === "Unknown") {
     const offline = await hostOffline(env, caller, session, "delete the session again");
     if (offline !== null) return offline;
   }

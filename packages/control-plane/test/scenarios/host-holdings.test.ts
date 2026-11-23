@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HostSchema } from "@tumpel/schemas";
+import { ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
 import { HELD_TURNS_PROTOCOL } from "../../src/channel/protocol.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
@@ -79,6 +79,69 @@ test("a heartbeat that names an offered turn again resets its grace", async (t) 
   await host.beats({ heldTurnIds: [] });
 
   assert.equal((await world.turn(turnId)).state, "Offered");
+});
+
+test("a heartbeat that does not name the session of a pending snapshot fails the snapshot and its turn SnapshotNotStored", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await quietHost(world);
+  const offer = await running(world, host);
+  await host.completes(offer);
+  host.take("SnapshotRequest");
+
+  await host.beats({ heldTurnIds: [], heldSessionIds: [offer.sessionId] });
+  assert.equal((await world.turn(offer.turnId)).state, "Running");
+
+  await host.beats({ heldTurnIds: [], heldSessionIds: [] });
+  assert.equal(reasonOf(await world.turn(offer.turnId)), "SnapshotNotStored");
+});
+
+test("a heartbeat that does not name a live Claude setup fails it", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  host.quiet();
+  const created = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/secret-sets",
+    JSON.stringify({ name: "setup", secrets: [] }),
+  );
+  assert.equal(created.status, 200, await created.clone().text());
+  const { secretSetId } = SecretSetSchema.parse(await created.json());
+  const started = await world.fetch(world.owner, "POST", "/v1/claude-setups", JSON.stringify({ secretSetId }));
+  assert.equal(started.status, 200, await started.clone().text());
+  const { claudeSetupId } = ClaudeSetupSchema.parse(await started.json());
+  host.take("ClaudeSetupBoxOffer");
+  await host.says({
+    type: "ClaudeSetupBoxUrl",
+    claudeSetupId,
+    signInUrl: "https://claude.ai/oauth/authorize?state=held",
+  });
+  const setup = async () => {
+    const read = await world.fetch(world.owner, "GET", `/v1/claude-setups/${claudeSetupId}`);
+    assert.equal(read.status, 200);
+    return ClaudeSetupSchema.parse(await read.json()).status;
+  };
+
+  await host.beats({ heldClaudeSetupIds: [claudeSetupId] });
+  assert.equal((await setup()).state, "AwaitingCode");
+
+  await host.beats({ heldClaudeSetupIds: [] });
+  const failed = await setup();
+  assert.equal(failed.state === "Failed" ? failed.reason : failed.state, "NoHostOnline");
+});
+
+test("revoking a host fails its running turn HostRevoked", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await quietHost(world);
+  const offer = await running(world, host);
+
+  const revoked = await world.fetch(world.owner, "POST", `/v1/hosts/${host.hostId}/revoke`, "{}");
+  assert.equal(revoked.status, 200);
+
+  assert.equal(reasonOf(await world.turn(offer.turnId)), "HostRevoked");
 });
 
 test("a Hello that does not name a running turn fails it HostDropped", async (t) => {

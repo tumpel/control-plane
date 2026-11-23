@@ -139,7 +139,7 @@ export type TurnSend = z.infer<typeof TurnSendSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
 type HostLoss = {
-  turn: "RateLimited" | "HostOffline";
+  turn: "RateLimited" | "HostRevoked";
   snapshot: "RateLimited" | "NotAnswered";
   turnDetail: string;
   snapshotDetail: string;
@@ -640,9 +640,6 @@ const undelivered = (host: string, sent: Exclude<OfferSent, "Sent"> | Error): [T
     `host ${host} is rate limited and takes no offers, so the turn never reached it; send the turn again once its health recovers`,
   ];
 };
-
-const lostTurnDetail = (lost: string): string =>
-  `${lost} during the turn; check that its supervisor runs, then send the turn again`;
 
 const offerPrompt = (harness: string, turn: TurnRow): string => {
   if (turn.goal === null) return turn.prompt;
@@ -1672,6 +1669,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async hostHello(tenantId: string, hostId: string, report: HostReport, heldTurns: HeldTurns): Promise<void> {
     const dropped = this.ctx.storage.transactionSync(() => {
+      const [heard] = this.ctx.storage.sql
+        .exec<{ heard_at: number }>("SELECT heard_at FROM host_reports WHERE host_id = ?", hostId)
+        .toArray();
+      if (heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env)))
+        this.appendEvent({ event: "HostOnline", hostId }, report.now);
       this.reportHost(hostId, report);
       clearSupersededFailure(this.ctx.storage.sql, hostId);
       return heldTurns.state === "Reported" ? this.unheldRunningTurns(hostId, heldTurns.heldTurnIds) : [];
@@ -1831,9 +1833,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
   }
 
-  protected forgetHostUsage(hostId: string): void {
+  protected async forgetHostUsage(hostId: string, now: number): Promise<void> {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) throw new Error(`the tenant Durable Object revoking host ${hostId} has no name`);
     this.ctx.storage.sql.exec("DELETE FROM host_reports WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
+    const host = await this.hostName(tenantId, hostId);
+    await this.failHostTurns(
+      tenantId,
+      hostId,
+      {
+        turn: "HostRevoked",
+        snapshot: "NotAnswered",
+        turnDetail: `host ${host} was revoked during the turn; send the turn again on another host`,
+        snapshotDetail: `host ${host} was revoked before it answered the snapshot`,
+      },
+      now,
+    );
   }
 
   protected runningTurnsByHost(): RunningTurns[] {
@@ -1889,7 +1905,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async hostRecords(tenantId: string): Promise<HostRecord[]> {
-    return withReportedHealth(await listHosts(this.env, tenantId), this.listHostUsage(tenantId));
+    return withReportedHealth(
+      await listHosts(this.env, tenantId),
+      this.listHostUsage(tenantId),
+      Date.now() - presenceGraceMs(settingsOf(this.env)),
+    );
   }
 
   protected listHostUsage(tenantId: string): ReportedHostUsage[] {
@@ -1955,7 +1975,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(
         request,
         "NotAnswered",
-        `host ${from} went offline before it answered a snapshot, and the session moved to host ${to}`,
+        `host ${from} had not answered a snapshot when the session moved to host ${to}`,
         failedAt,
       );
     }
@@ -3230,32 +3250,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async cancelHostTurns(hostId: string, turnIds: readonly string[]): Promise<void> {
     for (const turnId of turnIds) await this.host(hostId).send({ type: "TurnCancel", turnId });
-  }
-
-  protected async hostPresence(
-    tenantId: string,
-    hostId: string,
-    presence: "Online" | "Offline",
-    now: number,
-  ): Promise<void> {
-    this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
-    if (presence === "Online") return;
-    const host = await this.hostName(tenantId, hostId);
-    await this.failLostHost(tenantId, hostId, `host ${host} went offline`, now);
-  }
-
-  private async failLostHost(tenantId: string, hostId: string, lost: string, now: number): Promise<string[]> {
-    return this.failHostTurns(
-      tenantId,
-      hostId,
-      {
-        turn: "HostOffline",
-        snapshot: "NotAnswered",
-        turnDetail: lostTurnDetail(lost),
-        snapshotDetail: `${lost} before it answered the snapshot; check that its supervisor runs`,
-      },
-      now,
-    );
   }
 
   private async hostName(tenantId: string, hostId: string): Promise<string> {

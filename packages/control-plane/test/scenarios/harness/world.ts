@@ -462,9 +462,13 @@ export class World {
     const { hostId, key } = await this.enrol(member, name);
     const supervisor = await this.connect(hostId, key, options);
     await this.until(
-      `host ${hostId} reading Online`,
-      () => this.db.sql.exec("SELECT state FROM hosts WHERE host_id = ?", hostId).toArray()[0]?.state,
-      (state) => state === "Online" && supervisor.isWelcomed(),
+      `host ${hostId} reporting to its tenant`,
+      () =>
+        this.tenants
+          .instance(member.tenantId)
+          .ctx.storage.sql.exec("SELECT heard_at FROM host_reports WHERE host_id = ?", hostId)
+          .toArray().length,
+      (reports) => reports === 1 && supervisor.isWelcomed(),
     );
     return supervisor;
   }

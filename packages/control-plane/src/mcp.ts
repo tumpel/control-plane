@@ -941,7 +941,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/events",
     EventQuerySchema,
-    "Read the tenant's events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle, HostOffline or PrebuildDone, or follow GET /v1/events over a WebSocket. Reads from the end of the log when afterEventId is left out. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
+    "Read the tenant's events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle or PrebuildDone, or follow GET /v1/events over a WebSocket. Reads from the end of the log when afterEventId is left out. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
   ),
   rest(
     "tumpel_turn_cancel",

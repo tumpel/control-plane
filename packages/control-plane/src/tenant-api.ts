@@ -81,8 +81,6 @@ import {
   HostHelloResultSchema,
   HostMessageInputSchema,
   HostMessageResultSchema,
-  HostPresenceInputSchema,
-  HostPresenceResultSchema,
   ListClaudeSetupsInputSchema,
   ListClaudeSetupsResultSchema,
   ListConnectorsInputSchema,
@@ -336,7 +334,6 @@ export const TENANT_OPERATIONS = {
   setLimits: { input: SetLimitsInputSchema, result: SetLimitsResultSchema },
   turnMetricDimensions: { input: TurnMetricDimensionsInputSchema, result: TurnMetricDimensionsResultSchema },
   prepareOffer: { input: PrepareOfferInputSchema, result: PrepareOfferResultSchema },
-  hostPresence: { input: HostPresenceInputSchema, result: HostPresenceResultSchema },
   hostHealth: { input: HostHealthInputSchema, result: HostHealthResultSchema },
   hostMessage: { input: HostMessageInputSchema, result: HostMessageResultSchema },
 } as const;
