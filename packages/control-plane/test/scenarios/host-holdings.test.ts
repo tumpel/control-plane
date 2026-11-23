@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
+import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema, TurnSchema } from "@tumpel/schemas";
+import { snapshotAsked } from "./harness/snapshot-chunks.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const GRACE_MS = SETTINGS.heartbeatDeadlineSeconds * 1000;
@@ -156,6 +157,34 @@ test("a Hello that does not name a running turn fails it HostDropped", async (t)
   back.quiet();
 
   assert.equal(reasonOf(await world.turn(offer.turnId)), "HostDropped");
+});
+
+test("a Hello that does not name a finished turn whose snapshot is pending fails the turn SnapshotNotStored for the client", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await quietHost(world);
+  const offer = await running(world, host);
+  await host.completes(offer);
+  const request = snapshotAsked(host, offer.sessionId);
+
+  const back = await world.reconnect(host, { carried: { ...host.carried(), turns: [] } });
+  back.quiet();
+
+  const read = await world.fetch(world.owner, "GET", `/v1/turns/${offer.turnId}`);
+  assert.equal(read.status, 200);
+  const turn = TurnSchema.parse(await read.json());
+  assert.equal(reasonOf(turn), "SnapshotNotStored");
+  assert.ok(
+    turn.state === "Failed" && turn.detail.includes("host host-1 connected again and no longer holds this turn"),
+    JSON.stringify(turn),
+  );
+  const failures = world
+    .tenantSql()
+    .exec("SELECT reason FROM snapshot_failures WHERE snapshot_id = ?", request.snapshotId)
+    .toArray()
+    .map((row) => row.reason);
+  assert.deepEqual(failures, ["NotAnswered"]);
+  assert.equal((await world.session(offer.sessionId)).state, "Idle");
 });
 
 test("a Hello never fails an offered turn, however often it leaves the turn out", async (t) => {
