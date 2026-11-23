@@ -13,10 +13,10 @@ test("a tenant that restarts while it holds transcript lines takes them again fr
   await host.claims(offer);
   const line = (lineSeq: number) =>
     host.says({
-      type: "TurnLine",
+      type: "TurnLines",
       turnId: offer.turnId,
-      lineSeq,
-      text: `{"type":"assistant","n":${lineSeq}}`,
+      firstLineSeq: lineSeq,
+      lines: [`{"type":"assistant","n":${lineSeq}}`],
     });
   for (let lineSeq = 1; lineSeq <= 3; lineSeq++) await line(lineSeq);
 
@@ -43,10 +43,10 @@ test("a tenant that restarts with nothing held takes the next frame again from t
   const offer = host.takeOffer();
   await host.claims(offer);
   await host.says({
-    type: "TurnLine",
+    type: "TurnLines",
     turnId: offer.turnId,
-    lineSeq: 1,
-    text: '{"type":"result","subtype":"success","is_error":false}',
+    firstLineSeq: 1,
+    lines: ['{"type":"result","subtype":"success","is_error":false}'],
   });
   host.report(USAGE);
   await world.settle();

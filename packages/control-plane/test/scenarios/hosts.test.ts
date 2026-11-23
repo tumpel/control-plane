@@ -122,12 +122,12 @@ test("a host enrols with a one-time token, holds its channel, reads Degraded whe
 test("a connected host's samples land in its tenant's metrics store under its signed host id", async () => {
   const supervisor = await world.online(member, "telemetry");
   const at = new Date().toISOString();
-  supervisor.send({
-    type: "TelemetryBatch",
+  supervisor.measures({
     instruments: [{ metric: "host.memory.total", unit: "By", kind: "Sample", description: "Total memory" }],
     samples: [{ metric: "host.memory.total", at, value: 1024, dimensions: { hostId: "forged" } }],
     turns: [],
   });
+  await supervisor.beats();
   await world.until(
     `host ${supervisor.hostId}'s host.memory.total reaching the metrics store`,
     () => world.dataPoints.map(({ blobs }) => ({ metric: blobs?.[0], dimensions: blobs?.[1] ?? "{}" })),
@@ -163,7 +163,7 @@ test("a frame the host sends the moment Welcome arrives is accepted while the te
   }
 });
 
-test("a host whose tenant raised its frame limit streams 700 frames in a minute with none rate limited once it reconnects, while its object stays resident", async () => {
+test("a host whose tenant raised its frame limit streams 700 frames in a minute once it reconnects, and every one is acked with none rate limited", async () => {
   const { hostId, key } = await world.enrol(member, "busy");
   const first = await world.connect(hostId, key, { boxCapacity: 1 });
   await reads(hostId, "Online");
@@ -181,15 +181,7 @@ test("a host whose tenant raised its frame limit streams 700 frames in a minute 
   for (let seq = 1; seq <= 700; seq++) second.send(snapshotFailed(`snapshot-busy-${seq}`));
   await world.settle();
   assert.deepEqual(second.rateLimited(), []);
-
-  const third = await world.connect(hostId, key, { boxCapacity: 1 });
-  await world.until(
-    "the third connection welcomed",
-    () => third.isWelcomed(),
-    (welcomed) => welcomed,
-  );
-  assert.equal(third.acknowledgedSeq(), 700);
-  assert.deepEqual(second.rateLimited(), []);
+  assert.equal(second.acknowledgedSeq(), 700);
 });
 
 test("a staged supervisor update is stored on the host and the host read names its release and the boxes it waits on", async () => {

@@ -3,43 +3,24 @@ import {
   type ControlFrameSchema,
   HelloSchema,
   HostEnvelopeSchema,
-  HostFrameSchema,
-  HostHeartbeatSchema,
+  type HostFrameSchema,
   type HostReportedHealthSchema,
-  HostUsageSchema,
+  type HostUsageSchema,
   type MetricBatchSchema,
 } from "@tumpel/schemas";
-import { z } from "zod";
+import type { z } from "zod";
 
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true, channelProtocolOldest: true });
 export const STORED_FRAMES_PROTOCOL = 37;
-const UnstoredFramesUsageSchema = HostUsageSchema.partial({
-  diskBudgetMib: true,
-  diskHeldMib: true,
-  memoryBudgetMib: true,
-  memoryHeldMib: true,
-});
-const UnstoredFramesEnvelopeSchema = z.discriminatedUnion("type", [
-  HelloSchema.omit({ resendFrom: true }).extend({ usage: UnstoredFramesUsageSchema }),
-  HostHeartbeatSchema.omit({ ack: true, telemetry: true }).extend({ usage: UnstoredFramesUsageSchema }),
-  HostFrameSchema,
-]);
-export const hostEnvelopeSchema = (protocolVersion: number) =>
-  protocolVersion >= STORED_FRAMES_PROTOCOL ? HostEnvelopeSchema : UnstoredFramesEnvelopeSchema;
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
-export type HostEnvelope = z.infer<typeof HostEnvelopeSchema> | z.infer<typeof UnstoredFramesEnvelopeSchema>;
+export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
 export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
 
-export type StoredFramesHeartbeat = z.infer<typeof HostHeartbeatSchema>;
-export const storedFramesHeartbeat = (envelope: HostHeartbeat): envelope is StoredFramesHeartbeat =>
-  "ack" in envelope && "telemetry" in envelope;
-
-export type HostUsage = z.infer<typeof UnstoredFramesUsageSchema>;
 export type ReportedUsage = z.infer<typeof HostUsageSchema>;
 export type MetricBatch = z.infer<typeof MetricBatchSchema>;
 export type HostReportedHealth = z.infer<typeof HostReportedHealthSchema>;
@@ -87,7 +68,6 @@ export interface Frame<M> {
 }
 
 export interface Ledger<M> {
-  received: number;
   sent: number;
   unacked: Frame<M>[];
 }
@@ -97,7 +77,7 @@ export interface LedgerStore<M> {
   save(ledger: Ledger<M>): void;
 }
 
-export const emptyLedger = <M>(): Ledger<M> => ({ received: 0, sent: 0, unacked: [] });
+export const emptyLedger = <M>(): Ledger<M> => ({ sent: 0, unacked: [] });
 
 const HELLO_CONTEXT = "tumpel-channel-hello-v1";
 

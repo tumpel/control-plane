@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
-import { UNSTORED_FRAMES_PROTOCOL } from "./harness/supervisor.ts";
+import { ChannelProtocol, ClaudeSetupSchema, CloseCode, HostSchema, SecretSetSchema } from "@tumpel/schemas";
+import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const GRACE_MS = SETTINGS.heartbeatDeadlineSeconds * 1000;
@@ -174,21 +174,40 @@ test("a Hello never fails an offered turn, however often it leaves the turn out"
   assert.equal((await world.turn(turnId)).state, "Offered");
 });
 
-for (const protocolVersion of [ChannelProtocol.Oldest, UNSTORED_FRAMES_PROTOCOL, ChannelProtocol.Version]) {
-  test(`a channel ${protocolVersion} host connects and its heartbeats judge its turns`, async (t) => {
-    const world = await World.open();
-    t.after(() => world.close());
-    const host = await quietHost(world, { protocolVersion, channelProtocolOldest: protocolVersion });
-    assert.equal(host.welcomedVersion(), protocolVersion);
-    const offer = await running(world, host);
-
-    await host.beats();
-    assert.equal((await world.turn(offer.turnId)).state, "Running");
-
-    await host.beats({ heldTurnIds: [] });
-    assert.equal(reasonOf(await world.turn(offer.turnId)), "HostDropped");
+test(`a channel ${STORED_FRAMES_PROTOCOL} host connects and its heartbeats judge its turns`, async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await quietHost(world, {
+    protocolVersion: STORED_FRAMES_PROTOCOL,
+    channelProtocolOldest: STORED_FRAMES_PROTOCOL,
   });
-}
+  assert.equal(host.welcomedVersion(), STORED_FRAMES_PROTOCOL);
+  const offer = await running(world, host);
+
+  await host.beats();
+  assert.equal((await world.turn(offer.turnId)).state, "Running");
+
+  await host.beats({ heldTurnIds: [] });
+  assert.equal(reasonOf(await world.turn(offer.turnId)), "HostDropped");
+});
+
+test(`a host that speaks no newer than ${STORED_FRAMES_PROTOCOL - 1} is refused and told to update the supervisor`, async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const { hostId, key } = await world.enrol(world.owner, "old");
+  const host = await world.connect(hostId, key, {
+    protocolVersion: STORED_FRAMES_PROTOCOL - 1,
+    channelProtocolOldest: ChannelProtocol.Oldest,
+  });
+  const closed = await host.closed();
+  assert.deepEqual(
+    { code: closed.code, reason: closed.reason },
+    {
+      code: CloseCode.UnsupportedVersion,
+      reason: `protocol versions ${ChannelProtocol.Oldest} to ${STORED_FRAMES_PROTOCOL - 1} are not supported; this control plane speaks ${STORED_FRAMES_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
+    },
+  );
+});
 
 test(`a channel ${ChannelProtocol.Version} Hello is welcomed on ${ChannelProtocol.Version}, the newest this control plane speaks`, async (t) => {
   const world = await World.open();

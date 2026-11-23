@@ -8,12 +8,11 @@ import {
   type Frame,
   type Hello,
   HelloVersionSchema,
+  HostEnvelopeSchema,
   type HostMessage,
   type HostReportedHealth,
-  type HostUsage,
   heartbeat,
   helloBytes,
-  hostEnvelopeSchema,
   type LedgerStore,
   type MetricBatch,
   type Port,
@@ -29,7 +28,6 @@ import {
   type StoredControlMessage,
   type StoredOffer,
   sequence,
-  storedFramesHeartbeat,
 } from "./protocol.ts";
 
 export type ControlConnection =
@@ -59,45 +57,11 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   ClaudeSetupBoxDiscard: ChannelProtocol.Oldest,
 };
 
-type Spoken = { oldest: number; newest: number };
+type Replaced = Extract<HostMessage, { type: "TurnLine" | "TelemetryBatch" }>;
+export type TakenMessage = Exclude<HostMessage, Replaced>;
 
-const ALWAYS: Spoken = { oldest: ChannelProtocol.Oldest, newest: ChannelProtocol.Version };
-const UNSTORED: Spoken = { oldest: ChannelProtocol.Oldest, newest: STORED_FRAMES_PROTOCOL - 1 };
-
-export const HOST_MESSAGE_VERSIONS: Record<HostMessage["type"], Spoken> = {
-  TurnImageFetching: ALWAYS,
-  TurnClaim: ALWAYS,
-  TurnRepositoryReady: ALWAYS,
-  TurnLine: UNSTORED,
-  TurnComplete: ALWAYS,
-  TurnRepositoryCloneFailed: ALWAYS,
-  TurnFailed: ALWAYS,
-  SnapshotChunks: ALWAYS,
-  SnapshotPacks: ALWAYS,
-  RestoreChunks: ALWAYS,
-  SnapshotDone: ALWAYS,
-  SnapshotFailed: ALWAYS,
-  BoxGone: ALWAYS,
-  BoxTeardownFailed: ALWAYS,
-  ClaudeSetupBoxUrl: ALWAYS,
-  ClaudeSetupBoxFailed: ALWAYS,
-  SupervisorUpdateStep: ALWAYS,
-  SupervisorUpdateFailed: ALWAYS,
-  TelemetryBatch: UNSTORED,
-  TurnLines: { oldest: STORED_FRAMES_PROTOCOL, newest: ChannelProtocol.Version },
-};
-
-const unspokenBy = (type: HostMessage["type"], protocolVersion: number): string | null => {
-  const { oldest, newest } = HOST_MESSAGE_VERSIONS[type];
-  if (protocolVersion < oldest) return `which needs protocol version ${oldest}`;
-  if (protocolVersion > newest) return `which protocol version ${newest + 1} replaced`;
-  return null;
-};
-
-export const storesFrames = (connection: OpenConnection): boolean =>
-  connection.protocolVersion >= STORED_FRAMES_PROTOCOL;
-
-const EMPTY_TELEMETRY: MetricBatch = { instruments: [], samples: [], turns: [] };
+const replaced = (message: HostMessage): message is Replaced =>
+  message.type === "TurnLine" || message.type === "TelemetryBatch";
 
 export interface ControlHost {
   hostId: string;
@@ -122,19 +86,6 @@ export interface FrameRateRefusal {
   retryAfter: Date;
 }
 
-const budgeted = (usage: HostUsage): usage is ReportedUsage =>
-  usage.memoryBudgetMib !== undefined &&
-  usage.memoryHeldMib !== undefined &&
-  usage.diskBudgetMib !== undefined &&
-  usage.diskHeldMib !== undefined;
-
-const unbudgeted = (port: Port<ControlEnvelope>, hostId: string): Received =>
-  close(
-    port,
-    CloseCode.UnsupportedVersion,
-    `host ${hostId} reported usage without its memory and disk budgets; update the supervisor on that host`,
-  );
-
 export type ControlEvent =
   | { kind: "None" }
   | {
@@ -157,7 +108,7 @@ export type ControlEvent =
       heldClaudeSetupIds: string[];
       telemetry: MetricBatch;
     }
-  | { kind: "Message"; frame: Frame<HostMessage> }
+  | { kind: "Message"; frame: Frame<TakenMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "FrameRateLimited"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
@@ -230,10 +181,11 @@ const store = (
   connection: ControlConnection,
   context: ControlContext,
 ): Frame<StoredControlMessage> => {
-  const loaded = context.ledger.load();
-  const open = connection.phase === "Open";
-  const received = open && !storesFrames(connection) ? connection.cursor : loaded.received;
-  const { ledger, frame } = sequence({ ...loaded, received }, message, open ? connection.cursor : 0);
+  const { ledger, frame } = sequence(
+    context.ledger.load(),
+    message,
+    connection.phase === "Open" ? connection.cursor : 0,
+  );
   context.ledger.save(ledger);
   return frame;
 };
@@ -244,24 +196,33 @@ const dropAcked = (context: ControlContext, ack: number): void => {
   if (kept.unacked.length !== ledger.unacked.length) context.ledger.save(kept);
 };
 
+const sending = new WeakMap<LedgerStore<StoredControlMessage>, Promise<void>>();
+
+const inSeqOrder = (context: ControlContext, task: () => Promise<void>): Promise<void> => {
+  const turn = (sending.get(context.ledger) ?? Promise.resolve()).then(task);
+  sending.set(
+    context.ledger,
+    turn.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return turn;
+};
+
 export const send = async (
   connection: ControlConnection,
   message: StoredControlMessage,
   context: ControlContext,
   prepared?: ControlMessage,
 ): Promise<void> => {
-  if (connection.phase !== "Open") {
-    store(message, connection, context);
-    return;
-  }
-  const { protocolVersion } = connection;
-  const nextSeq = context.ledger.load().sent + 1;
-  if (unspoken(protocolVersion, message.type, nextSeq, context) !== null) {
-    store(message, connection, context);
-    return;
-  }
-  const spoken = prepared ?? (await prepare(message, context));
-  context.port.send({ ...store(message, connection, context), message: spoken });
+  const frame = store(message, connection, context);
+  if (connection.phase !== "Open") return;
+  if (unspoken(connection.protocolVersion, message.type, frame.seq, context) !== null) return;
+  return inSeqOrder(context, async () => {
+    const spoken = prepared ?? (await prepare(message, context));
+    context.port.send({ ...frame, message: spoken });
+  });
 };
 
 export const refuseFrame = (port: Port<ControlEnvelope>, seq: number, reason: string): void =>
@@ -296,13 +257,12 @@ const hello = async (
     );
   }
   if (context.host.revoked) return revoke(context, "the tenant revoked this host");
-  if (!budgeted(envelope.usage)) return unbudgeted(context.port, envelope.hostId);
   const ledger = context.ledger.load();
   for (const frame of ledger.unacked) {
     const refused = unspoken(channelProtocol, frame.message.type, frame.seq, context);
     if (refused !== null) return refused;
   }
-  const cursor = "resendFrom" in envelope ? envelope.resendFrom - 1 : ledger.received;
+  const cursor = envelope.resendFrom - 1;
   const resent = await resend(ledger, cursor, (stored) => prepare(stored, context));
   context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: channelProtocol, ack: cursor });
   for (const frame of resent) context.port.send(frame);
@@ -329,11 +289,11 @@ const helloVersion = (connection: ControlConnection, text: string, context: Cont
   const { protocolVersion, channelProtocolOldest } = greeting.value;
   const oldest = channelProtocolOldest ?? protocolVersion;
   const negotiated = Math.min(protocolVersion, ChannelProtocol.Version);
-  if (negotiated >= Math.max(oldest, ChannelProtocol.Oldest)) return negotiated;
+  if (negotiated >= Math.max(oldest, STORED_FRAMES_PROTOCOL)) return negotiated;
   return close(
     context.port,
     CloseCode.UnsupportedVersion,
-    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${STORED_FRAMES_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
   );
 };
 
@@ -341,7 +301,7 @@ const gap = (context: ControlContext, expected: number, got: number): Received =
   close(context.port, CloseCode.ProtocolError, `frame gap: expected seq ${expected}, got ${got}`);
 
 const duplicate = (connection: OpenConnection, seq: number, context: ControlContext): Received => {
-  if (storesFrames(connection)) context.port.send({ type: "Ack", seq });
+  context.port.send({ type: "Ack", seq });
   return { connection, event: { kind: "None" } };
 };
 
@@ -370,7 +330,7 @@ export const receive = async (
   }
   const version = helloVersion(connection, text, context);
   if (typeof version !== "number") return version;
-  const parsed = parseEnvelope(hostEnvelopeSchema(version), text);
+  const parsed = parseEnvelope(HostEnvelopeSchema, text);
   if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;
@@ -384,9 +344,7 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") {
-    if (!budgeted(envelope.usage)) return unbudgeted(context.port, context.host.hostId);
-    const telemetry = storedFramesHeartbeat(envelope) ? envelope.telemetry : EMPTY_TELEMETRY;
-    if (storedFramesHeartbeat(envelope)) dropAcked(context, envelope.ack);
+    dropAcked(context, envelope.ack);
     return {
       connection,
       event: {
@@ -396,53 +354,39 @@ export const receive = async (
         heldTurnIds: envelope.heldTurnIds,
         heldSessionIds: envelope.heldSessionIds,
         heldClaudeSetupIds: envelope.heldClaudeSetupIds,
-        telemetry,
+        telemetry: envelope.telemetry,
       },
     };
   }
-  const unspokenReason = unspokenBy(envelope.message.type, connection.protocolVersion);
-  if (unspokenReason !== null) {
+  const { message } = envelope;
+  if (replaced(message)) {
     return refuse(
       connection,
       text,
-      `frame ${envelope.seq} carries ${envelope.message.type}, ${unspokenReason}; this connection speaks ${connection.protocolVersion}, update the supervisor`,
+      `frame ${envelope.seq} carries ${message.type}, which protocol version ${STORED_FRAMES_PROTOCOL} replaced; this connection speaks ${connection.protocolVersion}, update the supervisor`,
       context,
     );
   }
   const arrived = arrival(connection.cursor, envelope.seq);
   if (arrived.kind === "Duplicate") return duplicate(connection, envelope.seq, context);
-  if (!storesFrames(connection)) dropAcked(context, envelope.ack);
-  if (arrived.kind === "Gap" && !storesFrames(connection)) return gap(context, arrived.expected, arrived.got);
   const overRate = context.admitFrame(envelope.seq);
   if (overRate !== null) {
     refuseOverRate(context.port, envelope.seq, overRate);
-    const event: ControlEvent = { kind: "FrameRateLimited", seq: envelope.seq, reason: overRate.reason };
-    if (storesFrames(connection)) return { connection, event };
-    return { connection: { ...connection, cursor: envelope.seq }, event };
+    return { connection, event: { kind: "FrameRateLimited", seq: envelope.seq, reason: overRate.reason } };
   }
   if (arrived.kind === "Gap") return gap(context, arrived.expected, arrived.got);
   return {
     connection,
     event: {
       kind: "Message",
-      frame: { type: "Frame", seq: envelope.seq, ack: envelope.ack, message: envelope.message },
+      frame: { type: "Frame", seq: envelope.seq, ack: envelope.ack, message },
     },
   };
 };
 
-export const stored = (connection: OpenConnection, seq: number, context: ControlContext): OpenConnection => {
-  if (storesFrames(connection)) context.port.send({ type: "Ack", seq });
+export const acknowledge = (connection: OpenConnection, seq: number, context: ControlContext): OpenConnection => {
+  context.port.send({ type: "Ack", seq });
   return { ...connection, cursor: seq };
-};
-
-export const answered = (connection: ControlConnection, frame: Frame<HostMessage>, context: ControlContext): void => {
-  if (frame.message.type !== "TurnLine") checkpoint(connection, context);
-};
-
-export const checkpoint = (connection: ControlConnection, context: ControlContext): void => {
-  if (connection.phase !== "Open" || storesFrames(connection)) return;
-  const ledger = context.ledger.load();
-  if (ledger.received !== connection.cursor) context.ledger.save({ ...ledger, received: connection.cursor });
 };
 
 export const beat = (context: ControlContext): void => context.port.send(heartbeat(context.now()));

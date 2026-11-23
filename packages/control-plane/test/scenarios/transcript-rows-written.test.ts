@@ -13,10 +13,15 @@ const rowsFor = async (lines: number) => {
     await host.claims(offer);
     const start = world.tenantRowsWritten();
     for (let lineSeq = 1; lineSeq <= lines; lineSeq++) {
-      await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+      await host.says({
+        type: "TurnLines",
+        turnId: offer.turnId,
+        firstLineSeq: lineSeq,
+        lines: [`{"type":"assistant","n":${lineSeq}}`],
+      });
     }
     const streamed = world.tenantRowsWritten() - start;
-    await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq: lines + 1, text: RESULT });
+    await host.says({ type: "TurnLines", turnId: offer.turnId, firstLineSeq: lines + 1, lines: [RESULT] });
     await host.says({
       type: "TurnComplete",
       turnId: offer.turnId,

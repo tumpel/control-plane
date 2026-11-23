@@ -5,9 +5,9 @@ import type { WebSocket } from "ws";
 import { z } from "zod";
 import {
   ControlEnvelopeSchema,
-  type HostUsage,
   helloBytes,
   type MetricBatch,
+  type ReportedUsage,
   STORED_FRAMES_PROTOCOL,
 } from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
@@ -22,7 +22,6 @@ const REPLIES = new Set([
 ]);
 
 export const GIVE_UP_MS = 60_000;
-export const UNSTORED_FRAMES_PROTOCOL = STORED_FRAMES_PROTOCOL - 1;
 export const LINES_PER_BATCH = 200;
 const STEP_MS = 50;
 
@@ -31,7 +30,7 @@ export type Clock = {
   tick(ms: number): Promise<void>;
 };
 
-export type { HostUsage };
+export type HostUsage = ReportedUsage;
 
 type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
@@ -148,7 +147,7 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      protocolVersion: UNSTORED_FRAMES_PROTOCOL,
+      protocolVersion: STORED_FRAMES_PROTOCOL,
       channelProtocolOldest: ChannelProtocol.Oldest,
       carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
@@ -185,10 +184,6 @@ export class Supervisor {
     this.heartbeatWith(this.holding());
   }
 
-  private storesFrames(): boolean {
-    return this.options.protocolVersion >= STORED_FRAMES_PROTOCOL;
-  }
-
   private heartbeatWith(holding: Holding): void {
     const telemetry = this.telemetry;
     this.telemetry = { instruments: [], samples: [], turns: [] };
@@ -199,7 +194,8 @@ export class Supervisor {
       heldSessionIds: holding.heldSessionIds,
       heldClaudeSetupIds: holding.heldClaudeSetupIds,
       heldTurnIds: holding.heldTurnIds,
-      ...(this.storesFrames() ? { ack: this.heard, telemetry } : {}),
+      ack: this.heard,
+      telemetry,
     });
   }
 
@@ -236,7 +232,7 @@ export class Supervisor {
     this.beat();
   }
 
-  report(usage: HostUsage): void {
+  report(usage: Partial<HostUsage>): void {
     this.usage = { ...this.usage, ...usage };
     this.beat();
   }
@@ -258,9 +254,7 @@ export class Supervisor {
       this.acknowledged(envelope.seq);
       return;
     }
-    const welcomeOnStoredFrames = envelope.type === "Welcome" && this.storesFrames();
-    if ("ack" in envelope && typeof envelope.ack === "number" && !welcomeOnStoredFrames)
-      this.acknowledged(envelope.ack);
+    if (envelope.type === "Frame") this.acknowledged(envelope.ack);
     if (envelope.type === "Challenge") {
       this.challenged = true;
       this.raw({
@@ -273,7 +267,7 @@ export class Supervisor {
         boxCapacity: this.options.boxCapacity,
         usage: this.usage,
         heldTurnIds: [...this.turns],
-        ...(this.storesFrames() ? { resendFrom: this.unacked[0]?.seq ?? this.sent + 1 } : {}),
+        resendFrom: this.unacked[0]?.seq ?? this.sent + 1,
       });
       return;
     }
@@ -459,15 +453,13 @@ export class Supervisor {
 
   async writes(turnId: string, firstLineSeq: number, texts: string[]): Promise<number[]> {
     const seqs: number[] = [];
-    const size = this.storesFrames() ? LINES_PER_BATCH : 1;
-    for (let at = 0; at < texts.length; at += size) {
-      const lines = texts.slice(at, at + size);
-      const lineSeq = firstLineSeq + at;
-      await this.says(
-        this.storesFrames()
-          ? { type: "TurnLines", turnId, firstLineSeq: lineSeq, lines }
-          : { type: "TurnLine", turnId, lineSeq, text: lines[0] },
-      );
+    for (let at = 0; at < texts.length; at += LINES_PER_BATCH) {
+      await this.says({
+        type: "TurnLines",
+        turnId,
+        firstLineSeq: firstLineSeq + at,
+        lines: texts.slice(at, at + LINES_PER_BATCH),
+      });
       seqs.push(this.sent);
     }
     return seqs;

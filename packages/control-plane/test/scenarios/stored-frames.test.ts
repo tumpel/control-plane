@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
-import { LINES_PER_BATCH, UNSTORED_FRAMES_PROTOCOL } from "./harness/supervisor.ts";
+import { LINES_PER_BATCH } from "./harness/supervisor.ts";
 import { UNMETERED, World } from "./harness/world.ts";
 
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
@@ -13,8 +12,7 @@ const TELEMETRY = {
   turns: [],
 };
 
-const storedHost = async (world: World, name = "host-1") =>
-  world.online(world.owner, name, { protocolVersion: STORED_FRAMES_PROTOCOL });
+const storedHost = async (world: World, name = "host-1") => world.online(world.owner, name);
 
 const running = async (world: World, name?: string) => {
   const host = await storedHost(world, name);
@@ -25,7 +23,7 @@ const running = async (world: World, name?: string) => {
   return { host, session, offer };
 };
 
-test("a 37 host's TurnLines batch is acked once stored, and a batch of 200 lines writes the rows a batch of one does", async (t) => {
+test("a TurnLines batch is acked once stored, and a batch of 200 lines writes the rows a batch of one does", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const { host, offer } = await running(world);
@@ -88,57 +86,22 @@ test("a tenant restart mid-turn with the host resending from resendFrom loses an
   );
 });
 
-test("a 36 host's TurnLine and TelemetryBatch frames are still taken, and a 37 host's are refused", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  const old = await world.online(world.owner, "old", { protocolVersion: UNSTORED_FRAMES_PROTOCOL });
-  assert.equal(old.welcomedVersion(), UNSTORED_FRAMES_PROTOCOL);
-  await old.says({ type: "TelemetryBatch", ...TELEMETRY });
-
-  const current = await storedHost(world, "current");
-  await assert.rejects(
-    current.says({ type: "TelemetryBatch", ...TELEMETRY }),
-    /TelemetryBatch, which protocol version 37 replaced/,
-  );
-  await assert.rejects(
-    current.says({ type: "TurnLine", turnId: "turn-1", lineSeq: 1, text: RESULT }),
-    /TurnLine, which protocol version 37 replaced/,
-  );
-  assert.equal(current.closure(), null);
-});
-
-test("an idle 37 heartbeat writes no row on the host channel or the tenant", async (t) => {
+test("one idle host heartbeating for 10 minutes writes no host channel row and at most 20 tenant rows", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await storedHost(world);
-  host.quiet();
   await world.settle();
+  const channel = world.hostRows(host.hostId);
   const tenant = world.tenantRowsWritten();
-  const channel = world.hostRows(host.hostId);
-
-  for (let beat = 1; beat <= 5; beat++) {
-    await world.passes(1_000);
-    await host.beats();
-  }
-
-  assert.equal(world.hostRows(host.hostId) - channel, 0);
-  assert.equal(world.tenantRowsWritten() - tenant, 0);
-});
-
-test("one idle 37 host writes at most 20 host channel rows in 10 minutes", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  const host = await storedHost(world);
-  await world.settle();
-  const channel = world.hostRows(host.hostId);
 
   await world.passes(10 * 60_000);
 
   assert.equal(host.closure(), null);
-  assert.ok(world.hostRows(host.hostId) - channel <= 20, `wrote ${world.hostRows(host.hostId) - channel} rows`);
+  assert.equal(world.hostRows(host.hostId) - channel, 0);
+  assert.ok(world.tenantRowsWritten() - tenant <= 20, `wrote ${world.tenantRowsWritten() - tenant} tenant rows`);
 });
 
-test("a 37 turn of 201 lines, its telemetry on five heartbeats and a snapshot stays within its row budget", async (t) => {
+test("a turn of 201 lines, its telemetry on five heartbeats and a snapshot stays within its row budget", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await storedHost(world);

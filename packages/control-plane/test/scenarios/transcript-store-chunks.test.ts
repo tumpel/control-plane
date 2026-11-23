@@ -6,10 +6,10 @@ const RESULT = '{"type":"result","subtype":"success","is_error":false}';
 const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 
 const line = (host: Host, turnId: string, lineSeq: number) =>
-  host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+  host.says({ type: "TurnLines", turnId, firstLineSeq: lineSeq, lines: [`{"type":"assistant","n":${lineSeq}}`] });
 
 const completes = async (host: Host, sessionId: string, turnId: string, lastLineSeq: number) => {
-  await host.says({ type: "TurnLine", turnId, lineSeq: lastLineSeq, text: RESULT });
+  await host.says({ type: "TurnLines", turnId, firstLineSeq: lastLineSeq, lines: [RESULT] });
   await host.says({ type: "TurnComplete", turnId, lastLineSeq, completedAt: new Date().toISOString() });
   await host.answersSnapshot(sessionId);
 };
@@ -42,7 +42,7 @@ test("a tenant that restarts after storing a chunk goes on from the stored lines
   await line(host, first.turnId, stored + 7);
   host.report(USAGE);
   await world.settle();
-  await host.says({ type: "TurnLine", turnId: first.turnId, lineSeq: stored + 8, text: RESULT });
+  await host.says({ type: "TurnLines", turnId: first.turnId, firstLineSeq: stored + 8, lines: [RESULT] });
   await host.says({
     type: "TurnComplete",
     turnId: first.turnId,

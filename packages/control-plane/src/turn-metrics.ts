@@ -1,26 +1,11 @@
 import type { TurnPointSchema } from "@tumpel/schemas";
-import { z } from "zod";
+import type { z } from "zod";
 
 type TurnPoint = z.infer<typeof TurnPointSchema>;
-export type Dimensions = Record<string, string>;
 
-const SPEND_METRICS = new Set(["turn.cost", "turn.tokens"]);
-
-export const DimensionsSchema = z.record(z.string(), z.string());
-
-export const offeredDimensions = (personaId: string, secretSetId: string): Dimensions => ({
-  personaId,
-  secretSetId,
-});
-
-export const stampTurnPoints = (
-  turns: readonly TurnPoint[],
-  offered: Readonly<Record<string, Dimensions>>,
-  hostId: string,
-): TurnPoint[] =>
+export const stampTurnPoints = (turns: readonly TurnPoint[], hostId: string): TurnPoint[] =>
   turns.flatMap((point) => {
-    const spend: Dimensions = SPEND_METRICS.has(point.metric) ? (offered[point.turnId] ?? {}) : {};
-    const dimensions: Dimensions = { ...point.dimensions, ...spend, hostId };
+    const dimensions: Record<string, string> = { ...point.dimensions, hostId };
     if (point.metric === "turn.cost" && dimensions.costBasis === "NotReported") return [];
     return [{ ...point, dimensions }];
   });

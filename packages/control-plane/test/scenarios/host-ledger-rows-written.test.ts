@@ -9,7 +9,7 @@ import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
 
 const HOST_MIGRATIONS = new URL("../../migrations/host/", import.meta.url);
 
-const channel = (protocolVersion: number) => {
+const channel = () => {
   const sql = new SqlStorage(migratedDatabase(HOST_MIGRATIONS));
   const ledger = new HostLedger(durableDb({ sql } as never, hostSchema));
   const closed: string[] = [];
@@ -24,12 +24,9 @@ const channel = (protocolVersion: number) => {
     admitFrame: () => null,
     now: () => new Date(),
   };
-  let connection: control.ControlConnection = { phase: "Open", protocolVersion, cursor: 0 };
+  let connection: control.ControlConnection = { phase: "Open", protocolVersion: STORED_FRAMES_PROTOCOL, cursor: 0 };
   const lines = async (seq: number, text = `{"n":${seq}}`) => {
-    const message =
-      protocolVersion >= STORED_FRAMES_PROTOCOL
-        ? { type: "TurnLines", turnId: "turn-1", firstLineSeq: seq, lines: [text] }
-        : { type: "TurnLine", turnId: "turn-1", lineSeq: seq, text };
+    const message = { type: "TurnLines", turnId: "turn-1", firstLineSeq: seq, lines: [text] };
     const received = await control.receive(
       connection,
       JSON.stringify({ type: "Frame", seq, ack: 0, message }),
@@ -37,37 +34,23 @@ const channel = (protocolVersion: number) => {
     );
     connection = received.connection;
     if (received.event.kind === "Message" && connection.phase === "Open")
-      connection = control.stored(connection, seq, context);
+      connection = control.acknowledge(connection, seq, context);
     return received.event.kind;
   };
-  const checkpoint = () => control.checkpoint(connection, context);
-  return { sql, ledger, sent, closed, lines, checkpoint };
+  return { sql, sent, closed, lines };
 };
 
-test("a 37 connection writes no ledger row for the frames it stores and acks each one", async () => {
-  const { sql, ledger, sent, lines, checkpoint } = channel(STORED_FRAMES_PROTOCOL);
+test("a connection writes no ledger row for the frames it stores and acks each one", async () => {
+  const { sql, sent, lines } = channel();
   const start = sql.rowsWritten;
   for (let seq = 1; seq <= 500; seq++) assert.equal(await lines(seq), "Message");
-  checkpoint();
   assert.equal(sql.rowsWritten - start, 0);
-  assert.equal(ledger.load().received, 0);
   assert.equal(sent.length, 500);
   assert.deepEqual(sent.at(-1), { type: "Ack", seq: 500 });
 });
 
-test("a 36 connection writes one ledger row per heartbeat checkpoint that moved the cursor, and none for an idle one", async () => {
-  const { sql, ledger, lines, checkpoint } = channel(STORED_FRAMES_PROTOCOL - 1);
-  const start = sql.rowsWritten;
-  for (let seq = 1; seq <= 500; seq++) await lines(seq);
-  checkpoint();
-  assert.equal(sql.rowsWritten - start, 1);
-  assert.equal(ledger.load().received, 500);
-  checkpoint();
-  assert.equal(sql.rowsWritten - start, 1);
-});
-
 test("an oversized frame is refused and stepped over, so the next frame opens no gap", async () => {
-  const { closed, lines } = channel(STORED_FRAMES_PROTOCOL);
+  const { closed, lines } = channel();
   assert.equal(await lines(1), "Message");
   assert.equal(await lines(2, "x".repeat(control.MAX_HOST_FRAME_BYTES)), "FrameRefused");
   assert.equal(await lines(3), "Message");

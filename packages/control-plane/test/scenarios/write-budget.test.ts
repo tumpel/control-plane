@@ -19,7 +19,12 @@ test("one host streaming 10 running turns for 10 minutes writes fewer than 100 t
     await world.startSession({ prompt: `stream session ${session}`, tags: [] });
     const offer = host.takeOffer();
     await host.claims(offer);
-    await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: '{"type":"assistant","n":1}' });
+    await host.says({
+      type: "TurnLines",
+      turnId: offer.turnId,
+      firstLineSeq: 1,
+      lines: ['{"type":"assistant","n":1}'],
+    });
     turnIds.push(offer.turnId);
   }
   await host.beats();
@@ -30,7 +35,12 @@ test("one host streaming 10 running turns for 10 minutes writes fewer than 100 t
     await world.passes(LINE_EVERY_MS);
     lineSeq += 1;
     for (const turnId of turnIds) {
-      await host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+      await host.says({
+        type: "TurnLines",
+        turnId,
+        firstLineSeq: lineSeq,
+        lines: [`{"type":"assistant","n":${lineSeq}}`],
+      });
     }
     if (elapsed % HEARTBEAT_EVERY_MS === 0) {
       await host.beats();
@@ -51,14 +61,19 @@ test("one turn from offer to completion writes a fixed number of tenant rows", a
   const offer = host.takeOffer();
   await host.claims(offer);
   for (let lineSeq = 1; lineSeq <= 10; lineSeq++) {
-    await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+    await host.says({
+      type: "TurnLines",
+      turnId: offer.turnId,
+      firstLineSeq: lineSeq,
+      lines: [`{"type":"assistant","n":${lineSeq}}`],
+    });
   }
   await host.beats();
   await host.says({
-    type: "TurnLine",
+    type: "TurnLines",
     turnId: offer.turnId,
-    lineSeq: 11,
-    text: '{"type":"result","subtype":"success","is_error":false}',
+    firstLineSeq: 11,
+    lines: ['{"type":"result","subtype":"success","is_error":false}'],
   });
   await host.says({
     type: "TurnComplete",

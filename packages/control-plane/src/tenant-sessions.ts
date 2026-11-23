@@ -42,9 +42,9 @@ import type {
   DispatchConnector,
   HostMessage,
   HostReportedHealth,
-  HostUsage,
   PersonaFileDownload,
   PreparedOffer,
+  ReportedUsage,
   SnapshotDownload,
   StoredControlMessage,
 } from "./channel/protocol.ts";
@@ -128,7 +128,6 @@ import {
   type TranscriptLine,
   transcriptPrefix,
 } from "./transcript";
-import { type Dimensions, offeredDimensions } from "./turn-metrics.ts";
 import { mintTurnToken, TUMPEL_CONNECTOR_ID, TURN_TOKEN_SIGNING_PURPOSE } from "./turn-token.ts";
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -378,7 +377,7 @@ const HEARD_REFRESH_MS = 30_000;
 export type HostReport = {
   boxCapacity: number;
   channelProtocol: number;
-  usage: HostUsage;
+  usage: ReportedUsage;
   now: number;
 };
 
@@ -475,7 +474,7 @@ const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 
-export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
+export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" | "TurnLine" }>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
@@ -2877,17 +2876,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { ...known, kind: "Lines", lines: [] };
   }
 
-  protected turnMetricDimensions(turnIds: readonly string[]): Record<string, Dimensions> {
-    const entries = turnIds.flatMap((turnId): [string, Dimensions][] => {
-      const turn = this.turnRow(turnId);
-      const session = turn === null ? null : this.sessionRow(turn.session_id);
-      const persona = session === null ? null : this.personaRow(session.persona_id);
-      if (session === null || persona === null) return [];
-      return [[turnId, offeredDimensions(session.persona_id, persona.secretSetId)]];
-    });
-    return Object.fromEntries(entries);
-  }
-
   protected async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
@@ -3386,10 +3374,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
+    const discard: HostReply = { type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id };
+    if (turn.state === "Failed" && turn.reason === "RepositoryCloneFailed") return discard;
     if (!IN_FLIGHT.includes(turn.state)) return null;
     const detail = this.cloneFailureDetail(session, message.detail);
     await this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt, "Failed");
-    return { type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id };
+    return discard;
   }
 
   private async turnFailed(tenantId: string, hostId: string, message: TurnFailed): Promise<HostReply | null> {
@@ -3439,6 +3429,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
+    if (turn.state === "Running" && turn.box_id === message.boxId) return { type: "TurnClaimed", turnId: turn.turn_id };
     if (turn.state !== "Offered") {
       if (session.state === "Stopped" && session.box_id === turn.box_id) {
         await this.host(hostId).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: turn.box_id });
@@ -3466,8 +3457,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     if (message.type === "TurnImageFetching" || message.type === "TurnRepositoryReady") return;
     if (turn.state !== "Running") return;
-    if (message.type === "TurnLine")
-      return this.appendLines(tenantId, session, turn, message.lineSeq, [message.text], now);
     if (message.type === "TurnLines")
       return this.appendLines(tenantId, session, turn, message.firstLineSeq, message.lines, now);
     const held = await this.lastLineSeq(tenantId, session, turn);
@@ -3581,6 +3570,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
         created_at: now,
       }),
     );
+    const succeeded = successResultOf(HarnessSchema.parse(session.harness));
+    if (succeeded !== null && fresh.some((text) => succeeded(parseJson(text)) === true))
+      this.ctx.storage.sql.exec(
+        "UPDATE turns SET result_printed = 1 WHERE turn_id = ? AND result_printed = 0",
+        turn.turn_id,
+      );
     const storageKey = chunkKey(tenantId, session.session_id, turn.turn_id, last + 1, lastLineSeq);
     const refused = await this.env.STORE.put(storageKey, encodeChunk(lines).body).then(
       () => null,
@@ -3600,12 +3595,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turn.turn_id,
       this.runningTail(tenantId, turn).then((tail) => withChunk(tail, last + 1, lastLineSeq)),
     );
-    const succeeded = successResultOf(HarnessSchema.parse(session.harness));
-    if (succeeded !== null && fresh.some((text) => succeeded(parseJson(text)) === true))
-      this.ctx.storage.sql.exec(
-        "UPDATE turns SET result_printed = 1 WHERE turn_id = ? AND result_printed = 0",
-        turn.turn_id,
-      );
   }
 
   private async failTurn(

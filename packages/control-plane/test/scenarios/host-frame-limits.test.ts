@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
+import { ChannelProtocol } from "@tumpel/schemas";
 import * as control from "../../src/channel/control.ts";
 import { HostFrameMeter, rateLimitDetail } from "../../src/channel/host-health.ts";
 import {
@@ -9,7 +10,6 @@ import {
   type HostMessage,
   helloBytes,
   type Ledger,
-  STORED_FRAMES_PROTOCOL,
   type StoredControlMessage,
 } from "../../src/channel/protocol.ts";
 
@@ -32,7 +32,7 @@ const savedTrips = () => {
 
 const healthyMeter = () => new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], savedTrips().store);
 
-const openChannel = async (meter: HostFrameMeter, protocolVersion: number = STORED_FRAMES_PROTOCOL - 1) => {
+const openChannel = async (meter: HostFrameMeter) => {
   const clock = { now: START };
   const trips: string[] = [];
   const pair = generateKeyPairSync("ed25519");
@@ -83,10 +83,9 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = STOR
     const received = await control.receive(channel.connection, JSON.stringify(envelope), context);
     channel.connection = received.connection;
     if (received.event.kind === "Message" && channel.connection.phase === "Open") {
-      channel.connection = control.stored(channel.connection, received.event.frame.seq, context);
+      channel.connection = control.acknowledge(channel.connection, received.event.frame.seq, context);
       channel.delivered.push(received.event.frame.seq);
     }
-    control.checkpoint(channel.connection, context);
     return received.event;
   };
   channel.connection = control.challenge(context.port);
@@ -95,12 +94,12 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = STOR
   await receive({
     type: "Hello",
     hostId: HOST_ID,
-    protocolVersion,
+    protocolVersion: ChannelProtocol.Version,
     supervisorVersion: "0.1.0",
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), pair.privateKey).toString("base64"),
     boxCapacity: 8,
     heldTurnIds: [],
-    ...(protocolVersion >= STORED_FRAMES_PROTOCOL ? { resendFrom: 1 } : {}),
+    resendFrom: 1,
     usage: {
       boxesWarm: 0,
       loadAverage: 0,
@@ -118,7 +117,7 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = STOR
     );
   const rateLimited = () =>
     channel.sent.flatMap((envelope) => (envelope.type === "FrameRateLimited" ? [envelope] : []));
-  return { channel, clock, trips, frame, refusals, rateLimited, received: () => ledger.received };
+  return { channel, clock, trips, frame, refusals, rateLimited };
 };
 
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
@@ -127,10 +126,10 @@ test("a host frame over the 4 MB bound is refused and the channel stays open for
   const { channel, frame, refusals } = await openChannel(healthyMeter());
 
   const oversize = await frame(1, {
-    type: "TurnLine",
+    type: "TurnLines",
     turnId: "turn-1",
-    lineSeq: 1,
-    text: "x".repeat(control.MAX_HOST_FRAME_BYTES),
+    firstLineSeq: 1,
+    lines: ["x".repeat(control.MAX_HOST_FRAME_BYTES)],
   });
   await frame(2, snapshotDone("snap-2"));
 
@@ -140,7 +139,6 @@ test("a host frame over the 4 MB bound is refused and the channel stays open for
   assert.equal(channel.closed, null);
 });
 
-const turnLine = (lineSeq: number): HostMessage => ({ type: "TurnLine", turnId: "turn-1", lineSeq, text: "line" });
 const turnLines = (lineSeq: number): HostMessage => ({
   type: "TurnLines",
   turnId: "turn-1",
@@ -148,31 +146,11 @@ const turnLines = (lineSeq: number): HostMessage => ({
   lines: ["line"],
 });
 const stream = async (frame: (seq: number, message: HostMessage) => Promise<unknown>, from: number, count: number) => {
-  for (let seq = from; seq < from + count; seq++) await frame(seq, turnLine(seq));
+  for (let seq = from; seq < from + count; seq++) await frame(seq, turnLines(seq));
 };
 
-test("a host streaming 700 lines in a minute has the 100 past the limit refused with the limit and the next window, every one acked so none replays, and the channel stays open", async () => {
-  const { channel, trips, frame, rateLimited, received } = await openChannel(healthyMeter());
-
-  await stream(frame, 1, 700);
-
-  assert.equal(channel.delivered.length, 600);
-  const refused = rateLimited();
-  assert.equal(refused.length, 100);
-  assert.deepEqual(refused[0], {
-    type: "FrameRateLimited",
-    seq: 601,
-    reason: `host ${HOST_ID} sent more than 600 frames a minute`,
-    framesPerMinute: 600,
-    retryAfter: "2026-11-21T11:01:00.000Z",
-  });
-  assert.equal(received(), 700);
-  assert.deepEqual(trips, ["RateLimited"]);
-  assert.equal(channel.closed, null);
-});
-
-test("on 37 the frames past the limit stay unacked for the host to resend after retryAfter, and each lands once", async () => {
-  const { channel, clock, frame, rateLimited, received } = await openChannel(healthyMeter(), STORED_FRAMES_PROTOCOL);
+test("the frames past the limit are refused with the limit and the next window and stay unacked for the host to resend, and each lands once", async () => {
+  const { channel, clock, trips, frame, rateLimited } = await openChannel(healthyMeter());
   for (let seq = 1; seq <= 610; seq++) await frame(seq, turnLines(seq));
 
   assert.equal(channel.delivered.length, 600);
@@ -180,7 +158,14 @@ test("on 37 the frames past the limit stay unacked for the host to resend after 
     rateLimited().map((limited) => limited.seq),
     [601, 602, 603, 604, 605, 606, 607, 608, 609, 610],
   );
-  assert.equal(received(), 0);
+  assert.deepEqual(rateLimited()[0], {
+    type: "FrameRateLimited",
+    seq: 601,
+    reason: `host ${HOST_ID} sent more than 600 frames a minute`,
+    framesPerMinute: 600,
+    retryAfter: "2026-11-21T11:01:00.000Z",
+  });
+  assert.deepEqual(trips, ["RateLimited"]);
   clock.now += 60_000;
   for (let seq = 601; seq <= 610; seq++) await frame(seq, turnLines(seq));
 
@@ -212,24 +197,22 @@ test("a RateLimited host recovers after a full minute under the limit, and its n
 
   clock.now += 60_000;
   assert.equal(meter.recovered(clock.now), false, "the minute after the trip is not yet a full clean window");
-  await stream(frame, 701, 10);
+  await stream(frame, 601, 10);
   clock.now += 60_000;
 
   assert.equal(meter.recovered(clock.now), true);
   meter.settle("Healthy");
   assert.equal(meter.health(), "Healthy");
-  await stream(frame, 711, 10);
+  await stream(frame, 611, 10);
   assert.equal(channel.delivered.length, 620);
 });
 
 test("a host tripping the limit a third time within an hour stays Unhealthy across an eviction until a person restores it, and the restore forgets its trips", async () => {
   const { saved, store } = savedTrips();
   const meter = new HostFrameMeter(FRAMES_PER_MINUTE, "Healthy", [], store);
-  const { clock, trips, frame } = await openChannel(meter);
-  let seq = 1;
+  const { channel, clock, trips, frame } = await openChannel(meter);
   for (let trip = 0; trip < 3; trip++) {
-    await stream(frame, seq, 601);
-    seq += 601;
+    await stream(frame, (channel.delivered.at(-1) ?? 0) + 1, trip === 0 ? 601 : 602);
     clock.now += 2 * 60_000;
     if (meter.recovered(clock.now)) meter.settle("Healthy");
     clock.now += 10 * 60_000;

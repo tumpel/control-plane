@@ -204,7 +204,7 @@ export class HostChannel extends DurableObject<Env> {
   private async take(
     socket: WebSocket,
     hostId: string,
-    frame: Frame<HostMessage>,
+    frame: Frame<control.TakenMessage>,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
@@ -219,11 +219,10 @@ export class HostChannel extends DurableObject<Env> {
       control.close(context.port, STORE_FAILED, reason);
       return;
     }
-    if (attachment.connection.phase !== "Open") return;
-    attachment.connection = control.stored(attachment.connection, frame.seq, context);
-    socket.serializeAttachment(attachment);
     await this.answer(hostId, frame, handled.reply, attachment, context);
-    control.answered(attachment.connection, frame, context);
+    if (attachment.connection.phase !== "Open") return;
+    attachment.connection = control.acknowledge(attachment.connection, frame.seq, context);
+    socket.serializeAttachment(attachment);
   }
 
   private async heartbeat(
@@ -245,25 +244,18 @@ export class HostChannel extends DurableObject<Env> {
     }
     const tenantId = await this.tenantOf(hostId);
     await this.telemetry(tenantId, hostId, beat.telemetry);
-    await tenantApi(this.env.TENANT, tenantId)
-      .call("hostHeartbeat", {
-        tenantId,
-        hostId,
-        boxCapacity: boxCapacityOf(attachment),
-        usage: beat.usage,
-        reportedHealth: beat.reportedHealth,
-        now,
-        channelProtocol: attachment.connection.protocolVersion,
-        heldSessionIds: beat.heldSessionIds,
-        heldClaudeSetupIds: beat.heldClaudeSetupIds,
-        heldTurnIds: beat.heldTurnIds,
-      })
-      .catch((error: unknown) => {
-        console.error(
-          `HeartbeatUnstored: host ${hostId}: ${errorOf(error).message}; the next heartbeat reports it again`,
-        );
-      });
-    control.checkpoint(attachment.connection, context);
+    await tenantApi(this.env.TENANT, tenantId).call("hostHeartbeat", {
+      tenantId,
+      hostId,
+      boxCapacity: boxCapacityOf(attachment),
+      usage: beat.usage,
+      reportedHealth: beat.reportedHealth,
+      now,
+      channelProtocol: attachment.connection.protocolVersion,
+      heldSessionIds: beat.heldSessionIds,
+      heldClaudeSetupIds: beat.heldClaudeSetupIds,
+      heldTurnIds: beat.heldTurnIds,
+    });
     control.beat(context);
   }
 
@@ -387,12 +379,8 @@ export class HostChannel extends DurableObject<Env> {
     return row.tenant_id;
   }
 
-  private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
+  private async forward(hostId: string, message: control.TakenMessage): Promise<HostReply | null> {
     const tenantId = await this.tenantOf(hostId);
-    if (message.type === "TelemetryBatch") {
-      await this.telemetry(tenantId, hostId, message);
-      return null;
-    }
     const tenant = tenantApi(this.env.TENANT, tenantId);
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
@@ -412,13 +400,8 @@ export class HostChannel extends DurableObject<Env> {
       ...point,
       dimensions: { ...point.dimensions, hostId },
     });
-    const turnIds = [...new Set(turns.map((point) => point.turnId))];
-    const offered =
-      turnIds.length === 0
-        ? {}
-        : (await tenantApi(this.env.TENANT, tenantId).call("turnMetricDimensions", { turnIds })).dimensions;
     const metrics = this.env.TENANT_METRICS.getByName(tenantId);
-    const batch = { instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) };
+    const batch = { instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, hostId) };
     for (const part of metricBatches(batch, METRICS_LIMITS)) {
       await metrics.record(part).catch((error: unknown) => {
         console.error(
