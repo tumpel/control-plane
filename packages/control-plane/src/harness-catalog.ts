@@ -6,7 +6,7 @@ export type HarnessCatalogEntry = z.infer<typeof HarnessCatalogEntrySchema>;
 export type EffectiveHarnessVersion = z.infer<typeof EffectiveHarnessVersionSchema>;
 
 export const CLAUDE_CODE_VERSION = "2.1.325";
-export const CODEX_VERSION = "0.169.0";
+export const CODEX_VERSION = "0.169.1";
 const CODEX_SIBLING_BINARY_PATHS = ["codex-code-mode-host", "codex-exec-server"];
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
@@ -36,6 +36,8 @@ const ANTHROPIC_MODELS = [
 const CLAUDE_CODE_MODELS = ["opus", "sonnet", "haiku", ...ANTHROPIC_MODELS];
 const ANTHROPIC_PROVIDER_MODELS = ANTHROPIC_MODELS.map((model) => `anthropic/${model}`);
 const CODEX_CHATGPT_MODELS = [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
   "gpt-6.1-sol",
   "gpt-6.1-terra",
   "gpt-6-astra",
@@ -160,14 +162,14 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         {
           architecture: "Amd64",
           url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz`,
-          sha256: "3b8ed091149cc63a59046b9f094bcfa21cdb4dda15ede441ce369bcee4a71ba0",
+          sha256: "738df5b3182e2b858a48143f0c2fff288d8dd200330dadfe4c5c9f3eac7e2244",
           binaryPath: "codex",
           siblingBinaryPaths: CODEX_SIBLING_BINARY_PATHS,
         },
         {
           architecture: "Arm64",
           url: `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-aarch64-unknown-linux-musl.tar.gz`,
-          sha256: "c8d0b4ab2a97c595b70b10412d36d0d5464dcef1e1d3246b073d48017cdf5a4f",
+          sha256: "3de502ad37d6f58e4dbc917d76ccbc8f3c16a4084cfaa78afadaf6c86559bcec",
           binaryPath: "codex",
           siblingBinaryPaths: CODEX_SIBLING_BINARY_PATHS,
         },
