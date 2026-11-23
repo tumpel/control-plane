@@ -47,7 +47,6 @@ test("an offer that waits on the tenant while a heartbeat stores the held frames
   const results: Record<string, unknown> = {
     hostMessage: { reply: null },
     hostUsage: {},
-    hostHello: {},
     hostPresence: {},
     prepareOffer: { prepared: { kind: "Withdrawn" } },
   };
@@ -65,7 +64,7 @@ test("an offer that waits on the tenant while a heartbeat stores the held frames
     connection: { phase: "Open", protocolVersion: ChannelProtocol.Version, heldReported: true },
     lastReceivedAt: now,
     lastSentAt: now,
-    report: { boxCapacity: 8, channelProtocol: ChannelProtocol.Version, usage: USAGE },
+    usage: USAGE,
     heldFrom: null,
   };
   const closed: string[] = [];

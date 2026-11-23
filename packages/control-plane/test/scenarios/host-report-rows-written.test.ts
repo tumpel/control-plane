@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
 import { BUDGETS, World } from "./harness/world.ts";
 
 test("heartbeats whose load, free memory and disk move write no tenant row within 30 s of the stored report, and one after", async (t) => {
@@ -9,9 +8,8 @@ test("heartbeats whose load, free memory and disk move write no tenant row withi
   const host = await world.hostOnline("host-1");
   const heardAt = Date.now();
   const beat = (at: number, step: number) =>
-    world.call("hostHello", {
+    world.call("hostUsage", {
       hostId: host.hostId,
-      boxCapacity: 8,
       usage: {
         ...BUDGETS,
         boxesWarm: 0,
@@ -20,7 +18,6 @@ test("heartbeats whose load, free memory and disk move write no tenant row withi
         diskHeldMib: step,
       },
       now: at,
-      channelProtocol: ChannelProtocol.Version,
     });
   const start = world.tenantRowsWritten();
   for (let step = 1; step <= 29; step++) await beat(heardAt + step * 1000, step);

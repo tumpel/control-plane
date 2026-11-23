@@ -1610,8 +1610,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 
-  protected async hostUsage(hostId: string): Promise<void> {
+  protected async hostUsage(hostId: string, usage: HostUsage, now: number): Promise<void> {
     await this.flushHeldLines(hostId);
+    this.ctx.storage.sql.exec(
+      `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
+        disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, heard_at = ?8
+      WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR heard_at < ?8 - ?9)`,
+      hostId,
+      usage.memoryBudgetMib ?? null,
+      usage.memoryHeldMib ?? null,
+      usage.memoryAvailableMib,
+      usage.diskBudgetMib ?? null,
+      usage.diskHeldMib ?? null,
+      usage.loadAverage,
+      now,
+      HEARD_REFRESH_MS,
+    );
   }
 
   private runsTurns(hostId: string): boolean {

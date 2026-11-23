@@ -78,7 +78,7 @@ const USAGE: HostUsage = {
   loadAverage: 0.25,
   memoryAvailableMib: 6144,
   diskBudgetMib: 200000,
-  diskHeldMib: 32768,
+  diskHeldMib: 1,
 };
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
@@ -1948,42 +1948,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.assertOpen("after the tenant restarted");
   });
 
-  test("a heartbeat whose load, free memory and disk move writes no tenant row until the host's stored report is 30 s old, then writes one", async () => {
-    const { tenantId, hostId, host } = await tenant();
-    const rowsWritten = async (): Promise<number> => {
-      const response = await call(`/__fixture/usage/${tenantId}`);
-      const { usage } = z.object({ usage: TenantUsageSchema }).parse(await response.json());
-      const counter = usage.counters.find((each) => each.measure === "RowsWritten");
-      if (counter === undefined) throw new Error("the tenant usage has no RowsWritten counter");
-      return counter.used;
-    };
-    const heardAt = async (): Promise<number> => {
-      const rows = await tenantSql(tenantId, "SELECT heard_at FROM host_reports WHERE host_id = ?", hostId);
-      const [row] = z.array(z.object({ heard_at: z.number() })).parse(rows);
-      if (row === undefined) throw new Error(`host ${hostId} has no stored report`);
-      return row.heard_at;
-    };
-    host.quiet();
-    const before = await rowsWritten();
-    const moving = (beat: number): HostUsage => ({
-      ...USAGE,
-      loadAverage: beat / 10,
-      memoryAvailableMib: 6000 - beat,
-      diskHeldMib: 32768 + beat,
-    });
-    for (let beat = 1; beat <= 5; beat++) host.report(moving(beat));
-    await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
-    const idle = await rowsWritten();
-    assert.equal(idle - before, 0);
-
-    const stale = (await heardAt()) - 31_000;
-    await tenantSql(tenantId, "UPDATE host_reports SET heard_at = ? WHERE host_id = ?", stale, hostId);
-    host.report(moving(6));
-    await until("the stale report refreshed", heardAt, (at) => at > stale);
-    const backdated = 1;
-    assert.equal((await rowsWritten()) - idle, backdated + 1);
-  });
-
   test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
     const { tool, toolRefusal, sessionStart } = await tenant();
     const started = await tool(
@@ -3541,7 +3505,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(refused.status, 409);
     assert.match(
       ProblemSchema.parse(await refused.json()).detail,
-      /gives box disks 200000 MiB and its boxes hold 32768 MiB of it, and the persona's boxes need 262144 MiB/,
+      /gives box disks 200000 MiB and its boxes hold 1 MiB of it, and the persona's boxes need 262144 MiB/,
     );
     const response = await sized(131072);
     assert.equal(response.status, 200, await response.clone().text());
