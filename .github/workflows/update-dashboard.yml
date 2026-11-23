@@ -27,4 +27,4 @@ jobs:
         name: Update dashboard dependencies and enable auto-merge
         env:
           CONTROL_PLANE_UPDATE_TOKEN: ${{ secrets.CONTROL_PLANE_UPDATE_TOKEN }}
-        run: node npm-scripts/update-dashboard.mjs
+        run: npm run release:update-dashboard

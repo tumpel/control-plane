@@ -19,3 +19,7 @@ Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architec
 - `npm install` installs dependencies.
 - `npm run check` runs every check. `npm run fix` formats.
 - `npm test` runs the TypeScript tests.
+
+## Releases
+
+Dashboard dependency updates must use one bot pull request. Required checks, review and branch protection govern squash auto-merge; dependency updates must never commit directly to main.

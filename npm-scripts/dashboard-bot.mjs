@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dashboardVersion } from "./dashboard-release.mjs";
+import { dashboardVersion, releaseNeedsUpdate } from "./dashboard-release.mjs";
 
 const REPOSITORY = "tumpel/control-plane";
 const BRANCH = "bot/update-dashboard";
@@ -56,7 +56,7 @@ export const verifyDashboardLock = (lock, release) => {
   }
 };
 
-export const dashboardBot = ({ root, token, github }) => {
+export const updateDashboard = async ({ root, token, github, release }) => {
   const run = (command, args) =>
     execFileSync(command, args, {
       cwd: root,
@@ -70,39 +70,34 @@ export const dashboardBot = ({ root, token, github }) => {
     DEPENDENCIES.map(([path, dependency]) =>
       dashboardVersion(JSON.parse(git("show", `${ref}:${path}`)).dependencies[dependency]),
     );
-  return {
-    read: async () => {
-      git("fetch", "origin", "main:refs/remotes/origin/main");
-      const remote = git("ls-remote", "origin", `refs/heads/${BRANCH}`);
-      const expected = remote.split(/\s/)[0];
-      if (expected && !/^[0-9a-f]{40}$/.test(expected))
-        throw new Error("Dashboard bot branch has an invalid SHA; inspect the remote branch.");
-      const versions = [versionsAt("origin/main")];
-      if (expected) {
-        git("fetch", "origin", expected);
-        versions.push(versionsAt(expected));
-      }
-      const pulls = await github(`/repos/${REPOSITORY}/pulls?head=tumpel:${BRANCH}&base=main&state=open`);
-      if (pulls.length > 1) throw new Error("Multiple dashboard bot pull requests exist; retain one before retrying.");
-      return { versions, expected, pull: pulls[0] };
-    },
-    update: async (release, state) => {
-      git("switch", "--force-create", BRANCH, "origin/main");
-      writeDashboardDependencies(root, release);
-      run("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"]);
-      verifyDashboardLock(JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8")), release);
-      git("add", "--", ...DEPENDENCIES.map(([path]) => path), "package-lock.json");
-      git(
-        "-c",
-        "user.name=dashboard-release[bot]",
-        "-c",
-        "user.email=dashboard-release[bot]@users.noreply.github.com",
-        "commit",
-        "-m",
-        `fix(dashboard): update dashboard and pages to ${release.version}`,
-      );
-      git("push", `--force-with-lease=refs/heads/${BRANCH}:${state.expected}`, "origin", `HEAD:refs/heads/${BRANCH}`);
-      await upsertDashboardPull(github, release, state.pull);
-    },
-  };
+  git("fetch", "origin", "main:refs/remotes/origin/main");
+  const pulls = await github(`/repos/${REPOSITORY}/pulls?head=tumpel:${BRANCH}&base=main&state=open`);
+  if (pulls.length > 1) throw new Error("Multiple dashboard bot pull requests exist; retain one before retrying.");
+  const remote = git("ls-remote", "origin", `refs/heads/${BRANCH}`);
+  const expected = remote.split(/\s/)[0];
+  if (expected && !/^[0-9a-f]{40}$/.test(expected))
+    throw new Error("Dashboard bot branch has an invalid SHA; inspect the remote branch.");
+  const versions = [versionsAt("origin/main")];
+  if (expected && pulls[0]) {
+    git("fetch", "origin", expected);
+    versions.push(versionsAt(expected));
+  }
+  if (!releaseNeedsUpdate(release, versions)) return { status: "unchanged" };
+  git("switch", "--force-create", BRANCH, "origin/main");
+  writeDashboardDependencies(root, release);
+  run("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"]);
+  verifyDashboardLock(JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8")), release);
+  git("add", "--", ...DEPENDENCIES.map(([path]) => path), "package-lock.json");
+  git(
+    "-c",
+    "user.name=dashboard-release[bot]",
+    "-c",
+    "user.email=dashboard-release[bot]@users.noreply.github.com",
+    "commit",
+    "-m",
+    `fix(dashboard): update dashboard and pages to ${release.version}`,
+  );
+  git("push", `--force-with-lease=refs/heads/${BRANCH}:${expected}`, "origin", `HEAD:refs/heads/${BRANCH}`);
+  await upsertDashboardPull(github, release, pulls[0]);
+  return { status: "updated" };
 };

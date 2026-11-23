@@ -6,4 +6,3 @@
 4. Request validation stays strict. Response tolerance must never admit unknown request values.
 5. Scenario tests must feed unknown values through the real client and consumer, assert the update message, and continue known work.
 6. Readiness acknowledgements cover Tumpel-run clients. Externally installed clients and cached browsers rely on tolerant decoding.
-7. Dashboard dependency updates must use one bot pull request. Required checks, review and branch protection govern squash auto-merge; dependency updates must never commit directly to main.

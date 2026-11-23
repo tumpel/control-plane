@@ -32,7 +32,7 @@ export const dashboardVersion = (url) => {
   return match[1];
 };
 
-export const verifyDashboardRelease = async ({ event, github, download, clock }) => {
+export const dashboardReleaseEvent = (event) => {
   if (
     event?.component !== "dashboard" ||
     event.repository !== REPOSITORY ||
@@ -52,53 +52,50 @@ export const verifyDashboardRelease = async ({ event, github, download, clock })
     .sort();
   if (!Array.isArray(event.assets) || JSON.stringify([...event.assets].sort()) !== JSON.stringify(expected))
     throw new Error("Dashboard dispatch assets differ from the release; dispatch both tarballs and their checksums.");
-  const commit = await github(`/repos/${REPOSITORY}/commits/${event.tag}`);
-  if (commit.sha !== event.sha)
-    throw new Error("Dashboard tag differs from its source SHA; publish the exact checked commit.");
-  const ancestry = await github(`/repos/${REPOSITORY}/compare/${event.sha}...main`);
-  if (!["ahead", "identical"].includes(ancestry.status))
-    throw new Error("Dashboard source is outside main; release a checked main commit.");
-  const release = await github(`/repos/${REPOSITORY}/releases/tags/${event.tag}`);
-  if (
-    release.draft !== false ||
-    !release.published_at ||
-    release.tag_name !== event.tag ||
-    release.target_commitish !== event.sha
-  )
-    throw new Error("Dashboard release is unpublished; finish publication before dispatching.");
-  for (const url of expected) {
-    if (!release.assets.some((asset) => asset.browser_download_url === url && asset.state === "uploaded"))
-      throw new Error(`Dashboard release lacks ${url}; publish every asset before dispatching.`);
-  }
-  await exactChecks(github, REPOSITORY, event.sha, clock);
-  const integrity = {};
-  for (const [name, url] of Object.entries(urls)) {
-    const bytes = await download(url);
-    const checksum = (await download(`${url}.sha256`)).toString("utf8").trim();
-    const filename = url.split("/").at(-1);
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (checksum !== `${digest}  ${filename}`)
-      throw new Error(`Dashboard checksum failed for ${filename}; publish matching tarball bytes and checksum.`);
-    integrity[name] = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-  }
-  return { version, sha: event.sha, urls, integrity };
+  return { version, sha: event.sha, urls };
 };
 
-export const updateDashboard = async ({ token, notice = console.log, bot, ...verification }) => {
-  if (!token) {
-    notice("::notice::CONTROL_PLANE_UPDATE_TOKEN is empty; skipping dashboard dependency update.");
-    return { status: "skipped" };
+export const verifyDashboardProvenance = (release, { commit, ancestry, published }) => {
+  if (commit.sha !== release.sha)
+    throw new Error("Dashboard tag differs from its source SHA; publish the exact checked commit.");
+  if (!["ahead", "identical"].includes(ancestry.status))
+    throw new Error("Dashboard source is outside main; release a checked main commit.");
+  if (published.draft !== false || !published.published_at || published.tag_name !== `v${release.version}`)
+    throw new Error("Dashboard release is unpublished; finish publication before dispatching.");
+  const expected = Object.values(release.urls).flatMap((url) => [url, `${url}.sha256`]);
+  for (const url of expected) {
+    if (!published.assets.some((asset) => asset.browser_download_url === url && asset.state === "uploaded"))
+      throw new Error(`Dashboard release lacks ${url}; publish every asset before dispatching.`);
   }
-  const release = await verifyDashboardRelease(verification);
-  const state = await bot.read();
-  if (
-    state.versions.some(
-      (versions) =>
-        versions.some((version) => compareVersions(release.version, version) < 0) ||
-        versions.every((version) => compareVersions(release.version, version) === 0),
-    )
-  )
-    return { status: "unchanged" };
-  await bot.update(release, state);
-  return { status: "updated" };
 };
+
+export const dashboardIntegrity = (url, bytes, checksum) => {
+  const filename = url.split("/").at(-1);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (checksum.trim() !== `${digest}  ${filename}`)
+    throw new Error(`Dashboard checksum failed for ${filename}; publish matching tarball bytes and checksum.`);
+  return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+};
+
+export const verifyDashboardRelease = async ({ event, github, download, clock }) => {
+  const release = dashboardReleaseEvent(event);
+  const commit = await github(`/repos/${REPOSITORY}/commits/${event.tag}`);
+  const ancestry = await github(`/repos/${REPOSITORY}/compare/${release.sha}...main`);
+  const published = await github(`/repos/${REPOSITORY}/releases/tags/${event.tag}`);
+  verifyDashboardProvenance(release, { commit, ancestry, published });
+  await exactChecks(github, REPOSITORY, release.sha, clock);
+  const integrity = {};
+  for (const [name, url] of Object.entries(release.urls)) {
+    const bytes = await download(url);
+    const checksum = (await download(`${url}.sha256`)).toString("utf8");
+    integrity[name] = dashboardIntegrity(url, bytes, checksum);
+  }
+  return { ...release, integrity };
+};
+
+export const releaseNeedsUpdate = (release, versions) =>
+  !versions.some(
+    (versions) =>
+      versions.some((version) => compareVersions(release.version, version) < 0) ||
+      versions.every((version) => compareVersions(release.version, version) === 0),
+  );
