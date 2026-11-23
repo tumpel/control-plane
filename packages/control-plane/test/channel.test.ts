@@ -13,7 +13,6 @@ import {
   type Ledger,
   type LedgerStore,
   type PreparedOffer,
-  SNAPSHOT_PACKS_PROTOCOL,
   type StoredControlMessage,
 } from "../src/channel/protocol.ts";
 
@@ -160,7 +159,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
       },
       hello: async (
         privateKey: KeyObject = keys.privateKey,
-        protocolVersion: number = SNAPSHOT_PACKS_PROTOCOL,
+        protocolVersion: number = ChannelProtocol.Oldest,
         resendFrom = 1,
       ) => {
         const [challenge] = sent;
@@ -214,8 +213,8 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       boxCapacity: 8,
       usage: USAGE,
       supervisorVersion: "0.1.0",
-      protocolVersion: SNAPSHOT_PACKS_PROTOCOL,
-      channelProtocol: SNAPSHOT_PACKS_PROTOCOL,
+      protocolVersion: ChannelProtocol.Oldest,
+      channelProtocol: ChannelProtocol.Oldest,
       channelProtocolOldest: undefined,
       guestProtocol: undefined,
       heldTurnIds: [],
@@ -234,13 +233,13 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.equal(link.closed, null);
 });
 
-for (const version of [SNAPSHOT_PACKS_PROTOCOL - 2, SNAPSHOT_PACKS_PROTOCOL - 1]) {
+for (const version of [ChannelProtocol.Oldest - 2, ChannelProtocol.Oldest - 1]) {
   test(`a Hello on ${version}, below the snapshot packs of 39, is refused and the supervisor told to update`, async () => {
     const link = setup().connect();
     await link.hello(undefined, version);
     assert.deepEqual(link.closed, {
       code: CloseCode.UnsupportedVersion,
-      reason: `protocol version ${version} is not supported; this control plane speaks ${SNAPSHOT_PACKS_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
+      reason: `protocol version ${version} is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
     });
     assert.equal(link.connection.phase, "Closed");
   });
@@ -266,7 +265,7 @@ test("a Hello on protocol version 1, without the fields later versions added, is
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
   assert.equal(
     link.closed?.reason,
-    `protocol version 1 is not supported; this control plane speaks ${SNAPSHOT_PACKS_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
+    `protocol version 1 is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
   );
   assert.equal(link.connection.phase, "Closed");
 });
@@ -405,7 +404,7 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   assert.equal(JSON.stringify(channel.ledger.current).includes("secret-"), false);
 
   const second = channel.connect();
-  await second.hello(undefined, SNAPSHOT_PACKS_PROTOCOL, 2);
+  await second.hello(undefined, ChannelProtocol.Oldest, 2);
   const resent = frames(second.sent);
   assert.deepEqual(
     resent.map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.ack, envelope.message.type]),
@@ -505,7 +504,7 @@ test("a Hello below an unacked frame's version is closed as an unsupported versi
   await link.hello();
   assert.deepEqual(link.closed, {
     code: CloseCode.UnsupportedVersion,
-    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${SNAPSHOT_PACKS_PROTOCOL}, update the supervisor`,
+    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${ChannelProtocol.Oldest}, update the supervisor`,
   });
   assert.equal(link.connection.phase, "Closed");
   assert.deepEqual(frames(link.sent), []);
@@ -623,7 +622,7 @@ test("a Hello offering 37 to 39 is welcomed on 39 with no ack and its resendFrom
 const stored39 = async () => {
   const channel = setup();
   const link = channel.connect();
-  await link.hello(undefined, SNAPSHOT_PACKS_PROTOCOL, 3);
+  await link.hello(undefined, ChannelProtocol.Oldest, 3);
   return { channel, link };
 };
 

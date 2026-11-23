@@ -8,7 +8,6 @@ import {
   helloBytes,
   type MetricBatch,
   type ReportedUsage,
-  SNAPSHOT_PACKS_PROTOCOL,
 } from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
 
@@ -148,8 +147,8 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      protocolVersion: ChannelProtocol.Version,
-      channelProtocolOldest: SNAPSHOT_PACKS_PROTOCOL,
+      protocolVersion: ChannelProtocol.Oldest,
+      channelProtocolOldest: ChannelProtocol.Oldest,
       carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
       usage: DEFAULT_USAGE,

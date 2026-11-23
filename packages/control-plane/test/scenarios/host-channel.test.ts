@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CloseCode } from "@tumpel/schemas";
-import { SNAPSHOT_PACKS_PROTOCOL } from "../../src/channel/protocol.ts";
+import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { World } from "./harness/world.ts";
 
@@ -47,7 +46,7 @@ test("a tenant that restarts mid-turn keeps the host channel open, and the turn 
 test("a 39 host has each frame acked once stored, so a hibernation between heartbeats loses nothing and the next frame lands", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
-  const host = await world.online(world.owner, "host-1", { protocolVersion: SNAPSHOT_PACKS_PROTOCOL });
+  const host = await world.online(world.owner, "host-1", { protocolVersion: ChannelProtocol.Oldest });
   const session = await world.startSession({ prompt: "write two lines", tags: [] });
   const offer = host.takeOffer();
   await host.claims(offer);

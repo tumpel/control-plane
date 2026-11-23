@@ -36,6 +36,19 @@ const indexBytesOf = (root: Placement[]): number => indexBytesFor(placementsOf(r
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
+const packList = async (
+  store: R2Bucket,
+  storageKey: string,
+): Promise<{ kind: "Read"; value: ReadonlySet<string> } | { kind: "Unreadable"; detail: string } | null> => {
+  const listed = await store.get(packListKey(storageKey));
+  if (listed === null) return null;
+  const parsed = PackListSchema.safeParse(parsedJson(await listed.text()));
+  if (!parsed.success) {
+    return { kind: "Unreadable", detail: `the pack list of ${storageKey} is no list: ${issues(parsed.error)}` };
+  }
+  return { kind: "Read", value: new Set(parsed.data) };
+};
+
 const parsedJson = (text: string): unknown => {
   try {
     return JSON.parse(text);
@@ -296,14 +309,8 @@ export class SnapshotManifests {
   }
 
   async packs(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<ReadonlySet<string>>> {
-    const listed = await store.get(packListKey(storageKey));
-    if (listed !== null) {
-      const parsed = PackListSchema.safeParse(parsedJson(await listed.text()));
-      if (!parsed.success) {
-        return { kind: "Unreadable", detail: `the pack list of ${storageKey} is no list: ${issues(parsed.error)}` };
-      }
-      return { kind: "Read", value: new Set(parsed.data) };
-    }
+    const listed = await packList(store, storageKey);
+    if (listed !== null) return listed;
     const read = await this.oneAtATime(async (): Promise<ManifestRead<ReadonlySet<string>>> => {
       const root = await this.root(store, storageKey);
       if (root.kind !== "Read") return root;
@@ -521,11 +528,10 @@ export class LivePacks {
       this.changing(store, tenantId, async (state) => {
         const pending = state.pending.get(storageKey);
         if (pending !== undefined) return new Set(pending);
-        const claimed = await store.get(packListKey(storageKey));
+        const claimed = await packList(store, storageKey);
         if (claimed === null) return null;
-        const parsed = PackListSchema.safeParse(parsedJson(await claimed.text()));
-        if (!parsed.success) throw new Error(`the pack list of ${storageKey} is no list: ${issues(parsed.error)}`);
-        return new Set(parsed.data);
+        if (claimed.kind !== "Read") throw new Error(claimed.detail);
+        return claimed.value;
       }),
     );
   }
