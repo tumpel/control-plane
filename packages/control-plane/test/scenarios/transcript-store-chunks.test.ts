@@ -40,12 +40,21 @@ test("a tenant that restarts after storing a chunk goes on from the stored lines
 
   await world.restartTenant();
   await line(host, first.turnId, stored + 7);
+  host.report(USAGE);
+  await world.settle();
+  await host.says({ type: "TurnLine", turnId: first.turnId, lineSeq: stored + 8, text: RESULT });
+  await host.says({
+    type: "TurnComplete",
+    turnId: first.turnId,
+    lastLineSeq: stored + 8,
+    completedAt: new Date().toISOString(),
+  });
   await world.until(
-    "the resent lines reaching the restarted tenant",
-    async () => (await world.turn(first.turnId)).lineCount,
-    (count) => count === stored + 7,
+    "a SnapshotRequest for the turn the restarted tenant completed",
+    () => host.received("SnapshotRequest").length,
+    (requests) => requests > 0,
   );
-  await completes(host, session.sessionId, first.turnId, stored + 8);
+  await host.answersSnapshot(session.sessionId);
   assert.equal((await world.turn(first.turnId)).lineCount, stored + 8);
 
   await world.passes(1_000);

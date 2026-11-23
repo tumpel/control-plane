@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
 
 type Row = Record<string, unknown>;
@@ -98,9 +98,14 @@ export class SqlStorage {
   readonly db: DatabaseSync;
   rowsWritten = 0;
   private readonly opened = new Map<string, number>();
+  private readonly prepared = new Map<string, StatementSync>();
+  private readonly totalChanges: StatementSync;
+  private readonly schemaVersion: StatementSync;
 
   constructor(db: DatabaseSync) {
     this.db = db;
+    this.totalChanges = db.prepare("SELECT total_changes() AS written");
+    this.schemaVersion = db.prepare("PRAGMA schema_version");
   }
 
   exec(query: string, ...params: unknown[]): Cursor {
@@ -108,20 +113,28 @@ export class SqlStorage {
     const several = params.length === 0 && statements(query) > 1;
     let rows: Row[] = [];
     if (several) this.db.exec(query);
-    else rows = this.db.prepare(query).all(...params.map(bindable)) as Row[];
+    else rows = this.statement(query).all(...params.map(bindable)) as Row[];
     const changed = this.changed() - before;
     const written = changed === 0 || several ? changed : changed + this.indexWrites(query);
     this.rowsWritten += written;
     return new Cursor(rows, written, changed);
   }
 
+  private statement(query: string): StatementSync {
+    const known = this.prepared.get(query);
+    if (known !== undefined) return known;
+    const statement = this.db.prepare(query);
+    this.prepared.set(query, statement);
+    return statement;
+  }
+
   private changed(): number {
-    const { written } = this.db.prepare("SELECT total_changes() AS written").get() as { written: number };
+    const { written } = this.totalChanges.get() as { written: number };
     return written;
   }
 
   private indexWrites(query: string): number {
-    const { schema_version: version } = this.db.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    const { schema_version: version } = this.schemaVersion.get() as { schema_version: number };
     const key = `${version}\n${query}`;
     const known = this.opened.get(key);
     if (known !== undefined) return known;
