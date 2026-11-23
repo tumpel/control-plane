@@ -139,8 +139,8 @@ export type TurnSend = z.infer<typeof TurnSendSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
 type HostLoss = {
-  turn: "RateLimited" | "HostOffline";
-  snapshot: "RateLimited" | "NotAnswered";
+  turn: "RateLimited";
+  snapshot: "RateLimited";
   turnDetail: string;
   snapshotDetail: string;
 };
@@ -640,9 +640,6 @@ const undelivered = (host: string, sent: Exclude<OfferSent, "Sent"> | Error): [T
     `host ${host} is rate limited and takes no offers, so the turn never reached it; send the turn again once its health recovers`,
   ];
 };
-
-const lostTurnDetail = (lost: string): string =>
-  `${lost} during the turn; check that its supervisor runs, then send the turn again`;
 
 const offerPrompt = (harness: string, turn: TurnRow): string => {
   if (turn.goal === null) return turn.prompt;
@@ -1321,6 +1318,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.sendSettled(tenantId, turn.turn_id, session.host_id, sent);
   }
 
+  private heardWithinGrace(hostId: string, now: number): boolean {
+    const [row] = this.ctx.storage.sql
+      .exec<{ heard_at: number }>("SELECT heard_at FROM host_reports WHERE host_id = ?", hostId)
+      .toArray();
+    return row !== undefined && row.heard_at >= now - presenceGraceMs(settingsOf(this.env));
+  }
+
   private reportRefusesOffer(hostId: string, now: number): "RateLimited" | "Degraded" | null {
     const [row] = this.ctx.storage.sql
       .exec<{ reported_health: string; heard_at: number }>(
@@ -1672,6 +1676,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async hostHello(tenantId: string, hostId: string, report: HostReport, heldTurns: HeldTurns): Promise<void> {
     const dropped = this.ctx.storage.transactionSync(() => {
+      if (!this.heardWithinGrace(hostId, report.now)) this.appendEvent({ event: "HostOnline", hostId }, report.now);
       this.reportHost(hostId, report);
       clearSupersededFailure(this.ctx.storage.sql, hostId);
       return heldTurns.state === "Reported" ? this.unheldRunningTurns(hostId, heldTurns.heldTurnIds) : [];
@@ -3230,32 +3235,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async cancelHostTurns(hostId: string, turnIds: readonly string[]): Promise<void> {
     for (const turnId of turnIds) await this.host(hostId).send({ type: "TurnCancel", turnId });
-  }
-
-  protected async hostPresence(
-    tenantId: string,
-    hostId: string,
-    presence: "Online" | "Offline",
-    now: number,
-  ): Promise<void> {
-    this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
-    if (presence === "Online") return;
-    const host = await this.hostName(tenantId, hostId);
-    await this.failLostHost(tenantId, hostId, `host ${host} went offline`, now);
-  }
-
-  private async failLostHost(tenantId: string, hostId: string, lost: string, now: number): Promise<string[]> {
-    return this.failHostTurns(
-      tenantId,
-      hostId,
-      {
-        turn: "HostOffline",
-        snapshot: "NotAnswered",
-        turnDetail: lostTurnDetail(lost),
-        snapshotDetail: `${lost} before it answered the snapshot; check that its supervisor runs`,
-      },
-      now,
-    );
   }
 
   private async hostName(tenantId: string, hostId: string): Promise<string> {

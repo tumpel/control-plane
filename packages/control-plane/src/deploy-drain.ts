@@ -4,6 +4,7 @@ import { sameSecret } from "./crypto";
 import { issues, json, type Problem, problem } from "./http";
 import { bearerOf } from "./identity";
 import type { Env } from "./index";
+import { presenceGraceMs, settingsOf } from "./settings";
 import { tenantApi } from "./tenant-api.ts";
 
 export type ReleaseRollout = z.infer<typeof ReleaseRolloutSchema>;
@@ -67,21 +68,26 @@ export const handleReleaseRollout = async (request: Request, _url: URL, env: Env
   }
   if (!sameSecret(bearerOf(request), drainToken(await object.text()))) return tokenRefused();
   const { results } = await env.DB.prepare("SELECT DISTINCT tenant_id FROM hosts").all<{ tenant_id: string }>();
-  const hosts = (
-    await Promise.all(
-      results.map(async ({ tenant_id }) =>
-        (
-          await tenantApi(env.TENANT, tenant_id).call("runningTurnsByHost", {})
-        ).running.map((each) => ({
-          ...each,
-          tenantId: tenant_id,
-        })),
-      ),
-    )
-  ).flat();
+  const heardSince = Date.now() - presenceGraceMs(settingsOf(env));
+  const tenants = await Promise.all(
+    results.map(async ({ tenant_id }) => {
+      const tenant = tenantApi(env.TENANT, tenant_id);
+      const [{ running }, { usage }] = await Promise.all([
+        tenant.call("runningTurnsByHost", {}),
+        tenant.call("listHostUsage", { tenantId: tenant_id }),
+      ]);
+      return {
+        running: running.map((each) => ({ ...each, tenantId: tenant_id })),
+        heard: usage.filter((report) => report.updatedAt >= heardSince).map((report) => report.hostId),
+      };
+    }),
+  );
+  const hosts = tenants.flatMap((tenant) => tenant.running);
   const { results: channelProtocols } = await env.DB.prepare(
-    "SELECT p.channel_protocol_version AS channelProtocolVersion, COUNT(*) AS hostCount FROM host_channel_protocols AS p JOIN hosts AS h ON h.host_id = p.host_id WHERE h.state = 'Online' GROUP BY p.channel_protocol_version ORDER BY p.channel_protocol_version",
-  ).all<{ channelProtocolVersion: number; hostCount: number }>();
+    "SELECT channel_protocol_version AS channelProtocolVersion, COUNT(*) AS hostCount FROM host_channel_protocols WHERE host_id IN (SELECT value FROM json_each(?)) GROUP BY channel_protocol_version ORDER BY channel_protocol_version",
+  )
+    .bind(JSON.stringify(tenants.flatMap((tenant) => tenant.heard)))
+    .all<{ channelProtocolVersion: number; hostCount: number }>();
   const rollout: ReleaseRollout = {
     deployedCommit: env.DEPLOYED_COMMIT,
     drained: hosts.length === 0,

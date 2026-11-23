@@ -26,7 +26,7 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { type HostRecord, hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
+import { type HostRecord, hostOf, hostRecords, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
@@ -103,13 +103,14 @@ const sessionArchived = (sessionId: string, refused: string): Refused =>
   });
 
 const hostOffline = async (env: Env, caller: Caller, session: Session, retry: string): Promise<Refused | null> => {
-  const host = await hostOf(env.DB, caller.tenantId, session.hostId);
+  const entry = await hostOf(env.DB, caller.tenantId, session.hostId);
+  const [host] = entry === null ? [] : await hostRecords(env, caller.tenantId, [entry]);
   if (host?.state === "Online") return null;
   return refuse(409, {
     code: "HostOffline",
     title: "Host offline",
     detail:
-      host === null
+      host === undefined
         ? "the session's host is no longer enrolled"
         : `the session runs on host ${host.name}, which is ${host.state}`,
     fix: `Start tumpel-supervisor run on that host, then ${retry}`,

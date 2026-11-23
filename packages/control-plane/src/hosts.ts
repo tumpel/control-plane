@@ -288,12 +288,25 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
   return row === null ? null : toHost(row);
 };
 
+const stateOf = (host: HostEntry, reported: boolean): HostEntry["state"] => {
+  if (host.state === "Revoked") return "Revoked";
+  if (reported) return "Online";
+  return host.state === "Enrolled" ? "Enrolled" : "Offline";
+};
+
 export const withReportedHealth = (
   hosts: HostEntry[],
   reports: { hostId: string; reportedHealth: HostRecord["reportedHealth"] }[],
 ): HostRecord[] => {
   const health = new Map(reports.map((report) => [report.hostId, report.reportedHealth]));
-  return hosts.map((host) => ({ ...host, reportedHealth: health.get(host.hostId) ?? "Healthy" }));
+  return hosts.map((host) => {
+    const reportedHealth = health.get(host.hostId);
+    return {
+      ...host,
+      state: stateOf(host, reportedHealth !== undefined),
+      reportedHealth: reportedHealth ?? "Healthy",
+    };
+  });
 };
 
 export const hostRecords = async (
@@ -322,6 +335,7 @@ export const hostReads = async (env: Env, tenantId: string, hosts: HostEntry[]):
     const report = reports.get(host.hostId);
     return {
       ...host,
+      state: stateOf(host, report !== undefined),
       reportedHealth: report?.reportedHealth ?? "Healthy",
       ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES),
       ...(protocols[host.hostId] ?? NO_PROTOCOLS),
