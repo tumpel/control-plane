@@ -78,7 +78,7 @@ test("a Stopping box the host drops without a BoxGone becomes Stopped on its nex
   if (oldest === undefined) throw new Error("three crews started");
 
   const sent = await world.sendTurn(foreman.sessionId, "resume the epic");
-  assert.equal(host.take("BoxTeardown").sessionId, oldest.sessionId);
+  assert.deepEqual(host.take("BoxTeardown"), { type: "BoxTeardown", sessionId: oldest.sessionId, boxId: oldest.boxId });
   assert.equal((await world.session(oldest.sessionId)).state, "Stopping");
 
   await host.beats({ heldSessionIds: host.holding().heldSessionIds.filter((id) => id !== oldest.sessionId) });
