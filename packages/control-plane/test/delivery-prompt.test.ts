@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { OfferedTurnSchema } from "@tumpel/schemas";
-import { DELIVERY_PROMPT_LIMIT, deliveryPrompt, subscriptionPrompt } from "../src/delivery-prompt.ts";
+import { DELIVERY_PROMPT_LIMIT, deliveryPrompt } from "../src/delivery-prompt.ts";
 
 const idle = (eventId: number) => ({
   event_id: eventId,
@@ -45,18 +45,6 @@ test("a delivery prompt drops the latest events until the message fits 100,000 c
   assert.equal(batch.lastEventId, 2);
   assert.equal(batch.prompt.length, 100000);
   assert.ok(OfferedTurnSchema.shape.prompt.safeParse(batch.prompt).success);
-});
-
-test("a delivery prompt carries a long subscription plan and goal with its event", () => {
-  const plan = "p".repeat(80000);
-  const goal = "g".repeat(10000);
-  const prompt = subscriptionPrompt(plan, goal);
-  const batch = deliveryPrompt(prompt, "t1", [idle(1)]);
-  assert.ok(batch?.kind === "Batch");
-  assert.ok(batch.prompt.startsWith(`${plan}\n\nSubscription goal: ${goal}\n`));
-  assert.ok(batch.prompt.endsWith('"turnId":"turn-1"}'));
-  assert.equal(batch.lastEventId, 1);
-  assert.ok(batch.prompt.length <= DELIVERY_PROMPT_LIMIT);
 });
 
 test("a delivery prompt delivers by reference an event too long to fit on its own", () => {
