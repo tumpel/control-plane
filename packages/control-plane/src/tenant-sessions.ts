@@ -21,6 +21,7 @@ import {
   SessionStateSchema,
   type SessionTagsPatchSchema,
   type SetSessionTagsResultSchema,
+  SnapshotRootSchema,
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
@@ -104,7 +105,8 @@ import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
-  indexBytesFor,
+  draftKey,
+  indexBytesOf,
   LivePacks,
   MAX_INDEX_BYTES,
   MAX_PACKS_PER_MANIFEST,
@@ -114,6 +116,8 @@ import {
   type SnapshotIndex,
   SnapshotManifests,
   STORE_DELETE_BATCH,
+  snapshotDraft,
+  snapshotPackSet,
 } from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
@@ -2497,7 +2501,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private objectKeys(snapshots: { storage_key: string }[]): string[] {
-    return snapshots.flatMap((snapshot) => [snapshot.storage_key, packListKey(snapshot.storage_key)]);
+    return snapshots.flatMap((snapshot) => [
+      snapshot.storage_key,
+      packListKey(snapshot.storage_key),
+      draftKey(snapshot.storage_key),
+    ]);
   }
 
   private async deleteObjects(keys: string[]): Promise<void> {
@@ -3332,16 +3340,29 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} listed pack ${twice} of snapshot ${message.snapshotId} in part ${message.part} as both written and reused`,
       );
     }
-    const uploading = new Set(
-      await this.live.hold(
-        this.env.STORE,
-        tenantId,
-        window.request.session_id,
-        window.request.storage_key,
-        [...listed],
-        message.reusedPackDigests,
+    const parts = (await snapshotDraft(this.env.STORE, window.request.storage_key))?.parts ?? [];
+    const partDigest = await sha256Hex(
+      new Uint8Array(
+        new TextEncoder().encode(JSON.stringify([message.packs, message.chunks, message.reusedPackDigests])),
       ),
     );
+    if (message.part > parts.length + 1) {
+      return refused(
+        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, but the control plane expects part ${parts.length + 1}, so the snapshot cannot name its packs`,
+      );
+    }
+    const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
+    if (parts[message.part - 1]?.partDigest !== partDigest) {
+      await this.env.STORE.put(
+        draftKey(window.request.storage_key),
+        JSON.stringify({
+          parts: [
+            ...parts.slice(0, message.part - 1),
+            { partDigest, packs: [...listed, ...message.reusedPackDigests] },
+          ],
+        }),
+      );
+    }
     const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
     const signer = signerOf(
       this.env,
@@ -3783,19 +3804,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
       kind: "Rejected" as const,
       detail: `host ${await this.hostName(tenantId, hostId)} ${detail}`,
     });
-    const indexBytes = indexBytesFor(chunkCount);
-    if (indexBytes > MAX_INDEX_BYTES) {
-      return rejected(
-        `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,
-      );
-    }
-    const root = await this.env.STORE.head(request.storage_key);
+    const root = await this.env.STORE.get(request.storage_key);
     if (root === null) {
       return rejected(
         `answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`,
       );
     }
-    const packs = await this.live.pendingPacks(this.env.STORE, tenantId, request.storage_key);
+    const parsed = SnapshotRootSchema.safeParse(await root.json());
+    if (!parsed.success) {
+      return rejected(
+        `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+      );
+    }
+    const indexBytes = indexBytesOf(parsed.data.manifest, chunkCount);
+    if (indexBytes > MAX_INDEX_BYTES) {
+      return rejected(
+        `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,
+      );
+    }
+    const packs = await snapshotPackSet(this.env.STORE, request.storage_key);
     if (packs === null) {
       return rejected(
         `answered SnapshotDone for snapshot ${request.snapshot_id} without sending SnapshotPacks part 1, so the control plane cannot name its packs and the session keeps its previous snapshot; update the supervisor`,

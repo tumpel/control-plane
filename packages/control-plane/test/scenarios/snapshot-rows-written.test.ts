@@ -307,7 +307,7 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
     await uploadsChunks(world, host, request.snapshotId, chunks);
     await storesRoot(world, request.storageKey, chunks);
     world.store.failure = {
-      operation: "head",
+      operation: "get",
       prefix: request.storageKey,
       error: new Error("object storage timed out"),
     };

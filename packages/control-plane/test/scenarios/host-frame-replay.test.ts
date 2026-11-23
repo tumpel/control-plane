@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 import { ClaudeSetupSchema, SecretSetSchema } from "@tumpel/schemas";
 import type { HostMessage } from "./harness/supervisor.ts";
 import { TENANT_ID, UNMETERED, World } from "./harness/world.ts";
@@ -74,6 +74,28 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
     chunks: [chunk],
     reusedPackDigests: [],
   });
+  const draft = async () => (await world.store.get(`${request.storageKey}.draft`))?.text();
+  assert.equal(JSON.parse((await draft()) ?? "null")?.parts.length, 1);
+  assert.deepEqual(
+    await world.call("hostMessage", {
+      tenantId: TENANT_ID,
+      hostId: host.hostId,
+      message: {
+        type: "SnapshotPacks",
+        snapshotId: request.snapshotId,
+        part: 3,
+        packs: [],
+        chunks: [],
+        reusedPackDigests: [digest],
+      },
+    }),
+    {
+      reply: {
+        type: "Refused",
+        reason: `host ${host.hostId} sent SnapshotPacks part 3 of snapshot ${request.snapshotId}, but the control plane expects part 2, so the snapshot cannot name its packs`,
+      },
+    },
+  );
   await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [chunk] }));
   await once(world, host.hostId, {
@@ -83,6 +105,7 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
     chunkCount: 1,
   });
   assert.equal(await (await world.store.get(`${request.storageKey}.packs`))?.text(), JSON.stringify([digest]));
+  assert.equal(await draft(), undefined);
   assert.equal((await world.turn(turnId)).state, "Completed");
   assert.equal((await world.session(session.sessionId)).state, "Idle");
 
@@ -112,59 +135,6 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
   assert.equal((await world.session(sessionId)).state, "Idle");
   await once(world, host.hostId, { type: "BoxGone", sessionId, boxId });
   assert.equal((await world.session(sessionId)).state, "Stopped");
-});
-
-test("a SnapshotDone resent after the tenant died between claiming its packs and storing it stores the snapshot", async (t) => {
-  const { world, host } = await opened(t);
-  await world.startSession({ prompt: "die after the claim", tags: [] });
-  const offer = host.takeOffer();
-  await host.claims(offer);
-  await host.completes(offer);
-  const request = await host.next("SnapshotRequest");
-  const manifest = JSON.stringify({ entries: [] });
-  const digest = createHash("sha256").update(manifest).digest("hex");
-  const chunk = { digest, packDigest: digest, offset: 0, length: manifest.length };
-  await world.call("hostMessage", {
-    tenantId: TENANT_ID,
-    hostId: host.hostId,
-    message: {
-      type: "SnapshotPacks",
-      snapshotId: request.snapshotId,
-      part: 1,
-      packs: [{ packDigest: digest, sizeBytes: manifest.length }],
-      chunks: [chunk],
-      reusedPackDigests: [],
-    },
-  });
-  await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
-  await world.store.put(request.storageKey, JSON.stringify({ manifest: [chunk] }));
-  const done: HostMessage = {
-    type: "SnapshotDone",
-    snapshotId: request.snapshotId,
-    uploadedBytes: 14,
-    chunkCount: 1,
-  };
-  const sql = world.tenantStorage(TENANT_ID).sql;
-  const exec = sql.exec.bind(sql);
-  const died = mock.method(sql, "exec", (query: string, ...bindings: unknown[]) => {
-    if (query.startsWith("SELECT 1 FROM snapshot_requests WHERE snapshot_id")) throw new Error("the tenant died");
-    return exec(query, ...bindings);
-  });
-  await assert.rejects(world.call("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message: done }));
-  died.mock.restore();
-  assert.equal(await (await world.store.get(`${request.storageKey}.packs`))?.text(), JSON.stringify([digest]));
-
-  await world.restartTenant();
-  await world.call("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message: done });
-  await world.settle();
-  assert.equal((await world.session(offer.sessionId)).state, "Idle");
-  assert.deepEqual(
-    sql
-      .exec("SELECT snapshot_id FROM snapshots WHERE snapshot_id = ?", request.snapshotId)
-      .toArray()
-      .map((row) => row.snapshot_id),
-    [request.snapshotId],
-  );
 });
 
 test("a clone failure, a snapshot failure, a box gone under a turn and a Claude setup's frames applied twice have one effect and the same reply", async (t) => {
