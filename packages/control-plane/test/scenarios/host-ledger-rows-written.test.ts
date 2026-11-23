@@ -57,12 +57,12 @@ const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = 
 
 const rowsFor = async (lines: number) => {
   const { sql, ledger, context, line } = channel();
-  const start = sql.totalRowsWritten();
+  const start = sql.rowsWritten;
   for (let seq = 1; seq <= lines; seq++) await line(seq);
-  const held = sql.totalRowsWritten() - start;
+  const held = sql.rowsWritten - start;
   control.acknowledge(context, ledger.take());
   assert.equal(ledger.load().received, lines);
-  return { held, checkpoint: sql.totalRowsWritten() - start };
+  return { held, checkpoint: sql.rowsWritten - start };
 };
 
 test("the host channel writes no row per transcript line and one row per checkpoint, however many lines it holds", async () => {

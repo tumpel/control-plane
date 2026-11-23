@@ -28,7 +28,6 @@
     "ticket": "node npm-scripts/ticket-run.mjs",
     "proof:e2e": "node npm-scripts/proof-env.mjs node npm-scripts/e2e-proof.mjs",
     "tenant:apply": "node npm-scripts/tenant-apply.mjs",
-    "release:fetch": "node npm-scripts/release-fetch.mjs",
     "guest:image": "node npm-scripts/guest-image.mjs",
     "guest:packages": "node npm-scripts/guest-packages-resolve.mjs",
     "guest:sources": "node npm-scripts/guest-image.mjs sources",

@@ -31,7 +31,7 @@ test("a host that falls silent fails its running turn HostOffline on the next re
   const offer = host.takeOffer();
   await host.claims(offer);
 
-  host.fallsSilent();
+  host.quiet();
   assert.equal((await world.turn(offer.turnId)).state, "Running");
   await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
 
@@ -46,7 +46,7 @@ test("a silent host counts as Degraded and takes no new session", async (t) => {
   await world.holdsAgentCredentials();
   const host = await world.hostOnline("host-1");
 
-  host.fallsSilent();
+  host.quiet();
   await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
 
   const started = z

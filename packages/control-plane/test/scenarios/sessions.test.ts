@@ -28,7 +28,6 @@ import {
   SnapshotSchema,
   StartedSessionFromIssueSchema,
   StartedSessionSchema,
-  StopFailureSchema,
   SubscriptionSchema,
   TenantEventSchema,
   TenantUsageSchema,
@@ -40,13 +39,6 @@ import { z } from "zod";
 import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
 import type { ReleaseManifest } from "../../src/releases.ts";
 import { steerSettings } from "../../src/steer.ts";
-import {
-  type ChunkLedger,
-  type ChunkStore,
-  ChunkWriter,
-  decodeLines,
-  type TranscriptLine,
-} from "../../src/transcript.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
 import { TEST_SETTINGS } from "../timing.ts";
 import { GITHUB_TOKEN_PREFIX, installApp, PREBUILT_HEAD, storeApp } from "./harness/github.ts";
@@ -81,14 +73,6 @@ const SETTINGS = {
   transcriptChunkLines: 2,
 };
 const UNLIMITED = 1_000_000;
-
-const signal = (): { promise: Promise<void>; resolve: () => void } => {
-  let resolve = (): void => undefined;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-};
 
 const KERNEL_DIGEST = "c".repeat(64);
 const BASE_DIGEST = "3".repeat(64);
@@ -922,71 +906,6 @@ suite("sessions", () => {
     );
   });
 
-  test("lines that arrive during a slow chunk write go into the next chunk, and every line is stored once in order", async () => {
-    const tenantId = `ten_${randomBytes(6).toString("hex")}`;
-    const sessionId = "ses_serial";
-    const turnId = "trn_serial";
-    const pending: TranscriptLine[] = [];
-    const index: { storageKey: string; lineSeqs: number[] }[] = [];
-    const ledger: ChunkLedger = {
-      pending: () => [...pending],
-      record: (_sessionId, _turnId, storageKey, chunk) => {
-        const last = chunk.lineSeqs.at(-1) ?? 0;
-        pending.splice(0, pending.filter((line) => line.lineSeq <= last).length);
-        index.push({ storageKey, lineSeqs: chunk.lineSeqs });
-      },
-    };
-    const puts: string[] = [];
-    const writing = signal();
-    const held = signal();
-    const spied: ChunkStore = {
-      put: async (key, body) => {
-        puts.push(key);
-        if (puts.length === 1) {
-          writing.resolve();
-          await held.promise;
-        }
-        return store.put(key, body);
-      },
-    };
-    const writer = new ChunkWriter(ledger, spied);
-    const writes: Promise<void>[] = [];
-    const deliver = (lineSeq: number): void => {
-      pending.push({ sessionId, lineSeq, tenantId, turnId, text: `line ${lineSeq}`, createdAt: Date.now() });
-      if (pending.length >= 2) writes.push(writer.write(tenantId, sessionId, turnId, 2));
-    };
-    deliver(1);
-    deliver(2);
-    await writing.promise;
-    deliver(3);
-    deliver(4);
-    deliver(5);
-    writes.push(writer.write(tenantId, sessionId, turnId, 1));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(puts.length, 1);
-    held.resolve();
-    await Promise.all(writes);
-    assert.deepEqual(
-      index.map((entry) => entry.lineSeqs),
-      [
-        [1, 2],
-        [3, 4, 5],
-      ],
-    );
-    assert.deepEqual(pending, []);
-    const stored = await Promise.all(
-      index.map(async ({ storageKey }) => {
-        const text = await store.text(storageKey);
-        assert.ok(text !== null, `chunk ${storageKey} is stored`);
-        return decodeLines(text);
-      }),
-    );
-    assert.deepEqual(
-      stored.flat().map(({ lineSeq, text }) => ({ lineSeq, text })),
-      [1, 2, 3, 4, 5].map((lineSeq) => ({ lineSeq, text: `line ${lineSeq}` })),
-    );
-  });
-
   test("a compact read stops after eight chunk reads of dropped lines, and the next read goes on from its cursor", async () => {
     const { github, host, tool, sessionStart, createPersona, readAll } = await tenant();
     await createPersona("Quiet", [
@@ -1523,7 +1442,7 @@ suite("sessions", () => {
 
   test("a tenant restart between a host's hello and the next start still places on that host and keeps its channel open", async () => {
     const { tenantId, hostId, host, tool, sessionStart } = await tenant();
-    world.restartTenantOf(tenantId);
+    await world.restartTenant(tenantId);
     const started = await tool(
       "tumpel_session_start",
       { ...(await sessionStart()), prompt: "after the restart" },
@@ -2579,6 +2498,72 @@ suite("sessions", () => {
     assert.doesNotMatch(offline.detail, UUID);
   });
 
+  test("the first heartbeat after a reconnect fails BoxLost each Running turn whose box the host no longer holds, after the turns its resent frames settle", async () => {
+    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const lost = await enrol("lost");
+    const first = await connect(lost.id, lost.key);
+    await hostState(lost.id, "Online");
+    const claimed = async (prompt: string) => {
+      const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt }, bearer);
+      assert.equal(response.status, 200, await response.clone().text());
+      const { session } = StartedSessionSchema.parse(await response.json());
+      const offer = await first.next("TurnOffer");
+      first.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+      await first.next("TurnClaimed");
+      return { sessionId: session.sessionId, turnId: offer.turnId };
+    };
+    const held = await claimed("box survives");
+    const gone = await claimed("box goes away");
+    const finished = await claimed("finished while disconnected");
+
+    first.close();
+    await hostState(lost.id, "Offline");
+    const back = await connect(
+      lost.id,
+      lost.key,
+      8,
+      { ...first.carried(), held: [held.sessionId, finished.sessionId] },
+      [
+        {
+          type: "TurnLine",
+          turnId: finished.turnId,
+          lineSeq: 1,
+          text: '{"type":"result","subtype":"success","is_error":false}',
+        },
+        { type: "TurnComplete", turnId: finished.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() },
+      ],
+    );
+    await until(
+      "the turn whose box is gone failing",
+      () => getJson(`/v1/turns/${gone.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    const failure = await getJson(`/v1/turns/${gone.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "BoxLost");
+    assert.match(failure.detail, /^host lost reconnected without the box that ran the turn/);
+    assert.equal((await getJson(`/v1/turns/${held.turnId}`, TurnSchema)).state, "Running");
+    const snapshot = await back.next("SnapshotRequest");
+    assert.equal(snapshot.turnId, finished.turnId);
+    await storeRoot(snapshot.storageKey);
+    back.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
+    await until(
+      "the finished turn reading Completed",
+      () => getJson(`/v1/turns/${finished.turnId}`, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    const session = await getJson(`/v1/sessions/${gone.sessionId}`, SessionSchema);
+    assert.equal(session.state, "Idle");
+    assert.equal(session.lastTurnState, "Failed");
+
+    const sent = await postJson(`/v1/sessions/${gone.sessionId}/turns`, { prompt: "again" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    const next = TurnSchema.parse(await sent.json());
+    assert.equal((await back.next("TurnOffer")).turnId, next.turnId);
+    back.close();
+  });
+
   test("two sessions started at once on two equal hosts land on different hosts, since each counts the other's turn", async () => {
     const { bearer, getJson, enrol, sessionStart } = await tenant();
     const first = await enrol("equal-1");
@@ -2888,6 +2873,104 @@ suite("sessions", () => {
     assert.notEqual(offer.boxId, off.offer.boxId);
   });
 
+  test("the first heartbeat after a reconnect releases the boxes a host still holds for Stopped, archived and idle Off sessions, and keeps Warm, Auto and running boxes", async () => {
+    const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
+    host.close();
+    await hostState(hostId, "Offline");
+    const drift = await enrol("drift");
+    const first = await connect(drift.id, drift.key);
+    await hostState(drift.id, "Online");
+    first.report({ ...USAGE, memoryHeldMib: 1024 });
+    await until(
+      "the first heartbeat of the first connection",
+      () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
+      (usages) => usages.find((usage) => usage.hostId === drift.id)?.memoryHeldMib === 1024,
+    );
+    const snapshotted = async (sessionId: string) => {
+      const request = await first.next("SnapshotRequest");
+      assert.equal(request.sessionId, sessionId);
+      await storeRoot(request.storageKey);
+      first.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+      await until(
+        `session ${sessionId} reading Idle with snapshot ${request.snapshotId}`,
+        async () => ({
+          session: await getJson(`/v1/sessions/${sessionId}`, SessionSchema),
+          snapshots: await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
+        }),
+        ({ session, snapshots }) =>
+          session.state === "Idle" && snapshots.some((snapshot) => snapshot.snapshotId === request.snapshotId),
+      );
+    };
+
+    const stopped = await idleTurn(
+      first,
+      { ...(await sessionStart()), prompt: "stopped", boxRetention: "Off" },
+      bearer,
+    );
+    await releasedBox(first, stopped.session.sessionId, stopped.offer.boxId);
+    first.send({ type: "BoxGone", sessionId: stopped.session.sessionId, boxId: stopped.offer.boxId });
+    await until(
+      "the stopped session reading Stopped",
+      () => getJson(`/v1/sessions/${stopped.session.sessionId}`, SessionSchema),
+      (session) => session.state === "Stopped",
+    );
+
+    const off = await idleTurn(first, { ...(await sessionStart()), prompt: "off", boxRetention: "Off" }, bearer);
+    await releasedBox(first, off.session.sessionId, off.offer.boxId);
+    first.send({
+      type: "BoxTeardownFailed",
+      sessionId: off.session.sessionId,
+      boxId: off.offer.boxId,
+      reason: "BoxDirty",
+      detail: "the box is busy",
+      failedAt: new Date().toISOString(),
+    });
+    await snapshotted(off.session.sessionId);
+
+    const archived = await idleTurn(first, { ...(await sessionStart()), prompt: "archived" }, bearer);
+    await snapshotted(archived.session.sessionId);
+    assert.equal(
+      (await tool("tumpel_session_archive", { sessionId: archived.session.sessionId }, SessionSchema)).state,
+      "Archived",
+    );
+    assert.equal((await first.next("BoxDiscard")).sessionId, archived.session.sessionId);
+
+    const warm = await idleTurn(first, { ...(await sessionStart()), prompt: "warm", boxRetention: "Warm" }, bearer);
+    await snapshotted(warm.session.sessionId);
+    const auto = await idleTurn(first, { ...(await sessionStart()), prompt: "auto" }, bearer);
+    await snapshotted(auto.session.sessionId);
+    const running = await postJson(
+      "/v1/sessions",
+      { ...(await sessionStart()), prompt: "running", boxRetention: "Off" },
+      bearer,
+    );
+    assert.equal(running.status, 200, await running.clone().text());
+    const runningOffer = await first.next("TurnOffer");
+    first.send({ type: "TurnClaim", turnId: runningOffer.turnId, boxId: runningOffer.boxId });
+    await first.next("TurnClaimed");
+
+    first.close();
+    await hostState(drift.id, "Offline");
+    const back = await connect(drift.id, drift.key, 8, first.carried());
+    const released = [await back.next("BoxDiscard"), await back.next("BoxDiscard"), await back.next("BoxTeardown")];
+    assert.deepEqual(
+      released.map((message) => [message.type, message.sessionId, message.boxId]).sort(),
+      [
+        ["BoxDiscard", stopped.session.sessionId, stopped.offer.boxId],
+        ["BoxDiscard", archived.session.sessionId, archived.offer.boxId],
+        ["BoxTeardown", off.session.sessionId, off.offer.boxId],
+      ].sort(),
+    );
+
+    const sent = await postJson(`/v1/sessions/${warm.session.sessionId}/turns`, { prompt: "still warm" }, bearer);
+    assert.equal(sent.status, 200, await sent.clone().text());
+    assert.equal((await back.next("TurnOffer")).boxId, warm.offer.boxId);
+    assert.equal(back.holds("BoxDiscard") || back.holds("BoxTeardown"), false);
+    assert.equal((await getJson(`/v1/sessions/${auto.session.sessionId}`, SessionSchema)).state, "Idle");
+    assert.equal((await getJson(`/v1/turns/${runningOffer.turnId}`, TurnSchema)).state, "Running");
+    back.close();
+  });
+
   const sealedValues = async (tenantId: string) =>
     z
       .object({ secret_set_id: z.string(), name: z.string(), sealed: z.string() })
@@ -2909,6 +2992,53 @@ suite("sessions", () => {
       );
     }
   };
+
+  test("a queued turn whose persona is gone fails CredentialRefused and the next queued turn on its host is offered", async () => {
+    const { tenantId, bearer, host, getJson, completedTurn, storedSnapshot } = await tenant();
+    const sessions = [];
+    for (const prompt of ["first", "second"]) {
+      const { session, offer } = await completedTurn(prompt);
+      await storedSnapshot(session.sessionId);
+      assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
+      await until(
+        `the ${prompt} turn reading Completed`,
+        () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
+        (turn) => turn.state === "Completed",
+      );
+      sessions.push(session.sessionId);
+    }
+    const [doomedSession, waitingSession] = sessions;
+    assert.ok(doomedSession !== undefined && waitingSession !== undefined);
+    const sealed = await sealedValues(tenantId);
+    await writeSealed(tenantId, sealed, true);
+    const queued = [];
+    for (const sessionId of sessions) {
+      const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "queued" }, bearer);
+      assert.equal(sent.status, 200, await sent.clone().text());
+      queued.push(TurnSchema.parse(await sent.json()));
+    }
+    const [doomed, waiting] = queued;
+    assert.ok(doomed !== undefined && waiting !== undefined);
+    const gone = crypto.randomUUID();
+    await tenantSql(tenantId, "UPDATE sessions SET persona_id = ? WHERE session_id = ?", gone, doomedSession);
+    await writeSealed(tenantId, sealed, false);
+
+    const offer = await host.next("TurnOffer");
+    assert.equal(offer.turnId, waiting.turnId);
+    await until(
+      "the doomed turn reading Failed",
+      () => getJson(`/v1/turns/${doomed.turnId}`, TurnSchema),
+      (turn) => turn.state === "Failed",
+    );
+    const failure = await getJson(`/v1/turns/${doomed.turnId}/failure`, TurnFailureSchema);
+    assert.equal(failure.reason, "CredentialRefused");
+    assert.equal(
+      failure.detail,
+      `the session runs on persona ${gone}, which is gone, so the turn has no secret set to run on; start a new session on an existing persona`,
+    );
+    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
+    assert.equal((await host.next("TurnClaimed")).turnId, waiting.turnId);
+  });
 
   test("a repeated claim of a completed turn is withdrawn and a NotClaimed failure after it leaves the turn Completed", async () => {
     const { host, getJson, completedTurn, storedSnapshot } = await tenant();

@@ -67,7 +67,7 @@ const snapshotFailed = (snapshotId: string) => ({
   failedAt: "2026-11-15T10:00:00+01:00",
 });
 
-test("a host enrols with a one-time token, holds its channel, reads Offline when it falls silent, and stops on revoke", async () => {
+test("a host enrols with a one-time token, holds its channel, reads Degraded when it falls silent, and stops on revoke", async () => {
   const token = await mint();
   const key = hostKey();
   const first = await enrolWith("first", token, key.publicKey);
@@ -90,7 +90,7 @@ test("a host enrols with a one-time token, holds its channel, reads Offline when
     ["Online"],
   );
 
-  supervisor.fallsSilent();
+  supervisor.quiet();
   const silent = await world.until(
     `host ${host.hostId} reading Degraded`,
     () => readHost(host.hostId),

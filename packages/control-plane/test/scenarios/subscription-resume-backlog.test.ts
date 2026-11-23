@@ -45,7 +45,7 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   failed("turn-3", "the harness exited");
 
   const before = world.tenantRowsWritten();
-  world.restartTenant();
+  await world.restartTenant();
   await world.runtime.settle();
   assert.equal(world.tenantRowsWritten() - before, 0, "the restart rewrites no stored event");
   await world.call("hostHello", {

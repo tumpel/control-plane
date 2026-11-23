@@ -13,12 +13,14 @@ import {
 } from "@tumpel/schemas";
 import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
+import { request } from "./harness/server.ts";
 import { World } from "./harness/world.ts";
 
 const EMAIL = "config@example.test";
 const SECRET = "sk-ant-e2e-never-printed";
 const REVIEWER_MEMORY = "Review the diff for correctness.\n";
 const REVIEWER_SETTINGS = '{"permissions":{"defaultMode":"bypassPermissions"}}\n';
+const SLOW_APPLY_MS = 500;
 const sha256 = (text: string | Buffer): string => createHash("sha256").update(text).digest("hex");
 
 const FIXTURE = {
@@ -131,6 +133,14 @@ const enrolHost = async (): Promise<string> => {
   return HostSchema.parse(await enrolled.json()).hostId;
 };
 
+const turned = async (condition: () => boolean, what: string): Promise<void> => {
+  for (let spin = 0; spin < 10_000; spin++) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`${what} never happened`);
+};
+
 const tenantRows = (): Record<string, unknown[]> => {
   const sql = world.tenantStorage(tenant).sql;
   const tables = sql
@@ -239,39 +249,60 @@ test("an apply refused at a later change writes none of the earlier ones", async
   assert.deepEqual(kept, held);
 });
 
-test("a write that breaks a constraint inside the apply transaction rolls back every earlier write", async () => {
-  const held = tenantRows();
-  const secretSetId = crypto.randomUUID();
-  const persona = {
-    name: "Rollback",
-    harness: "ClaudeCode",
-    secretSetId,
-    connectorIds: [],
-    boxMemoryMib: 4096,
-    boxDiskMib: 32768,
-    boxRetention: "Auto",
-    tumpelMcp: false,
-    files: [],
+test("a persona created while an apply waits on the tenant breaks the apply's write of the same name, and the apply rolls back every earlier write", async (t) => {
+  const { Tenant } = (await import(new URL("../../src/tenant.ts", import.meta.url).href)) as {
+    Tenant: { prototype: Record<string, unknown> };
   };
-  const { applied } = (await world.callTenant(tenant, "applyConfig", {
-    tenantId: tenant,
-    writes: [
-      {
-        kind: "CreateSecretSet",
-        secretSetId,
-        secretSet: {
-          name: "rollback",
-          secrets: [{ kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: SECRET }],
-        },
-        githubUser: null,
+  const inherited = Tenant.prototype.applyConfig as (...args: unknown[]) => Promise<unknown>;
+  let applyWaiting = false;
+  Tenant.prototype.applyConfig = async function (this: unknown, ...args: unknown[]) {
+    applyWaiting = true;
+    await new Promise((resolve) => setTimeout(resolve, SLOW_APPLY_MS));
+    return inherited.apply(this, args);
+  };
+  t.after(() => {
+    delete Tenant.prototype.applyConfig;
+  });
+  const [prod] = SecretSetSchema.array()
+    .parse(await getJson("/v1/secret-sets"))
+    .filter((set) => set.name === "prod");
+  assert.ok(prod);
+  const local = { "reviewer/CLAUDE.md": REVIEWER_MEMORY, "reviewer/settings.json": REVIEWER_SETTINGS };
+  const applying = request(`${world.origin}/v1/tenant-config/apply`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer },
+    body: JSON.stringify({
+      config: {
+        ...FIXTURE,
+        personas: [
+          ...FIXTURE.personas,
+          { name: "Race", harness: "ClaudeCode", secretSetName: "race", connectorNames: [], files: [] },
+        ],
+        secretSets: [...FIXTURE.secretSets, { ...FIXTURE.secretSets[0], name: "race" }],
       },
-      { kind: "Pin", pin: { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION } },
-      { kind: "CreatePersona", persona },
-      { kind: "CreatePersona", persona },
-    ],
-    now: Date.now(),
-  })) as { applied: { kind: string } };
-  assert.equal(applied.kind, "Conflict");
+      files: files(local).inline,
+      secretValues: [{ env: "TUMPEL_E2E_ANTHROPIC_KEY", value: SECRET }],
+      expiryValues: [],
+    }),
+  });
+  await turned(() => applyWaiting, "the apply reaching the tenant");
+  const raced = await request(`${world.origin}/v1/personas`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer },
+    body: JSON.stringify({
+      name: "Race",
+      harness: "ClaudeCode",
+      secretSetId: prod.secretSetId,
+      connectorIds: [],
+      files: [],
+    }),
+  });
+  assert.equal(raced.status, 200, await raced.clone().text());
+  const held = tenantRows();
+  await world.tick(SLOW_APPLY_MS);
+  const refused = await applying;
+  assert.equal(refused.status, 409, await refused.clone().text());
+  assert.match(ProblemSchema.parse(await refused.json()).detail, /nothing was changed$/);
   assert.deepEqual(tenantRows(), held);
 });
 

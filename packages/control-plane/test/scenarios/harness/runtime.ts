@@ -43,11 +43,17 @@ const awaitingIo = async <T>(work: () => Promise<T>): Promise<T> => {
 class Cursor {
   private readonly rows: Row[];
   readonly rowsWritten: number;
-  readonly rowsRead = 0;
+  readonly changed: number;
+  readonly rowsReadUnmeasured = 0;
 
-  constructor(rows: Row[], rowsWritten: number) {
+  constructor(rows: Row[], rowsWritten: number, changed: number) {
     this.rows = rows;
     this.rowsWritten = rowsWritten;
+    this.changed = changed;
+  }
+
+  get rowsRead(): number {
+    return this.rowsReadUnmeasured;
   }
 
   toArray(): Row[] {
@@ -82,30 +88,56 @@ const bindable = (value: unknown): SQLInputValue => {
   return value as SQLInputValue;
 };
 
+const INDEX_ROOTS =
+  "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND rootpage NOT IN (SELECT rootpage FROM sqlite_master WHERE type = 'table')";
+
 export class SqlStorage {
   private savepoint = 0;
   readonly db: DatabaseSync;
   rowsWritten = 0;
+  private readonly opened = new Map<string, number>();
 
   constructor(db: DatabaseSync) {
     this.db = db;
   }
 
   exec(query: string, ...params: unknown[]): Cursor {
-    if (params.length === 0 && statements(query) > 1) {
-      this.db.exec(query);
-      return new Cursor([], 0);
-    }
-    const rows = this.db.prepare(query).all(...params.map(bindable)) as Row[];
-    const { written } = this.db.prepare("SELECT changes() AS written").get() as { written: number };
-    const counted = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query) ? written : 0;
-    this.rowsWritten += counted;
-    return new Cursor(rows, counted);
+    const before = this.changed();
+    const several = params.length === 0 && statements(query) > 1;
+    let rows: Row[] = [];
+    if (several) this.db.exec(query);
+    else rows = this.db.prepare(query).all(...params.map(bindable)) as Row[];
+    const changed = this.changed() - before;
+    const written = changed === 0 || several ? changed : changed + this.indexWrites(query);
+    this.rowsWritten += written;
+    return new Cursor(rows, written, changed);
   }
 
-  totalRowsWritten(): number {
+  private changed(): number {
     const { written } = this.db.prepare("SELECT total_changes() AS written").get() as { written: number };
     return written;
+  }
+
+  private indexWrites(query: string): number {
+    const { schema_version: version } = this.db.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    const key = `${version}\n${query}`;
+    const known = this.opened.get(key);
+    if (known !== undefined) return known;
+    const indexes = new Set(
+      this.db
+        .prepare(INDEX_ROOTS)
+        .all()
+        .map(({ rootpage }) => Number(rootpage)),
+    );
+    const writes = new Set(
+      this.db
+        .prepare(`EXPLAIN ${query}`)
+        .all()
+        .filter(({ opcode, p2 }) => opcode === "OpenWrite" && indexes.has(Number(p2)))
+        .map(({ p2 }) => Number(p2)),
+    ).size;
+    this.opened.set(key, writes);
+    return writes;
   }
 
   inTransaction<T>(run: () => T): T {
@@ -283,6 +315,7 @@ export class ServerSocket {
   }
 
   async closed(code: number, reason: string, wasClean: boolean): Promise<void> {
+    const release = flight.hold();
     try {
       const ctx = this.ctx;
       if (ctx === null || this.readyState === 3) return;
@@ -294,6 +327,7 @@ export class ServerSocket {
     } finally {
       this.readyState = 3;
       this.link.toServer.drop();
+      release();
     }
   }
 
@@ -479,7 +513,6 @@ export class Runtime {
   private readonly objects: { object: object; ctx: DurableObjectState }[] = [];
 
   constructor(start: number) {
-    mock.timers.reset();
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: start });
   }
 
@@ -525,8 +558,11 @@ export const migratedDatabase = (directory: URL): DatabaseSync => {
     .sort()) {
     db.exec(readFileSync(new URL(name, directory), "utf8"));
   }
+  db.exec("PRAGMA foreign_keys = ON");
   return db;
 };
+
+type D1Meta = { changes: number; rows_written: number };
 
 class D1Statement {
   private params: unknown[] = [];
@@ -543,16 +579,20 @@ class D1Statement {
     return this;
   }
 
-  run(): Promise<{ results: Row[]; success: true; meta: { changes: number } }> {
+  run(): Promise<{ results: Row[]; success: true; meta: D1Meta }> {
     return Promise.resolve(
       spendingOnIo(() => {
         const cursor = this.sql.exec(this.query, ...this.params);
-        return { results: cursor.toArray(), success: true as const, meta: { changes: cursor.rowsWritten } };
+        return {
+          results: cursor.toArray(),
+          success: true as const,
+          meta: { changes: cursor.changed, rows_written: cursor.rowsWritten },
+        };
       }),
     );
   }
 
-  all(): Promise<{ results: Row[]; success: true; meta: { changes: number } }> {
+  all(): Promise<{ results: Row[]; success: true; meta: D1Meta }> {
     return this.run();
   }
 

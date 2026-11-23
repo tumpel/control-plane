@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { register } from "node:module";
 import { mock } from "node:test";
@@ -23,7 +24,6 @@ import { ACCESS_AUDIENCE, AccessStub } from "./access.ts";
 import { GitHubStub, installApp } from "./github.ts";
 import {
   D1Database,
-  type DurableObjectState,
   flight,
   ioClock,
   migratedDatabase,
@@ -35,7 +35,7 @@ import {
   type Storage,
 } from "./runtime.ts";
 import { type RequestInit, request, ScenarioServer, settle } from "./server.ts";
-import { type HostMessage, hostKey, Supervisor, type SupervisorOptions, until } from "./supervisor.ts";
+import { hostKey, Supervisor, type SupervisorOptions, until } from "./supervisor.ts";
 
 export type { TurnOffer } from "./supervisor.ts";
 
@@ -353,10 +353,6 @@ export class World {
     return until(this, what, read, done);
   }
 
-  faults(): unknown[] {
-    return flight.faults;
-  }
-
   private storageOf(member: Member): Storage {
     return this.tenantStorage(member.tenantId);
   }
@@ -373,29 +369,12 @@ export class World {
     return held.ctx.storage;
   }
 
-  tenantRows(tenantId: string): number {
-    return this.tenantStorage(tenantId).sql.rowsWritten;
-  }
-
   hostRows(hostId: string): number {
     return this.hostStorage(hostId).sql.rowsWritten;
   }
 
-  restartHostChannel(hostId: string): void {
-    this.hostChannels.restart(hostId);
-  }
-
   hibernateHostChannel(hostId: string): void {
     this.hostChannels.hibernate(hostId);
-  }
-
-  restartTenantOf(tenantId: string): void {
-    this.tenants.restart(tenantId);
-  }
-
-  async restart(member: Member): Promise<void> {
-    (this.env.TENANT as Namespace<object>).restart(member.tenantId);
-    await this.runtime.settle();
   }
 
   rowsWritten(member: Member): number {
@@ -490,10 +469,6 @@ export class World {
     return supervisor;
   }
 
-  async hostMessage(host: Supervisor, message: HostMessage): Promise<unknown> {
-    return this.call("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message });
-  }
-
   async computeMs(operation: string, input: unknown): Promise<number> {
     const spent = ioClock.spentMs;
     const started = performance.now();
@@ -509,13 +484,13 @@ export class World {
     return this.online(this.owner, name);
   }
 
-  restartTenant(): void {
-    this.tenants.restart(TENANT_ID);
+  async restartTenant(tenantId: string = TENANT_ID): Promise<void> {
+    this.tenants.restart(tenantId);
+    await this.runtime.settle();
   }
 
   tenantRowsWritten(): number {
-    const { ctx } = this.tenants.instance(TENANT_ID) as { ctx: DurableObjectState };
-    return ctx.storage.sql.totalRowsWritten();
+    return this.tenants.instance(TENANT_ID).ctx.storage.sql.rowsWritten;
   }
 
   private async defaultPersona(): Promise<string> {
@@ -722,7 +697,10 @@ export class World {
     await this.github?.close();
     await this.access?.close();
     await this.dispatcher.destroy();
+    await this.runtime.settle();
+    const faults = flight.faults;
     flight.reset();
     this.runtime.close();
+    assert.deepEqual(faults, [], "a Durable Object or the Worker threw during the scenario");
   }
 }

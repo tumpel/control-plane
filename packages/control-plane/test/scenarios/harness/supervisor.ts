@@ -178,10 +178,6 @@ export class Supervisor {
     this.heartbeat = null;
   }
 
-  fallsSilent(): void {
-    this.quiet();
-  }
-
   resumes(): void {
     this.quiet();
     this.heartbeat = setInterval(() => this.beat(), this.options.heartbeatMs);
@@ -352,10 +348,6 @@ export class Supervisor {
     return StoredTurnOfferSchema.parse(this.take("TurnOffer"));
   }
 
-  snapshotRequestsFor(sessionId: string): number {
-    return this.inbox.filter((message) => message.type === "SnapshotRequest" && message.sessionId === sessionId).length;
-  }
-
   rateLimited(): number[] {
     return [...this.limited];
   }
@@ -424,13 +416,6 @@ export class Supervisor {
       JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
     );
     await this.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: manifest.length });
-  }
-
-  async tearsDownBox(sessionId: string): Promise<string> {
-    const teardown = z.object({ sessionId: z.string(), boxId: z.string() }).parse(this.take("BoxTeardown"));
-    if (teardown.sessionId !== sessionId) throw new Error(`the box torn down is of ${teardown.sessionId}`);
-    await this.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
-    return teardown.boxId;
   }
 
   async dropsIdleBox(offer: TurnOffer): Promise<void> {

@@ -132,7 +132,7 @@ test("a tenant past its metric limit refuses a new metric name and writes no row
   const sql = storage as never;
   const limits = { ...METRICS_LIMITS, instrumentsPerTenant: 2 };
   declareInstruments(sql, INSTRUMENTS, T0, limits);
-  const written = storage.totalRowsWritten();
+  const written = storage.rowsWritten;
 
   declareInstruments(sql, INSTRUMENTS, T0, limits);
   assert.throws(
@@ -145,5 +145,5 @@ test("a tenant past its metric limit refuses a new metric name and writes no row
       ),
     /limit of 2 metrics per tenant/,
   );
-  assert.equal(storage.totalRowsWritten(), written);
+  assert.equal(storage.rowsWritten, written);
 });

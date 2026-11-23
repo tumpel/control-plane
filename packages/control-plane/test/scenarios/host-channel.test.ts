@@ -35,7 +35,7 @@ test("a tenant that restarts mid-turn keeps the host channel open, and the turn 
   await world.settle();
   await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq: 2, text: assistant(2) });
 
-  world.restartTenant();
+  await world.restartTenant();
   host.report(DEFAULT_USAGE);
   await world.settle();
   assert.equal(host.closure(), null, "the tenant restart closed the host channel");
@@ -81,7 +81,6 @@ test("a host channel that hibernates between two heartbeats while it holds frame
       code: CloseCode.ProtocolError,
       reason: `the control plane slept and lost frames ${held} onward before it stored them; reconnect and resend them`,
     },
-    "current behaviour: this close goes away once held frames survive hibernation",
   );
   assert.deepEqual(host.unackedSeqs(), [held]);
 });
