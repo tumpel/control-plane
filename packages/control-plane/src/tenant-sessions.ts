@@ -1688,9 +1688,28 @@ export abstract class TenantSessions extends DurableObject<Env> {
         this.appendEvent({ event: "HostOnline", hostId }, report.now);
       this.reportHost(hostId, report);
       clearSupersededFailure(this.ctx.storage.sql, hostId);
-      return this.unheldRunningTurns(hostId, heldTurnIds);
+      return {
+        turns: this.unheldRunningTurns(hostId, heldTurnIds),
+        snapshots: this.unheldSnapshots(hostId, heldTurnIds),
+      };
     });
-    await this.dropTurns(tenantId, hostId, dropped, report.now);
+    await this.dropTurns(tenantId, hostId, dropped.turns, report.now);
+    if (dropped.snapshots.length === 0) return;
+    const host = await this.hostName(tenantId, hostId);
+    const detail = `host ${host} connected again and no longer holds this turn, so the snapshot it was asked for never arrives`;
+    await this.snapshotsGone(tenantId, dropped.snapshots, detail, "Idle", "NotAnswered", report.now);
+  }
+
+  private unheldSnapshots(hostId: string, heldTurnIds: string[]): SnapshotRequestRow[] {
+    return this.ctx.storage.sql
+      .exec<SnapshotRequestRow>(
+        `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
+        FROM snapshot_requests r JOIN turns t ON t.turn_id = r.turn_id
+        WHERE t.host_id = ? AND t.state = 'Running' AND t.turn_id NOT IN (SELECT value FROM json_each(?))`,
+        hostId,
+        JSON.stringify(heldTurnIds),
+      )
+      .toArray();
   }
 
   protected async hostHeartbeat(
@@ -1756,7 +1775,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (requests.length > 0) {
       const host = await this.hostName(tenantId, hostId);
       const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
-      await this.snapshotsGone(tenantId, requests, detail, "Idle", now);
+      await this.snapshotsGone(tenantId, requests, detail, "Idle", "BoxNotFound", now);
     }
     await this.offerRoomed(tenantId, hostId);
   }
@@ -2609,7 +2628,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const host = await this.hostName(tenantId, hostId);
     const detail = `host ${host} answered BoxGone for box ${session.box_id} while the session was Running, so the box and the work it held since the last snapshot are gone`;
     const now = Date.now();
-    await this.snapshotsGone(tenantId, requests, detail, "Stopped", now);
+    await this.snapshotsGone(tenantId, requests, detail, "Stopped", "BoxNotFound", now);
     for (const { turn_id } of unasked)
       await this.failTurn(tenantId, turn_id, "BoxLost", `${detail}; send the turn again`, iso(now), "Stopped");
   }
@@ -2619,10 +2638,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     requests: SnapshotRequestRow[],
     detail: string,
     sessionState: "Idle" | "Stopped",
+    reason: "BoxNotFound" | "NotAnswered",
     now: number,
   ): Promise<void> {
     for (const request of requests) {
-      this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
+      this.recordSnapshotFailure(request, reason, detail, iso(now));
       await this.snapshotNotStored(tenantId, request, detail, sessionState);
       const session = this.sessionRow(request.session_id);
       if (session === null) continue;
