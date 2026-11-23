@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { z } from "zod";
 import type { R2Bucket } from "./harness/runtime.ts";
-import { type Host, World } from "./harness/world.ts";
+import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const TENANT_ID = "tenant-scenario";
 const LARGE = 100_000;
@@ -56,8 +56,9 @@ const SnapshotsSchema = z.object({
     }),
   ),
 });
-const PreparedOfferSchema = z.object({
-  prepared: z.object({ kind: z.literal("Ready"), snapshots: z.array(z.object({ storageKey: z.string() })) }),
+const OfferedSnapshotsSchema = z.object({
+  turnId: z.string(),
+  snapshots: z.array(z.object({ storageKey: z.string() })),
 });
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -185,11 +186,11 @@ const storesSnapshot = async (
 };
 
 const inWorld = async <T>(run: (world: World, host: Host) => Promise<T>): Promise<T> => {
-  const world = await World.open();
+  const world = await World.open({ limits: UNMETERED });
   try {
     return await run(world, await world.hostOnline("host-1"));
   } finally {
-    world.close();
+    await world.close();
   }
 };
 
@@ -238,18 +239,9 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
 
     const before = world.tenantRowsWritten();
     await world.startSession({ prompt: "start from the prebuild", tags: [] });
-    const offer = host.takeOffer();
-    const answer = await world.call("prepareOffer", {
-      tenantId: TENANT_ID,
-      turnId: offer.turnId,
-      hostId: host.hostId,
-      now: Date.now(),
-    });
-    const parsed = PreparedOfferSchema.safeParse(answer);
-    if (!parsed.success) throw new Error(`the fork was not offered: ${JSON.stringify(await world.turn(offer.turnId))}`);
-    const { prepared } = parsed.data;
+    const offer = OfferedSnapshotsSchema.parse(host.take("TurnOffer"));
     assert.deepEqual(
-      prepared.snapshots.map((snapshot) => snapshot.storageKey),
+      offer.snapshots.map((snapshot) => snapshot.storageKey),
       [layer.storageKey],
     );
     const restored = [[layer.root], ...parts(chunks)];
@@ -517,7 +509,7 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
 });
 
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
-  const world = await World.open();
+  const world = await World.open({ limits: UNMETERED });
   try {
     const chunks = tree(LARGEST_RESTORABLE, "largest");
     const storageKey = `${TENANT_ID}/session/snapshots/largest`;
@@ -532,7 +524,7 @@ test("a manifest of 500000 chunks loads into an index within the memory the cont
     const last = chunks.at(-1);
     assert.deepEqual(last === undefined ? undefined : { ...read.value.find(last.digest) }, last);
   } finally {
-    world.close();
+    await world.close();
   }
 });
 

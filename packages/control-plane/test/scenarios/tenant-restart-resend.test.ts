@@ -13,7 +13,12 @@ test("a tenant that restarts while it holds transcript lines refuses the checkpo
   const offer = host.takeOffer();
   await host.claims(offer);
   const line = (lineSeq: number) =>
-    host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
+    world.hostMessage(host, {
+      type: "TurnLine",
+      turnId: offer.turnId,
+      lineSeq,
+      text: `{"type":"assistant","n":${lineSeq}}`,
+    });
   for (let lineSeq = 1; lineSeq <= 3; lineSeq++) await line(lineSeq);
 
   world.restartTenant();
@@ -58,7 +63,7 @@ test("a tenant that restarts with nothing held asks for the next frame again, an
 
   world.restartTenant();
   const complete = () =>
-    host.says({
+    world.hostMessage(host, {
       type: "TurnComplete",
       turnId: offer.turnId,
       lastLineSeq: 1,
@@ -66,6 +71,7 @@ test("a tenant that restarts with nothing held asks for the next frame again, an
     });
   await assert.rejects(complete(), /TranscriptLinesLost/);
   await complete();
-  await host.answersSnapshot(session.sessionId);
+  const reconnected = await world.reconnect(host);
+  await reconnected.answersSnapshot(session.sessionId);
   assert.equal((await world.turn(offer.turnId)).state, "Completed");
 });
