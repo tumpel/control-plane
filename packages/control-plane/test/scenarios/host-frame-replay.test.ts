@@ -75,7 +75,8 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
     reusedPackDigests: [],
   });
   const draft = async () => (await world.store.get(`${request.storageKey}.draft`))?.text();
-  assert.equal(JSON.parse((await draft()) ?? "null")?.parts.length, 1);
+  assert.deepEqual(JSON.parse((await draft()) ?? "null")?.lastPart, 1);
+  assert.deepEqual(JSON.parse((await draft()) ?? "null")?.packs, [digest]);
   assert.deepEqual(
     await world.call("hostMessage", {
       tenantId: TENANT_ID,

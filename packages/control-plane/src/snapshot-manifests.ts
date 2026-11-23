@@ -53,7 +53,9 @@ const packList = async (
 };
 
 const SnapshotDraftSchema = z.object({
-  parts: z.array(z.object({ partDigest: z.string(), packs: z.array(z.string()) })),
+  lastPart: z.number().int().min(1),
+  lastHash: z.string(),
+  packs: z.array(z.string()),
 });
 
 export type SnapshotDraft = z.infer<typeof SnapshotDraftSchema>;
@@ -68,7 +70,7 @@ export const snapshotDraft = async (store: R2Bucket, storageKey: string): Promis
 
 export const snapshotPackSet = async (store: R2Bucket, storageKey: string): Promise<ReadonlySet<string> | null> => {
   const draft = await snapshotDraft(store, storageKey);
-  if (draft !== null) return new Set(draft.parts.flatMap((part) => part.packs));
+  if (draft !== null) return new Set(draft.packs);
   const claimed = await packList(store, storageKey);
   if (claimed === null) return null;
   if (claimed.kind !== "Read") throw new Error(claimed.detail);

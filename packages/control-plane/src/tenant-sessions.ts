@@ -3340,26 +3340,28 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} listed pack ${twice} of snapshot ${message.snapshotId} in part ${message.part} as both written and reused`,
       );
     }
-    const parts = (await snapshotDraft(this.env.STORE, window.request.storage_key))?.parts ?? [];
-    const partDigest = await sha256Hex(
+    const draft = await snapshotDraft(this.env.STORE, window.request.storage_key);
+    const lastHash = await sha256Hex(
       new Uint8Array(
         new TextEncoder().encode(JSON.stringify([message.packs, message.chunks, message.reusedPackDigests])),
       ),
     );
-    if (message.part > parts.length + 1) {
+    const replayed = draft?.lastPart === message.part && draft.lastHash === lastHash;
+    const expected = draft === null ? 1 : draft.lastPart + 1;
+    if (!replayed && message.part !== 1 && message.part !== expected) {
       return refused(
-        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, but the control plane expects part ${parts.length + 1}, so the snapshot cannot name its packs`,
+        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, but the control plane expects part ${expected}, so the snapshot cannot name its packs`,
       );
     }
     const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
-    if (parts[message.part - 1]?.partDigest !== partDigest) {
+    if (!replayed) {
+      const kept = message.part === 1 || draft === null ? [] : draft.packs;
       await this.env.STORE.put(
         draftKey(window.request.storage_key),
         JSON.stringify({
-          parts: [
-            ...parts.slice(0, message.part - 1),
-            { partDigest, packs: [...listed, ...message.reusedPackDigests] },
-          ],
+          lastPart: message.part,
+          lastHash,
+          packs: [...new Set([...kept, ...listed, ...message.reusedPackDigests])],
         }),
       );
     }
