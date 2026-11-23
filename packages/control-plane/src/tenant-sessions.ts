@@ -2574,6 +2574,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (session.box_id !== message.boxId) return null;
+    if (message.type === "BoxGone" && session.state === "Running") {
+      await this.boxGoneUnderTurn(tenantId, hostId, session);
+      return null;
+    }
     if (message.type === "BoxGone" && session.state === "Idle") {
       this.setSessionState(session.session_id, "Stopped", Date.now());
       await this.evictionSettled(tenantId, session.session_id);
@@ -2588,6 +2592,43 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.recordStopFailure(session.session_id, message.reason, message.detail, message.failedAt);
     await this.returnToIdle(tenantId, session.session_id);
     return null;
+  }
+
+  private async boxGoneUnderTurn(tenantId: string, hostId: string, session: SessionRow): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const requests = sql
+      .exec<SnapshotRequestRow>(
+        "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ? AND box_id = ?",
+        session.session_id,
+        session.box_id,
+      )
+      .toArray();
+    const unasked = sql
+      .exec<{ turn_id: string }>(
+        `SELECT turn_id FROM turns WHERE session_id = ? AND box_id = ? AND state = 'Running'
+          AND turn_id NOT IN (SELECT turn_id FROM snapshot_requests)`,
+        session.session_id,
+        session.box_id,
+      )
+      .toArray();
+    if (requests.length === 0 && unasked.length === 0) return;
+    const host = await this.hostName(tenantId, hostId);
+    const detail = `host ${host} answered BoxGone for box ${session.box_id} while the session was Running, so the box and the work it held since the last snapshot are gone`;
+    const now = iso(Date.now());
+    for (const request of requests) {
+      this.recordSnapshotFailure(request, "BoxNotFound", detail, now);
+      await this.prebuildUnstored(session, detail);
+      await this.failTurn(
+        tenantId,
+        request.turn_id,
+        "SnapshotNotStored",
+        `${detail}; send the turn again`,
+        now,
+        "Stopped",
+      );
+    }
+    for (const { turn_id } of unasked)
+      await this.failTurn(tenantId, turn_id, "BoxLost", `${detail}; send the turn again`, now, "Stopped");
   }
 
   private ranBox(session: SessionRow, boxId: string, hostId: string): boolean {
