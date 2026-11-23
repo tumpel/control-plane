@@ -135,12 +135,6 @@ export type Turn = z.infer<typeof TurnSchema>;
 export type TurnSend = z.infer<typeof TurnSendSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
-type HostLoss = {
-  turn: "RateLimited" | "HostRevoked";
-  snapshot: "RateLimited" | "NotAnswered";
-  turnDetail: string;
-  snapshotDetail: string;
-};
 type TurnImage = z.infer<typeof TurnImageSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type CredentialHandover = z.infer<typeof CredentialHandoverSchema>;
@@ -1757,17 +1751,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM host_reports WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
     const host = await this.hostName(tenantId, hostId);
-    await this.failHostTurns(
-      tenantId,
-      hostId,
-      {
-        turn: "HostRevoked",
-        snapshot: "NotAnswered",
-        turnDetail: `host ${host} was revoked during the turn; send the turn again on another host`,
-        snapshotDetail: `host ${host} was revoked before it answered the snapshot`,
-      },
-      now,
-    );
+    await this.failRevokedHostWork(tenantId, hostId, host, now);
   }
 
   protected runningTurnsByHost(): RunningTurns[] {
@@ -3120,14 +3104,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return snapshots;
   }
 
-  protected async failHostTurns(tenantId: string, hostId: string, loss: HostLoss, now: number): Promise<string[]> {
+  private async failRevokedHostWork(tenantId: string, hostId: string, host: string, now: number): Promise<void> {
+    const turnDetail = `host ${host} was revoked during the turn; send the turn again on another host`;
+    const snapshotDetail = `host ${host} was revoked before it answered the snapshot`;
     const running = this.ctx.storage.sql
       .exec<{ turn_id: string }>(
         "SELECT turn_id FROM turns WHERE host_id = ? AND state IN ('Offered', 'Running')",
         hostId,
       )
       .toArray();
-    for (const { turn_id } of running) await this.failTurn(tenantId, turn_id, loss.turn, loss.turnDetail, iso(now));
+    for (const { turn_id } of running) await this.failTurn(tenantId, turn_id, "HostRevoked", turnDetail, iso(now));
     const requests = this.ctx.storage.sql
       .exec<SnapshotRequestRow>(
         `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
@@ -3136,18 +3122,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     for (const request of requests) {
-      this.recordSnapshotFailure(request, loss.snapshot, loss.snapshotDetail, iso(now));
-      await this.snapshotNotStored(tenantId, request, loss.snapshotDetail);
+      this.recordSnapshotFailure(request, "NotAnswered", snapshotDetail, iso(now));
+      await this.snapshotNotStored(tenantId, request, snapshotDetail);
       const session = this.sessionRow(request.session_id);
       if (session === null) continue;
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
-      await this.prebuildUnstored(session, loss.snapshotDetail);
+      await this.prebuildUnstored(session, snapshotDetail);
     }
-    return running.map(({ turn_id }) => turn_id);
-  }
-
-  protected async cancelHostTurns(hostId: string, turnIds: readonly string[]): Promise<void> {
-    for (const turnId of turnIds) await this.host(hostId).send({ type: "TurnCancel", turnId });
   }
 
   private async hostName(tenantId: string, hostId: string): Promise<string> {

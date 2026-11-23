@@ -335,7 +335,7 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/hosts/{hostId}/restore-health",
     HostPathSchema,
-    "Restore an Unhealthy or RateLimited host to Healthy, so it gets turn offers again. A host goes Unhealthy after it passes its frame limit three times within an hour.",
+    "Restore an Unhealthy or RateLimited host to Healthy, so it gets turn offers again.",
   ),
   rest(
     "tumpel_host_set_labels",

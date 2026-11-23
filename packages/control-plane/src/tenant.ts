@@ -610,17 +610,8 @@ export class Tenant extends TenantConnectors {
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
-    hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
+    hostHealth: ({ hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
-      if (health === "Healthy") return {};
-      const failed = await this.failHostTurns(
-        tenantId,
-        hostId,
-        { turn: "RateLimited", snapshot: "RateLimited", turnDetail: detail, snapshotDetail: detail },
-        now,
-      );
-      await this.cancelHostTurns(hostId, failed);
-      await this.failHostClaudeSetups(hostId, "RateLimited", detail, now);
       return {};
     },
     hostMessage: async ({ tenantId, hostId, message }) => ({

@@ -109,6 +109,7 @@ export class Supervisor {
   private readonly inbox: ControlMessage[] = [];
   private readonly refusals: { seq: number; reason: string }[] = [];
   private readonly limited: number[] = [];
+  private readonly retryAfters: string[] = [];
   private readonly lineSeqs = new Map<string, number>();
   private telemetry: MetricBatch = { instruments: [], samples: [], turns: [] };
   private closedWith: Closed | null = null;
@@ -280,6 +281,7 @@ export class Supervisor {
     }
     if (envelope.type === "FrameRateLimited") {
       this.limited.push(envelope.seq);
+      this.retryAfters.push(envelope.retryAfter);
       return;
     }
     if (envelope.type === "FrameRefused") {
@@ -418,6 +420,14 @@ export class Supervisor {
 
   rateLimited(): number[] {
     return [...this.limited];
+  }
+
+  retryAfter(): string[] {
+    return [...this.retryAfters];
+  }
+
+  resendsUnacked(): void {
+    for (const frame of this.unacked) this.raw({ ...frame, ack: this.heard });
   }
 
   acknowledgedSeq(): number {
