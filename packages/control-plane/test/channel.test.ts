@@ -9,6 +9,7 @@ import {
   type ControlEnvelope,
   emptyLedger,
   type Frame,
+  HELD_TURNS_PROTOCOL,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
@@ -169,6 +170,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
           usage: USAGE,
+          ...(protocolVersion >= HELD_TURNS_PROTOCOL ? { heldTurnIds: [] } : {}),
         });
       },
       oldHello: async () => {
@@ -188,7 +190,7 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
     link.connection = control.challenge(link.context.port);
     return link;
   };
-  return { connect, ledger, peer, turn };
+  return { connect, ledger, peer, turn, keys };
 };
 
 const closure = (link: { closed: Closed | null }): Closed | null => link.closed;
@@ -207,8 +209,10 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       usage: USAGE,
       supervisorVersion: "0.1.0",
       protocolVersion: ChannelProtocol.Version,
+      channelProtocol: ChannelProtocol.Version,
       channelProtocolOldest: undefined,
       guestProtocol: undefined,
+      heldTurns: { state: "Reported", heldTurnIds: [] },
     },
   ]);
   assert.deepEqual(
@@ -257,8 +261,10 @@ test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () =
     usage: USAGE,
     supervisorVersion: "0.1.0",
     protocolVersion: ChannelProtocol.Oldest,
+    channelProtocol: ChannelProtocol.Oldest,
     channelProtocolOldest: undefined,
     guestProtocol: undefined,
+    heldTurns: { state: "NotReported" },
   });
 });
 
@@ -603,32 +609,61 @@ test("revoke closes a live connection, and a revoked host's next Hello is closed
   assert.deepEqual(channel.ledger.current, before);
 });
 
-test("only the first heartbeat after Welcome reports the held sessions, once per connection", async () => {
+test("every heartbeat reports what the host holds, and a channel 34 host's reports no held turns", async () => {
   const channel = setup();
-  const first = channel.connect();
-  await first.hello();
-  const beat = (heldSessionIds: string[]): HostEnvelope => ({
-    type: "Heartbeat",
-    sentAt: "2026-11-18T10:00:00+01:00",
+  const current = channel.connect();
+  await current.hello();
+  const beat = (held: Record<string, unknown>) =>
+    ({
+      type: "Heartbeat",
+      sentAt: "2026-11-18T10:00:00+01:00",
+      usage: USAGE,
+      heldSessionIds: ["session-1"],
+      heldClaudeSetupIds: [],
+      ...held,
+    }) as HostEnvelope;
+  await current.deliver(beat({ heldTurnIds: ["turn-1"] }));
+  await current.deliver(beat({ heldTurnIds: [] }));
+  const reported = (heldTurns: unknown) => ({
+    kind: "Heartbeat",
     usage: USAGE,
-    heldSessionIds,
+    reportedHealth: "Healthy",
+    heldTurns,
+    heldSessionIds: ["session-1"],
     heldClaudeSetupIds: [],
   });
-  await first.deliver(beat(["session-1"]));
-  await first.deliver(beat([]));
-  assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, health: "Healthy", heldSessionIds: ["session-1"], heldClaudeSetupIds: [] },
-    { kind: "Heartbeat", usage: USAGE, health: "Healthy" },
+  assert.deepEqual(current.events.slice(1), [
+    reported({ state: "Reported", heldTurnIds: ["turn-1"] }),
+    reported({ state: "Reported", heldTurnIds: [] }),
   ]);
 
-  const second = channel.connect();
-  await second.hello();
-  await second.deliver(beat([]));
-  assert.deepEqual(second.events.at(-1), {
-    kind: "FirstHeartbeat",
+  const old = channel.connect();
+  await old.hello(undefined, HELD_TURNS_PROTOCOL - 1);
+  await old.deliver(beat({}));
+  assert.deepEqual(old.events.at(-1), reported({ state: "NotReported" }));
+});
+
+test("a Hello that offers a range of versions is welcomed on the newest both sides speak", async () => {
+  const channel = setup();
+  const link = channel.connect();
+  const [challenge] = link.sent;
+  assert.equal(challenge?.type, "Challenge");
+  await link.deliver({
+    type: "Hello",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Version + 3,
+    channelProtocolOldest: ChannelProtocol.Oldest,
+    supervisorVersion: "0.1.0",
+    signature: sign(null, helloBytes(challenge.nonce, HOST_ID), channel.keys.privateKey).toString("base64"),
+    boxCapacity: 8,
     usage: USAGE,
-    health: "Healthy",
-    heldSessionIds: [],
-    heldClaudeSetupIds: [],
+    heldTurnIds: [],
+  } as HostEnvelope);
+  assert.equal(link.connection.phase, "Open");
+  assert.deepEqual(link.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: ChannelProtocol.Version,
+    ack: 0,
   });
 });

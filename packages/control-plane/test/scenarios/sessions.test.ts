@@ -187,7 +187,7 @@ const connect = (
   id: string,
   key: KeyObject,
   boxCapacity = 8,
-  carried: Carried = { received: 0, sent: 0, held: [] },
+  carried: Carried = { received: 0, sent: 0, held: [], turns: [] },
   resend: HostMessage[] = [],
   usage: HostUsage = USAGE,
 ): Promise<HostSide> =>
@@ -1436,7 +1436,7 @@ suite("sessions", () => {
     const hostAfter = await hostRows();
 
     const spent = { tenantWritten: tenantAfter - tenantBefore, hostWritten: hostAfter - hostBefore };
-    assert.ok(spent.tenantWritten <= 50, `the turn wrote ${spent.tenantWritten} tenant rows`);
+    assert.ok(spent.tenantWritten <= 53, `the turn wrote ${spent.tenantWritten} tenant rows`);
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
   });
 

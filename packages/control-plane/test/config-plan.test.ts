@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   EffectiveHarnessVersionSchema,
-  HostSchema,
+  HostRecordSchema,
   PersonaFileLimit,
   SecretSetSchema,
   SessionSchema,
@@ -73,7 +73,7 @@ const liveSecretSet = (secretSetId: string, name: string, keys: string[]) =>
   });
 
 const liveHost = (hostId: string, state: string, labels: string[]) =>
-  HostSchema.parse({
+  HostRecordSchema.parse({
     hostId,
     tenantId: "t1",
     name: hostId,

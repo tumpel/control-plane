@@ -67,7 +67,7 @@
       "claudeSetupMintBudgetSeconds": 120,
       "claudeSetupMintGraceSeconds": 10,
       "heartbeatIntervalSeconds": 10,
-      "heartbeatDeadlineSeconds": 30,
+      "heartbeatDeadlineSeconds": 90,
       "devicePollIntervalSeconds": 5,
       "deviceSlowDownStepSeconds": 5
     }
@@ -160,7 +160,7 @@
           "claudeSetupMintBudgetSeconds": 120,
           "claudeSetupMintGraceSeconds": 10,
           "heartbeatIntervalSeconds": 10,
-          "heartbeatDeadlineSeconds": 30,
+          "heartbeatDeadlineSeconds": 90,
           "devicePollIntervalSeconds": 5,
           "deviceSlowDownStepSeconds": 5
         }

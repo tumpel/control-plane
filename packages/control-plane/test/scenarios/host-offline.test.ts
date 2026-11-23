@@ -22,24 +22,6 @@ test("a host that closes its socket fails its running turn HostOffline at once",
   assert.match(turn.state === "Failed" ? (turn.detail ?? "") : "", /went offline/);
 });
 
-test("a host that falls silent fails its running turn HostOffline on the next read", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  await world.holdsAgentCredentials();
-  const host = await world.hostOnline("host-1");
-  await world.startSession({ prompt: "stream a lot", tags: [] });
-  const offer = host.takeOffer();
-  await host.claims(offer);
-
-  host.quiet();
-  assert.equal((await world.turn(offer.turnId)).state, "Running");
-  await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
-
-  const turn = await world.turn(offer.turnId);
-  assert.equal(reasonOf(turn), "HostOffline");
-  assert.match(turn.state === "Failed" ? (turn.detail ?? "") : "", /sent nothing for/);
-});
-
 test("a silent host counts as Degraded and takes no new session", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
@@ -54,7 +36,7 @@ test("a silent host counts as Degraded and takes no new session", async (t) => {
     .parse(await world.tryStartSession({ prompt: "start while the host is silent", tags: [] }));
   assert.deepEqual(
     started.started.hosts.map((each) => each.reason),
-    ["NotHealthy"],
+    ["NotOnline"],
   );
   assert.equal(host.received("TurnOffer").length, 0);
 });

@@ -5,7 +5,7 @@ import { mock } from "node:test";
 import {
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
-  HostSchema,
+  HostRecordSchema,
   MintedEnrolmentTokenSchema,
   SessionSchema,
   StartedSessionSchema,
@@ -430,7 +430,7 @@ export class World {
       }),
     });
     if (enrolled.status !== 200) throw new Error(`enrolling answered ${enrolled.status}: ${await enrolled.text()}`);
-    return { hostId: HostSchema.parse(await enrolled.json()).hostId, key };
+    return { hostId: HostRecordSchema.parse(await enrolled.json()).hostId, key };
   }
 
   async connect(
@@ -526,7 +526,7 @@ export class World {
   async startPrebuild(): Promise<void> {
     const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
       "hosts.ts",
-      "listHosts",
+      "listHostRecords",
     );
     await installApp(this.db, TENANT_ID, "acme");
     const personaId = await this.defaultPersona();
@@ -573,7 +573,7 @@ export class World {
   async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
     const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
       "hosts.ts",
-      "listHosts",
+      "listHostRecords",
     );
     const personaId = await this.defaultPersona();
     return this.call("startSession", {
@@ -601,7 +601,7 @@ export class World {
   async sendTurn(sessionId: string, prompt: string): Promise<{ turnId: string }> {
     const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
       "hosts.ts",
-      "listHosts",
+      "listHostRecords",
     );
     return z.object({ sent: z.object({ kind: z.literal("Sent"), turn: z.object({ turnId: z.string() }) }) }).parse(
       await this.call("sendTurn", {

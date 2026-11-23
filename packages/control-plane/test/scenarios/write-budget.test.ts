@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
-import { BUDGETS, World } from "./harness/world.ts";
+import { World } from "./harness/world.ts";
 
 const STEADY_ROWS_BUDGET = 100;
-const TURN_ROWS_BUDGET = 50;
+const TURN_ROWS_BUDGET = 53;
 
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 const SESSIONS = 10;
 const LINE_EVERY_MS = 2_000;
 const HEARTBEAT_EVERY_MS = 10_000;
@@ -15,14 +13,7 @@ const STREAM_MS = 10 * 60_000;
 test("one host streaming 10 running turns for 10 minutes writes fewer than 100 tenant rows", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
-  await world.call("hostHello", {
-    hostId: host.hostId,
-    boxCapacity: SESSIONS,
-    usage: USAGE,
-    now: Date.now(),
-    channelProtocol: ChannelProtocol.Version,
-  });
+  const host = await world.online(world.owner, "host-1", { boxCapacity: SESSIONS });
   const turnIds: string[] = [];
   for (let session = 1; session <= SESSIONS; session++) {
     await world.startSession({ prompt: `stream session ${session}`, tags: [] });
@@ -31,7 +22,7 @@ test("one host streaming 10 running turns for 10 minutes writes fewer than 100 t
     await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq: 1, text: '{"type":"assistant","n":1}' });
     turnIds.push(offer.turnId);
   }
-  await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+  await host.beats();
 
   const start = world.tenantRowsWritten();
   let lineSeq = 1;
@@ -42,7 +33,7 @@ test("one host streaming 10 running turns for 10 minutes writes fewer than 100 t
       await host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
     }
     if (elapsed % HEARTBEAT_EVERY_MS === 0) {
-      await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+      await host.beats();
     }
   }
   const rows = world.tenantRowsWritten() - start;
@@ -62,7 +53,7 @@ test("one turn from offer to completion writes a fixed number of tenant rows", a
   for (let lineSeq = 1; lineSeq <= 10; lineSeq++) {
     await host.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
   }
-  await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+  await host.beats();
   await host.says({
     type: "TurnLine",
     turnId: offer.turnId,

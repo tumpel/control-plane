@@ -4,6 +4,7 @@ import { after, before, test } from "node:test";
 import {
   ConfigPlanSchema,
   EffectiveHarnessVersionSchema,
+  HostRecordSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
   PersonaFileLimit,
@@ -130,7 +131,7 @@ const enrolHost = async (): Promise<string> => {
     supervisorVersion: "0.1.0",
   });
   assert.equal(enrolled.status, 200);
-  return HostSchema.parse(await enrolled.json()).hostId;
+  return HostRecordSchema.parse(await enrolled.json()).hostId;
 };
 
 const turned = async (condition: () => boolean, what: string): Promise<void> => {

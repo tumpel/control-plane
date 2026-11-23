@@ -13,6 +13,7 @@ import {
   EffectiveHarnessVersionSchema,
   HarnessCatalogEntrySchema,
   HarnessPinSchema,
+  HostRecordSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
@@ -174,7 +175,7 @@ const enrolHost = async (): Promise<string> => {
     supervisorVersion: "0.1.0",
   });
   assert.equal(enrolled.status, 200);
-  return HostSchema.parse(await enrolled.json()).hostId;
+  return HostRecordSchema.parse(await enrolled.json()).hostId;
 };
 
 before(async () => {

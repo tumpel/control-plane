@@ -114,7 +114,6 @@ import {
   revokeEnrolmentToken,
   revokeHost,
   setHostLabels,
-  withPresence,
 } from "./hosts";
 import {
   issues,
@@ -1271,7 +1270,7 @@ const handleHost = async (request: Request, url: URL, env: Env): Promise<Respons
   }
   const host = await hostOf(env.DB, caller.tenantId, hostId);
   if (host === null) return refusal(hostNotFound(hostId));
-  const [withUpdates] = await hostReads(env, caller.tenantId, [await withPresence(env, host)]);
+  const [withUpdates] = await hostReads(env, caller.tenantId, [host]);
   return json(withUpdates);
 };
 

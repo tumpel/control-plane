@@ -1,6 +1,5 @@
 import { type CredentialRefusal, checkModelCredential, credentialProblem } from "@tumpel/api/credentials";
 import {
-  BoxMemoryLimit,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
@@ -27,7 +26,7 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
+import { type HostRecord, hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
@@ -130,11 +129,10 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
 
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
+  if (refused.reason === "NotOnline" && refused.host.state === "Online")
+    return `${named} has not reported to the control plane within its heartbeat grace and counts as Degraded until it sends a heartbeat`;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
   if (refused.reason === "NotHealthy") {
-    if (refused.host.health === "Degraded") {
-      return `${named} missed its heartbeat and counts as Degraded until it sends one or reconnects`;
-    }
     if (refused.host.health !== "Healthy") return `${named} is ${refused.host.health}`;
     return `${named} reports itself ${refused.host.reportedHealth}`;
   }
@@ -310,7 +308,7 @@ const prepareStart = async (
   return ok({
     principalId: caller.principalId,
     startedBy: caller.origin,
-    hosts: await listHosts(env, caller.tenantId),
+    hosts: await listHostRecords(env, caller.tenantId),
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
@@ -500,7 +498,7 @@ export const sendTurn = async (
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
-  const hosts = await listHosts(env, caller.tenantId);
+  const hosts = await listHostRecords(env, caller.tenantId);
   const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);

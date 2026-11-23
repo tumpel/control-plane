@@ -103,6 +103,7 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = Chan
     supervisorVersion: "0.1.0",
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), pair.privateKey).toString("base64"),
     boxCapacity: 8,
+    heldTurnIds: [],
     usage: {
       boxesWarm: 0,
       loadAverage: 0,

@@ -27,7 +27,6 @@ const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = 
   let connection: control.ControlConnection = {
     phase: "Open",
     protocolVersion: ChannelProtocol.Version,
-    heldReported: true,
   };
   const line = async (seq: number) => {
     const text = JSON.stringify({
@@ -38,7 +37,7 @@ const channel = (admitFrame: (seq: number) => control.FrameRateRefusal | null = 
     });
     const received = await control.receive(connection, text, context);
     connection = received.connection;
-    if (received.event.kind === "Message") ledger.hold(received.event.frame, true, text.length);
+    if (received.event.kind === "Message") ledger.hold(received.event.frame, true);
     return received.event.kind;
   };
   const oversized = async (seq: number) => {

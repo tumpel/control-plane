@@ -3,6 +3,7 @@ import { after, before, test } from "node:test";
 import {
   CloseCode,
   EnrolmentTokenSchema,
+  HostRecordSchema,
   HostSchema,
   MintedEnrolmentTokenSchema,
   ProblemSchema,
@@ -10,7 +11,7 @@ import {
 } from "@tumpel/schemas";
 import { z } from "zod";
 import { hostKey } from "./harness/supervisor.ts";
-import { LIMITS, type Member, World } from "./harness/world.ts";
+import { LIMITS, type Member, SETTINGS, World } from "./harness/world.ts";
 
 const EMAIL = "hosts@example.test";
 const RAISED = { ...LIMITS.ceiling, hostFramesPerMinute: 1200 };
@@ -72,7 +73,7 @@ test("a host enrols with a one-time token, holds its channel, reads Degraded whe
   const key = hostKey();
   const first = await enrolWith("first", token, key.publicKey);
   assert.equal(first.status, 200);
-  const host = HostSchema.parse(await first.json());
+  const host = HostRecordSchema.parse(await first.json());
   assert.equal(host.state, "Enrolled");
   assert.equal(host.name, "first");
 
@@ -91,17 +92,15 @@ test("a host enrols with a one-time token, holds its channel, reads Degraded whe
   );
 
   supervisor.quiet();
-  const silent = await world.until(
-    `host ${host.hostId} reading Degraded`,
-    () => readHost(host.hostId),
-    (read) => read.health === "Degraded",
-  );
+  await world.passes((SETTINGS.heartbeatDeadlineSeconds + 1) * 1000);
+  const silent = await readHost(host.hostId);
   assert.equal(silent.state, "Online");
+  assert.equal(silent.presence, "Degraded");
   supervisor.resumes();
   await world.until(
     `host ${host.hostId} heard again`,
     () => readHost(host.hostId),
-    (read) => read.state === "Online" && read.health !== "Degraded",
+    (read) => read.presence === "Online",
   );
 
   const revoked = await world.fetch(member, "POST", `/v1/hosts/${host.hostId}/revoke`, "{}");
