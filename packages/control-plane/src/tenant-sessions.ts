@@ -1733,8 +1733,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const held = JSON.stringify(heldSessionIds);
     const gone = this.ctx.storage.sql
       .exec<{ session_id: string }>(
-        `UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND session_id NOT IN (SELECT value FROM json_each(?))
-          AND (state = 'Idle' OR (state = 'Stopping' AND session_id NOT IN (SELECT session_id FROM snapshot_requests)))
+        `UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state IN ('Idle', 'Stopping')
+          AND session_id NOT IN (SELECT value FROM json_each(?))
+          AND (state = 'Idle' OR NOT EXISTS (SELECT 1 FROM snapshot_requests r WHERE r.session_id = sessions.session_id))
         RETURNING session_id`,
         now,
         hostId,
