@@ -1452,9 +1452,34 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async evictionSettled(tenantId: string, sessionId: string): Promise<void> {
-    if (this.sessionRow(sessionId)?.state === "Stopping") return;
+    const settled = this.sessionRow(sessionId);
+    if (settled?.state === "Stopping") return;
     const next = this.nextQueued(sessionId);
     if (next !== null) await this.runQueued(tenantId, next);
+    if (settled !== null) await this.offerRoomed(tenantId, settled.host_id);
+  }
+
+  private async offerRoomed(tenantId: string, hostId: string): Promise<void> {
+    const roomed = this.ctx.storage.sql
+      .exec<{ turn_id: string }>(
+        `SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id = t.session_id
+        WHERE t.host_id = ?1 AND t.state = 'Offered' AND t.offer_sent = 0
+          AND s.host_id = t.host_id AND s.box_id = t.box_id AND s.state IN ('Starting', 'Running')
+          AND NOT EXISTS (SELECT 1 FROM sessions x WHERE x.host_id = ?1 AND x.state = 'Stopping')
+          AND NOT EXISTS (
+            SELECT 1 FROM turns e WHERE e.session_id = t.session_id AND e.state IN ('Offered', 'Running')
+              AND (e.created_at, e.turn_id) < (t.created_at, t.turn_id)
+          )
+        ORDER BY t.created_at, t.turn_id`,
+        hostId,
+      )
+      .toArray();
+    for (const { turn_id: turnId } of roomed) {
+      const turn = this.turnRow(turnId);
+      const session = turn === null ? null : this.sessionRow(turn.session_id);
+      if (turn === null || session === null) throw new Error(`turn ${turnId} vanished while it waited for room`);
+      await this.offer(tenantId, session, turn);
+    }
   }
 
   private async sendSettled(tenantId: string, turnId: string, hostId: string, sent: OfferSent | Error): Promise<void> {
@@ -2109,7 +2134,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         this.listHostUsage(tenantId),
         image.image,
         boxSizeOf(session),
-        this.heldBoxes(),
+        this.heldBoxes().filter((each) => each.sessionId !== session.session_id),
         now - presenceGraceMs(settingsOf(this.env)),
       );
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
