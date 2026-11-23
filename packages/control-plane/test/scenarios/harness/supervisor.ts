@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:cryp
 import { ChannelProtocol, type HostUsageSchema, StoredTurnOfferSchema } from "@tumpel/schemas";
 import type { WebSocket } from "ws";
 import { z } from "zod";
-import { ControlEnvelopeSchema, helloBytes } from "../../../src/channel/protocol.ts";
+import { ControlEnvelopeSchema, HELD_TURNS_PROTOCOL, helloBytes } from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
 
 const REPLIES = new Set([
@@ -28,7 +28,8 @@ type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
 export type HostMessage = { type: string } & Record<string, unknown>;
 export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
-export type Carried = { received: number; sent: number; held: string[] };
+export type Carried = { received: number; sent: number; held: string[]; turns: string[] };
+export type Holding = { heldTurnIds: string[]; heldSessionIds: string[] };
 type SentFrame = { type: "Frame"; seq: number; ack: number; message: HostMessage };
 export type Closed = { code: number; reason: string; wasClean: boolean };
 
@@ -68,6 +69,7 @@ export const hostKey = (): { privateKey: KeyObject; publicKey: string } => {
 
 export type SupervisorOptions = {
   boxCapacity: number;
+  protocolVersion: number;
   carried: Carried;
   resend: HostMessage[];
   usage: HostUsage;
@@ -89,6 +91,8 @@ export class Supervisor {
   private sent: number;
   private acked = 0;
   private readonly held: Set<string>;
+  private readonly turns: Set<string>;
+  private readonly released = new Set<string>();
   private unacked: SentFrame[];
   private usage: HostUsage;
   private welcomed = false;
@@ -112,6 +116,7 @@ export class Supervisor {
     this.heard = options.carried.received;
     this.sent = options.carried.sent;
     this.held = new Set(options.carried.held);
+    this.turns = new Set(options.carried.turns);
     this.unacked = [...options.unacked];
     this.socket = openSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${hostId}/channel`);
     this.socket.on("message", (data) => this.receive(String(data)));
@@ -132,7 +137,8 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      carried: { received: 0, sent: 0, held: [] },
+      protocolVersion: ChannelProtocol.Version,
+      carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
       usage: DEFAULT_USAGE,
       supervisorVersion: "0.1.0",
@@ -164,13 +170,32 @@ export class Supervisor {
 
   private beat(): void {
     if (!this.welcomed || this.closedWith !== null) return;
+    this.heartbeatWith(this.holding());
+  }
+
+  private heartbeatWith(holding: Holding): void {
     this.raw({
       type: "Heartbeat",
       sentAt: new Date().toISOString(),
       usage: this.usage,
-      heldSessionIds: [...this.held],
+      heldSessionIds: holding.heldSessionIds,
       heldClaudeSetupIds: [],
+      ...this.heldTurnIds(holding.heldTurnIds),
     });
+  }
+
+  private heldTurnIds(heldTurnIds: string[]): { heldTurnIds?: string[] } {
+    return this.options.protocolVersion >= HELD_TURNS_PROTOCOL ? { heldTurnIds } : {};
+  }
+
+  holding(): Holding {
+    return { heldTurnIds: [...this.turns], heldSessionIds: [...this.held].filter((id) => !this.released.has(id)) };
+  }
+
+  async beats(holding: Partial<Holding> = {}): Promise<void> {
+    this.heartbeatWith({ ...this.holding(), ...holding });
+    await this.clock.settle();
+    this.assertOpen("after a Heartbeat");
   }
 
   quiet(): void {
@@ -208,11 +233,12 @@ export class Supervisor {
       this.raw({
         type: "Hello",
         hostId: this.hostId,
-        protocolVersion: ChannelProtocol.Version,
+        protocolVersion: this.options.protocolVersion,
         supervisorVersion: this.options.supervisorVersion,
         signature: sign(null, helloBytes(envelope.nonce, this.hostId), this.key).toString("base64"),
         boxCapacity: this.options.boxCapacity,
         usage: this.usage,
+        ...this.heldTurnIds([...this.turns]),
       });
       return;
     }
@@ -233,7 +259,12 @@ export class Supervisor {
     if (envelope.type !== "Frame" || envelope.seq <= this.heard) return;
     assert.equal(envelope.seq, this.heard + 1, "the control plane skipped a frame");
     this.heard = envelope.seq;
-    if (envelope.message.type === "TurnOffer") this.held.add(envelope.message.sessionId);
+    if (envelope.message.type === "TurnOffer") {
+      this.held.add(envelope.message.sessionId);
+      this.released.delete(envelope.message.sessionId);
+      this.turns.add(envelope.message.turnId);
+    }
+    if (envelope.message.type === "BoxDiscard") this.released.add(envelope.message.sessionId);
     this.inbox.push(envelope.message);
   }
 
@@ -243,6 +274,9 @@ export class Supervisor {
   }
 
   send(message: HostMessage): number {
+    if ((message.type === "TurnComplete" || message.type === "TurnFailed") && typeof message.turnId === "string")
+      this.turns.delete(message.turnId);
+    if (message.type === "BoxGone" && typeof message.sessionId === "string") this.released.add(message.sessionId);
     this.sent += 1;
     const frame: SentFrame = { type: "Frame", seq: this.sent, ack: this.heard, message };
     this.unacked.push(frame);
@@ -361,7 +395,7 @@ export class Supervisor {
   }
 
   carried(): Carried {
-    return { received: this.heard, sent: this.sent, held: [...this.held] };
+    return { received: this.heard, sent: this.sent, held: [...this.held], turns: [...this.turns] };
   }
 
   close(): void {

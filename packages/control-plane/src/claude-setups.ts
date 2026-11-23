@@ -7,7 +7,7 @@ import {
 } from "@tumpel/schemas";
 import { SETUP_CREDENTIALS } from "./claude-setup";
 import { pinnedEntry } from "./harness-catalog";
-import { listHosts } from "./hosts";
+import { listHostRecords } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -65,7 +65,7 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
     });
   }
   const now = Date.now();
-  const hosts = await listHosts(env, caller.tenantId);
+  const hosts = await listHostRecords(env, caller.tenantId);
   const { started } = await tenant.call("startClaudeSetup", {
     tenantId: caller.tenantId,
     input: {

@@ -75,11 +75,13 @@ const assess = (
   usages: ReadonlyMap<string, ReportedHostUsage>,
   image: ImageAvailability,
   { boxMemoryMib, boxDiskMib }: BoxSize,
+  heardSince: number,
 ): Candidate | Unplaceable => {
   const usage = usages.get(host.hostId);
-  if (host.state !== "Online" || usage === undefined) return { kind: "Unplaceable", host, reason: "NotOnline" };
-  if (host.health !== "Healthy" || host.reportedHealth !== "Healthy")
-    return { kind: "Unplaceable", host, reason: "NotHealthy" };
+  if (host.state !== "Online" || usage === undefined || usage.updatedAt < heardSince)
+    return { kind: "Unplaceable", host, reason: "NotOnline" };
+  if (host.health !== "Healthy" || usage.reportedHealth !== "Healthy")
+    return { kind: "Unplaceable", host: { ...host, reportedHealth: usage.reportedHealth }, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
   if (boxMemoryMib > freeMemoryMib(usage))
     return { kind: "Unplaceable", host, reason: "MemoryFull", usage, boxMemoryMib };
@@ -93,17 +95,17 @@ const evicting = (
   image: ImageAvailability,
   box: BoxSize,
   victims: readonly HeldBox[],
+  heardSince: number,
 ): HeldBox[] | null => {
   for (let count = 1; count <= victims.length; count++) {
     const evict = victims.slice(0, count);
-    const freed = assess(host, new Map([[host.hostId, freeing(usage, evict)]]), image, box);
+    const freed = assess(host, new Map([[host.hostId, freeing(usage, evict)]]), image, box, heardSince);
     if (freed.kind === "Candidate") return evict;
   }
   return null;
 };
 
 const isPlacementRefusal = (refused: TenantUnplaceable): refused is Unplaceable =>
-  refused.reason !== "NotHeard" &&
   refused.reason !== "Full" &&
   refused.reason !== "NoMemory" &&
   (!("usage" in refused) ||
@@ -122,7 +124,7 @@ export const placementRefusals = (hosts: readonly TenantUnplaceable[]): Unplacea
   });
 
 export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
-  hosts.some(({ reason, host }) => reason === "NotHealthy" && host.health === "Degraded") &&
+  hosts.some(({ reason, host }) => reason === "NotOnline" && host.state === "Online") &&
   hosts.every(({ reason }) => reason === "NotOnline" || reason === "NotHealthy");
 
 export const placeSession = (
@@ -131,9 +133,10 @@ export const placeSession = (
   image: ImageAvailability,
   box: BoxSize,
   held: readonly HeldBox[],
+  heardSince: number,
 ): Placement => {
   const byHost = new Map(usages.map((usage) => [usage.hostId, withHeld(usage, held)]));
-  const assessed = hosts.map((host) => assess(host, byHost, image, box));
+  const assessed = hosts.map((host) => assess(host, byHost, image, box, heardSince));
   const [best] = assessed
     .filter((each): each is Candidate => each.kind === "Candidate")
     .sort((a, b) => busyness(a) - busyness(b) || freeSlots(b.usage) - freeSlots(a.usage));
@@ -146,7 +149,7 @@ export const placeSession = (
     const usage = byHost.get(hostId);
     if (host === undefined || usage === undefined) continue;
     const victims = evictable.filter((each) => each.hostId === hostId);
-    const evict = evicting(host, usage, image, box, victims);
+    const evict = evicting(host, usage, image, box, victims, heardSince);
     if (evict !== null) return { kind: "Placed", host, evict };
   }
   return { kind: "Refused", hosts: assessed.filter((each): each is Unplaceable => each.kind === "Unplaceable") };

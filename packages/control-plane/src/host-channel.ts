@@ -6,14 +6,7 @@ import * as control from "./channel/control.ts";
 import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
 import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
 import { HostLedger } from "./channel/ledger.ts";
-import type {
-  ControlEnvelope,
-  Frame,
-  HostMessage,
-  HostReportedHealth,
-  StoredControlMessage,
-  TelemetryBatch,
-} from "./channel/protocol.ts";
+import type { ControlEnvelope, Frame, HostMessage, StoredControlMessage, TelemetryBatch } from "./channel/protocol.ts";
 import { durableDb } from "./db/client.ts";
 import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
@@ -41,18 +34,19 @@ interface Attachment {
   connection: control.ControlConnection;
   lastReceivedAt: number;
   lastSentAt: number;
-  usage: control.ReportedUsage | null;
+  boxCapacity: number | null;
   heldFrom: number | null;
 }
+
+type Heartbeat = Extract<control.ControlEvent, { kind: "Heartbeat" }>;
 
 type Presence = "Online" | "Offline";
 
 type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
 
-const usageOf = (attachment: Attachment): control.ReportedUsage => {
-  if (attachment.usage === null)
-    throw new Error("a host channel holds transcript lines from a connection that sent no usage");
-  return attachment.usage;
+const boxCapacityOf = (attachment: Attachment): number => {
+  if (attachment.boxCapacity === null) throw new Error("a host channel took a Heartbeat on a connection with no Hello");
+  return attachment.boxCapacity;
 };
 
 const isAttachment = (value: unknown): value is Attachment =>
@@ -63,7 +57,7 @@ const isAttachment = (value: unknown): value is Attachment =>
   typeof value.lastReceivedAt === "number" &&
   "lastSentAt" in value &&
   typeof value.lastSentAt === "number" &&
-  "usage" in value &&
+  "boxCapacity" in value &&
   "heldFrom" in value;
 
 export class HostChannel extends DurableObject<Env> {
@@ -108,17 +102,6 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
-  lastReceivedAt(): number | null {
-    const received = this.ctx
-      .getWebSockets()
-      .filter(
-        (socket) =>
-          socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
-      )
-      .map((socket) => this.attachment(socket).lastReceivedAt);
-    return received.length === 0 ? null : Math.max(...received);
-  }
-
   async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
@@ -133,7 +116,6 @@ export class HostChannel extends DurableObject<Env> {
     const spoken = await control.prepare(message, this.context(null, host, null));
     const open = this.openSocket();
     if (message.type === "TurnOffer" && open === undefined) return "Offline";
-    if (message.type === "TurnOffer" && open !== undefined && this.silent(open)) return "Degraded";
     if (open === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
       return "Sent";
@@ -154,31 +136,14 @@ export class HostChannel extends DurableObject<Env> {
       );
   }
 
-  private async fellSilent(hostId: string, silentFor: number, now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    const detail = `host ${hostId} sent nothing for ${Math.floor(silentFor / 1000)} seconds, so its running work failed`;
-    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", {
-      tenantId,
-      hostId,
-      health: "Degraded",
-      detail,
-      now,
-    });
-  }
-
   private async offerRefused(hostId: string): Promise<OfferSent | null> {
-    const row = await this.env.DB.prepare("SELECT state, reported_health FROM hosts WHERE host_id = ?")
+    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
       .bind(hostId)
-      .first<{ state: string; reported_health: string }>();
-    if ((await this.frameMeter(hostId)).health() !== "Healthy" || row?.reported_health === "RateLimited")
-      return "RateLimited";
+      .first<{ state: string }>();
+    if ((await this.frameMeter(hostId)).health() !== "Healthy") return "RateLimited";
     const open = this.openSocket();
     if (row?.state !== "Online" || open === undefined) return "Offline";
-    return this.silent(open) ? "Degraded" : null;
-  }
-
-  private silent(socket: WebSocket): boolean {
-    return Date.now() - this.attachment(socket).lastReceivedAt >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
+    return null;
   }
 
   async restoreHealth(detail: string): Promise<void> {
@@ -215,7 +180,7 @@ export class HostChannel extends DurableObject<Env> {
       connection: { phase: "Closed" },
       lastReceivedAt: now,
       lastSentAt: now,
-      usage: null,
+      boxCapacity: null,
       heldFrom: null,
     };
     attachment.connection = control.challenge(this.port(server, attachment));
@@ -250,22 +215,17 @@ export class HostChannel extends DurableObject<Env> {
       return this.refreshPresence(socket);
     }
     const now = Date.now();
-    const silentFor = now - attachment.lastReceivedAt;
     attachment.lastReceivedAt = now;
-    if (attachment.connection.phase === "Open" && silentFor >= settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
-      await this.fellSilent(host.host_id, silentFor, now);
     const meter = await this.frameMeter(host.host_id);
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
     if (event.kind === "Welcomed") {
       this.ledger.take();
-      attachment.usage = event.usage;
+      attachment.boxCapacity = event.boxCapacity;
     }
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") attachment.usage = event.usage;
     this.keep(socket, attachment);
     if (this.tripped !== null) await this.trip(host.host_id, this.tripped, meter.framesPerMinute);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.reportHealth(host.host_id, event.health);
+    if (event.kind === "Heartbeat") {
       if (meter.recovered(now)) {
         await this.setHealth(
           host.host_id,
@@ -275,17 +235,14 @@ export class HostChannel extends DurableObject<Env> {
         meter.settle("Healthy");
       }
     }
-    if (event.kind === "Message") await this.take(host.host_id, event.frame, now, attachment, context);
+    if (event.kind === "Message") await this.take(host.host_id, event.frame, attachment, context);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
-    if ((event.kind === "FrameRefused" || event.kind === "FrameRateLimited") && this.ledger.holding())
-      await this.flush(host.host_id, usageOf(attachment), now, attachment, context);
     if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event, now);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
+    if (event.kind === "Heartbeat") {
       if (
-        !(await this.flush(host.host_id, event.usage, now, attachment, context)) &&
+        !(await this.heartbeat(host.host_id, event, now, attachment, context)) &&
         this.ledger.stalled() >= RETRY_LIMIT
       )
         return this.giveUp(socket, attachment, context);
@@ -308,49 +265,24 @@ export class HostChannel extends DurableObject<Env> {
   private async take(
     hostId: string,
     frame: Frame<HostMessage>,
-    now: number,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    const bytes = JSON.stringify(frame.message).length;
-    if (this.ledger.queued().length > 0) return this.queue(frame, bytes, attachment, context);
+    if (this.ledger.queued().length > 0) return this.queue(frame);
     const ordered = frame.message.type !== "TurnLine" && this.ledger.holding();
-    if (ordered && !(await this.settle(hostId, usageOf(attachment), now, attachment, context)))
-      return this.queue(frame, bytes, attachment, context);
+    if (ordered && !(await this.settle(hostId, attachment, context))) return this.queue(frame);
     const delivered = await this.reply(hostId, frame);
-    if (!delivered.ok) {
-      if (ordered) this.checkpoint(attachment, context, []);
-      return this.queue(frame, bytes, attachment, context);
-    }
+    if (!delivered.ok) return this.queue(frame);
     if (frame.message.type !== "TurnLine") {
       this.checkpoint(attachment, context, [frame]);
       return this.answer(hostId, frame, delivered.reply, attachment, context);
     }
     await this.answer(hostId, frame, delivered.reply, attachment, context);
-    this.ledger.hold(frame, true, bytes);
-    if (!this.ledger.full()) return;
-    if (!(await this.flush(hostId, usageOf(attachment), now, attachment, context))) this.overflow(attachment, context);
+    this.ledger.hold(frame, true);
   }
 
-  private queue(
-    frame: Frame<HostMessage>,
-    bytes: number,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): void {
-    this.ledger.hold(frame, false, bytes);
-    if (this.ledger.full()) this.overflow(attachment, context);
-  }
-
-  private overflow(attachment: Attachment, context: control.ControlContext): void {
-    const first = this.ledger.first();
-    this.ledger.take();
-    attachment.heldFrom = null;
-    control.close(
-      context.port,
-      CloseCode.ProtocolError,
-      `the control plane could not store frames ${first ?? "none"} onward in time; reconnect and resend them`,
-    );
+  private queue(frame: Frame<HostMessage>): void {
+    this.ledger.hold(frame, false);
   }
 
   private giveUp(socket: WebSocket, attachment: Attachment, context: control.ControlContext): Promise<void> {
@@ -365,16 +297,35 @@ export class HostChannel extends DurableObject<Env> {
     return this.refreshPresence(socket);
   }
 
-  private async flush(
+  private async heartbeat(
     hostId: string,
-    usage: control.ReportedUsage,
+    beat: Heartbeat,
     now: number,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<boolean> {
-    if (!(await this.settle(hostId, usage, now, attachment, context))) return false;
-    this.checkpoint(attachment, context, []);
-    return true;
+    if (!(await this.settle(hostId, attachment, context))) return false;
+    if (attachment.connection.phase !== "Open") return false;
+    const tenantId = await this.tenantOf(hostId);
+    const reported = await tenantApi(this.env.TENANT, tenantId)
+      .call("hostHeartbeat", {
+        tenantId,
+        hostId,
+        boxCapacity: boxCapacityOf(attachment),
+        usage: beat.usage,
+        reportedHealth: beat.reportedHealth,
+        now,
+        channelProtocol: attachment.connection.protocolVersion,
+        heldSessionIds: beat.heldSessionIds,
+        heldClaudeSetupIds: beat.heldClaudeSetupIds,
+        heldTurns: beat.heldTurns,
+      })
+      .then(
+        () => true,
+        (error: unknown) => this.undelivered("Heartbeat", error),
+      );
+    if (reported) this.checkpoint(attachment, context, []);
+    return reported;
   }
 
   private checkpoint(attachment: Attachment, context: control.ControlContext, frames: Frame<HostMessage>[]): void {
@@ -383,23 +334,14 @@ export class HostChannel extends DurableObject<Env> {
     if (acked.length > 0) control.acknowledge(context, acked);
   }
 
-  private async settle(
-    hostId: string,
-    usage: control.ReportedUsage,
-    now: number,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): Promise<boolean> {
+  private async settle(hostId: string, attachment: Attachment, context: control.ControlContext): Promise<boolean> {
     for (const frame of this.ledger.queued()) {
       const delivered = await this.reply(hostId, frame);
       if (!delivered.ok) return false;
       this.ledger.forwarded(frame.seq);
       await this.answer(hostId, frame, delivered.reply, attachment, context);
     }
-    return this.report(hostId, usage, now).then(
-      () => true,
-      (error: unknown) => this.undelivered("Heartbeat", error),
-    );
+    return true;
   }
 
   private undelivered(type: string, error: unknown): false {
@@ -485,11 +427,13 @@ export class HostChannel extends DurableObject<Env> {
     ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
+      tenantId,
       hostId,
       boxCapacity: welcomed.boxCapacity,
       usage: welcomed.usage,
       now,
-      channelProtocol: welcomed.protocolVersion,
+      channelProtocol: welcomed.channelProtocol,
+      heldTurns: welcomed.heldTurns,
     });
   }
 
@@ -540,28 +484,6 @@ export class HostChannel extends DurableObject<Env> {
     await this.env.DB.prepare("UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1")
       .bind(health, now, hostId)
       .run();
-  }
-
-  private async reportHealth(hostId: string, health: HostReportedHealth): Promise<void> {
-    await this.env.DB.prepare(
-      "UPDATE hosts SET reported_health = ?1, updated_at = ?2 WHERE host_id = ?3 AND reported_health IS NOT ?1",
-    )
-      .bind(health, Date.now(), hostId)
-      .run();
-  }
-
-  private async report(hostId: string, usage: control.ReportedUsage, now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
-  }
-
-  private async reconcileHeldBoxes(
-    hostId: string,
-    held: { heldSessionIds: string[]; heldClaudeSetupIds: string[] },
-    now: number,
-  ): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, ...held, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {

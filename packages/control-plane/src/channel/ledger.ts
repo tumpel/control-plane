@@ -15,10 +15,7 @@ const { ledger: hostLedger, refusedFrames } = hostSchema;
 
 export type HostDb = DurableDb<typeof hostSchema>;
 
-type Held = { frame: Frame<unknown>; message: HostMessage | null; forwarded: boolean; bytes: number };
-
-const HELD_FRAMES = 1000;
-const HELD_BYTES = 1_000_000;
+type Held = { frame: Frame<unknown>; message: HostMessage | null; forwarded: boolean };
 
 export class HostLedger implements LedgerStore<StoredControlMessage> {
   readonly #db: HostDb;
@@ -89,8 +86,8 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
     return this.#refused;
   }
 
-  hold(frame: Frame<HostMessage>, forwarded: boolean, bytes: number): void {
-    this.#held.push({ frame, message: frame.message, forwarded, bytes });
+  hold(frame: Frame<HostMessage>, forwarded: boolean): void {
+    this.#held.push({ frame, message: frame.message, forwarded });
   }
 
   holding(): boolean {
@@ -109,10 +106,6 @@ export class HostLedger implements LedgerStore<StoredControlMessage> {
 
   requeue(): void {
     for (const held of this.#held) if (held.message !== null) held.forwarded = false;
-  }
-
-  full(): boolean {
-    return this.#held.length >= HELD_FRAMES || this.#held.reduce((bytes, held) => bytes + held.bytes, 0) >= HELD_BYTES;
   }
 
   first(): number | null {

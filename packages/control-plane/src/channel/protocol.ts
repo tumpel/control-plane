@@ -1,23 +1,37 @@
 import {
   ControlEnvelopeSchema,
   type ControlFrameSchema,
+  type HeldTurnsSchema,
   HelloSchema,
   HostEnvelopeSchema,
-  type HostFrameSchema,
+  HostFrameSchema,
+  HostHeartbeatSchema,
   type HostReportedHealthSchema,
   type HostUsageSchema,
 } from "@tumpel/schemas";
-import type { z } from "zod";
+import { z } from "zod";
 
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
-export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true });
+export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true, channelProtocolOldest: true });
+export const HELD_TURNS_PROTOCOL = 35;
+const HeldTurnsUnreportedEnvelopeSchema = z.discriminatedUnion("type", [
+  HelloSchema.omit({ heldTurnIds: true }),
+  HostHeartbeatSchema.omit({ heldTurnIds: true }),
+  HostFrameSchema,
+]);
+export const hostEnvelopeSchema = (protocolVersion: number) =>
+  protocolVersion >= HELD_TURNS_PROTOCOL ? HostEnvelopeSchema : HeldTurnsUnreportedEnvelopeSchema;
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
-export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;
+export type HostEnvelope = z.infer<typeof HostEnvelopeSchema> | z.infer<typeof HeldTurnsUnreportedEnvelopeSchema>;
+export type HeldTurns = z.infer<typeof HeldTurnsSchema>;
 export type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
 export type Hello = Extract<HostEnvelope, { type: "Hello" }>;
 export type HostHeartbeat = Extract<HostEnvelope, { type: "Heartbeat" }>;
+
+export const heldTurnsOf = (envelope: Hello | HostHeartbeat): HeldTurns =>
+  "heldTurnIds" in envelope ? { state: "Reported", heldTurnIds: envelope.heldTurnIds } : { state: "NotReported" };
 export type HostUsage = z.infer<typeof HostUsageSchema>;
 export type HostReportedHealth = z.infer<typeof HostReportedHealthSchema>;
 export type HostFrame = z.infer<typeof HostFrameSchema>;

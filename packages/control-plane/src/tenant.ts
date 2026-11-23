@@ -588,27 +588,14 @@ export class Tenant extends TenantConnectors {
     transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
       cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
     }),
-    offerSent: ({ turnId }) => {
-      this.offerSent(turnId);
+    hostHello: async ({ tenantId, hostId, boxCapacity, usage, now, channelProtocol, heldTurns }) => {
+      await this.hostHello(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, heldTurns);
       return {};
     },
-    hostHello: ({ hostId, boxCapacity, usage, now, channelProtocol }) => {
-      this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
-      return {};
-    },
-    hostUsage: async ({ hostId, usage, now }) => {
-      await this.hostUsage(hostId, usage, now);
-      return {};
-    },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
-      await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
-      await this.failHostClaudeSetups(
-        hostId,
-        "NoHostOnline",
-        `host ${hostId} reconnected without the setup's box; start the setup again`,
-        now,
-        heldClaudeSetupIds,
-      );
+    hostHeartbeat: async (input) => {
+      const { tenantId, hostId, boxCapacity, usage, reportedHealth, now, channelProtocol } = input;
+      await this.hostHeartbeat(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, reportedHealth, input);
+      await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },
     forgetHostUsage: ({ hostId }) => {
@@ -639,10 +626,6 @@ export class Tenant extends TenantConnectors {
     hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
       this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
       if (health === "Healthy") return {};
-      if (health === "Degraded") {
-        await this.hostFellSilent(tenantId, hostId, now);
-        return {};
-      }
       const failed = await this.failHostTurns(
         tenantId,
         hostId,

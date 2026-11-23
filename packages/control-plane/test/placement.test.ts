@@ -36,6 +36,7 @@ const EMPTY = {
   memoryHeldMib: 0,
   diskBudgetMib: 200_000,
   diskHeldMib: 0,
+  reportedHealth: "Healthy" as const,
   channelProtocol: 28,
   createdAt: 0,
   updatedAt: 0,
@@ -68,7 +69,7 @@ test("a session goes to the online host least busy across load, memory and disk,
     usageOf("free", { memoryHeldMib: 4096, loadAverage: 0.5, memoryAvailableMib: 8192 }),
     usageOf("freer", { memoryHeldMib: 2048, loadAverage: 3.5, memoryAvailableMib: 2048 }),
   ];
-  assert.equal(placed(placeSession(hosts, usages, AMD64_IMAGES, BOX, [])), "free");
+  assert.equal(placed(placeSession(hosts, usages, AMD64_IMAGES, BOX, [], 0)), "free");
 });
 
 test("a loaded host with much free box memory loses to an idle host with little", () => {
@@ -83,9 +84,9 @@ test("a loaded host with much free box memory loses to an idle host with little"
     memoryHeldMib: 20_480,
   });
   const homelab = usageOf("homelab", { loadAverage: 0.05, memoryBudgetMib: 6144 });
-  assert.equal(placed(placeSession(hosts, [box, homelab], AMD64_IMAGES, BOX, [])), "homelab");
+  assert.equal(placed(placeSession(hosts, [box, homelab], AMD64_IMAGES, BOX, [], 0)), "homelab");
   assert.equal(
-    placed(placeSession(hosts, [box, { ...homelab, loadAverage: 3.9, memoryHeldMib: 4096 }], AMD64_IMAGES, BOX, [])),
+    placed(placeSession(hosts, [box, { ...homelab, loadAverage: 3.9, memoryHeldMib: 4096 }], AMD64_IMAGES, BOX, [], 0)),
     "box",
   );
 });
@@ -97,7 +98,7 @@ test("a tenant whose hosts' box memory is all held is refused with each host's r
     { ...HOST, hostId: "gone", name: "gone", state: "Offline" },
   ];
   const full = usageOf("full", { memoryBudgetMib: 4096, memoryHeldMib: 4096 });
-  const placement = placeSession(hosts, [full, { ...full, hostId: "arm" }], AMD64_IMAGES, BOX, []);
+  const placement = placeSession(hosts, [full, { ...full, hostId: "arm" }], AMD64_IMAGES, BOX, [], 0);
   assert.deepEqual(reasons(placement), [
     ["full", "MemoryFull"],
     ["arm", "NoImage"],
@@ -114,7 +115,7 @@ test("a host whose architecture has no image of the session's harness version in
     [{ harness: "ClaudeCode", harnessVersion: "2.0.0", architectures: [] }, []],
   ];
   for (const [image, architectures] of cases) {
-    const placement = placeSession([HOST], [usage], image, BOX, []);
+    const placement = placeSession([HOST], [usage], image, BOX, [], 0);
     assert.deepEqual(
       placement.kind === "Refused"
         ? placement.hosts.map((each) => [each.reason, each.reason === "NoImage" ? [...each.image.architectures] : []])
@@ -122,7 +123,7 @@ test("a host whose architecture has no image of the session's harness version in
       [["NoImage", architectures]],
     );
   }
-  assert.equal(placed(placeSession([{ ...HOST, architecture: "Arm64" }], [usage], arm, BOX, [])), "base");
+  assert.equal(placed(placeSession([{ ...HOST, architecture: "Arm64" }], [usage], arm, BOX, [], 0)), "base");
 });
 
 test("a held turn goes to a host with disk room, the fullest disk loses ties, and a host holding no box takes any disk", () => {
@@ -131,7 +132,7 @@ test("a held turn goes to a host with disk room, the fullest disk loses ties, an
   const full = { ...HOST, hostId: "full", name: "full" };
   const roomy = { ...HOST, hostId: "roomy", name: "roomy" };
   const busier = { ...HOST, hostId: "busier", name: "busier" };
-  const refused = placeSession([full], [usage("full", 70_000, 65_536)], AMD64_IMAGES, BOX, []);
+  const refused = placeSession([full], [usage("full", 70_000, 65_536)], AMD64_IMAGES, BOX, [], 0);
   assert.deepEqual(
     refused.kind === "Refused"
       ? refused.hosts.map((each) => [each.reason, each.reason === "NoDisk" ? each.boxDiskMib : 0])
@@ -146,6 +147,7 @@ test("a held turn goes to a host with disk room, the fullest disk loses ties, an
         AMD64_IMAGES,
         BOX,
         [],
+        0,
       ),
     ),
     "roomy",
@@ -158,11 +160,12 @@ test("a held turn goes to a host with disk room, the fullest disk loses ties, an
         AMD64_IMAGES,
         BOX,
         [],
+        0,
       ),
     ),
     "roomy",
   );
-  assert.equal(placed(placeSession([full], [usage("full", 10_000, 0)], AMD64_IMAGES, BOX, [])), "full");
+  assert.equal(placed(placeSession([full], [usage("full", 10_000, 0)], AMD64_IMAGES, BOX, [], 0)), "full");
 });
 
 test("a placement refusal captures each host's name and reason: MemoryFull, NoDisk, NoImage, NotOnline", () => {
@@ -177,7 +180,7 @@ test("a placement refusal captures each host's name and reason: MemoryFull, NoDi
     usageOf("small", { diskBudgetMib: 21_000, diskHeldMib: 19_000 }),
     usageOf("arm", { diskBudgetMib: 21_000 }),
   ];
-  assert.deepEqual(reasons(placeSession(hosts, usages, AMD64_IMAGES, BOX, [])), [
+  assert.deepEqual(reasons(placeSession(hosts, usages, AMD64_IMAGES, BOX, [], 0)), [
     ["example-host", "MemoryFull"],
     ["tumpel", "NoDisk"],
     ["arm-box", "NoImage"],
@@ -192,10 +195,10 @@ test("a host is refused only when the box's memory does not fit its budget, what
   const tight = { ...HOST, hostId: "tight", name: "tight" };
   const box = { boxMemoryMib: 2048, boxDiskMib: BoxDiskLimit.DefaultMib };
   assert.equal(
-    placed(placeSession([tight, fits], [usage("tight", 8193), usage("fits", 8192)], AMD64_IMAGES, box, [])),
+    placed(placeSession([tight, fits], [usage("tight", 8193), usage("fits", 8192)], AMD64_IMAGES, box, [], 0)),
     "fits",
   );
-  assert.deepEqual(reasons(placeSession([tight], [usage("tight", 8193)], AMD64_IMAGES, box, [])), [
+  assert.deepEqual(reasons(placeSession([tight], [usage("tight", 8193)], AMD64_IMAGES, box, [], 0)), [
     ["tight", "MemoryFull"],
   ]);
 });
@@ -219,7 +222,7 @@ test("free box memory on any host wins over evicting an Auto box", () => {
     usageOf("held", { memoryBudgetMib: ONE_BOX, memoryHeldMib: ONE_BOX }),
     usageOf("spare", { memoryBudgetMib: ONE_BOX, loadAverage: 3.9 }),
   ];
-  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, [heldBox("old", "held", true, 1)]);
+  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, [heldBox("old", "held", true, 1)], 0);
   assert.deepEqual(placement.kind === "Placed" && [placement.host.name, placement.evict], ["spare", []]);
 });
 
@@ -233,7 +236,7 @@ test("with no free box memory the least recently used Auto box across hosts goes
     usageOf("b", { memoryBudgetMib: ONE_BOX, memoryHeldMib: ONE_BOX }),
   ];
   const held = [heldBox("a-new", "a", true, 30), heldBox("a-old", "a", true, 20), heldBox("b-oldest", "b", true, 10)];
-  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, held);
+  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, held, 0);
   assert.deepEqual(
     placement.kind === "Placed" && [placement.host.name, placement.evict.map((each) => each.sessionId)],
     ["b", ["b-oldest"]],
@@ -249,7 +252,7 @@ test("a Warm box is never evicted, so a start beside only Warm and running boxes
     usageOf("warm", { memoryBudgetMib: ONE_BOX, memoryHeldMib: ONE_BOX }),
     usageOf("busy", { boxesRunning: 1, memoryBudgetMib: ONE_BOX, memoryHeldMib: ONE_BOX }),
   ];
-  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, [heldBox("kept", "warm", false, 1)]);
+  const placement = placeSession(hosts, usages, AMD64_IMAGES, BOX, [heldBox("kept", "warm", false, 1)], 0);
   assert.deepEqual(reasons(placement), [
     ["warm", "MemoryFull"],
     ["busy", "MemoryFull"],
@@ -265,6 +268,6 @@ test("a host out of reserved memory evicts its oldest Auto box, never a Warm one
     { ...heldBox("auto-old", "budget", true, 2), boxMemoryMib: 2048 },
     { ...heldBox("auto-new", "budget", true, 3), boxMemoryMib: 2048 },
   ];
-  const placement = placeSession([host], [usage], AMD64_IMAGES, box, held);
+  const placement = placeSession([host], [usage], AMD64_IMAGES, box, held, 0);
   assert.deepEqual(placement.kind === "Placed" && placement.evict.map((each) => each.sessionId), ["auto-old"]);
 });

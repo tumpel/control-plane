@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BUDGETS, SETTINGS, World } from "./harness/world.ts";
-
-const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
+import { SETTINGS, World } from "./harness/world.ts";
 
 test("a turn whose transcript write fails ends as failed, and another turn on the same host is still stored, acked and completed with no row per line", async (t) => {
   const world = await World.open();
@@ -16,7 +14,7 @@ test("a turn whose transcript write fails ends as failed, and another turn on th
   await host.claims(b);
   const line = (turnId: string, lineSeq: number) =>
     host.says({ type: "TurnLine", turnId, lineSeq, text: `{"type":"assistant","n":${lineSeq}}` });
-  const heartbeat = () => world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+  const heartbeat = () => host.beats();
   const put = world.store.put.bind(world.store);
   world.store.put = (async (key: string, ...rest: unknown[]) => {
     if (key.includes(a.turnId)) throw new Error("the store refuses turn a");

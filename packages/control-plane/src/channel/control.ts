@@ -5,14 +5,16 @@ import {
   type ControlMessage,
   decodeBase64,
   type Frame,
+  type HeldTurns,
   type Hello,
   HelloVersionSchema,
-  HostEnvelopeSchema,
   type HostMessage,
   type HostReportedHealth,
   type HostUsage,
   heartbeat,
+  heldTurnsOf,
   helloBytes,
+  hostEnvelopeSchema,
   type Ledger,
   type LedgerStore,
   type Port,
@@ -30,7 +32,7 @@ import {
 
 export type ControlConnection =
   | { phase: "AwaitingHello"; nonce: string }
-  | { phase: "Open"; protocolVersion: number; heldReported: boolean }
+  | { phase: "Open"; protocolVersion: number }
   | { phase: "Closed" };
 
 export const MAX_HOST_FRAME_BYTES = 4_000_000;
@@ -123,14 +125,16 @@ export type ControlEvent =
       usage: ReportedUsage;
       supervisorVersion: string;
       protocolVersion: number;
+      channelProtocol: number;
       channelProtocolOldest: Hello["channelProtocolOldest"];
       guestProtocol: Hello["guestProtocol"];
+      heldTurns: HeldTurns;
     }
-  | { kind: "Heartbeat"; usage: ReportedUsage; health: HostReportedHealth }
   | {
-      kind: "FirstHeartbeat";
+      kind: "Heartbeat";
       usage: ReportedUsage;
-      health: HostReportedHealth;
+      reportedHealth: HostReportedHealth;
+      heldTurns: HeldTurns;
       heldSessionIds: string[];
       heldClaudeSetupIds: string[];
     }
@@ -245,6 +249,7 @@ export const revoke = (context: ControlContext, reason: string): Received =>
 const hello = async (
   connection: { phase: "AwaitingHello"; nonce: string },
   envelope: Hello,
+  channelProtocol: number,
   context: ControlContext,
 ): Promise<Received> => {
   const signed = helloBytes(connection.nonce, envelope.hostId);
@@ -262,27 +267,29 @@ const hello = async (
   if (!budgeted(envelope.usage)) return unbudgeted(context.port, envelope.hostId);
   const ledger = context.ledger.load();
   for (const frame of ledger.unacked) {
-    const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
+    const refused = unspoken(channelProtocol, frame.message.type, frame.seq, context);
     if (refused !== null) return refused;
   }
   const resent = await resend(ledger, (stored) => prepare(stored, context));
   context.port.send({
     type: "Welcome",
     hostId: context.host.hostId,
-    protocolVersion: envelope.protocolVersion,
+    protocolVersion: channelProtocol,
     ack: ledger.received,
   });
   for (const frame of resent) context.port.send(frame);
   return {
-    connection: { phase: "Open", protocolVersion: envelope.protocolVersion, heldReported: false },
+    connection: { phase: "Open", protocolVersion: channelProtocol },
     event: {
       kind: "Welcomed",
       boxCapacity: envelope.boxCapacity,
       usage: envelope.usage,
       supervisorVersion: envelope.supervisorVersion,
       protocolVersion: envelope.protocolVersion,
+      channelProtocol,
       channelProtocolOldest: envelope.channelProtocolOldest,
       guestProtocol: envelope.guestProtocol,
+      heldTurns: heldTurnsOf(envelope),
     },
   };
 };
@@ -292,7 +299,20 @@ const inbound = (context: ControlContext): Ledger<StoredControlMessage> => ({
   received: context.ledger.heard(),
 });
 
-const spoken = (version: number): boolean => version >= ChannelProtocol.Oldest && version <= ChannelProtocol.Version;
+const helloVersion = (connection: ControlConnection, text: string, context: ControlContext): number | Received => {
+  if (connection.phase === "Open") return connection.protocolVersion;
+  const greeting = parseEnvelope(HelloVersionSchema, text);
+  if (!greeting.ok) return ChannelProtocol.Version;
+  const { protocolVersion, channelProtocolOldest } = greeting.value;
+  const oldest = channelProtocolOldest ?? protocolVersion;
+  const negotiated = Math.min(protocolVersion, ChannelProtocol.Version);
+  if (negotiated >= Math.max(oldest, ChannelProtocol.Oldest)) return negotiated;
+  return close(
+    context.port,
+    CloseCode.UnsupportedVersion,
+    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+  );
+};
 
 const refuse = async (
   connection: ControlConnection,
@@ -328,17 +348,9 @@ export const receive = async (
     if (connection.phase === "Open") return refuse(connection, text, reason, context);
     return close(context.port, CloseCode.ProtocolError, reason);
   }
-  if (connection.phase === "AwaitingHello") {
-    const greeting = parseEnvelope(HelloVersionSchema, text);
-    if (greeting.ok && !spoken(greeting.value.protocolVersion)) {
-      return close(
-        context.port,
-        CloseCode.UnsupportedVersion,
-        `protocol version ${greeting.value.protocolVersion} is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
-      );
-    }
-  }
-  const parsed = parseEnvelope(HostEnvelopeSchema, text);
+  const version = helloVersion(connection, text, context);
+  if (typeof version !== "number") return version;
+  const parsed = parseEnvelope(hostEnvelopeSchema(version), text);
   if (!parsed.ok && connection.phase === "Open") return refuse(connection, text, parsed.reason, context);
   if (!parsed.ok) return close(context.port, CloseCode.ProtocolError, parsed.reason);
   const envelope = parsed.value;
@@ -346,23 +358,20 @@ export const receive = async (
     if (envelope.type !== "Hello") {
       return close(context.port, CloseCode.ProtocolError, `expected Hello after Challenge, got ${envelope.type}`);
     }
-    return hello(connection, envelope, context);
+    return hello(connection, envelope, version, context);
   }
   if (envelope.type === "Hello") {
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") {
     if (!budgeted(envelope.usage)) return unbudgeted(context.port, context.host.hostId);
-    const health = envelope.health ?? "Healthy";
-    if (connection.heldReported) {
-      return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };
-    }
     return {
-      connection: { ...connection, heldReported: true },
+      connection,
       event: {
-        kind: "FirstHeartbeat",
+        kind: "Heartbeat",
         usage: envelope.usage,
-        health,
+        reportedHealth: envelope.health ?? "Healthy",
+        heldTurns: heldTurnsOf(envelope),
         heldSessionIds: envelope.heldSessionIds,
         heldClaudeSetupIds: envelope.heldClaudeSetupIds,
       },
