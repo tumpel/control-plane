@@ -23,6 +23,7 @@ type Paused = z.infer<typeof PauseSubscriptionResultSchema>["paused"];
 type Resumed = z.infer<typeof ResumeSubscriptionResultSchema>["resumed"];
 type Completed = z.infer<typeof CompleteSubscriptionResultSchema>["completed"];
 
+const DELIVERY_FAILURE_LIMIT = 3;
 const CREW_FAILURE_LIMIT = 10;
 
 type SubscriptionRow = {
@@ -33,6 +34,7 @@ type SubscriptionRow = {
   expires_at: string;
   cursor_event_id: number;
   crew_failures_in_a_row: number;
+  delivery_failures_in_a_row: number;
   state: Subscription["state"];
   variant: string;
   created_at: number;
@@ -60,7 +62,7 @@ const crewMatch = (subscription: string, session: string, tags: string): string 
     AND c.tag NOT IN (SELECT value FROM json_each(${tags})))`;
 
 const SUBSCRIPTION_SELECT = `${SUBSCRIPTION_STATES} SELECT s.subscription_id, s.session_id, s.prompt, s.goal, s.expires_at, s.cursor_event_id,
-  s.crew_failures_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
+  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
   (SELECT json_group_array(event) FROM (SELECT event FROM subscription_events WHERE subscription_id = s.subscription_id ORDER BY event)) AS events,
   (SELECT json_group_array(tag) FROM (SELECT tag FROM subscription_crew_tags WHERE subscription_id = s.subscription_id ORDER BY tag)) AS crew_tags
   FROM subscriptions AS s JOIN states AS st ON st.subscription_id = s.subscription_id`;
@@ -86,7 +88,7 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
     expiresAt: row.expires_at,
     cursorEventId: row.cursor_event_id,
     crewFailuresInARow: row.crew_failures_in_a_row,
-    deliveryFailuresInARow: 0,
+    deliveryFailuresInARow: row.delivery_failures_in_a_row,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -175,7 +177,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
         this.clearState(subscriptionId);
         sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
         sql.exec(
-          "UPDATE subscriptions SET crew_failures_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
+          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
           now,
           subscriptionId,
         );
@@ -470,10 +472,16 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (delivery === undefined) return;
     const { subscription_id: subscriptionId } = delivery;
     sql.exec("DELETE FROM subscription_turns WHERE turn_id = ?", event.turnId);
-    sql.exec("UPDATE subscriptions SET updated_at = ? WHERE subscription_id = ?", now, subscriptionId);
+    sql.exec(
+      `UPDATE subscriptions SET delivery_failures_in_a_row = CASE WHEN ?1 THEN delivery_failures_in_a_row + 1 ELSE 0 END,
+        updated_at = ?2 WHERE subscription_id = ?3`,
+      event.event === "TurnFailed" ? 1 : 0,
+      now,
+      subscriptionId,
+    );
     const row = this.subscriptionRow(subscriptionId);
     if (row === null || row.state !== "Active") return;
-    if (event.event === "TurnFailed") {
+    if (row.delivery_failures_in_a_row >= DELIVERY_FAILURE_LIMIT) {
       this.pause(row, { kind: "DeliveryFailed", turnId: event.turnId }, now);
       return;
     }
