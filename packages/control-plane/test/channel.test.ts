@@ -229,7 +229,7 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.equal(link.closed, null);
 });
 
-for (const version of [ChannelProtocol.Oldest, STORED_FRAMES_PROTOCOL - 1]) {
+for (const version of [STORED_FRAMES_PROTOCOL - 2, STORED_FRAMES_PROTOCOL - 1]) {
   test(`a Hello on ${version}, below the stored frames of 37, is refused and the supervisor told to update`, async () => {
     const link = setup().connect();
     await link.hello(undefined, version);
@@ -612,7 +612,6 @@ test("a channel 37 Hello that offers a range of versions is welcomed on 37, with
     type: "Welcome",
     hostId: HOST_ID,
     protocolVersion: ChannelProtocol.Version,
-    ack: 3,
   });
 });
 
@@ -637,36 +636,6 @@ test("on 37 a frame below resendFrom is a duplicate acked again, the next is ack
   assert.deepEqual(frames(link.sent).at(-1), { type: "Frame", seq: 1, ack: 3, message: snapshotRequest("snap-4") });
   await link.deliver(frame(5, 0, snapshotDone("snap-5")));
   assert.match(closure(link)?.reason ?? "", /expected seq 4, got 5/);
-});
-
-test("on 37 TurnLine and TelemetryBatch are refused as replaced and TurnLines is a message", async () => {
-  const { link } = await stored37();
-  const lines: HostMessage = { type: "TurnLines", turnId: "turn-1", firstLineSeq: 1, lines: ["{}", "{}"] };
-  await link.deliver(frame(3, 0, { type: "TurnLine", turnId: "turn-1", lineSeq: 1, text: "{}" }));
-  await link.deliver(
-    frame(4, 0, {
-      type: "TelemetryBatch",
-      instruments: [],
-      samples: [{ metric: "host.load.1m", at: "2026-11-17T10:00:00+01:00", value: 0.5, dimensions: {} }],
-      turns: [],
-    }),
-  );
-  await link.deliver(frame(5, 0, lines));
-  assert.equal(link.closed, null);
-  assert.deepEqual(
-    link.sent.flatMap((envelope) => (envelope.type === "FrameRefused" ? [[envelope.seq, envelope.reason]] : [])),
-    [
-      [
-        3,
-        `frame 3 carries TurnLine, which protocol version 37 replaced; this connection speaks 37, update the supervisor`,
-      ],
-      [
-        4,
-        `frame 4 carries TelemetryBatch, which protocol version 37 replaced; this connection speaks 37, update the supervisor`,
-      ],
-    ],
-  );
-  assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(5, 0, lines) });
 });
 
 test("on 37 a Heartbeat ack drops the stored outbound frames up to it and carries its telemetry", async () => {

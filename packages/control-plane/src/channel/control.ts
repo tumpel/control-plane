@@ -57,12 +57,6 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   ClaudeSetupBoxDiscard: ChannelProtocol.Oldest,
 };
 
-type Replaced = Extract<HostMessage, { type: "TurnLine" | "TelemetryBatch" }>;
-export type TakenMessage = Exclude<HostMessage, Replaced>;
-
-const replaced = (message: HostMessage): message is Replaced =>
-  message.type === "TurnLine" || message.type === "TelemetryBatch";
-
 export interface ControlHost {
   hostId: string;
   publicKey: string;
@@ -108,7 +102,7 @@ export type ControlEvent =
       heldClaudeSetupIds: string[];
       telemetry: MetricBatch;
     }
-  | { kind: "Message"; frame: Frame<TakenMessage> }
+  | { kind: "Message"; frame: Frame<HostMessage> }
   | { kind: "FrameRefused"; seq: number; reason: string }
   | { kind: "FrameRateLimited"; seq: number; reason: string }
   | { kind: "Closed"; code: number; reason: string };
@@ -264,7 +258,7 @@ const hello = async (
   }
   const cursor = envelope.resendFrom - 1;
   const resent = await resend(ledger, cursor, (stored) => prepare(stored, context));
-  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: channelProtocol, ack: cursor });
+  context.port.send({ type: "Welcome", hostId: context.host.hostId, protocolVersion: channelProtocol });
   for (const frame of resent) context.port.send(frame);
   return {
     connection: { phase: "Open", protocolVersion: channelProtocol, cursor },
@@ -359,14 +353,6 @@ export const receive = async (
     };
   }
   const { message } = envelope;
-  if (replaced(message)) {
-    return refuse(
-      connection,
-      text,
-      `frame ${envelope.seq} carries ${message.type}, which protocol version ${STORED_FRAMES_PROTOCOL} replaced; this connection speaks ${connection.protocolVersion}, update the supervisor`,
-      context,
-    );
-  }
   const arrived = arrival(connection.cursor, envelope.seq);
   if (arrived.kind === "Duplicate") return duplicate(connection, envelope.seq, context);
   const overRate = context.admitFrame();

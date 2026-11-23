@@ -234,7 +234,7 @@ export type TranscriptCursor = {
   harness: Session["harness"];
   lastLineSeq: number;
   inFlight: boolean;
-} & ({ kind: "Chunk"; storageKey: string; range: Range } | { kind: "Lines"; lines: TranscriptLine[] });
+} & ({ kind: "Chunk"; storageKey: string; range: Range } | { kind: "Lines" });
 
 type UnheldTurnRow = { turn_id: string; state: string; offer_sent: number; unheld_heartbeats: number };
 
@@ -468,7 +468,7 @@ const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 
-export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" | "TurnLine" }>;
+export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
@@ -2857,7 +2857,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         : await firstChunkAfter(this.env.STORE, transcriptPrefix(tenantId, sessionId), start);
     if (chunk !== null && (turnId === null || chunk.turnId === turnId))
       return { ...known, kind: "Chunk", storageKey: chunk.storageKey, range: { offset: 0, length: chunk.size } };
-    return { ...known, kind: "Lines", lines: [] };
+    return { ...known, kind: "Lines" };
   }
 
   protected async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {

@@ -118,22 +118,6 @@ export class HostChannel extends DurableObject<Env> {
       );
   }
 
-  async restoreHealth(detail: string): Promise<void> {
-    const host = this.host();
-    if (host === null) throw new Error("a health restore reached a host object that was never registered");
-    const hostId = host.host_id;
-    const now = Date.now();
-    const stored = await this.env.DB.prepare("SELECT health FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ health: string }>();
-    if (stored?.health === "Healthy") return;
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("hostHealth", { tenantId, hostId, health: "Healthy", detail, now });
-    await this.env.DB.prepare("UPDATE hosts SET health = ?1, updated_at = ?2 WHERE host_id = ?3 AND health IS NOT ?1")
-      .bind("Healthy", now, hostId)
-      .run();
-  }
-
   override async fetch(request: Request): Promise<Response> {
     const host = this.host();
     if (host === null) {
@@ -205,7 +189,7 @@ export class HostChannel extends DurableObject<Env> {
   private async take(
     socket: WebSocket,
     hostId: string,
-    frame: Frame<control.TakenMessage>,
+    frame: Frame<HostMessage>,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
@@ -322,7 +306,7 @@ export class HostChannel extends DurableObject<Env> {
     return row.tenant_id;
   }
 
-  private async forward(hostId: string, message: control.TakenMessage): Promise<HostReply | null> {
+  private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
     const tenantId = await this.tenantOf(hostId);
     const tenant = tenantApi(this.env.TENANT, tenantId);
     if (isSupervisorUpdate(message)) {

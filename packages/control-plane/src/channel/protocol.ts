@@ -28,7 +28,6 @@ export type HostFrame = z.infer<typeof HostFrameSchema>;
 export type ControlFrame = z.infer<typeof ControlFrameSchema>;
 export type HostMessage = HostFrame["message"];
 export type ControlMessage = ControlFrame["message"];
-export type TelemetryBatch = Extract<HostMessage, { type: "TelemetryBatch" }>;
 export type TurnLines = Extract<HostMessage, { type: "TurnLines" }>;
 export type TurnOffer = Extract<ControlMessage, { type: "TurnOffer" }>;
 export type DispatchGrant = TurnOffer["credential"];
