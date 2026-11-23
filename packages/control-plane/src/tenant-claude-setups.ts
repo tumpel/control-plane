@@ -28,7 +28,7 @@ import { keyStoreOf } from "./key-store.ts";
 import { placeSession, type Unplaceable } from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, readRelease } from "./releases";
-import { settingsOf } from "./settings";
+import { presenceGraceMs, settingsOf } from "./settings";
 import { TenantPrebuilds } from "./tenant-prebuilds";
 import { type HostReply, sealContext, type TenantHostMessage } from "./tenant-sessions";
 
@@ -136,6 +136,7 @@ export class TenantClaudeSetups extends TenantPrebuilds {
       },
       { boxMemoryMib: BoxMemoryLimit.DefaultMib, boxDiskMib: BoxDiskLimit.DefaultMib },
       this.heldBoxes(),
+      now - presenceGraceMs(settingsOf(this.env)),
     );
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const settings = settingsOf(this.env);
@@ -301,22 +302,18 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return { kind: "Stored" };
   }
 
-  protected async failHostClaudeSetups(
-    hostId: string,
-    reason: ClaudeSetupFailureReason,
-    detail: string,
-    now: number,
-    held: readonly string[] = [],
-  ): Promise<void> {
+  protected async failUnheldClaudeSetups(hostId: string, held: readonly string[], now: number): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<ClaudeSetupRow>(
-        `${CLAUDE_SETUP_SELECT} WHERE host_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
+        `${CLAUDE_SETUP_SELECT} WHERE host_id = ? AND state IN ('AwaitingCode', 'Minting')
+          AND claude_setup_id NOT IN (SELECT value FROM json_each(?))`,
         hostId,
+        JSON.stringify(held),
       )
-      .toArray()
-      .filter((row) => !held.includes(row.claude_setup_id));
+      .toArray();
+    const detail = `host ${hostId} reported the boxes it holds and the setup's box was not among them; start the setup again`;
     for (const row of rows)
-      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(row, reason, detail, now, true));
+      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(row, "NoHostOnline", detail, now, true));
   }
 
   private async failClaudeSetup(

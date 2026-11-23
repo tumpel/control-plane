@@ -1,9 +1,6 @@
 # Public surface
 
-Every tenant operation is one MCP tool and one CLI command, backed by the same REST handler, so an
-MCP session sets up and runs a whole tenant. `npm run surface` writes this file; `npm run surface:check`
-fails when an operation lacks a tool or a command and is not on the allowlist, when an allowlist entry
-names no operation or one that has a tool, or when this file is stale.
+Tenant operations have an MCP tool and a CLI command backed by the same REST handler, except for the CLI-only and MCP-only operations listed below. `npm run surface` writes this file; `npm run surface:check` checks client names and declared MCP REST routes against the contract and rejects stale output.
 
 Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command
 `tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:
@@ -54,7 +51,6 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Hosts_list`                             | `tumpel_host_list`                           | `tumpel host list`                           |
 | `Hosts_listUsage`                        | `tumpel_host_list_usage`                     | `tumpel host list-usage`                     |
 | `Hosts_patchLabels`                      | `tumpel_host_patch_labels`                   | `tumpel host patch-labels`                   |
-| `Hosts_restoreHealth`                    | `tumpel_host_restore_health`                 | `tumpel host restore-health`                 |
 | `Hosts_revoke`                           | `tumpel_host_revoke`                         | `tumpel host revoke`                         |
 | `Hosts_setLabels`                        | `tumpel_host_set_labels`                     | `tumpel host set-labels`                     |
 | `Identity_listTenants`                   | `tumpel_tenants`                             | `tumpel tenants`                             |
@@ -78,7 +74,8 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Personas_create`                        | `tumpel_persona_create`                      | `tumpel persona create`                      |
 | `Personas_delete`                        | `tumpel_persona_delete`                      | `tumpel persona delete`                      |
 | `Personas_get`                           | `tumpel_persona_get`                         | `tumpel persona get`                         |
-| `Personas_list`                          | `tumpel_persona_list`                        | `tumpel persona list`                        |
+| `Personas_list`                          | `(none)`                                     | `tumpel persona list`                        |
+| `Personas_listMetadata`                  | `tumpel_persona_list`                        | `(none)`                                     |
 | `Personas_patch`                         | `tumpel_persona_patch`                       | `tumpel persona patch`                       |
 | `Personas_patchFile`                     | `tumpel_persona_patch_file`                  | `tumpel persona patch-file`                  |
 | `Personas_update`                        | `tumpel_persona_update`                      | `tumpel persona update`                      |
@@ -143,7 +140,12 @@ nothing: the server cannot read your environment, so they return the config entr
 
 CLI only: tenant operations with a CLI command and no MCP tool:
 
+- `Personas_list`: the pinned CLI lists full personas through GET /v1/personas.
 - `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
+
+MCP only: tenant operations with an MCP tool and no CLI command:
+
+- `Personas_listMetadata`: MCP lists persona and file metadata through GET /v2/personas; the pinned CLI keeps the full v1 list.
 
 Allowlist: operations that are not tenant operations, with no tool or command:
 

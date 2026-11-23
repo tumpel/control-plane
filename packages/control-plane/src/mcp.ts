@@ -314,7 +314,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts/usage",
     NO_ARGUMENTS,
-    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them when the host reports them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
+    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm (its Idle and Stopping boxes), loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
   ),
   rest(
     "tumpel_host_get",
@@ -329,13 +329,6 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/hosts/{hostId}/revoke",
     HostPathSchema,
     "Revoke a host: its channel closes and it cannot connect again.",
-  ),
-  rest(
-    "tumpel_host_restore_health",
-    "POST",
-    "/v1/hosts/{hostId}/restore-health",
-    HostPathSchema,
-    "Restore an Unhealthy or RateLimited host to Healthy, so it gets turn offers again. A host goes Unhealthy after it passes its frame limit three times within an hour.",
   ),
   rest(
     "tumpel_host_set_labels",
@@ -414,7 +407,13 @@ export const TOOLS: ToolDefinition[] = [
     PersonaFileUploadRequestSchema,
     "Presign the upload of one persona file larger than 65536 bytes, named by the sha256 digest and size of its bytes. Returns uploadUrl and uploadExpiresAt: PUT the bytes to uploadUrl before uploadExpiresAt, then name the file as Stored by digest in a persona write.",
   ),
-  rest("tumpel_persona_list", "GET", "/v1/personas", NO_ARGUMENTS, "List the tenant's personas."),
+  rest(
+    "tumpel_persona_list",
+    "GET",
+    "/v2/personas",
+    NO_ARGUMENTS,
+    "List the tenant's personas with file paths, digests, sizes and timestamps. Use tumpel_persona_get to read file content.",
+  ),
   rest("tumpel_persona_get", "GET", "/v1/personas/{personaId}", PersonaPathSchema, "Read one persona."),
   rest(
     "tumpel_persona_update",
@@ -941,7 +940,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/events",
     EventQuerySchema,
-    "Read the tenant's events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle, HostOffline or PrebuildDone, or follow GET /v1/events over a WebSocket. Reads from the end of the log when afterEventId is left out. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
+    "Read the tenant's events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle or PrebuildDone, or follow GET /v1/events over a WebSocket. Reads from the end of the log when afterEventId is left out. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
   ),
   rest(
     "tumpel_turn_cancel",

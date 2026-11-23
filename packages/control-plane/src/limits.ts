@@ -127,11 +127,11 @@ export const effectiveLimits = (
   return { source: "Configured", profile: configuredProfile(limits) };
 };
 
-export type HostLimits = { health: string; hostFramesPerMinute: number };
+export type HostLimits = { hostFramesPerMinute: number };
 
 export const hostLimitsOf = async (db: D1Database, limits: Limits, hostId: string): Promise<HostLimits | null> => {
   const row = await centralDb(db)
-    .select({ health: hosts.health, tier: tenants.tier, profile: tenantLimits.profile })
+    .select({ tier: tenants.tier, profile: tenantLimits.profile })
     .from(hosts)
     .innerJoin(tenants, eq(tenants.tenantId, hosts.tenantId))
     .leftJoin(tenantLimits, eq(tenantLimits.tenantId, hosts.tenantId))
@@ -139,7 +139,7 @@ export const hostLimitsOf = async (db: D1Database, limits: Limits, hostId: strin
     .get();
   if (row === undefined) return null;
   const { profile } = effectiveLimits(limits, TenantTierSchema.parse(row.tier), customProfileOf(row.profile));
-  return { health: row.health, hostFramesPerMinute: profile.hostFramesPerMinute };
+  return { hostFramesPerMinute: profile.hostFramesPerMinute };
 };
 
 const RATES = ["writesPerMinute", "hostFramesPerMinute"] as const;
@@ -161,7 +161,6 @@ export const pastBound = (profile: TenantLimitsProfile, bound: TenantLimitsProfi
     .map((budget) => `usage needs ${budget.measure} per ${budget.window.toLowerCase()} at most ${budget.limit}`),
 ];
 
-const READ_OPERATION =
-  /^(list|get|read)[A-Z]|^(transcriptCursor|connectedAccounts|runningTurnsByHost|turnMetricDimensions)$/;
+const READ_OPERATION = /^(list|get|read)[A-Z]|^(transcriptCursor|connectedAccounts|runningTurnsByHost)$/;
 
 export const writes = (operation: string): boolean => !READ_OPERATION.test(operation);

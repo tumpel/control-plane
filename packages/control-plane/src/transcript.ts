@@ -40,22 +40,22 @@ const storedChunk = (prefix: string, { key: storageKey, size }: { key: string; s
   return { storageKey, lastLineSeq: Number(match[1]), firstLineSeq: Number(match[2]), turnId: match[3], size };
 };
 
-const listChunks = async (store: R2Bucket, prefix: string, after: number, limit: number): Promise<StoredChunk[]> => {
-  const listed = await store.list({ prefix, startAfter: keysEndingAfter(prefix, after), limit });
-  if (listed.truncated && limit > 1)
-    throw new Error(
-      `transcript ${prefix} holds more than ${limit} chunks after lineSeq ${after}, more than one listing returns`,
-    );
-  return listed.objects.map((object) => storedChunk(prefix, object));
+export const chunksAfter = async (store: R2Bucket, prefix: string, after: number): Promise<StoredChunk[]> => {
+  const chunks: StoredChunk[] = [];
+  for (let startAfter = keysEndingAfter(prefix, after); ; ) {
+    const listed = await store.list({ prefix, startAfter });
+    chunks.push(...listed.objects.map((object) => storedChunk(prefix, object)));
+    const last = listed.objects.at(-1);
+    if (!listed.truncated || last === undefined) return chunks;
+    startAfter = last.key;
+  }
 };
 
-const LISTED_CHUNKS = 1000;
-
-export const chunksAfter = (store: R2Bucket, prefix: string, after: number): Promise<StoredChunk[]> =>
-  listChunks(store, prefix, after, LISTED_CHUNKS);
-
-export const firstChunkAfter = async (store: R2Bucket, prefix: string, after: number): Promise<StoredChunk | null> =>
-  (await listChunks(store, prefix, after, 1))[0] ?? null;
+export const firstChunkAfter = async (store: R2Bucket, prefix: string, after: number): Promise<StoredChunk | null> => {
+  const listed = await store.list({ prefix, startAfter: keysEndingAfter(prefix, after), limit: 1 });
+  const [first] = listed.objects;
+  return first === undefined ? null : storedChunk(prefix, first);
+};
 
 export const deleteTranscript = async (store: R2Bucket, prefix: string): Promise<void> => {
   for (;;) {
@@ -88,18 +88,6 @@ export interface Range {
   offset: number;
   length: number;
 }
-
-export const linesWithin = (lines: TranscriptLine[], maxBytes: number | null): TranscriptLine[] => {
-  if (maxBytes === null) return lines;
-  let bytes = 0;
-  const kept: TranscriptLine[] = [];
-  for (const line of lines) {
-    bytes += encodeLine(line).byteLength;
-    if (kept.length > 0 && bytes > maxBytes) return kept;
-    kept.push(line);
-  }
-  return kept;
-};
 
 export const decodeLines = (text: string): TranscriptLine[] =>
   text
@@ -161,46 +149,3 @@ export const pageOf = (
   }
   return done(false);
 };
-
-export interface ChunkLedger {
-  pending(tenantId: string, sessionId: string, turnId: string): TranscriptLine[];
-  record(sessionId: string, turnId: string, storageKey: string, chunk: Chunk): void;
-}
-
-export interface ChunkStore {
-  put(key: string, body: Uint8Array): Promise<unknown>;
-}
-
-export class ChunkWriter {
-  readonly #writes = new Map<string, Promise<void>>();
-  readonly #ledger: ChunkLedger;
-  readonly #store: ChunkStore;
-
-  constructor(ledger: ChunkLedger, store: ChunkStore) {
-    this.#ledger = ledger;
-    this.#store = store;
-  }
-
-  write(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
-    const run = (): Promise<void> => this.#writeNow(tenantId, sessionId, turnId, minLines);
-    const previous = this.#writes.get(sessionId) ?? Promise.resolve();
-    const next = previous.then(run, run);
-    this.#writes.set(sessionId, next);
-    const forget = (): void => {
-      if (this.#writes.get(sessionId) === next) this.#writes.delete(sessionId);
-    };
-    next.then(forget, forget);
-    return next;
-  }
-
-  async #writeNow(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
-    const lines = this.#ledger.pending(tenantId, sessionId, turnId);
-    const first = lines[0];
-    const last = lines.at(-1);
-    if (first === undefined || last === undefined || lines.length < minLines) return;
-    const chunk = encodeChunk(lines);
-    const storageKey = chunkKey(tenantId, sessionId, turnId, first.lineSeq, last.lineSeq);
-    await this.#store.put(storageKey, chunk.body);
-    this.#ledger.record(sessionId, turnId, storageKey, chunk);
-  }
-}

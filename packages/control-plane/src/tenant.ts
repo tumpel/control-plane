@@ -585,34 +585,21 @@ export class Tenant extends TenantConnectors {
       handovers: this.listCredentialHandovers(tenantId, sessionId),
     }),
     getSnapshot: ({ tenantId, snapshotId }) => ({ snapshot: this.getSnapshot(tenantId, snapshotId) }),
-    transcriptCursor: async ({ tenantId, sessionId, after, turnId, limit, maxBytes }) => ({
-      cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId, limit, maxBytes ?? null),
+    transcriptCursor: async ({ tenantId, sessionId, after, turnId }) => ({
+      cursor: await this.transcriptCursor(tenantId, sessionId, after, turnId),
     }),
-    offerSent: ({ turnId }) => {
-      this.offerSent(turnId);
+    hostHello: async ({ tenantId, hostId, boxCapacity, usage, now, channelProtocol, heldTurnIds }) => {
+      await this.hostHello(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, heldTurnIds);
       return {};
     },
-    hostHello: ({ hostId, boxCapacity, usage, now, channelProtocol }) => {
-      this.hostHello(hostId, boxCapacity, usage, now, channelProtocol);
+    hostHeartbeat: async (input) => {
+      const { tenantId, hostId, boxCapacity, usage, reportedHealth, now, channelProtocol } = input;
+      await this.hostHeartbeat(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, reportedHealth, input);
+      await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },
-    hostUsage: async ({ hostId, usage, now }) => {
-      await this.hostUsage(hostId, usage, now);
-      return {};
-    },
-    reconcileHeldBoxes: async ({ tenantId, hostId, heldSessionIds, heldClaudeSetupIds, now }) => {
-      await this.reconcileHeldBoxes(tenantId, hostId, heldSessionIds, now);
-      await this.failHostClaudeSetups(
-        hostId,
-        "NoHostOnline",
-        `host ${hostId} reconnected without the setup's box; start the setup again`,
-        now,
-        heldClaudeSetupIds,
-      );
-      return {};
-    },
-    forgetHostUsage: ({ hostId }) => {
-      this.forgetHostUsage(hostId);
+    forgetHostUsage: async ({ hostId }) => {
+      await this.forgetHostUsage(hostId, Date.now());
       return {};
     },
     runningTurnsByHost: () => ({ running: this.runningTurnsByHost() }),
@@ -620,39 +607,9 @@ export class Tenant extends TenantConnectors {
     readUsage: () => ({ usage: this.usageMeter().usage(Date.now()) }),
     readLimits: () => ({ limits: this.limits }),
     setLimits: async (input) => ({ limits: await this.setLimits(input) }),
-    turnMetricDimensions: ({ turnIds }) => ({ dimensions: this.turnMetricDimensions(turnIds) }),
     prepareOffer: async ({ tenantId, turnId, hostId, now }) => ({
       prepared: await this.prepareOffer(tenantId, turnId, hostId, now),
     }),
-    hostPresence: async ({ tenantId, hostId, presence, now }) => {
-      await this.hostPresence(tenantId, hostId, presence, now);
-      if (presence === "Offline") {
-        await this.failHostClaudeSetups(
-          hostId,
-          "NoHostOnline",
-          `host ${hostId} went offline during the setup; check that its supervisor runs, then start the setup again`,
-          now,
-        );
-      }
-      return {};
-    },
-    hostHealth: async ({ tenantId, hostId, health, detail, now }) => {
-      this.appendEvent({ event: "HostHealthChanged", hostId, health, detail }, now);
-      if (health === "Healthy") return {};
-      if (health === "Degraded") {
-        await this.hostFellSilent(tenantId, hostId, now);
-        return {};
-      }
-      const failed = await this.failHostTurns(
-        tenantId,
-        hostId,
-        { turn: "RateLimited", snapshot: "RateLimited", turnDetail: detail, snapshotDetail: detail },
-        now,
-      );
-      await this.cancelHostTurns(hostId, failed);
-      await this.failHostClaudeSetups(hostId, "RateLimited", detail, now);
-      return {};
-    },
     hostMessage: async ({ tenantId, hostId, message }) => ({
       reply: await this.hostMessage(tenantId, hostId, message),
     }),

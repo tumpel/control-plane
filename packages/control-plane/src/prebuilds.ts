@@ -11,7 +11,7 @@ import { type LifecycleCommand, readDevcontainer } from "./devcontainer.ts";
 import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { GUEST_TOOLCHAINS } from "./guest-toolchains.ts";
 import { HARNESS_CATALOG, type HarnessCatalogEntry, pinnedEntry } from "./harness-catalog";
-import { listHosts, type Outcome, type Refused } from "./hosts";
+import { listHostRecords, type Outcome, type Refused } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
@@ -183,7 +183,7 @@ export const startPrebuild = async (
     input: {
       principalId: caller.principalId,
       startedBy: { kind: "Person", principalId: caller.principalId },
-      hosts: await listHosts(env, caller.tenantId),
+      hosts: await listHostRecords(env, caller.tenantId),
       harness: entry.harness,
       harnessVersion: entry.harnessVersion,
       endpoint: apiOrigin,

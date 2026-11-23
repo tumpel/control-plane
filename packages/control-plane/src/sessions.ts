@@ -1,6 +1,5 @@
 import { type CredentialRefusal, checkModelCredential, credentialProblem } from "@tumpel/api/credentials";
 import {
-  BoxMemoryLimit,
   SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
@@ -27,12 +26,12 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { type HostRecord, hostOf, listHosts, type Outcome, type Refused } from "./hosts.ts";
+import { type HostRecord, hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
-import { degradedOnly, type Unplaceable } from "./placement.ts";
+import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
@@ -105,14 +104,16 @@ const sessionArchived = (sessionId: string, refused: string): Refused =>
 
 const hostOffline = async (env: Env, caller: Caller, session: Session, retry: string): Promise<Refused | null> => {
   const host = await hostOf(env.DB, caller.tenantId, session.hostId);
-  if (host?.state === "Online") return null;
+  if (host !== null && host.state !== "Revoked" && session.state !== "Unknown") return null;
   return refuse(409, {
     code: "HostOffline",
     title: "Host offline",
     detail:
       host === null
         ? "the session's host is no longer enrolled"
-        : `the session runs on host ${host.name}, which is ${host.state}`,
+        : host.state === "Revoked"
+          ? `the session runs on host ${host.name}, which is Revoked`
+          : `the session runs on host ${host.name}, which has not reported to the control plane within its heartbeat grace`,
     fix: `Start tumpel-supervisor run on that host, then ${retry}`,
   });
 };
@@ -130,17 +131,10 @@ export const credentialRefused = (refusal: CredentialRefusal, owner: string, har
 
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;
+  if (refused.reason === "NotOnline" && refused.host.state === "Offline")
+    return `${named} has not reported to the control plane within its heartbeat grace and counts as Degraded until it sends a heartbeat`;
   if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
-  if (refused.reason === "NotHeard") {
-    return `${named} has not said hello since your tenant restarted, so its free room is unknown until it reconnects`;
-  }
-  if (refused.reason === "NotHealthy") {
-    if (refused.host.health === "Degraded") {
-      return `${named} missed its heartbeat and counts as Degraded until it sends one or reconnects`;
-    }
-    if (refused.host.health !== "Healthy") return `${named} is ${refused.host.health}`;
-    return `${named} reports itself ${refused.host.reportedHealth}`;
-  }
+  if (refused.reason === "NotHealthy") return `${named} reports itself ${refused.host.reportedHealth}`;
   if (refused.reason === "NoImage") {
     const { harness, harnessVersion, architectures } = refused.image;
     const carried =
@@ -149,26 +143,17 @@ export const why = (refused: Unplaceable): string => {
         : `${harness} ${harnessVersion} guest images for ${architectures.join(", ")} only`;
     return `${named} is ${refused.host.architecture}, and the current release carries ${carried}`;
   }
-  if (refused.reason === "NoMemory") {
-    return `${named} has ${refused.usage.memoryAvailableMib} MiB of memory available, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
-  }
   if (refused.reason === "NoConnectors") {
     return `${named} runs a supervisor too old to serve connectors`;
-  }
-  if (refused.reason === "MemoryFull") {
-    return `${named} gives boxes ${refused.usage.memoryBudgetMib} MiB of memory and its boxes hold ${refused.usage.memoryHeldMib} MiB of it, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
   }
   if (refused.reason === "NoDisk") {
     return `${named} gives box disks ${refused.usage.diskBudgetMib} MiB and its boxes hold ${refused.usage.diskHeldMib} MiB of it, and the persona's boxes need ${refused.boxDiskMib} MiB`;
   }
-  return `${named} runs a turn in all ${refused.usage.boxCapacity} of its box slots`;
+  return `${named} gives boxes ${refused.usage.memoryBudgetMib} MiB of memory and its boxes hold ${refused.usage.memoryHeldMib} MiB of it, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
 };
 
 export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
-  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoMemory")) {
-    return `Lower the persona's boxMemoryMib toward the ${BoxMemoryLimit.DefaultMib} MiB default, free memory on a host, or enrol a host with more memory, then ${retry}`;
-  }
   if (lacking === undefined && hosts.some(({ reason }) => reason === "NoConnectors")) {
     return `Let a host update its supervisor to the current release, or use a persona without connectors, then ${retry}`;
   }
@@ -185,7 +170,8 @@ export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
 };
 
-const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
+const unplaced = (tenantRefusals: Parameters<typeof placementRefusals>[0], retry: string): Refused => {
+  const hosts = placementRefusals(tenantRefusals);
   if (hosts.length === 0) {
     return refuse(409, {
       code: "NoHostAvailable",
@@ -209,14 +195,6 @@ const unplaced = (hosts: Unplaceable[], retry: string): Refused => {
       title: "Every host's box memory is in use",
       detail: `no host of your tenant has memory for another box: ${detail}`,
       fix: `Wait for a running turn to finish, lower the persona's boxMemoryMib, or enrol another host, then ${retry}`,
-    });
-  }
-  if (hosts.some(({ reason }) => reason === "Full")) {
-    return refuse(409, {
-      code: "PoolExhausted",
-      title: "Every box slot is running a turn",
-      detail: `no host of your tenant has a free box slot: ${detail}`,
-      fix: `Wait for a running turn to finish, raise boxCapacity in runtime.json and rerun tumpel-supervisor install, or enrol another host, then ${retry}`,
     });
   }
   return refuse(409, {
@@ -329,7 +307,7 @@ const prepareStart = async (
   return ok({
     principalId: caller.principalId,
     startedBy: caller.origin,
-    hosts: await listHosts(env, caller.tenantId),
+    hosts: await listHostRecords(env, caller.tenantId),
     harness: entry.harness,
     harnessVersion: entry.harnessVersion,
     endpoint,
@@ -345,7 +323,11 @@ const connectorDisconnected = (names: string[]): Refused =>
     fix: DISCONNECTED_FIX,
   });
 
-export const placed = <T>(started: SessionStarted<T>): Outcome<T> => {
+export const placed = <T>(
+  started:
+    | Exclude<SessionStarted<T>, { kind: "Unplaced" }>
+    | { kind: "Unplaced"; hosts: Parameters<typeof placementRefusals>[0] },
+): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
   if (started.kind === "TagsOverLimit") {
@@ -515,7 +497,7 @@ export const sendTurn = async (
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
-  const hosts = await listHosts(env, caller.tenantId);
+  const hosts = await listHostRecords(env, caller.tenantId);
   const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
@@ -581,7 +563,7 @@ export const archiveSession = async (
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
-  if (session.state === "Idle") {
+  if (session.state === "Idle" || session.state === "Unknown") {
     const offline = await hostOffline(env, caller, session, "archive the session again");
     if (offline !== null) return offline;
   }
@@ -637,7 +619,7 @@ export const deleteSession = async (env: Env, caller: Caller, sessionId: string)
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
-  if (session.state === "Idle") {
+  if (session.state === "Idle" || session.state === "Unknown") {
     const offline = await hostOffline(env, caller, session, "delete the session again");
     if (offline !== null) return offline;
   }
@@ -739,7 +721,7 @@ export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): 
 };
 
 const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLine[]> => {
-  if (cursor.kind === "Lines") return cursor.lines;
+  if (cursor.kind === "Lines") return [];
   const object = await env.STORE.get(cursor.storageKey, { range: cursor.range });
   if (object === null) throw new Error(`transcript chunk ${cursor.storageKey} is indexed but missing from the store`);
   return decodeLines(await object.text());
@@ -785,8 +767,6 @@ export const readTranscript = async (
         sessionId,
         after: page.cursor,
         turnId: query.turnId ?? null,
-        limit: compact || limit === null ? chunkLines : limit - page.lines.length,
-        ...(compact ? {} : { maxBytes: Math.max(1, maxBytes - page.bytes) }),
       })
     ).cursor;
   let page = emptyPage(query.after ?? 0);

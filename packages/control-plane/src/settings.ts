@@ -20,3 +20,5 @@ export const apiOriginOf = (env: { API_ORIGIN: string }): string => {
 
 export const turnCredentialSeconds = (settings: Settings): number =>
   Math.max(settings.dispatchGrantTtlSeconds, settings.turnOfferTtlSeconds + settings.turnImageFetchBudgetSeconds);
+
+export const presenceGraceMs = (settings: Settings): number => settings.heartbeatDeadlineSeconds * 1000;

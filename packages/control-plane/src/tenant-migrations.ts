@@ -98,6 +98,11 @@ import tenant0091 from "../migrations/tenant/0091_drop_transcript_tables.sql";
 import tenant0092 from "../migrations/tenant/0092_drop_ci_prebuilds.sql";
 import tenant0093 from "../migrations/tenant/0093_drop_build_providers.sql";
 import tenant0094 from "../migrations/tenant/0094_turns_offered.sql";
+import tenant0095 from "../migrations/tenant/0095_turns_in_flight.sql";
+import tenant0096 from "../migrations/tenant/0096_host_reports.sql";
+import tenant0097 from "../migrations/tenant/0097_reconcile_holdings.sql";
+import tenant0098 from "../migrations/tenant/0098_subscription_failures.sql";
+import tenant0099 from "../migrations/tenant/0099_sessions_host_state.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -201,4 +206,9 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0092_drop_ci_prebuilds", sql: tenant0092 },
   { name: "0093_drop_build_providers", sql: tenant0093 },
   { name: "0094_turns_offered", sql: tenant0094 },
+  { name: "0095_turns_in_flight", sql: tenant0095 },
+  { name: "0096_host_reports", sql: tenant0096 },
+  { name: "0097_reconcile_holdings", sql: tenant0097 },
+  { name: "0098_subscription_failures", sql: tenant0098 },
+  { name: "0099_sessions_host_state", sql: tenant0099 },
 ];

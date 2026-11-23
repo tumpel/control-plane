@@ -17,7 +17,7 @@ export const TEST_SETTINGS: Settings = {
   claudeSetupMintBudgetSeconds: 120,
   claudeSetupMintGraceSeconds: 10,
   heartbeatIntervalSeconds: 1,
-  heartbeatDeadlineSeconds: 3,
+  heartbeatDeadlineSeconds: 90,
   devicePollIntervalSeconds: 1,
   deviceSlowDownStepSeconds: 1,
 };

@@ -15,8 +15,8 @@ const keyOf = (body: unknown): string => {
   return parsed.data.object.key;
 };
 
-const onlineHosts = async (db: D1Database): Promise<string[]> => {
-  const { results } = await db.prepare("SELECT host_id FROM hosts WHERE state = 'Online'").all<{ host_id: string }>();
+const enrolledHosts = async (db: D1Database): Promise<string[]> => {
+  const { results } = await db.prepare("SELECT host_id FROM hosts WHERE state != 'Revoked'").all<{ host_id: string }>();
   return results.map((row) => row.host_id);
 };
 
@@ -28,7 +28,7 @@ export const noticeRelease = async (env: Env, bodies: unknown[], now: number): P
   }
   if (release.kind === "Unreadable") throw new Error(`${release.detail}; publish the release again`);
   const { releaseVersion } = release.manifest;
-  const hosts = await onlineHosts(env.DB);
+  const hosts = await enrolledHosts(env.DB);
   await Promise.all(hosts.map((hostId) => env.HOST.get(env.HOST.idFromName(hostId)).releasePublished(releaseVersion)));
   await pruneReleases(env.RELEASES, releaseVersion, release.stored, now);
 };

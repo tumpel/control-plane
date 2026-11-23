@@ -165,7 +165,6 @@ export const hosts = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
     labels: text("labels").notNull().default(sql`'[]'`),
     health: text("health").notNull().default(sql`'Healthy'`),
-    reportedHealth: text("reported_health").notNull().default(sql`'Healthy'`),
   },
   (table) => [index("hosts_by_tenant").on(table.tenantId, table.createdAt)],
 );

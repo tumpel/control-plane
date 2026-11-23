@@ -35,7 +35,7 @@ test("a tenant past the write rate of its own profile is refused by its object, 
   assert.equal(refused.status, 429);
   assert.match(ProblemSchema.parse(await refused.json()).detail, /more than 2 writing requests in a minute/);
 
-  world.restartTenant();
+  await world.restartTenant();
   await world.passes(60_000);
   const kept = TenantLimitsSchema.parse(await (await world.fetch(world.owner, "GET", "/v1/limits")).json());
   assert.equal(kept.source, "Custom");
