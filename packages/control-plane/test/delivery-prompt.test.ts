@@ -60,3 +60,26 @@ test("a delivery prompt delivers by reference an event too long to fit on its ow
   });
   assert.ok(batch.prompt.length <= DELIVERY_PROMPT_LIMIT);
 });
+
+test("a start refusal too long to inline reads back by event id without a session filter", () => {
+  const batch = deliveryPrompt("Handle the refusal.", "t1", [
+    {
+      event_id: 41,
+      created_at: 1_000,
+      payload: JSON.stringify({
+        event: "StartRefused",
+        operation: "Start",
+        refusal: { code: "HarnessNotInCatalog", detail: "x".repeat(5000) },
+        personaId: "persona-1",
+        model: "model-1",
+        harnessVersion: "old-version",
+        crewTags: ["crew:work"],
+      }),
+    },
+  ]);
+  assert.ok(batch?.kind === "Batch");
+  assert.equal(batch.lastEventId, 41);
+  assert.ok(batch.prompt.length <= DELIVERY_PROMPT_LIMIT);
+  assert.match(batch.prompt, /afterEventId=40&event=StartRefused/);
+  assert.doesNotMatch(batch.prompt, /sessionId/);
+});

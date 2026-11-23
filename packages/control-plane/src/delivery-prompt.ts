@@ -12,12 +12,12 @@ export type DeliveryBatch =
   | { kind: "Batch"; prompt: string; lastEventId: number }
   | { kind: "Malformed"; cause: string };
 
-export const eventReference = (eventId: number, event: string, sessionId: string): string =>
+export const eventReference = (eventId: number, event: string, sessionId?: string): string =>
   JSON.stringify({
     eventId,
     event,
     sessionId,
-    tooLongToInline: `read it in full with GET /v1/events?afterEventId=${eventId - 1}&event=${event}&sessionId=${sessionId} (tumpel_events_list); it is the first event of the page`,
+    tooLongToInline: `read it in full with GET /v1/events?afterEventId=${eventId - 1}&event=${event}${sessionId === undefined ? "" : `&sessionId=${sessionId}`} (tumpel_events_list); it is the first event of the page`,
   });
 
 export const widestReference = (events: string[]): string =>
@@ -58,8 +58,7 @@ export const deliveryPrompt = (plan: string, tenantId: string, events: DeliveryE
   if (batch !== undefined) return batch;
   const [first] = parsed;
   if (first === undefined) return null;
-  if (!("sessionId" in first)) throw new Error(`delivered event ${first.eventId} (${first.event}) names no session`);
-  const prompt = `${plan}\n\n${eventReference(first.eventId, first.event, first.sessionId)}`;
+  const prompt = `${plan}\n\n${eventReference(first.eventId, first.event, "sessionId" in first ? first.sessionId : undefined)}`;
   if (prompt.length > DELIVERY_PROMPT_LIMIT) {
     throw new Error(`event ${first.eventId} does not fit even by reference after a plan the create check admitted`);
   }

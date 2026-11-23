@@ -10,8 +10,17 @@ import {
 } from "@tumpel/schemas";
 import type { z } from "zod";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
+import { recordSessionStartRefusal, START_REFUSAL_EVENTS } from "./start-refusals.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
+import {
+  type NewSession,
+  type OfferedPrompt,
+  type Session,
+  type SessionStarted,
+  type StartedSession,
+  TenantSessions,
+  type TurnRow,
+} from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];
@@ -98,11 +107,24 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
 const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e JOIN event_sessions AS es ON es.event_id = e.event_id
   WHERE e.event_id > ?2
     AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = ?1)
-    AND ${crewMatch("?1", "es.session_id", "es.tags")}`;
+    AND ${crewMatch("?1", "es.session_id", "es.tags")}
+    UNION ALL ${START_REFUSAL_EVENTS}`;
 
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
 export abstract class TenantSubscriptions extends TenantSessions {
+  protected recordStartRefusal(input: NewSession, result: SessionStarted<StartedSession>, now: number): void {
+    if (result.kind !== "Unplaced") return;
+    recordSessionStartRefusal(
+      this.ctx.storage,
+      input,
+      result,
+      this.startTags(input.startedBy, input.start.tags ?? []),
+      now,
+      (event, at) => this.appendEvent(event, at),
+      (subscriptionId, at) => this.ensureDelivery(subscriptionId, at),
+    );
+  }
   protected getSubscription(tenantId: string, subscriptionId: string): Subscription | null {
     const row = this.subscriptionRow(subscriptionId);
     return row === null ? null : toSubscription(tenantId, row);
