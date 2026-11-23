@@ -46,6 +46,7 @@ import {
   PersonaFilePatchSchema,
   PersonaFileUploadRequestSchema,
   PersonaFileUploadSchema,
+  PersonaMetadataListSchema,
   PersonaPatchSchema,
   PersonaPathSchema,
   PersonaUpdateSchema,
@@ -440,6 +441,13 @@ const handlePersonasList = async (request: Request, env: Env): Promise<Response>
   const { personas } = await tenantApi(env.TENANT, caller.tenantId).call("listPersonas", { tenantId: caller.tenantId });
   const now = Date.now();
   return json(await Promise.all(personas.map((persona) => readPersona(env, persona, now))));
+};
+
+const handlePersonasListMetadata = async (request: Request, env: Env): Promise<Response> => {
+  const caller = await deviceCaller(request, env);
+  if (caller instanceof Response) return caller;
+  const { personas } = await tenantApi(env.TENANT, caller.tenantId).call("listPersonas", { tenantId: caller.tenantId });
+  return json(PersonaMetadataListSchema.parse(personas));
 };
 
 const personaNotFound = (personaId: string): Response =>
@@ -1756,6 +1764,7 @@ const ROUTES: Record<string, Route> = {
   "POST /v1/tenant-config/plan": handleConfigPlan,
   "POST /v1/tenant-config/apply": handleConfigApply,
   "GET /v1/personas": (request, _url, env) => handlePersonasList(request, env),
+  "GET /v2/personas": (request, _url, env) => handlePersonasListMetadata(request, env),
   "POST /v1/personas": handlePersonaCreate,
   "POST /v1/personas/file-uploads": handlePersonaFileUpload,
   "GET /v1/secret-sets": handleSecretSetsList,

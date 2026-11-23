@@ -124,12 +124,18 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected createSubscription(tenantId: string, create: SubscriptionCreate, now: number): Created {
     const sql = this.ctx.storage.sql;
-    const session = this.subscriptionSession(create.sessionId);
+    const session = durableDb(this.ctx.storage, {}).get<{ state: string }>(
+      query`SELECT state FROM sessions WHERE session_id = ${create.sessionId}`,
+    );
     if (session === undefined) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
     if (session.state === "Failed") return { kind: "Failed" };
-    if (create.crewTags.length > 0 && session.tumpelMcp !== 1) {
-      return { kind: "PersonaLacksTumpelMcp", personaId: session.personaId, personaName: session.personaName };
+    if (create.crewTags.length > 0) {
+      const persona = this.subscriptionSession(create.sessionId);
+      if (persona === undefined) throw new Error(`session ${create.sessionId} has no persona`);
+      if (persona.tumpelMcp !== 1) {
+        return { kind: "PersonaLacksTumpelMcp", personaId: persona.personaId, personaName: persona.personaName };
+      }
     }
     const subscriptionId = crypto.randomUUID();
     this.ctx.storage.transactionSync(() => {
@@ -199,13 +205,12 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   private subscriptionSession(
     sessionId: string,
-  ): { state: string; personaId: string; personaName: string; tumpelMcp: number } | undefined {
+  ): { personaId: string; personaName: string; tumpelMcp: number } | undefined {
     return durableDb(this.ctx.storage, {}).get<{
-      state: string;
       personaId: string;
       personaName: string;
       tumpelMcp: number;
-    }>(query`SELECT s.state, p.persona_id AS personaId, p.name AS personaName, p.tumpel_mcp AS tumpelMcp
+    }>(query`SELECT p.persona_id AS personaId, p.name AS personaName, p.tumpel_mcp AS tumpelMcp
       FROM sessions AS s JOIN personas AS p ON p.persona_id = s.persona_id WHERE s.session_id = ${sessionId}`);
   }
 

@@ -18,6 +18,7 @@ import {
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
+  PersonaMetadataListSchema,
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
@@ -430,8 +431,8 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   );
   await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId, updatedAt: disconnected.updatedAt });
   assert.deepEqual(
-    await toolJson(PersonaSchema.array(), "tumpel_persona_list"),
-    await rest(PersonaSchema.array(), "GET", "/v1/personas"),
+    await toolJson(PersonaMetadataListSchema, "tumpel_persona_list"),
+    await rest(PersonaMetadataListSchema, "GET", "/v2/personas"),
   );
   await toolDone("tumpel_persona_delete", { personaId: persona.personaId });
   assert.equal((await call(`/v1/personas/${persona.personaId}`, { headers: bearer })).status, 404);
