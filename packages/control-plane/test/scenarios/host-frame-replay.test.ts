@@ -112,14 +112,28 @@ test("a clone failure, a snapshot failure and a Claude setup's frames applied tw
   await world.startSession({ prompt: "clone fails", tags: [] });
   const cloning = host.takeOffer();
   await once(world, host.hostId, { type: "TurnClaim", turnId: cloning.turnId, boxId: cloning.boxId });
-  await once(world, host.hostId, {
+  const cloneFailed: HostMessage = {
     type: "TurnRepositoryCloneFailed",
     turnId: cloning.turnId,
     cause: "Refused",
     detail: "git reported: fatal: could not read Username",
     failedAt: FAILED_AT,
-  });
+  };
+  const discarded = await world.call("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message: cloneFailed });
   assert.equal((await world.turn(cloning.turnId)).state, "Failed");
+  await world.settle();
+  world
+    .tenantStorage(TENANT_ID)
+    .sql.exec("UPDATE sessions SET box_id = ? WHERE session_id = ?", "box-new", cloning.sessionId);
+  const rows = world.tenantRowsWritten();
+  assert.deepEqual(
+    await world.call("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message: cloneFailed }),
+    discarded,
+  );
+  assert.deepEqual(discarded, {
+    reply: { type: "BoxDiscard", sessionId: cloning.sessionId, boxId: cloning.boxId },
+  });
+  assert.equal(world.tenantRowsWritten() - rows, 0);
 
   await world.startSession({ prompt: "snapshot fails", tags: [] });
   const snapshotting = host.takeOffer();

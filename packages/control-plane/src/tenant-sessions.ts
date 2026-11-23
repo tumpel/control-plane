@@ -2879,10 +2879,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   protected async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
-    if (turn === null || session === null) {
-      throw new Error(`host ${hostId} has an offer for turn ${turnId}, which tenant ${tenantId} does not hold`);
-    }
-    if (turn.state !== "Offered") return { kind: "Withdrawn" };
+    if (turn === null || session === null || turn.state !== "Offered") return { kind: "Withdrawn" };
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) {
       const detail = `the session runs ${session.harness} ${session.harness_version}, which left the harness catalog, so no image runs the turn; start a new session on a listed version`;
@@ -3374,7 +3371,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
-    const discard: HostReply = { type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id };
+    const discard: HostReply = { type: "BoxDiscard", sessionId: session.session_id, boxId: turn.box_id };
     if (turn.state === "Failed" && turn.reason === "RepositoryCloneFailed") return discard;
     if (!IN_FLIGHT.includes(turn.state)) return null;
     const detail = this.cloneFailureDetail(session, message.detail);
