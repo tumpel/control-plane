@@ -27,6 +27,7 @@ const headersOf = (message: IncomingMessage): Headers => {
 };
 
 const linkFor = new Map<string, (link: Link) => void>();
+const opened = new Map<WebSocket, Promise<void>>();
 
 export class ScenarioServer {
   readonly origin: string;
@@ -138,6 +139,7 @@ export class ScenarioServer {
     this.sockets.close();
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    await Promise.all(opened.values());
   }
 }
 
@@ -206,10 +208,17 @@ export const openSocket = (
     socket.emit("error", new Error(`the server answered the upgrade with ${response.statusCode}`));
   });
   socket.on("message", () => link?.toClient.arrived());
-  socket.on("close", () => {
-    connected();
-    link?.toClient.drop();
-  });
+  opened.set(
+    socket,
+    new Promise<void>((resolve) => {
+      socket.on("close", () => {
+        connected();
+        link?.toClient.drop();
+        opened.delete(socket);
+        resolve();
+      });
+    }),
+  );
   const send = socket.send.bind(socket);
   socket.send = ((data: string) => {
     link?.toServer.sent();

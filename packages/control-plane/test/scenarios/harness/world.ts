@@ -14,6 +14,7 @@ import {
   TurnSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
+import { Agent, setGlobalDispatcher } from "undici";
 import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
@@ -127,6 +128,7 @@ export class World {
   readonly releases = new R2Bucket();
   readonly db = new D1Database(migratedDatabase(MIGRATIONS));
   private readonly hosts = new Map<string, Supervisor>();
+  private readonly dispatcher = new Agent();
   readonly dataPoints: { blobs?: string[]; doubles?: number[]; indexes?: string[] }[] = [];
   private api!: TenantApi;
   private tenants!: Namespace<object>;
@@ -147,6 +149,7 @@ export class World {
     this.runtime = runtime;
     this.limits = limits;
     this.tier = tier;
+    setGlobalDispatcher(this.dispatcher);
   }
 
   static async open(
@@ -715,10 +718,11 @@ export class World {
 
   async close(): Promise<void> {
     for (const host of this.hosts.values()) host.quiet();
-    flight.reset();
-    this.runtime.close();
     await this.server?.close();
     await this.github?.close();
     await this.access?.close();
+    await this.dispatcher.destroy();
+    flight.reset();
+    this.runtime.close();
   }
 }
