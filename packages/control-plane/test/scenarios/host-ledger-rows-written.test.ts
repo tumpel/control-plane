@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ChannelProtocol } from "@tumpel/schemas";
 import * as control from "../../src/channel/control.ts";
 import { HostLedger } from "../../src/channel/ledger.ts";
-import { STORED_FRAMES_PROTOCOL } from "../../src/channel/protocol.ts";
 import { durableDb } from "../../src/db/client.ts";
 import * as hostSchema from "../../src/db/host-schema.ts";
 import { migratedDatabase, SqlStorage } from "./harness/runtime.ts";
@@ -24,7 +24,7 @@ const channel = () => {
     admitFrame: () => null,
     now: () => new Date(),
   };
-  let connection: control.ControlConnection = { phase: "Open", protocolVersion: STORED_FRAMES_PROTOCOL, cursor: 0 };
+  let connection: control.ControlConnection = { phase: "Open", protocolVersion: ChannelProtocol.Oldest, cursor: 0 };
   const lines = async (seq: number, text = `{"n":${seq}}`) => {
     const message = { type: "TurnLines", turnId: "turn-1", firstLineSeq: seq, lines: [text] };
     const received = await control.receive(

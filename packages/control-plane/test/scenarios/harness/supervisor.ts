@@ -8,7 +8,6 @@ import {
   helloBytes,
   type MetricBatch,
   type ReportedUsage,
-  STORED_FRAMES_PROTOCOL,
 } from "../../../src/channel/protocol.ts";
 import { openSocket } from "./server.ts";
 
@@ -105,7 +104,6 @@ export class Supervisor {
   private usage: HostUsage;
   private welcomed = false;
   private welcomedOn: number | null = null;
-  private welcomeFields: string[] = [];
   private challenged = false;
   private readonly inbox: ControlMessage[] = [];
   private readonly refusals: { seq: number; reason: string }[] = [];
@@ -149,7 +147,7 @@ export class Supervisor {
   ): Promise<Supervisor> {
     const side = new Supervisor(clock, origin, hostId, key, {
       boxCapacity: 8,
-      protocolVersion: STORED_FRAMES_PROTOCOL,
+      protocolVersion: ChannelProtocol.Oldest,
       channelProtocolOldest: ChannelProtocol.Oldest,
       carried: { received: 0, sent: 0, held: [], turns: [] },
       resend: [],
@@ -245,10 +243,7 @@ export class Supervisor {
 
   private receive(text: string): void {
     try {
-      const sent: unknown = JSON.parse(text);
-      if (typeof sent === "object" && sent !== null && "type" in sent && sent.type === "Welcome")
-        this.welcomeFields = Object.keys(sent);
-      this.accept(ControlEnvelopeSchema.parse(sent));
+      this.accept(ControlEnvelopeSchema.parse(JSON.parse(text)));
     } catch (error) {
       this.broken ??= error instanceof Error ? error : new Error(String(error));
     }
@@ -386,10 +381,6 @@ export class Supervisor {
 
   welcomedVersion(): number | null {
     return this.welcomedOn;
-  }
-
-  welcomedWith(): string[] {
-    return this.welcomeFields;
   }
 
   assertOpen(when: string): void {

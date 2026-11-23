@@ -13,7 +13,6 @@ import type { z } from "zod";
 export const CHANNEL_PATH = /^\/v1\/hosts\/([^/]+)\/channel$/;
 
 export const HelloVersionSchema = HelloSchema.pick({ type: true, protocolVersion: true, channelProtocolOldest: true });
-export const STORED_FRAMES_PROTOCOL = 37;
 export { ControlEnvelopeSchema, HostEnvelopeSchema };
 
 export type HostEnvelope = z.infer<typeof HostEnvelopeSchema>;

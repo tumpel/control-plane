@@ -22,7 +22,6 @@ import {
   type ReportedUsage,
   randomNonce,
   resend,
-  STORED_FRAMES_PROTOCOL,
   type StoredClaudeSetupCode,
   type StoredClaudeSetupOffer,
   type StoredControlMessage,
@@ -283,11 +282,11 @@ const helloVersion = (connection: ControlConnection, text: string, context: Cont
   const { protocolVersion, channelProtocolOldest } = greeting.value;
   const oldest = channelProtocolOldest ?? protocolVersion;
   const negotiated = Math.min(protocolVersion, ChannelProtocol.Version);
-  if (negotiated >= Math.max(oldest, STORED_FRAMES_PROTOCOL)) return negotiated;
+  if (negotiated >= Math.max(oldest, ChannelProtocol.Oldest)) return negotiated;
   return close(
     context.port,
     CloseCode.UnsupportedVersion,
-    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${STORED_FRAMES_PROTOCOL} to ${ChannelProtocol.Version}, update the supervisor`,
+    `${oldest === protocolVersion ? `protocol version ${protocolVersion} is` : `protocol versions ${oldest} to ${protocolVersion} are`} not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
   );
 };
 
