@@ -3832,6 +3832,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `answered SnapshotDone for snapshot ${request.snapshot_id} without sending SnapshotPacks part 1, so the control plane cannot name its packs and the session keeps its previous snapshot; update the supervisor`,
       );
     }
+    const unnamed = parsed.data.manifest.find((placement) => !packs.has(placement.packDigest));
+    if (unnamed !== undefined) {
+      return rejected(
+        `stored snapshot ${request.snapshot_id} whose root places its manifest in pack ${unnamed.packDigest}, which no SnapshotPacks part named, so the control plane cannot keep it and the session keeps its previous snapshot; update the supervisor`,
+      );
+    }
     return { kind: "Checked", packs };
   }
 

@@ -155,7 +155,7 @@ const snapshotDone = async (
 const storePlacedRoot = async (
   storageKey: string,
   chunks: Placement[],
-): Promise<{ root: string; pack: { packDigest: string; sizeBytes: number } }> => {
+): Promise<{ root: string; placement: Placement; pack: { packDigest: string; sizeBytes: number } }> => {
   const manifest = JSON.stringify({
     entries: [
       {
@@ -173,9 +173,10 @@ const storePlacedRoot = async (
   });
   const digest = createHash("sha256").update(manifest).digest("hex");
   await store.put(`${storageKey.split("/")[0]}/packs/${digest}`, manifest);
-  const root = JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] });
+  const placement = { digest, packDigest: digest, offset: 0, length: manifest.length };
+  const root = JSON.stringify({ manifest: [placement] });
   await store.put(storageKey, root);
-  return { root, pack: { packDigest: digest, sizeBytes: manifest.length } };
+  return { root, placement, pack: { packDigest: digest, sizeBytes: manifest.length } };
 };
 
 const tenantSql = async (tenantId: string, query: string, ...bindings: (string | number)[]): Promise<unknown[]> => {
@@ -457,7 +458,16 @@ const tenant = async () => {
       assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(upload.packDigest, "hex").toString("base64"));
       await store.put(url.pathname.replace("/tumpel-sessions/", ""), "pack bytes");
     }
-    await storePlacedRoot(request.storageKey, [...answer.held, ...chunks]);
+    const { placement, pack } = await storePlacedRoot(request.storageKey, [...answer.held, ...chunks]);
+    host.send({
+      type: "SnapshotPacks",
+      snapshotId: request.snapshotId,
+      part: 2,
+      packs: [pack],
+      chunks: [placement],
+      reusedPackDigests: [],
+    });
+    await host.next("SnapshotPackUploads");
     host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 64, chunkCount: chunks.length });
     await until(
       "a stored snapshot",
