@@ -8,7 +8,7 @@ import {
 } from "@tumpel/schemas";
 import { z } from "zod";
 import { DELIVERY_PROMPT_LIMIT } from "../../src/delivery-prompt.ts";
-import { TENANT_ID, World } from "./harness/world.ts";
+import { BUDGETS, TENANT_ID, World } from "./harness/world.ts";
 
 type EventLog = { appendEvent(event: Record<string, unknown>, now: number): number };
 
@@ -51,7 +51,7 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   await world.call("hostHello", {
     hostId: host.hostId,
     boxCapacity: 8,
-    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
+    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
     now: Date.now(),
     channelProtocol: ChannelProtocol.Version,
   });

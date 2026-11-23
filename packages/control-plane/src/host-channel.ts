@@ -3,7 +3,7 @@ import { CloseCode, HostHealthSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { errorOf, RETRY_LIMIT } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { lost, refusedOrResent, resendable, unheard } from "./channel/failure.ts";
+import { lost, refusedOrResent, resendable } from "./channel/failure.ts";
 import { HostFrameMeter, type HostHealth, rateLimitDetail } from "./channel/host-health.ts";
 import { HostLedger } from "./channel/ledger.ts";
 import type {
@@ -11,7 +11,6 @@ import type {
   Frame,
   HostMessage,
   HostReportedHealth,
-  HostUsage,
   StoredControlMessage,
   TelemetryBatch,
 } from "./channel/protocol.ts";
@@ -42,7 +41,7 @@ interface Attachment {
   connection: control.ControlConnection;
   lastReceivedAt: number;
   lastSentAt: number;
-  usage: HostUsage | null;
+  usage: control.ReportedUsage | null;
   heldFrom: number | null;
 }
 
@@ -50,7 +49,7 @@ type Presence = "Online" | "Offline";
 
 type Delivered = { ok: true; reply: HostReply | null } | { ok: false };
 
-const usageOf = (attachment: Attachment): HostUsage => {
+const usageOf = (attachment: Attachment): control.ReportedUsage => {
   if (attachment.usage === null)
     throw new Error("a host channel holds transcript lines from a connection that sent no usage");
   return attachment.usage;
@@ -73,7 +72,6 @@ export class HostChannel extends DurableObject<Env> {
   private readonly ledger: HostLedger;
   private meter: HostFrameMeter | null = null;
   private tripped: HostHealth | null = null;
-  private reported: HostReportedHealth | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -169,10 +167,11 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private async offerRefused(hostId: string): Promise<OfferSent | null> {
-    if (await this.offersPaused(hostId)) return "RateLimited";
-    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
+    const row = await this.env.DB.prepare("SELECT state, reported_health FROM hosts WHERE host_id = ?")
       .bind(hostId)
-      .first<{ state: string }>();
+      .first<{ state: string; reported_health: string }>();
+    if ((await this.frameMeter(hostId)).health() !== "Healthy" || row?.reported_health === "RateLimited")
+      return "RateLimited";
     const open = this.openSocket();
     if (row?.state !== "Online" || open === undefined) return "Offline";
     return this.silent(open) ? "Degraded" : null;
@@ -368,7 +367,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private async flush(
     hostId: string,
-    usage: HostUsage,
+    usage: control.ReportedUsage,
     now: number,
     attachment: Attachment,
     context: control.ControlContext,
@@ -386,7 +385,7 @@ export class HostChannel extends DurableObject<Env> {
 
   private async settle(
     hostId: string,
-    usage: HostUsage,
+    usage: control.ReportedUsage,
     now: number,
     attachment: Attachment,
     context: control.ControlContext,
@@ -397,23 +396,10 @@ export class HostChannel extends DurableObject<Env> {
       this.ledger.forwarded(frame.seq);
       await this.answer(hostId, frame, delivered.reply, attachment, context);
     }
-    const reported = await this.report(hostId, usage, now).then(
+    return this.report(hostId, usage, now).then(
       () => true,
-      (error: unknown) => this.unreported(error, attachment, context),
+      (error: unknown) => this.undelivered("Heartbeat", error),
     );
-    return reported;
-  }
-
-  private unreported(error: unknown, attachment: Attachment, context: control.ControlContext): false {
-    if (!unheard(error)) return this.undelivered("Heartbeat", error);
-    this.ledger.take();
-    attachment.heldFrom = null;
-    attachment.connection = control.close(
-      context.port,
-      CloseCode.ProtocolError,
-      "the tenant restarted and lost this host's Hello; reconnect so the Hello carries its usage again",
-    ).connection;
-    return false;
   }
 
   private undelivered(type: string, error: unknown): false {
@@ -531,10 +517,6 @@ export class HostChannel extends DurableObject<Env> {
     return this.meter;
   }
 
-  private async offersPaused(hostId: string): Promise<boolean> {
-    return (await this.frameMeter(hostId)).health() !== "Healthy" || this.reported === "RateLimited";
-  }
-
   private async trip(hostId: string, health: HostHealth, framesPerMinute: number): Promise<void> {
     this.tripped = null;
     const over = rateLimitDetail(hostId, framesPerMinute);
@@ -561,8 +543,6 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private async reportHealth(hostId: string, health: HostReportedHealth): Promise<void> {
-    if (this.reported === health) return;
-    this.reported = health;
     await this.env.DB.prepare(
       "UPDATE hosts SET reported_health = ?1, updated_at = ?2 WHERE host_id = ?3 AND reported_health IS NOT ?1",
     )
@@ -570,7 +550,7 @@ export class HostChannel extends DurableObject<Env> {
       .run();
   }
 
-  private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
+  private async report(hostId: string, usage: control.ReportedUsage, now: number): Promise<void> {
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
   }

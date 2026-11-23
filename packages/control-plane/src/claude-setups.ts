@@ -11,7 +11,7 @@ import { listHosts } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
-import { degradedOnly } from "./placement";
+import { degradedOnly, placementRefusals } from "./placement";
 import { releaseUnreadable } from "./releases";
 import { placeableFix, why } from "./sessions";
 import { tenantApi } from "./tenant-api.ts";
@@ -96,11 +96,12 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
       fix: `Remove ${started.name} from the set, or set up ${name} for another set, then ${START_AGAIN}`,
     });
   }
-  if (degradedOnly(started.hosts)) {
+  const refused = placementRefusals(started.hosts);
+  if (degradedOnly(refused)) {
     return problem(409, {
       code: "HostDegraded",
       title: "No healthy host",
-      detail: `no host of your tenant is healthy: ${started.hosts.map(why).join(", ")}`,
+      detail: `no host of your tenant is healthy: ${refused.map(why).join(", ")}`,
       fix: `Check that tumpel-supervisor runs on a host and reaches the control plane, then ${START_AGAIN}`,
     });
   }
@@ -108,10 +109,10 @@ const start = async (request: Request, url: URL, env: Env, caller: Caller): Prom
     code: "NoHostOnline",
     title: "No host online",
     detail:
-      started.hosts.length === 0
+      refused.length === 0
         ? "your tenant has no hosts"
-        : `no host of your tenant can run the setup box: ${started.hosts.map(why).join(", ")}`,
-    fix: placeableFix(started.hosts, START_AGAIN),
+        : `no host of your tenant can run the setup box: ${refused.map(why).join(", ")}`,
+    fix: placeableFix(refused, START_AGAIN),
   });
 };
 

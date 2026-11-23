@@ -30,6 +30,10 @@ export class Tenant extends BaseTenant {
   sql(query: string, bindings: SqlStorageValue[]): Record<string, SqlStorageValue>[] {
     return this.ctx.storage.sql.exec(query, ...bindings).toArray();
   }
+
+  restart(): void {
+    this.ctx.abort("a test restarted the tenant");
+  }
 }
 
 const FIXTURE = "/__fixture/";
@@ -64,6 +68,15 @@ const sql = async (request: Request, env: Env, tenantId: string): Promise<Respon
   return Response.json(await tenant.sql(query, bindings));
 };
 
+const restart = async (env: Env, tenantId: string): Promise<Response> => {
+  const tenant = (env.TENANT as unknown as DurableObjectNamespace<Tenant>).getByName(tenantId);
+  const aborted = await tenant.restart().then(
+    () => false,
+    () => true,
+  );
+  return new Response(null, { status: aborted ? 204 : 500 });
+};
+
 const usage = async (env: Env, tenantId: string): Promise<Response> =>
   Response.json(await tenantApi(env.TENANT, tenantId).call("readUsage", { tenantId }));
 
@@ -87,6 +100,7 @@ const fixture = (request: Request, env: Env, path: string): Promise<Response> =>
   if (kind === "sql") return sql(request, env, target);
   if (kind === "d1") return d1(request, env);
   if (kind === "usage") return usage(env, target);
+  if (kind === "restart") return restart(env, target);
   if (kind === "host-rows") return hostRows(env, target);
   return Promise.resolve(new Response(`no fixture route ${path}`, { status: 404 }));
 };

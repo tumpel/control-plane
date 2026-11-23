@@ -103,7 +103,15 @@ const openChannel = async (meter: HostFrameMeter, protocolVersion: number = Chan
     supervisorVersion: "0.1.0",
     signature: sign(null, helloBytes(challenge.nonce, HOST_ID), pair.privateKey).toString("base64"),
     boxCapacity: 8,
-    usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 4096 },
+    usage: {
+      boxesWarm: 0,
+      loadAverage: 0,
+      memoryAvailableMib: 4096,
+      memoryBudgetMib: 4096,
+      memoryHeldMib: 0,
+      diskBudgetMib: 100000,
+      diskHeldMib: 0,
+    },
   });
   const frame = (seq: number, message: HostMessage) => receive({ type: "Frame", seq, ack: 0, message });
   const refusals = () =>

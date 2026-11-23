@@ -100,21 +100,36 @@ export interface FrameRateRefusal {
   retryAfter: Date;
 }
 
+export type ReportedUsage = Required<HostUsage>;
+
+const budgeted = (usage: HostUsage): usage is ReportedUsage =>
+  usage.memoryBudgetMib !== undefined &&
+  usage.memoryHeldMib !== undefined &&
+  usage.diskBudgetMib !== undefined &&
+  usage.diskHeldMib !== undefined;
+
+const unbudgeted = (port: Port<ControlEnvelope>, hostId: string): Received =>
+  close(
+    port,
+    CloseCode.UnsupportedVersion,
+    `host ${hostId} reported usage without its memory and disk budgets; update the supervisor on that host`,
+  );
+
 export type ControlEvent =
   | { kind: "None" }
   | {
       kind: "Welcomed";
       boxCapacity: number;
-      usage: HostUsage;
+      usage: ReportedUsage;
       supervisorVersion: string;
       protocolVersion: number;
       channelProtocolOldest: Hello["channelProtocolOldest"];
       guestProtocol: Hello["guestProtocol"];
     }
-  | { kind: "Heartbeat"; usage: HostUsage; health: HostReportedHealth }
+  | { kind: "Heartbeat"; usage: ReportedUsage; health: HostReportedHealth }
   | {
       kind: "FirstHeartbeat";
-      usage: HostUsage;
+      usage: ReportedUsage;
       health: HostReportedHealth;
       heldSessionIds: string[];
       heldClaudeSetupIds: string[];
@@ -244,6 +259,7 @@ const hello = async (
     );
   }
   if (context.host.revoked) return revoke(context, "the tenant revoked this host");
+  if (!budgeted(envelope.usage)) return unbudgeted(context.port, envelope.hostId);
   const ledger = context.ledger.load();
   for (const frame of ledger.unacked) {
     const refused = unspoken(envelope.protocolVersion, frame.message.type, frame.seq, context);
@@ -336,6 +352,7 @@ export const receive = async (
     return close(context.port, CloseCode.ProtocolError, "Hello arrived twice on one connection");
   }
   if (envelope.type === "Heartbeat") {
+    if (!budgeted(envelope.usage)) return unbudgeted(context.port, context.host.hostId);
     const health = envelope.health ?? "Healthy";
     if (connection.heldReported) {
       return { connection, event: { kind: "Heartbeat", usage: envelope.usage, health } };

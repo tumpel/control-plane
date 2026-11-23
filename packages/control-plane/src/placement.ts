@@ -1,9 +1,11 @@
-import { BoxMemoryLimit, type ReportedHostUsageSchema } from "@tumpel/schemas";
+import type { ReportedHostUsageSchema, UnplaceableSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { HostRecord as Host } from "./host-record.ts";
 import type { HostArchitecture } from "./releases.ts";
 
-export type ReportedHostUsage = z.infer<typeof ReportedHostUsageSchema>;
+export type ReportedHostUsage = Required<z.infer<typeof ReportedHostUsageSchema>>;
+
+type TenantUnplaceable = z.infer<typeof UnplaceableSchema>;
 
 export interface ImageAvailability {
   harness: string;
@@ -14,11 +16,8 @@ export interface ImageAvailability {
 export type Unplaceable =
   | { kind: "Unplaceable"; host: Host; reason: "NotOnline" }
   | { kind: "Unplaceable"; host: Host; reason: "NotHealthy" }
-  | { kind: "Unplaceable"; host: Host; reason: "NotHeard" }
   | { kind: "Unplaceable"; host: Host; reason: "NoImage"; image: ImageAvailability }
-  | { kind: "Unplaceable"; host: Host; reason: "Full"; usage: ReportedHostUsage }
   | { kind: "Unplaceable"; host: Host; reason: "MemoryFull"; usage: ReportedHostUsage; boxMemoryMib: number }
-  | { kind: "Unplaceable"; host: Host; reason: "NoMemory"; usage: ReportedHostUsage; boxMemoryMib: number }
   | { kind: "Unplaceable"; host: Host; reason: "NoDisk"; usage: ReportedHostUsage; boxDiskMib: number }
   | { kind: "Unplaceable"; host: Host; reason: "NoConnectors"; usage: ReportedHostUsage };
 
@@ -42,14 +41,10 @@ const MIB = 1024 ** 2;
 
 const freeSlots = (usage: ReportedHostUsage): number => usage.boxCapacity - usage.boxesRunning - usage.boxesWarm;
 
-const freeMemoryMib = ({ memoryBudgetMib, memoryHeldMib }: ReportedHostUsage): number | undefined =>
-  memoryBudgetMib === undefined || memoryHeldMib === undefined ? undefined : memoryBudgetMib - memoryHeldMib;
+const freeMemoryMib = ({ memoryBudgetMib, memoryHeldMib }: ReportedHostUsage): number =>
+  memoryBudgetMib - memoryHeldMib;
 
-const freeShare = (usage: ReportedHostUsage): number => {
-  const free = freeMemoryMib(usage);
-  if (free === undefined) return freeSlots(usage) / usage.boxCapacity;
-  return free / Math.max(usage.memoryBudgetMib ?? 0, 1);
-};
+const freeShare = (usage: ReportedHostUsage): number => freeMemoryMib(usage) / Math.max(usage.memoryBudgetMib, 1);
 
 const withHeld = (usage: ReportedHostUsage, held: readonly HeldBox[]): ReportedHostUsage => ({
   ...usage,
@@ -59,18 +54,12 @@ const withHeld = (usage: ReportedHostUsage, held: readonly HeldBox[]): ReportedH
 const freeing = (usage: ReportedHostUsage, victims: readonly HeldBox[]): ReportedHostUsage => ({
   ...usage,
   boxesWarm: usage.boxesWarm - victims.length,
-  ...(usage.memoryHeldMib === undefined
-    ? {}
-    : { memoryHeldMib: usage.memoryHeldMib - victims.reduce((sum, each) => sum + each.boxMemoryMib, 0) }),
-  ...(usage.diskHeldMib === undefined
-    ? {}
-    : { diskHeldMib: usage.diskHeldMib - victims.reduce((sum, each) => sum + each.boxDiskMib, 0) }),
+  memoryHeldMib: usage.memoryHeldMib - victims.reduce((sum, each) => sum + each.boxMemoryMib, 0),
+  diskHeldMib: usage.diskHeldMib - victims.reduce((sum, each) => sum + each.boxDiskMib, 0),
 });
 
 const diskHeld = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage): number =>
-  diskBudgetMib === undefined || diskHeldMib === undefined || diskHeldMib === 0
-    ? 0
-    : Math.min(diskHeldMib / Math.max(diskBudgetMib, 1), 1);
+  diskHeldMib === 0 ? 0 : Math.min(diskHeldMib / Math.max(diskBudgetMib, 1), 1);
 
 const busyness = ({ host, usage }: Candidate): number =>
   usage.loadAverage / host.cpuCount -
@@ -79,10 +68,7 @@ const busyness = ({ host, usage }: Candidate): number =>
   diskHeld(usage);
 
 const lacksDisk = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage, boxDiskMib: number): boolean =>
-  diskBudgetMib !== undefined &&
-  diskHeldMib !== undefined &&
-  diskHeldMib > 0 &&
-  diskHeldMib + boxDiskMib > diskBudgetMib;
+  diskHeldMib > 0 && diskHeldMib + boxDiskMib > diskBudgetMib;
 
 const assess = (
   host: Host,
@@ -90,19 +76,13 @@ const assess = (
   image: ImageAvailability,
   { boxMemoryMib, boxDiskMib }: BoxSize,
 ): Candidate | Unplaceable => {
-  if (host.state !== "Online") return { kind: "Unplaceable", host, reason: "NotOnline" };
+  const usage = usages.get(host.hostId);
+  if (host.state !== "Online" || usage === undefined) return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (host.health !== "Healthy" || host.reportedHealth !== "Healthy")
     return { kind: "Unplaceable", host, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
-  const usage = usages.get(host.hostId);
-  if (usage === undefined) return { kind: "Unplaceable", host, reason: "NotHeard" };
-  const freeMemory = freeMemoryMib(usage);
-  if (freeMemory !== undefined && boxMemoryMib > freeMemory)
+  if (boxMemoryMib > freeMemoryMib(usage))
     return { kind: "Unplaceable", host, reason: "MemoryFull", usage, boxMemoryMib };
-  if (freeMemory === undefined && usage.boxesRunning + usage.boxesWarm >= usage.boxCapacity)
-    return { kind: "Unplaceable", host, reason: "Full", usage };
-  if (freeMemory === undefined && boxMemoryMib > BoxMemoryLimit.DefaultMib && usage.memoryAvailableMib < boxMemoryMib)
-    return { kind: "Unplaceable", host, reason: "NoMemory", usage, boxMemoryMib };
   if (lacksDisk(usage, boxDiskMib)) return { kind: "Unplaceable", host, reason: "NoDisk", usage, boxDiskMib };
   return { kind: "Candidate", host, usage };
 };
@@ -121,6 +101,25 @@ const evicting = (
   }
   return null;
 };
+
+const isPlacementRefusal = (refused: TenantUnplaceable): refused is Unplaceable =>
+  refused.reason !== "NotHeard" &&
+  refused.reason !== "Full" &&
+  refused.reason !== "NoMemory" &&
+  (!("usage" in refused) ||
+    (refused.usage.memoryBudgetMib !== undefined &&
+      refused.usage.memoryHeldMib !== undefined &&
+      refused.usage.diskBudgetMib !== undefined &&
+      refused.usage.diskHeldMib !== undefined));
+
+export const placementRefusals = (hosts: readonly TenantUnplaceable[]): Unplaceable[] =>
+  hosts.map((refused) => {
+    if (!isPlacementRefusal(refused))
+      throw new Error(
+        `the tenant refused host ${refused.host.hostId} as ${refused.reason}, which placement never answers`,
+      );
+    return refused;
+  });
 
 export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
   hosts.some(({ reason, host }) => reason === "NotHealthy" && host.health === "Degraded") &&

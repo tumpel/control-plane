@@ -78,7 +78,7 @@ const USAGE: HostUsage = {
   loadAverage: 0.25,
   memoryAvailableMib: 6144,
   diskBudgetMib: 200000,
-  diskHeldMib: 32768,
+  diskHeldMib: 1,
 };
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
@@ -289,7 +289,7 @@ class HostSide {
   }
 
   report(usage: HostUsage): void {
-    this.usage = usage;
+    this.usage = { ...this.usage, ...usage };
     this.beat();
   }
 
@@ -308,7 +308,8 @@ class HostSide {
     });
     const parsed = ControlEnvelopeSchema.parse(JSON.parse(challenge));
     assert.equal(parsed.type, "Challenge");
-    const side = new HostSide(socket, carried, resend, usage);
+    const budgeted = { memoryBudgetMib: boxCapacity * BoxMemoryLimit.DefaultMib, memoryHeldMib: 0, ...usage };
+    const side = new HostSide(socket, carried, resend, budgeted);
     side.raw({
       type: "Hello",
       hostId: id,
@@ -316,7 +317,7 @@ class HostSide {
       supervisorVersion: "0.1.0",
       signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
       boxCapacity,
-      usage,
+      usage: budgeted,
     });
     return side;
   }
@@ -1932,6 +1933,21 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(spent.hostRead <= 520, `the turn read ${spent.hostRead} host rows`);
   });
 
+  test("a tenant restart between a host's hello and the next start still places on that host and keeps its channel open", async () => {
+    const { tenantId, hostId, host, tool, sessionStart } = await tenant();
+    const restarted = await call(`/__fixture/restart/${tenantId}`);
+    assert.equal(restarted.status, 204);
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart()), prompt: "after the restart" },
+      StartedSessionSchema,
+    );
+    assert.equal(started.session.hostId, hostId);
+    assert.equal((await host.next("TurnOffer")).turnId, started.turn.turnId);
+    await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
+    host.assertOpen("after the tenant restarted");
+  });
+
   test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
     const { tool, toolRefusal, sessionStart } = await tenant();
     const started = await tool(
@@ -3489,7 +3505,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(refused.status, 409);
     assert.match(
       ProblemSchema.parse(await refused.json()).detail,
-      /gives box disks 200000 MiB and its boxes hold 32768 MiB of it, and the persona's boxes need 262144 MiB/,
+      /gives box disks 200000 MiB and its boxes hold 1 MiB of it, and the persona's boxes need 262144 MiB/,
     );
     const response = await sized(131072);
     assert.equal(response.status, 200, await response.clone().text());
@@ -3550,8 +3566,8 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.match(failure.detail, /a box disk of 32768 MiB does not fit/);
   });
 
-  test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes offered since its last report", async () => {
-    const { bearer, host, hostId, refused, getJson, enrol, sessionStart, hostState } = await tenant();
+  test("a host reporting a memory budget takes boxes past its box slots until their memory fills it, counting boxes placed before the host reports them", async () => {
+    const { bearer, host, hostId, refused, enrol, sessionStart, hostState } = await tenant();
     host.close();
     await hostState(hostId, "Offline");
     const budgeted = await enrol("budgeted");
@@ -3581,13 +3597,6 @@ suite("sessions", { concurrency: 8 }, () => {
         `no host of your tenant has memory for another box: box is Offline, budgeted gives boxes ${budget} MiB of memory and its boxes hold ${2 * box} MiB of it, and the persona's boxes need ${box} MiB`,
       ],
     );
-    side.report({ ...USAGE, memoryBudgetMib: budget, memoryHeldMib: box });
-    await until(
-      "the host's report of one held box",
-      () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
-      (usages) => usages.find((usage) => usage.hostId === budgeted.id)?.memoryHeldMib === box,
-    );
-    assert.equal(await start("third"), budgeted.id);
     side.close();
   });
 
@@ -3702,11 +3711,11 @@ suite("sessions", { concurrency: 8 }, () => {
     const drift = await enrol("drift");
     const first = await connect(drift.id, drift.key);
     await hostState(drift.id, "Online");
-    first.report({ ...USAGE, loadAverage: 0.5 });
+    first.report({ ...USAGE, memoryHeldMib: 1024 });
     await until(
       "the first heartbeat of the first connection",
       () => getJson("/v1/hosts/usage", ReportedHostUsageSchema.array()),
-      (usages) => usages.find((usage) => usage.hostId === drift.id)?.loadAverage === 0.5,
+      (usages) => usages.find((usage) => usage.hostId === drift.id)?.memoryHeldMib === 1024,
     );
     const snapshotted = async (sessionId: string) => {
       const request = await first.next("SnapshotRequest");

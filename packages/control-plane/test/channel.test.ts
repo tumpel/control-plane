@@ -19,7 +19,15 @@ import {
 } from "../src/channel/protocol.ts";
 
 const HOST_ID = "host-1";
-const USAGE = { boxesWarm: 1, loadAverage: 0.5, memoryAvailableMib: 4096 };
+const USAGE = {
+  boxesWarm: 1,
+  loadAverage: 0.5,
+  memoryAvailableMib: 4096,
+  memoryBudgetMib: 4096,
+  memoryHeldMib: 0,
+  diskBudgetMib: 100000,
+  diskHeldMib: 0,
+};
 
 const keyPair = (): { publicKey: string; privateKey: KeyObject } => {
   const pair = generateKeyPairSync("ed25519");
