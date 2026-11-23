@@ -107,7 +107,7 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
   assert.equal((await world.session(sessionId)).state, "Stopped");
 });
 
-test("a clone failure, a snapshot failure and a Claude setup's frames applied twice have one effect and the same reply", async (t) => {
+test("a clone failure, a snapshot failure, a box gone under a turn and a Claude setup's frames applied twice have one effect and the same reply", async (t) => {
   const { world, host } = await opened(t);
   await world.startSession({ prompt: "clone fails", tags: [] });
   const cloning = host.takeOffer();
@@ -147,6 +147,14 @@ test("a clone failure, a snapshot failure and a Claude setup's frames applied tw
     detail: "the store refused the upload",
     failedAt: FAILED_AT,
   });
+
+  await world.startSession({ prompt: "box gone while running", tags: [] });
+  const losing = host.takeOffer();
+  await host.claims(losing);
+  await host.completes(losing);
+  host.take("SnapshotRequest");
+  await once(world, host.hostId, { type: "BoxGone", sessionId: losing.sessionId, boxId: losing.boxId });
+  assert.equal((await world.turn(losing.turnId)).state, "Failed");
 
   const created = await world.fetch(
     world.owner,
