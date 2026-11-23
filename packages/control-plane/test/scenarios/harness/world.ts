@@ -1,22 +1,30 @@
+import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { register } from "node:module";
+import { mock } from "node:test";
 import {
-  ChannelProtocol,
+  DeviceAuthorizationSchema,
+  DeviceTokenSchema,
+  HostSchema,
+  MintedEnrolmentTokenSchema,
   SessionSchema,
   StartedSessionSchema,
-  StoredTurnOfferSchema,
   SubscriptionSchema,
   type TenantLimitsProfileSchema,
   TenantUsageSchema,
   TurnSchema,
+  WhoamiSchema,
 } from "@tumpel/schemas";
+import { Agent, setGlobalDispatcher } from "undici";
 import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
+import { ACCESS_AUDIENCE, AccessStub } from "./access.ts";
+import { GitHubStub, installApp } from "./github.ts";
 import {
   D1Database,
-  type DurableObjectState,
+  flight,
   ioClock,
   migratedDatabase,
   type Namespace,
@@ -24,7 +32,12 @@ import {
   RateLimiter,
   Runtime,
   type SqlStorage,
+  type Storage,
 } from "./runtime.ts";
+import { type RequestInit, request, ScenarioServer, settle } from "./server.ts";
+import { hostKey, Supervisor, type SupervisorOptions, until } from "./supervisor.ts";
+
+export type { TurnOffer } from "./supervisor.ts";
 
 register("./hooks.mjs", import.meta.url);
 
@@ -53,20 +66,22 @@ const imported = async <T>(path: string, name: string): Promise<T> => {
   return module[name] as T;
 };
 
-export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
 type Turn = z.infer<typeof TurnSchema>;
 export type TenantUsage = z.infer<typeof TenantUsageSchema>;
 
-const ControlMessageSchema = z.looseObject({ type: z.string() });
-type ControlMessage = z.infer<typeof ControlMessageSchema>;
-
 const START = Date.parse("2026-11-21T11:00:00Z");
 export const TENANT_ID = "tenant-scenario";
 export const PRINCIPAL_ID = "principal-scenario";
 
-export type WorldOptions = { webhookSenders: "Running" | "Unreachable"; vapidKey: "Valid" | "Unreadable" };
+export type WorldOptions = {
+  webhookSenders: "Running" | "Unreachable";
+  vapidKey: "Valid" | "Unreadable";
+  vars: Record<string, unknown>;
+};
+type Settings = typeof TEST_SETTINGS;
+const STEP_MS = 50;
 
 const VAPID = generateKeyPairSync("ec", { namedCurve: "P-256" });
 const VAPID_JWK = VAPID.privateKey.export({ format: "jwk" });
@@ -96,123 +111,13 @@ export const LIMITS: ScenarioLimits = {
   },
 };
 
-export class Host {
-  private readonly inbox: ControlMessage[] = [];
-  private readonly lineSeqs = new Map<string, number>();
-  private lastHeard: number | null = null;
-  readonly hostId: string;
-  private readonly world: World;
+export const UNMETERED: ScenarioLimits = {
+  ...LIMITS,
+  hostFramesPerMinute: 1_000_000,
+  ceiling: { ...LIMITS.ceiling, hostFramesPerMinute: 1_000_000 },
+};
 
-  constructor(hostId: string, world: World) {
-    this.hostId = hostId;
-    this.world = world;
-  }
-
-  lastReceivedAt(): number {
-    return this.lastHeard ?? Date.now();
-  }
-
-  fallsSilent(): void {
-    this.lastHeard = Date.now();
-  }
-
-  async closesSocket(): Promise<void> {
-    this.world.db.sql.exec("UPDATE hosts SET state = 'Offline' WHERE host_id = ?", this.hostId);
-    await this.world.call("hostPresence", {
-      tenantId: TENANT_ID,
-      hostId: this.hostId,
-      presence: "Offline",
-      now: Date.now(),
-    });
-  }
-
-  send(message: unknown): Promise<"Sent" | "RateLimited"> {
-    const parsed = ControlMessageSchema.parse(message);
-    const [row] = this.world.db.sql.exec("SELECT health FROM hosts WHERE host_id = ?", this.hostId).toArray();
-    if (parsed.type === "TurnOffer" && row?.health !== "Healthy") return Promise.resolve("RateLimited");
-    this.inbox.push(parsed);
-    return Promise.resolve("Sent");
-  }
-
-  received(type: string): ControlMessage[] {
-    return this.inbox.filter((message) => message.type === type);
-  }
-
-  take(type: string): ControlMessage {
-    const at = this.inbox.findIndex((message) => message.type === type);
-    if (at === -1) {
-      throw new Error(
-        `host ${this.hostId} was sent no ${type}; it holds ${JSON.stringify(this.inbox.map((message) => message.type))}`,
-      );
-    }
-    const [message] = this.inbox.splice(at, 1);
-    return ControlMessageSchema.parse(message);
-  }
-
-  takeOffer(): TurnOffer {
-    return StoredTurnOfferSchema.parse(this.take("TurnOffer"));
-  }
-
-  async says(message: Record<string, unknown>): Promise<unknown> {
-    this.lastHeard = null;
-    return this.world.call("hostMessage", { tenantId: TENANT_ID, hostId: this.hostId, message });
-  }
-
-  async claims(offer: TurnOffer): Promise<void> {
-    await this.says({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-  }
-
-  async finishes(offer: TurnOffer): Promise<void> {
-    await this.completes(offer);
-    await this.answersSnapshot(offer.sessionId);
-  }
-
-  async completes(offer: TurnOffer): Promise<void> {
-    const lineSeq = (this.lineSeqs.get(offer.sessionId) ?? 0) + 1;
-    this.lineSeqs.set(offer.sessionId, lineSeq);
-    const result = '{"type":"result","subtype":"success","is_error":false}';
-    await this.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: result });
-    await this.says({
-      type: "TurnComplete",
-      turnId: offer.turnId,
-      lastLineSeq: lineSeq,
-      completedAt: new Date(Date.now()).toISOString(),
-    });
-  }
-
-  async answersSnapshot(sessionId: string): Promise<void> {
-    const request = z
-      .object({ snapshotId: z.string(), sessionId: z.string(), storageKey: z.string() })
-      .parse(this.take("SnapshotRequest"));
-    if (request.sessionId !== sessionId) throw new Error(`the snapshot asked for is of ${request.sessionId}`);
-    const manifest = JSON.stringify({ entries: [] });
-    const digest = createHash("sha256").update(manifest).digest("hex");
-    await this.says({
-      type: "SnapshotPacks",
-      snapshotId: request.snapshotId,
-      part: 1,
-      packs: [{ packDigest: digest, sizeBytes: manifest.length }],
-      chunks: [{ digest, packDigest: digest, offset: 0, length: manifest.length }],
-    });
-    await this.world.store.put(`${request.storageKey.split("/")[0]}/packs/${digest}`, manifest);
-    await this.world.store.put(
-      request.storageKey,
-      JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
-    );
-    await this.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: manifest.length });
-  }
-
-  async tearsDownBox(sessionId: string): Promise<string> {
-    const teardown = z.object({ sessionId: z.string(), boxId: z.string() }).parse(this.take("BoxTeardown"));
-    if (teardown.sessionId !== sessionId) throw new Error(`the box torn down is of ${teardown.sessionId}`);
-    await this.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
-    return teardown.boxId;
-  }
-
-  async dropsIdleBox(offer: TurnOffer): Promise<void> {
-    await this.says({ type: "BoxGone", sessionId: offer.sessionId, boxId: offer.boxId });
-  }
-}
+export type Host = Supervisor;
 
 type TenantSteps = {
   expireSubscriptions(now: number): void;
@@ -222,9 +127,16 @@ export class World {
   readonly store = new R2Bucket();
   readonly releases = new R2Bucket();
   readonly db = new D1Database(migratedDatabase(MIGRATIONS));
-  private readonly hosts = new Map<string, Host>();
+  private readonly hosts = new Map<string, Supervisor>();
+  private readonly dispatcher = new Agent();
+  readonly dataPoints: { blobs?: string[]; doubles?: number[]; indexes?: string[] }[] = [];
   private api!: TenantApi;
   private tenants!: Namespace<object>;
+  private hostChannels!: Namespace<object>;
+  private server!: ScenarioServer;
+  github!: GitHubStub;
+  access!: AccessStub;
+  origin = "";
   private tenantApi!: (namespace: unknown, tenantId: string) => TenantApi;
   private worker!: Worker;
   private env: Record<string, unknown> = {};
@@ -237,20 +149,32 @@ export class World {
     this.runtime = runtime;
     this.limits = limits;
     this.tier = tier;
+    setGlobalDispatcher(this.dispatcher);
   }
 
-  static async open(options: Partial<WorldOptions> & { limits?: ScenarioLimits; tier?: Tier } = {}): Promise<World> {
-    const { limits, tier, ...rest } = options;
-    const world = new World(new Runtime(START), limits ?? LIMITS, tier ?? "Configured");
-    await world.boot({ webhookSenders: "Running", vapidKey: "Valid", ...rest }).catch((error: unknown) => {
-      world.close();
-      throw error;
-    });
+  static async open(
+    options: Partial<WorldOptions> & { limits?: ScenarioLimits; tier?: Tier; start?: number } = {},
+  ): Promise<World> {
+    const { limits, tier, start, ...rest } = options;
+    const world = new World(new Runtime(start ?? START), limits ?? LIMITS, tier ?? "Configured");
+    await world
+      .boot({ webhookSenders: "Running", vapidKey: "Valid", vars: {}, ...rest })
+      .catch(async (error: unknown) => {
+        await world.close();
+        throw error;
+      });
     return world;
+  }
+
+  get settings(): Settings {
+    return this.env.TUMPEL_SETTINGS as Settings;
   }
 
   private async boot(options: WorldOptions): Promise<void> {
     const Tenant = await imported<DurableObjectClass>("tenant.ts", "Tenant");
+    const HostChannel = await imported<DurableObjectClass>("host-channel.ts", "HostChannel");
+    const EventChannel = await imported<DurableObjectClass>("event-channel.ts", "EventChannel");
+    const TenantMetrics = await imported<DurableObjectClass>("tenant-metrics.ts", "TenantMetrics");
     const WebhookSender = await imported<DurableObjectClass>("webhook-sender.ts", "WebhookSender");
     const unreachable = () =>
       this.runtime.stubs(() => ({
@@ -258,17 +182,19 @@ export class World {
       }));
     this.tenantApi = await imported<(namespace: unknown, tenantId: string) => TenantApi>("tenant-api.ts", "tenantApi");
     this.worker = await imported<Worker>("index.ts", "default");
-    const ignored = () =>
-      this.runtime.stubs(() => new Proxy({}, { get: () => () => Promise.resolve(undefined) }) as object);
+    this.github = await GitHubStub.listen();
+    this.access = await AccessStub.listen();
     const env: Record<string, unknown> = {
       DB: this.db,
       STORE: this.store,
       RELEASES: this.releases,
-      HOST: this.runtime.stubs((hostId) => this.host(hostId)),
-      EVENTS: ignored(),
+      HOST: this.runtime.namespace(HostChannel, () => env),
+      EVENTS: this.runtime.namespace(EventChannel, () => env),
       WEBHOOKS:
         options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env, true) : unreachable(),
-      TENANT_METRICS: ignored(),
+      TENANT_METRICS: this.runtime.namespace(TenantMetrics, () => env),
+      METRICS: { writeDataPoint: (point: World["dataPoints"][number]) => this.dataPoints.push(point) },
+      METRICS_DATASET: "tumpel_metrics_scenario",
       TUMPEL_SETTINGS: SETTINGS,
       SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
       R2_BUCKET_NAME: "store",
@@ -279,7 +205,9 @@ export class World {
       RELEASES_ACCESS_KEY_ID: "scenario",
       RELEASES_SECRET_ACCESS_KEY: "scenario",
       API_ORIGIN: "https://api.scenario.test",
-      GITHUB_API_ORIGIN: "https://github.scenario.test",
+      GITHUB_API_ORIGIN: this.github.origin,
+      ACCESS_ISSUER: this.access.issuer,
+      ACCESS_AUD: ACCESS_AUDIENCE,
       VAPID_PRIVATE_KEY:
         options.vapidKey === "Valid"
           ? VAPID.privateKey.export({ format: "pem", type: "pkcs8" }).toString()
@@ -291,14 +219,19 @@ export class World {
       TENANT_READ_RATE: new RateLimiter(this.limits.readsPerMinute),
       TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
       WEBHOOK_RATE: new RateLimiter(600),
+      ...options.vars,
     };
     this.tenants = this.runtime.namespace(Tenant, () => env);
+    this.hostChannels = env.HOST as Namespace<object>;
     env.TENANT = this.tenants;
     this.env = env;
+    this.server = await ScenarioServer.listen((incoming) => this.worker.fetch(incoming, this.env));
+    this.origin = this.server.origin;
     this.api = this.tenantApi(env.TENANT, TENANT_ID);
     await this.releases.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
     this.owner = await this.member(TENANT_ID, PRINCIPAL_ID, this.tier);
     await this.call("open", { tenantId: TENANT_ID, now: Date.now() });
+    await this.holdsAgentCredentials();
   }
 
   private async member(tenantId: string, principalId: string, tier: Tier): Promise<Member> {
@@ -345,25 +278,103 @@ export class World {
   }
 
   async fetch(member: Member, method: string, path: string, body?: string): Promise<Response> {
-    const request = new Request(`https://api.scenario.test${path}`, {
+    return this.request(path, {
       method,
       headers: { authorization: `Bearer ${member.token}`, "content-type": "application/json" },
       ...(body === undefined ? {} : { body }),
     });
-    const response = await this.worker.fetch(request, this.env);
-    await this.runtime.settle();
+  }
+
+  postJson(path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+    return this.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  }
+
+  browser(email: string): Record<string, string> {
+    return { "cf-access-jwt-assertion": this.access.assertion(email), origin: this.origin };
+  }
+
+  async signUp(
+    name: string,
+    email: string,
+  ): Promise<{ tenantId: string; token: string; bearer: Record<string, string> }> {
+    const signedUp = await this.postJson("/v1/tenants", { name }, this.browser(email));
+    if (signedUp.status !== 200) throw new Error(`signing up answered ${signedUp.status}: ${await signedUp.text()}`);
+    const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+    return { tenantId, ...(await this.device(tenantId, email)) };
+  }
+
+  async device(tenantId: string, email: string): Promise<{ token: string; bearer: Record<string, string> }> {
+    const started = DeviceAuthorizationSchema.parse(
+      await (await this.postJson("/v1/device/code", { device_name: `${email} scenario` })).json(),
+    );
+    const approved = await this.postJson(
+      "/v1/device/approve",
+      { userCode: started.user_code, tenantId },
+      this.browser(email),
+    );
+    if (approved.status !== 200)
+      throw new Error(`approving the device answered ${approved.status}: ${await approved.text()}`);
+    await this.passes(started.interval * 1000);
+    const granted = await this.postJson("/v1/device/token", {
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: started.device_code,
+    });
+    if (granted.status !== 200) throw new Error(`the device token answered ${granted.status}: ${await granted.text()}`);
+    const token = DeviceTokenSchema.parse(await granted.json()).access_token;
+    return { token, bearer: { authorization: `Bearer ${token}` } };
+  }
+
+  async callTenant(tenantId: string, operation: string, input: unknown): Promise<unknown> {
+    const result = await this.tenantApi(this.tenants, tenantId).call(operation, input);
+    await this.settle();
+    return result;
+  }
+
+  async request(path: string, init: RequestInit = {}): Promise<Response> {
+    const response = await request(`${this.origin}${path}`, init);
+    await this.settle();
     return response;
   }
 
-  private storageOf(member: Member) {
-    const held = (this.env.TENANT as Namespace<object>).instances.get(member.tenantId);
-    if (held === undefined) throw new Error(`tenant ${member.tenantId} has no Durable Object yet`);
+  async settle(): Promise<void> {
+    await settle(this.runtime);
+  }
+
+  async tick(ms: number): Promise<void> {
+    mock.timers.tick(ms);
+    await this.settle();
+  }
+
+  until<T>(what: string, read: () => Promise<T> | T, done: (value: T) => boolean): Promise<T> {
+    return until(this, what, read, done);
+  }
+
+  private storageOf(member: Member): Storage {
+    return this.tenantStorage(member.tenantId);
+  }
+
+  tenantStorage(tenantId: string): Storage {
+    const held = this.tenants.instances.get(tenantId);
+    if (held === undefined) throw new Error(`tenant ${tenantId} has no Durable Object yet`);
     return held.ctx.storage;
   }
 
-  async restart(member: Member): Promise<void> {
-    (this.env.TENANT as Namespace<object>).restart(member.tenantId);
-    await this.runtime.settle();
+  hostStorage(hostId: string): Storage {
+    const held = this.hostChannels.instances.get(hostId);
+    if (held === undefined) throw new Error(`host ${hostId} has no channel Durable Object yet`);
+    return held.ctx.storage;
+  }
+
+  hostRows(hostId: string): number {
+    return this.hostStorage(hostId).sql.rowsWritten;
+  }
+
+  hibernateHostChannel(hostId: string): void {
+    this.hostChannels.hibernate(hostId);
   }
 
   rowsWritten(member: Member): number {
@@ -386,16 +397,76 @@ export class World {
 
   host(hostId: string): Host {
     const held = this.hosts.get(hostId);
-    if (held !== undefined) return held;
-    const host = new Host(hostId, this);
-    this.hosts.set(hostId, host);
-    return host;
+    if (held === undefined) throw new Error(`no supervisor connected as host ${hostId}`);
+    return held;
   }
 
   async call(operation: string, input: unknown): Promise<unknown> {
     const result = await this.api.call(operation, input);
-    await this.runtime.settle();
+    await this.settle();
     return result;
+  }
+
+  async enrol(
+    member: Member,
+    name: string,
+    key = hostKey(),
+  ): Promise<{ hostId: string; key: ReturnType<typeof hostKey> }> {
+    const minted = await this.fetch(member, "POST", "/v1/enrolment-tokens", JSON.stringify({ expiresInSeconds: 600 }));
+    if (minted.status !== 200)
+      throw new Error(`minting an enrolment token answered ${minted.status}: ${await minted.text()}`);
+    const { token } = MintedEnrolmentTokenSchema.parse(await minted.json());
+    const enrolled = await this.request("/v1/hosts/enrol", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enrolmentToken: token,
+        name,
+        architecture: "Amd64",
+        cpuCount: 8,
+        memoryBytes: 32 * 1024 ** 3,
+        publicKey: key.publicKey,
+        supervisorVersion: "0.1.0",
+      }),
+    });
+    if (enrolled.status !== 200) throw new Error(`enrolling answered ${enrolled.status}: ${await enrolled.text()}`);
+    return { hostId: HostSchema.parse(await enrolled.json()).hostId, key };
+  }
+
+  async connect(
+    hostId: string,
+    key: ReturnType<typeof hostKey>,
+    options: Partial<Omit<SupervisorOptions, "store">> = {},
+  ): Promise<Supervisor> {
+    const supervisor = await Supervisor.connect(this, this.origin, hostId, key.privateKey, {
+      heartbeatMs: this.settings.heartbeatIntervalSeconds * 1000,
+      store: this.store,
+      ...options,
+    });
+    this.hosts.get(hostId)?.quiet();
+    this.hosts.set(hostId, supervisor);
+    return supervisor;
+  }
+
+  async reconnect(host: Supervisor, options: Partial<SupervisorOptions> = {}): Promise<Supervisor> {
+    const supervisor = await host.reconnect(options);
+    this.hosts.set(host.hostId, supervisor);
+    return supervisor;
+  }
+
+  async online(
+    member: Member,
+    name: string,
+    options: Partial<Omit<SupervisorOptions, "store">> = {},
+  ): Promise<Supervisor> {
+    const { hostId, key } = await this.enrol(member, name);
+    const supervisor = await this.connect(hostId, key, options);
+    await this.until(
+      `host ${hostId} reading Online`,
+      () => this.db.sql.exec("SELECT state FROM hosts WHERE host_id = ?", hostId).toArray()[0]?.state,
+      (state) => state === "Online" && supervisor.isWelcomed(),
+    );
+    return supervisor;
   }
 
   async computeMs(operation: string, input: unknown): Promise<number> {
@@ -409,36 +480,17 @@ export class World {
     return elapsed;
   }
 
-  async hostOnline(name: string): Promise<Host> {
-    const hostId = randomUUID();
-    const now = Date.now();
-    this.db.sql.exec(
-      `INSERT INTO hosts (host_id, tenant_id, name, state, architecture, cpu_count, memory_bytes, public_key, supervisor_version, created_at, updated_at)
-      VALUES (?, ?, ?, 'Online', 'Amd64', 8, ?, 'key', '0.1.0', ?, ?)`,
-      hostId,
-      TENANT_ID,
-      name,
-      32 * 1024 ** 3,
-      now,
-      now,
-    );
-    await this.call("hostHello", {
-      hostId,
-      boxCapacity: 8,
-      usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS },
-      now,
-      channelProtocol: ChannelProtocol.Version,
-    });
-    return this.host(hostId);
+  hostOnline(name: string): Promise<Host> {
+    return this.online(this.owner, name);
   }
 
-  restartTenant(): void {
-    this.tenants.restart(TENANT_ID);
+  async restartTenant(tenantId: string = TENANT_ID): Promise<void> {
+    this.tenants.restart(tenantId);
+    await this.runtime.settle();
   }
 
   tenantRowsWritten(): number {
-    const { ctx } = this.tenants.instance(TENANT_ID) as { ctx: DurableObjectState };
-    return ctx.storage.sql.totalRowsWritten();
+    return this.tenants.instance(TENANT_ID).ctx.storage.sql.rowsWritten;
   }
 
   private async defaultPersona(): Promise<string> {
@@ -476,6 +528,7 @@ export class World {
       "hosts.ts",
       "listHosts",
     );
+    await installApp(this.db, TENANT_ID, "acme");
     const personaId = await this.defaultPersona();
     const prebuildId = randomUUID();
     const [base] = CLAUDE_CODE_AMD64_RELEASE.bases;
@@ -634,10 +687,20 @@ export class World {
   }
 
   async passes(ms: number): Promise<void> {
-    await this.runtime.advance(ms);
+    await this.settle();
+    for (let left = ms; left > 0; left -= STEP_MS) await this.tick(Math.min(STEP_MS, left));
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    for (const host of this.hosts.values()) host.quiet();
+    await this.server?.close();
+    await this.github?.close();
+    await this.access?.close();
+    await this.dispatcher.destroy();
+    await this.runtime.settle();
+    const faults = flight.faults;
+    flight.reset();
     this.runtime.close();
+    assert.deepEqual(faults, [], "a Durable Object or the Worker threw during the scenario");
   }
 }

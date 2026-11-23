@@ -7,6 +7,7 @@ const RATE_LIMITED = "host sent more than 600 frames a minute";
 
 const healthIs = async (world: World, host: Host, health: string, detail: string): Promise<void> => {
   world.db.sql.exec("UPDATE hosts SET health = ? WHERE host_id = ?", health, host.hostId);
+  world.hibernateHostChannel(host.hostId);
   await world.call("hostHealth", { tenantId: TENANT_ID, hostId: host.hostId, health, detail, now: Date.now() });
 };
 

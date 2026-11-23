@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol } from "@tumpel/schemas";
 import { BUDGETS, type Host, SETTINGS, World } from "./harness/world.ts";
 
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
@@ -39,22 +38,23 @@ test("a tenant that restarts after storing a chunk goes on from the stored lines
   const stored = SETTINGS.transcriptChunkLines;
   for (let lineSeq = 1; lineSeq <= stored + 6; lineSeq++) await line(host, first.turnId, lineSeq);
 
-  world.restartTenant();
-  await assert.rejects(line(host, first.turnId, stored + 7), /TranscriptLinesLost/);
-  await assert.rejects(
-    world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() }),
-    /TranscriptLinesLost/,
-  );
-  for (let lineSeq = stored + 1; lineSeq <= stored + 7; lineSeq++) await line(host, first.turnId, lineSeq);
-  await world.call("hostHello", {
-    hostId: host.hostId,
-    boxCapacity: 8,
-    usage: USAGE,
-    now: Date.now(),
-    channelProtocol: ChannelProtocol.Version,
+  await world.restartTenant();
+  await line(host, first.turnId, stored + 7);
+  host.report(USAGE);
+  await world.settle();
+  await host.says({ type: "TurnLine", turnId: first.turnId, lineSeq: stored + 8, text: RESULT });
+  await host.says({
+    type: "TurnComplete",
+    turnId: first.turnId,
+    lastLineSeq: stored + 8,
+    completedAt: new Date().toISOString(),
   });
-  await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
-  await completes(host, session.sessionId, first.turnId, stored + 8);
+  await world.until(
+    "a SnapshotRequest for the turn the restarted tenant completed",
+    () => host.received("SnapshotRequest").length,
+    (requests) => requests > 0,
+  );
+  await host.answersSnapshot(session.sessionId);
   assert.equal((await world.turn(first.turnId)).lineCount, stored + 8);
 
   await world.passes(1_000);
@@ -62,7 +62,8 @@ test("a tenant that restarts after storing a chunk goes on from the stored lines
   const second = host.takeOffer();
   await host.claims(second);
   for (let lineSeq = stored + 9; lineSeq <= stored + 11; lineSeq++) await line(host, second.turnId, lineSeq);
-  await world.call("hostUsage", { hostId: host.hostId, usage: USAGE, now: Date.now() });
+  host.report(USAGE);
+  await world.settle();
   await completes(host, session.sessionId, second.turnId, stored + 12);
 
   assert.equal((await world.turn(second.turnId)).lineCount, 4);

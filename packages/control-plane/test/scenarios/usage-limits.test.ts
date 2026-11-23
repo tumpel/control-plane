@@ -127,7 +127,7 @@ test("a free-tier tenant restarted mid-day keeps its day's counts", async (t) =>
   const before = day(await world.usage(free));
   assert.ok(before.some(({ measure, used }) => measure === "Requests" && used >= 20));
 
-  await world.restart(free);
+  await world.restartTenant(free.tenantId);
 
   const after = await world.usage(free);
   assert.equal(after.tier, "Free");

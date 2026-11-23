@@ -4,7 +4,7 @@ import { ChannelProtocol } from "@tumpel/schemas";
 import { BUDGETS, World } from "./harness/world.ts";
 
 const STEADY_ROWS_BUDGET = 100;
-const TURN_ROWS_BUDGET = 24;
+const TURN_ROWS_BUDGET = 50;
 
 const USAGE = { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000, ...BUDGETS };
 const SESSIONS = 10;

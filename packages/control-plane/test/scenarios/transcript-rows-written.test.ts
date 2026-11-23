@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SETTINGS, World } from "./harness/world.ts";
+import { SETTINGS, UNMETERED, World } from "./harness/world.ts";
 
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
 
 const rowsFor = async (lines: number) => {
-  const world = await World.open();
+  const world = await World.open({ limits: UNMETERED });
   try {
     const host = await world.hostOnline("host-1");
     const session = await world.startSession({ prompt: "write a long answer", tags: [] });
@@ -28,7 +28,7 @@ const rowsFor = async (lines: number) => {
     assert.equal(turn.lineCount, lines + 1);
     return { streamed, turn: world.tenantRowsWritten() - start };
   } finally {
-    world.close();
+    await world.close();
   }
 };
 

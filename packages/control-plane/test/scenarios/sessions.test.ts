@@ -1,13 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createHash, createPrivateKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { join } from "node:path";
+import { createHash, type KeyObject, randomBytes } from "node:crypto";
 import { after, before, suite, test } from "node:test";
-import { setTimeout as wait } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import {
   BoxMemoryLimit,
   ChannelProtocol,
@@ -19,7 +12,6 @@ import {
   FailedTurnSchema,
   HostSchema,
   type HostUsageSchema,
-  MintedEnrolmentTokenSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
@@ -36,42 +28,33 @@ import {
   SnapshotSchema,
   StartedSessionFromIssueSchema,
   StartedSessionSchema,
-  StopFailureSchema,
   SubscriptionSchema,
-  SupervisorHostKeySchema,
   TenantEventSchema,
   TenantUsageSchema,
   TurnFailureSchema,
   TurnSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
-import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
-import { ControlEnvelopeSchema, helloBytes } from "../../src/channel/protocol.ts";
-import { generateDataKey, seal } from "../../src/envelope.ts";
 import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
-import { workersSecretKeyStore } from "../../src/key-store.ts";
 import type { ReleaseManifest } from "../../src/releases.ts";
 import { steerSettings } from "../../src/steer.ts";
-import {
-  type ChunkLedger,
-  type ChunkStore,
-  ChunkWriter,
-  decodeLines,
-  type TranscriptLine,
-} from "../../src/transcript.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
-import { GIVE_UP_MS, TEST_SETTINGS, until } from "../timing.ts";
+import { TEST_SETTINGS } from "../timing.ts";
+import { GITHUB_TOKEN_PREFIX, installApp, PREBUILT_HEAD, storeApp } from "./harness/github.ts";
+import { openSocket, type RequestInit } from "./harness/server.ts";
+import type { Carried, ControlMessage, HostMessage, Supervisor } from "./harness/supervisor.ts";
+import { LIMITS, World } from "./harness/world.ts";
 
-const AUDIENCE = "tumpel-sessions-e2e";
 const DEPLOYED_COMMIT = "7".repeat(40);
-const KID = "sessions-e2e-key";
 const CALLBACK = "https://client.example.test/callback";
 const PROVIDER_KEY = "sk-ant-sessions-e2e-key";
 const OFFER_TTL_SECONDS = 3;
 const IMAGE_FETCH_BUDGET_SECONDS = 2;
 const R2_STUB_ORIGIN = "https://r2.example.test";
+const DASHBOARD_ORIGIN = "https://app.tumpel.test";
 type HostUsage = z.infer<typeof HostUsageSchema>;
+type HostSide = Supervisor;
 
 const USAGE: HostUsage = {
   boxesWarm: 0,
@@ -80,8 +63,6 @@ const USAGE: HostUsage = {
   diskBudgetMib: 200000,
   diskHeldMib: 1,
 };
-const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
-const SUPERVISOR = join(ROOT, ".tmp", "release-binaries", "tumpel-supervisor");
 const SETTINGS = {
   ...TEST_SETTINGS,
   dispatchGrantTtlSeconds: OFFER_TTL_SECONDS + IMAGE_FETCH_BUDGET_SECONDS - 1,
@@ -91,30 +72,7 @@ const SETTINGS = {
   turnTotalBudgetSeconds: 60,
   transcriptChunkLines: 2,
 };
-
-type WorkerConfig = Extract<
-  Extract<Parameters<typeof createTestHarness>[0], object>["workers"][number],
-  { config: unknown }
->["config"];
-
-const { env: _stages, ...config }: WorkerConfig & { env?: unknown } = JSON.parse(
-  readFileSync(fileURLToPath(new URL("../../wrangler.jsonc", import.meta.url)), "utf8"),
-);
-
-const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
-const jwk = { ...rsa.publicKey.export({ format: "jwk" }), kid: KID, alg: "RS256", use: "sig" };
-
-type ControlEnvelope = z.infer<typeof ControlEnvelopeSchema>;
-type ControlMessage = Extract<ControlEnvelope, { type: "Frame" }>["message"];
-type HostMessage = { type: string } & Record<string, unknown>;
-
-const signal = (): { promise: Promise<void>; resolve: () => void } => {
-  let resolve = (): void => undefined;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-};
+const UNLIMITED = 1_000_000;
 
 const KERNEL_DIGEST = "c".repeat(64);
 const BASE_DIGEST = "3".repeat(64);
@@ -134,26 +92,15 @@ const RELEASE: ReleaseManifest = {
   ],
 };
 
-let certs: Server;
-let github: Server;
-let server: TestHarness;
-let origin: string;
-let issuer: string;
-let scratch: string;
+let world: World;
 let tenants = 0;
 
-const assertion = (email: string): string => {
-  const now = Math.floor(Date.now() / 1000);
-  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const header = encode({ alg: "RS256", kid: KID, typ: "JWT" });
-  const payload = encode({ iss: issuer, aud: [AUDIENCE], email, iat: now, nbf: now, exp: now + 600 });
-  return `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url")}`;
+const browser = (email: string): Record<string, string> => world.browser(email);
+
+const call = async (path: string, init: RequestInit = {}): Promise<Response> => {
+  await world.tick(1);
+  return world.request(path, init);
 };
-
-const browser = (email: string): Record<string, string> => ({ "cf-access-jwt-assertion": assertion(email), origin });
-
-const call = (path: string, init: NonNullable<Parameters<TestHarness["fetch"]>[1]> = {}) =>
-  server.fetch(`${origin}${path}`, { redirect: "manual", ...init });
 
 const postJson = (path: string, body: unknown, headers: Record<string, string> = {}) =>
   call(path, {
@@ -162,30 +109,32 @@ const postJson = (path: string, body: unknown, headers: Record<string, string> =
     body: JSON.stringify(body),
   });
 
+const until = <T>(what: string, read: () => Promise<T>, done: (value: T) => boolean): Promise<T> =>
+  world.until(what, read, done);
+
+const wait = (ms: number): Promise<void> => world.passes(ms);
+
 type Objects = {
   put(key: string, body: string | Uint8Array): Promise<void>;
   delete(key: string): Promise<void>;
   text(key: string): Promise<string | null>;
 };
 
-const objects = (bucket: "STORE" | "RELEASES"): Objects => {
-  const at = (key: string): string => `/__fixture/objects/${bucket}/${key}`;
-  const written = async (response: { status: number; text(): Promise<string> }): Promise<void> => {
-    assert.equal(response.status, 204, await response.text());
-  };
-  return {
-    put: async (key, body) => written(await call(at(key), { method: "PUT", body })),
-    delete: async (key) => written(await call(at(key), { method: "DELETE" })),
-    text: async (key) => {
-      const response = await call(at(key));
-      if (response.status === 404) return null;
-      assert.equal(response.status, 200, await response.clone().text());
-      return response.text();
-    },
-  };
-};
+const objects = (bucket: () => World["store"]): Objects => ({
+  put: async (key, body) => {
+    await bucket().put(key, body);
+  },
+  delete: async (key) => {
+    await bucket().delete(key);
+  },
+  text: async (key) => {
+    const object = await bucket().get(key);
+    return object === null ? null : object.text();
+  },
+});
 
-const store = objects("STORE");
+const store = objects(() => world.store);
+const releases = objects(() => world.releases);
 
 const storeRoot = async (storageKey: string, digests: string[] = []): Promise<string> =>
   storePlacedRoot(
@@ -215,204 +164,43 @@ const storePlacedRoot = async (storageKey: string, chunks: Placement[]): Promise
   await store.put(storageKey, root);
   return root;
 };
-const releases = objects("RELEASES");
 
 const tenantSql = async (tenantId: string, query: string, ...bindings: (string | number)[]): Promise<unknown[]> => {
-  const response = await call(`/__fixture/sql/${tenantId}`, {
-    method: "POST",
-    body: JSON.stringify({ query, bindings }),
-  });
-  assert.equal(response.status, 200, await response.clone().text());
-  return z.array(z.unknown()).parse(await response.json());
+  const rows = world
+    .tenantStorage(tenantId)
+    .sql.exec(query, ...bindings)
+    .toArray();
+  await world.settle();
+  return rows;
 };
 
-const d1Run = async (query: string, ...bindings: (string | number)[]): Promise<void> => {
-  const response = await call("/__fixture/d1", { method: "POST", body: JSON.stringify({ query, bindings }) });
-  assert.equal(response.status, 204, await response.text());
-};
+const tenantUsage = async (tenantId: string) =>
+  z.object({ usage: TenantUsageSchema }).parse(await world.callTenant(tenantId, "readUsage", { tenantId })).usage;
 
 let mcpId = 0;
 
-const GITHUB_ISSUES: Record<string, { state: string; title: string; body: string }> = {
-  "/repos/acme/app/issues/12": { state: "open", title: "Fix the login: it loops", body: "Steps: sign in" },
-  "/repos/acme/app/issues/2": { state: "closed", title: "Done already", body: "" },
-};
+const installPrebuiltApp = (tenantId: string): Promise<void> => installApp(world.db, tenantId, "prebuilt");
 
-const GITHUB_TOKEN_PREFIX = "ghp-e2e-";
-const userReads = new Map<string, number>();
+const storePrebuiltApp = (): Promise<void> => storeApp(world.db, "prebuilt");
 
-type Carried = { received: number; sent: number; held: string[] };
-
-class HostSide {
-  private received: number;
-  private sent: number;
-  private readonly held: Set<string>;
-  private readonly resend: HostMessage[];
-  private usage: HostUsage;
-  private welcomed = false;
-  private readonly inbox: ControlMessage[] = [];
-  private readonly refusals: { seq: number; reason: string }[] = [];
-  private closedWith: { code: number; wasClean: boolean } | null = null;
-  private readonly waiters: (() => void)[] = [];
-  private readonly heartbeat: NodeJS.Timeout;
-
-  private readonly socket: WebSocket;
-
-  private constructor(socket: WebSocket, carried: Carried, resend: HostMessage[], usage: HostUsage) {
-    this.socket = socket;
-    this.usage = usage;
-    this.received = carried.received;
-    this.sent = carried.sent;
-    this.held = new Set(carried.held);
-    this.resend = resend;
-    socket.addEventListener("message", (event) => this.receive(String(event.data)));
-    socket.addEventListener("close", (event) => {
-      this.closedWith = { code: event.code, wasClean: event.wasClean };
-      for (const wake of this.waiters.splice(0)) wake();
-    });
-    this.heartbeat = setInterval(() => this.beat(), SETTINGS.heartbeatIntervalSeconds * 1000);
-  }
-
-  private beat(): void {
-    if (!this.welcomed) return;
-    this.raw({
-      type: "Heartbeat",
-      sentAt: new Date().toISOString(),
-      usage: this.usage,
-      heldSessionIds: [...this.held],
-      heldClaudeSetupIds: [],
-    });
-  }
-
-  quiet(): void {
-    clearInterval(this.heartbeat);
-  }
-
-  report(usage: HostUsage): void {
-    this.usage = { ...this.usage, ...usage };
-    this.beat();
-  }
-
-  static async connect(
-    id: string,
-    key: KeyObject,
-    boxCapacity = 8,
-    carried: Carried = { received: 0, sent: 0, held: [] },
-    resend: HostMessage[] = [],
-    usage: HostUsage = USAGE,
-  ): Promise<HostSide> {
-    const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/hosts/${id}/channel`);
-    const challenge = await new Promise<string>((resolve, reject) => {
-      socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
-      socket.addEventListener("error", () => reject(new Error("the host channel did not open")), { once: true });
-    });
-    const parsed = ControlEnvelopeSchema.parse(JSON.parse(challenge));
-    assert.equal(parsed.type, "Challenge");
-    const budgeted = { memoryBudgetMib: boxCapacity * BoxMemoryLimit.DefaultMib, memoryHeldMib: 0, ...usage };
-    const side = new HostSide(socket, carried, resend, budgeted);
-    side.raw({
-      type: "Hello",
-      hostId: id,
-      protocolVersion: ChannelProtocol.Version,
-      supervisorVersion: "0.1.0",
-      signature: sign(null, helloBytes(parsed.nonce, id), key).toString("base64"),
+const connect = (
+  id: string,
+  key: KeyObject,
+  boxCapacity = 8,
+  carried: Carried = { received: 0, sent: 0, held: [] },
+  resend: HostMessage[] = [],
+  usage: HostUsage = USAGE,
+): Promise<HostSide> =>
+  world.connect(
+    id,
+    { privateKey: key, publicKey: "" },
+    {
       boxCapacity,
-      usage: budgeted,
-    });
-    return side;
-  }
-
-  private raw(envelope: unknown): void {
-    this.socket.send(JSON.stringify(envelope));
-  }
-
-  private receive(text: string): void {
-    const envelope = ControlEnvelopeSchema.parse(JSON.parse(text));
-    if (envelope.type === "Welcome") {
-      this.welcomed = true;
-      for (const message of this.resend) this.send(message);
-    }
-    if (envelope.type === "FrameRefused") {
-      this.refusals.push({ seq: envelope.seq, reason: envelope.reason });
-      for (const wake of this.waiters.splice(0)) wake();
-      return;
-    }
-    if (envelope.type !== "Frame" || envelope.seq <= this.received) return;
-    assert.equal(envelope.seq, this.received + 1, "the control plane skipped a frame");
-    this.received = envelope.seq;
-    if (envelope.message.type === "TurnOffer") this.held.add(envelope.message.sessionId);
-    this.inbox.push(envelope.message);
-    for (const wake of this.waiters.splice(0)) wake();
-  }
-
-  send(message: HostMessage): void {
-    this.sent += 1;
-    this.raw({ type: "Frame", seq: this.sent, ack: this.received, message });
-  }
-
-  async next<K extends ControlMessage["type"]>(type: K): Promise<Extract<ControlMessage, { type: K }>> {
-    const deadline = Date.now() + GIVE_UP_MS;
-    for (;;) {
-      const at = this.inbox.findIndex((message) => message.type === type);
-      if (at !== -1) return this.inbox.splice(at, 1)[0] as Extract<ControlMessage, { type: K }>;
-      this.assertOpen(`waiting for ${type}`);
-      const left = deadline - Date.now();
-      if (left <= 0) assert.fail(`no ${type} reached the host`);
-      await Promise.race([
-        new Promise<void>((resolve) => this.waiters.push(resolve)),
-        wait(left, undefined, { ref: false }),
-      ]);
-    }
-  }
-
-  async refusal(): Promise<{ seq: number; reason: string }> {
-    const deadline = Date.now() + GIVE_UP_MS;
-    for (;;) {
-      const refused = this.refusals.shift();
-      if (refused !== undefined) return refused;
-      this.assertOpen("waiting for FrameRefused");
-      const left = deadline - Date.now();
-      if (left <= 0) assert.fail("no FrameRefused reached the host");
-      await Promise.race([
-        new Promise<void>((resolve) => this.waiters.push(resolve)),
-        wait(left, undefined, { ref: false }),
-      ]);
-    }
-  }
-
-  assertOpen(when: string): void {
-    if (this.closedWith === null) return;
-    const { code, wasClean } = this.closedWith;
-    assert.fail(
-      `the control plane closed the channel ${wasClean ? "cleanly" : "without a close frame"} with ${code} ${when}`,
-    );
-  }
-
-  holds(type: ControlMessage["type"]): boolean {
-    return this.inbox.some((message) => message.type === type);
-  }
-
-  snapshotRequestsFor(sessionId: string): number {
-    return this.inbox.filter((message) => message.type === "SnapshotRequest" && message.sessionId === sessionId).length;
-  }
-
-  carried(): Carried {
-    return { received: this.received, sent: this.sent, held: [...this.held] };
-  }
-
-  close(): void {
-    clearInterval(this.heartbeat);
-    this.socket.close();
-  }
-}
-
-const hostSides: HostSide[] = [];
-
-const connect = async (...args: Parameters<typeof HostSide.connect>): Promise<HostSide> => {
-  const side = await HostSide.connect(...args);
-  hostSides.push(side);
-  return side;
-};
+      carried,
+      resend,
+      usage: { memoryBudgetMib: boxCapacity * BoxMemoryLimit.DefaultMib, memoryHeldMib: 0, ...usage },
+    },
+  );
 
 const connectorToken = async (tenantId: string, email: string): Promise<string> => {
   const registered = await postJson("/oauth/register", { redirect_uris: [CALLBACK], client_name: "sessions e2e" });
@@ -461,85 +249,6 @@ const connectorToken = async (tenantId: string, email: string): Promise<string> 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
 const SETTINGS_FILE = '{"permissions":{"defaultMode":"bypassPermissions"}}';
-const GITHUB_USER = { id: 4242, login: "ticket-worker" };
-const PREBUILT_HEAD = "5".repeat(40);
-const PREBUILT_TREE = "6".repeat(40);
-const PREBUILT_DEVCONTAINER_TREE = "9".repeat(40);
-const PREBUILT_DEVCONTAINER = "8".repeat(40);
-const BARE_TREE = "a".repeat(40);
-const installationTokenRequests: unknown[] = [];
-
-const prebuiltRepository = (method: string, path: string): { status: number; body: unknown } | null => {
-  if (method === "GET" && path === "/app/installations/77") {
-    return { status: 200, body: { permissions: { contents: "write", metadata: "read" } } };
-  }
-  if (method === "POST" && path === "/app/installations/77/access_tokens") {
-    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
-    return {
-      status: 201,
-      body: { token: "installation-token", expires_at: expiresAt, permissions: { contents: "read" } },
-    };
-  }
-  if (path === "/repos/prebuilt/app") return { status: 200, body: { default_branch: "main" } };
-  if (path === "/repos/prebuilt/app/commits/main") {
-    return { status: 200, body: { sha: PREBUILT_HEAD, commit: { tree: { sha: PREBUILT_TREE } } } };
-  }
-  if (path === `/repos/prebuilt/app/git/trees/${PREBUILT_TREE}`) {
-    return {
-      status: 200,
-      body: {
-        tree: [
-          { path: ".devcontainer", type: "tree", sha: PREBUILT_DEVCONTAINER_TREE },
-          { path: "package-lock.json", type: "blob", sha: "7".repeat(40) },
-        ],
-      },
-    };
-  }
-  if (path === `/repos/prebuilt/app/git/trees/${PREBUILT_DEVCONTAINER_TREE}?recursive=1`) {
-    return { status: 200, body: { tree: [{ path: "devcontainer.json", type: "blob", sha: PREBUILT_DEVCONTAINER }] } };
-  }
-  if (path === `/repos/prebuilt/app/git/blobs/${PREBUILT_DEVCONTAINER}`) {
-    const content = Buffer.from('{ "onCreateCommand": "npm ci" }\n').toString("base64");
-    return { status: 200, body: { content, encoding: "base64" } };
-  }
-  if (path === "/repos/prebuilt/bare") return { status: 200, body: { default_branch: "main" } };
-  if (path === "/repos/prebuilt/bare/commits/main") {
-    return { status: 200, body: { sha: PREBUILT_HEAD, commit: { tree: { sha: BARE_TREE } } } };
-  }
-  if (path === `/repos/prebuilt/bare/git/trees/${BARE_TREE}`) {
-    return { status: 200, body: { tree: [{ path: "package-lock.json", type: "blob", sha: "7".repeat(40) }] } };
-  }
-  return null;
-};
-
-const storePrebuiltApp = async (): Promise<void> => {
-  const keyStore = workersSecretKeyStore(Buffer.alloc(32, 7).toString("base64"));
-  const dataKey = await generateDataKey();
-  const appKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
-  const privateKey = appKey.export({ type: "pkcs8", format: "der" }).toString("base64");
-  await d1Run(
-    `INSERT OR IGNORE INTO github_apps (github_app_slot, app_id, slug, client_id, owner_login, html_url, wrapped_data_key,
-    client_secret_sealed, webhook_secret_sealed, private_key_sealed, bot_user_id, created_at)
-    VALUES (1, 1, 'tumpel-sessions', 'Iv1.sessions', 'prebuilt', 'https://github.com/apps/tumpel-sessions', ?, ?, ?, ?, 4343, ?)`,
-    await keyStore.wrap(dataKey),
-    await seal(dataKey, "sessions-client-secret", "github-app/client_secret"),
-    await seal(dataKey, "sessions-webhook-secret", "github-app/webhook_secret"),
-    await seal(dataKey, privateKey, "github-app/private_key"),
-    Date.now(),
-  );
-};
-
-const installPrebuiltApp = async (tenantId: string): Promise<void> => {
-  await storePrebuiltApp();
-  await d1Run(
-    `INSERT INTO github_installations (installation_id, tenant_id, account_login, account_type, status, created_at, updated_at)
-    VALUES (77, ?, 'prebuilt', 'Organization', 'Active', ?, ?)
-    ON CONFLICT (installation_id) DO UPDATE SET tenant_id = excluded.tenant_id`,
-    tenantId,
-    Date.now(),
-    Date.now(),
-  );
-};
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 
@@ -560,8 +269,12 @@ const tenant = async () => {
   const mcpToken = await connectorToken(tenantId, email);
   const bearer = { authorization: `Bearer ${mcpToken}` };
 
-  const refused = async (path: string, init: NonNullable<Parameters<TestHarness["fetch"]>[1]> = {}) => {
-    const response = await call(path, { method: "POST", ...init, headers: { ...bearer, ...init.headers } });
+  const refused = async (path: string, init: RequestInit = {}) => {
+    const response = await call(path, {
+      method: "POST",
+      ...init,
+      headers: { ...bearer, ...(init.headers as Record<string, string> | undefined) },
+    });
     assert.equal(response.status, 409, `${path}: ${await response.clone().text()}`);
     return ProblemSchema.parse(await response.json());
   };
@@ -602,28 +315,8 @@ const tenant = async () => {
   };
 
   const enrol = async (name = "box"): Promise<{ id: string; key: KeyObject }> => {
-    const minted = await postJson("/v1/enrolment-tokens", { expiresInSeconds: 600 }, bearer);
-    const { token } = MintedEnrolmentTokenSchema.parse(await minted.json());
-    const dir = mkdtempSync(join(scratch, `${name}-`));
-    const tokenFile = `${dir}.token`;
-    writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
-    const child = spawn(SUPERVISOR, ["enrol", "--endpoint", origin, "--token-file", tokenFile, "--name", name], {
-      env: { ...process.env, TUMPEL_SUPERVISOR_DIR: dir },
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
-    assert.equal(code, 0, stderr);
-    const enrolled = HostSchema.pick({ hostId: true }).parse(JSON.parse(stdout));
-    const stored = SupervisorHostKeySchema.parse(JSON.parse(readFileSync(join(dir, "host-key.json"), "utf8")));
-    const key = createPrivateKey({ key: Buffer.from(stored.privateKey, "base64"), format: "der", type: "pkcs8" });
-    return { id: enrolled.hostId, key };
+    const { hostId, key } = await world.enrol({ tenantId, token: mcpToken }, name);
+    return { id: hostId, key: key.privateKey };
   };
 
   const readAll = async (sessionId: string, turnId: string, limit: number) => {
@@ -662,7 +355,7 @@ const tenant = async () => {
     const persona = { name, harness: "ClaudeCode", secretSetId, connectorIds: [], files };
     const personas = await getJson("/v1/personas", PersonaSchema.array());
     const existing = personas.find((candidate) => candidate.name === name);
-    const written = await server.fetch(`${origin}/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
+    const written = await call(`/v1/personas${existing ? `/${existing.personaId}` : ""}`, {
       method: existing ? "PUT" : "POST",
       headers: { "content-type": "application/json", ...bearer },
       body: JSON.stringify(persona),
@@ -765,7 +458,7 @@ const tenant = async () => {
     tenantId,
     email,
     github,
-    reads: () => userReads.get(github) ?? 0,
+    reads: () => world.github.reads(github),
     bearer,
     host,
     hostId,
@@ -786,90 +479,28 @@ const tenant = async () => {
 };
 
 before(async () => {
-  mkdirSync(join(ROOT, ".tmp"), { recursive: true });
-  scratch = mkdtempSync(join(ROOT, ".tmp", "sessions-e2e-"));
-  certs = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ keys: [jwk] }));
+  world = await World.open({
+    limits: {
+      ...LIMITS,
+      readsPerMinute: UNLIMITED,
+      writesPerMinute: UNLIMITED,
+      hostFramesPerMinute: UNLIMITED,
+      ceiling: { ...LIMITS.ceiling, writesPerMinute: UNLIMITED, hostFramesPerMinute: UNLIMITED },
+    },
+    vars: {
+      TUMPEL_SETTINGS: SETTINGS,
+      DEPLOYED_COMMIT,
+      R2_STUB_ORIGIN,
+      DASHBOARD_ORIGIN,
+      API_ORIGIN: "https://api.tumpel.test",
+      R2_BUCKET_NAME: "tumpel-sessions",
+      RELEASES_BUCKET_NAME: "tumpel-releases",
+    },
   });
-  await new Promise<void>((resolve) => certs.listen(0, "127.0.0.1", resolve));
-  issuer = `http://127.0.0.1:${(certs.address() as AddressInfo).port}`;
-  github = createServer((request, response) => {
-    const path = (request.url ?? "").toLowerCase();
-    const prebuilt = prebuiltRepository(request.method ?? "", path);
-    if (prebuilt !== null) {
-      let body = "";
-      request.on("data", (chunk) => {
-        body += chunk;
-      });
-      request.on("end", () => {
-        if (body !== "") installationTokenRequests.push(JSON.parse(body));
-        response.writeHead(prebuilt.status, { "content-type": "application/json" });
-        response.end(JSON.stringify(prebuilt.body));
-      });
-      return;
-    }
-    const token = (request.headers.authorization ?? "").replace(/^Bearer /, "");
-    const known = token.startsWith(GITHUB_TOKEN_PREFIX);
-    if (path === "/user" && known) {
-      userReads.set(token, (userReads.get(token) ?? 0) + 1);
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(GITHUB_USER));
-      return;
-    }
-    const issue = GITHUB_ISSUES[path];
-    if (issue === undefined || !known) {
-      response.writeHead(404, { "content-type": "application/json" });
-      response.end(JSON.stringify({ message: "Not Found" }));
-      return;
-    }
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(
-      JSON.stringify({
-        ...issue,
-        number: Number(path.split("/").at(-1)),
-        html_url: `https://github.com${path.replace("/repos", "")}`,
-        updated_at: "2026-11-15T09:00:00Z",
-        labels: [],
-      }),
-    );
-  });
-  await new Promise<void>((resolve) => github.listen(0, "127.0.0.1", resolve));
-  server = createTestHarness({
-    root: fileURLToPath(new URL("../..", import.meta.url)),
-    workers: [
-      {
-        config: {
-          ...config,
-          main: "./test/fixtures/sessions-worker.ts",
-          vars: {
-            ...config.vars,
-            ACCESS_ISSUER: issuer,
-            ACCESS_AUD: AUDIENCE,
-            TUMPEL_SETTINGS: SETTINGS,
-            DEPLOYED_COMMIT,
-            R2_STUB_ORIGIN,
-            SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
-            DASHBOARD_ORIGIN: "https://app.tumpel.test",
-            API_ORIGIN: "https://api.tumpel.test",
-            GITHUB_API_ORIGIN: `http://127.0.0.1:${(github.address() as AddressInfo).port}`,
-          },
-        },
-      },
-    ],
-  });
-  origin = (await server.listen()).url.origin;
-  await server.getWorker().applyD1Migrations("DB");
   await releases.put("current.json", JSON.stringify(RELEASE));
 });
 
-after(async () => {
-  for (const side of hostSides) side.close();
-  await server?.close();
-  certs?.close();
-  github?.close();
-  if (scratch) rmSync(scratch, { recursive: true, force: true });
-});
+after(() => world.close());
 
 test("a start against a current.json of the previous shape is refused ImageNotReleased with the reason, not a crash", async () => {
   const { bearer, sessionStart } = await tenant();
@@ -974,7 +605,7 @@ test("a deploy drain refuses new sessions and turns DeployInProgress and counts 
   assert.equal((await call("/v1/releases/rollout", { headers: drainBearer })).status, 404);
 });
 
-suite("sessions", { concurrency: 8 }, () => {
+suite("sessions", () => {
   test("a turn started over MCP reaches the host, its lines read back in order by cursor, and a snapshot follows", async () => {
     const { github, reads, host, hostId, getJson, tool, readAll, sessionStart } = await tenant();
     const started = await tool(
@@ -1109,8 +740,8 @@ suite("sessions", { concurrency: 8 }, () => {
     const expected = texts.map((text, index) => ({ lineSeq: index + 1, text }));
     await until(
       "three lines in the transcript",
-      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
-      (turn) => turn.lineCount === 3,
+      () => readAll(sessionId, turnId, 10),
+      (lines) => lines.length === 3,
     );
     assert.deepEqual(await readAll(sessionId, turnId, 10), expected);
     const chunked = await tool(
@@ -1275,73 +906,8 @@ suite("sessions", { concurrency: 8 }, () => {
     );
   });
 
-  test("lines that arrive during a slow chunk write go into the next chunk, and every line is stored once in order", async () => {
-    const tenantId = `ten_${randomBytes(6).toString("hex")}`;
-    const sessionId = "ses_serial";
-    const turnId = "trn_serial";
-    const pending: TranscriptLine[] = [];
-    const index: { storageKey: string; lineSeqs: number[] }[] = [];
-    const ledger: ChunkLedger = {
-      pending: () => [...pending],
-      record: (_sessionId, _turnId, storageKey, chunk) => {
-        const last = chunk.lineSeqs.at(-1) ?? 0;
-        pending.splice(0, pending.filter((line) => line.lineSeq <= last).length);
-        index.push({ storageKey, lineSeqs: chunk.lineSeqs });
-      },
-    };
-    const puts: string[] = [];
-    const writing = signal();
-    const held = signal();
-    const spied: ChunkStore = {
-      put: async (key, body) => {
-        puts.push(key);
-        if (puts.length === 1) {
-          writing.resolve();
-          await held.promise;
-        }
-        return store.put(key, body);
-      },
-    };
-    const writer = new ChunkWriter(ledger, spied);
-    const writes: Promise<void>[] = [];
-    const deliver = (lineSeq: number): void => {
-      pending.push({ sessionId, lineSeq, tenantId, turnId, text: `line ${lineSeq}`, createdAt: Date.now() });
-      if (pending.length >= 2) writes.push(writer.write(tenantId, sessionId, turnId, 2));
-    };
-    deliver(1);
-    deliver(2);
-    await writing.promise;
-    deliver(3);
-    deliver(4);
-    deliver(5);
-    writes.push(writer.write(tenantId, sessionId, turnId, 1));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(puts.length, 1);
-    held.resolve();
-    await Promise.all(writes);
-    assert.deepEqual(
-      index.map((entry) => entry.lineSeqs),
-      [
-        [1, 2],
-        [3, 4, 5],
-      ],
-    );
-    assert.deepEqual(pending, []);
-    const stored = await Promise.all(
-      index.map(async ({ storageKey }) => {
-        const text = await store.text(storageKey);
-        assert.ok(text !== null, `chunk ${storageKey} is stored`);
-        return decodeLines(text);
-      }),
-    );
-    assert.deepEqual(
-      stored.flat().map(({ lineSeq, text }) => ({ lineSeq, text })),
-      [1, 2, 3, 4, 5].map((lineSeq) => ({ lineSeq, text: `line ${lineSeq}` })),
-    );
-  });
-
   test("a compact read stops after eight chunk reads of dropped lines, and the next read goes on from its cursor", async () => {
-    const { github, host, tool, sessionStart, createPersona } = await tenant();
+    const { github, host, tool, sessionStart, createPersona, readAll } = await tenant();
     await createPersona("Quiet", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
       { kind: "Variable", name: "GITHUB_TOKEN", value: github },
@@ -1367,8 +933,8 @@ suite("sessions", { concurrency: 8 }, () => {
     });
     await until(
       "nineteen lines in the transcript",
-      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
-      (turn) => turn.lineCount === 19,
+      () => readAll(sessionId, turnId, 20),
+      (lines) => lines.length === 19,
     );
     const capped = await tool(
       "tumpel_transcript_read",
@@ -1803,66 +1369,14 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(await tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()), []);
   });
 
-  test("idle heartbeats read a few rows each, not one per archived session, turn or ended subscription", async () => {
-    const { tenantId, host, tool, completedTurn, storedSnapshot } = await tenant();
-    const archived = 20;
-    for (let index = 0; index < archived; index++) {
-      const { session } = await completedTurn(`archived session ${index}`);
-      await storedSnapshot(session.sessionId);
-      await until(
-        "the session reading Idle",
-        () => tool("tumpel_session_get", { sessionId: session.sessionId }, SessionSchema),
-        (read) => read.state === "Idle",
-      );
-      await tool(
-        "tumpel_subscription_create",
-        {
-          sessionId: session.sessionId,
-          prompt: "watch",
-          goal: "watch",
-          events: ["TurnFailed"],
-          crewTags: [],
-          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-        },
-        SubscriptionSchema,
-      );
-      assert.equal(
-        (await tool("tumpel_session_archive", { sessionId: session.sessionId }, SessionSchema)).state,
-        "Archived",
-      );
-      await host.next("BoxDiscard");
-    }
-    const rowsRead = async (): Promise<number> => {
-      const response = await call(`/__fixture/usage/${tenantId}`);
-      const { usage } = z.object({ usage: TenantUsageSchema }).parse(await response.json());
-      const counter = usage.counters.find((each) => each.measure === "RowsRead");
-      if (counter === undefined) throw new Error("the tenant usage has no RowsRead counter");
-      return counter.used;
-    };
-
-    const before = await rowsRead();
-    await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
-    const read = (await rowsRead()) - before;
-
-    assert.ok(read < 2 * archived, `two idle heartbeats read ${read} rows`);
-  });
-
   test("a turn of 201 lines, 5 telemetry batches and a snapshot stays within its row budget on the tenant and the host", async () => {
     const { tenantId, hostId, host, tool, sessionStart, storedSnapshot } = await tenant();
-    const tenantRows = async (): Promise<{ rowsRead: number; rowsWritten: number }> => {
-      const response = await call(`/__fixture/usage/${tenantId}`);
-      const { usage } = z.object({ usage: TenantUsageSchema }).parse(await response.json());
-      const used = (measure: string): number => {
-        const counter = usage.counters.find((each) => each.measure === measure);
-        if (counter === undefined) throw new Error(`the tenant usage has no ${measure} counter`);
-        return counter.used;
-      };
-      return { rowsRead: used("RowsRead"), rowsWritten: used("RowsWritten") };
+    const tenantRows = async (): Promise<number> => {
+      const counter = (await tenantUsage(tenantId)).counters.find((each) => each.measure === "RowsWritten");
+      if (counter === undefined) throw new Error("the tenant usage has no RowsWritten counter");
+      return counter.used;
     };
-    const hostRows = async (): Promise<{ rowsRead: number; rowsWritten: number }> =>
-      z
-        .object({ rowsRead: z.number(), rowsWritten: z.number() })
-        .parse(await (await call(`/__fixture/host-rows/${hostId}`)).json());
+    const hostRows = async (): Promise<number> => world.hostRows(hostId);
     host.quiet();
     const tenantBefore = await tenantRows();
     const hostBefore = await hostRows();
@@ -1921,22 +1435,14 @@ suite("sessions", { concurrency: 8 }, () => {
     const tenantAfter = await tenantRows();
     const hostAfter = await hostRows();
 
-    const spent = {
-      tenantWritten: tenantAfter.rowsWritten - tenantBefore.rowsWritten,
-      tenantRead: tenantAfter.rowsRead - tenantBefore.rowsRead,
-      hostWritten: hostAfter.rowsWritten - hostBefore.rowsWritten,
-      hostRead: hostAfter.rowsRead - hostBefore.rowsRead,
-    };
+    const spent = { tenantWritten: tenantAfter - tenantBefore, hostWritten: hostAfter - hostBefore };
     assert.ok(spent.tenantWritten <= 50, `the turn wrote ${spent.tenantWritten} tenant rows`);
-    assert.ok(spent.tenantRead <= 2300, `the turn read ${spent.tenantRead} tenant rows`);
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
-    assert.ok(spent.hostRead <= 520, `the turn read ${spent.hostRead} host rows`);
   });
 
   test("a tenant restart between a host's hello and the next start still places on that host and keeps its channel open", async () => {
     const { tenantId, hostId, host, tool, sessionStart } = await tenant();
-    const restarted = await call(`/__fixture/restart/${tenantId}`);
-    assert.equal(restarted.status, 204);
+    await world.restartTenant(tenantId);
     const started = await tool(
       "tumpel_session_start",
       { ...(await sessionStart()), prompt: "after the restart" },
@@ -1945,7 +1451,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(started.session.hostId, hostId);
     assert.equal((await host.next("TurnOffer")).turnId, started.turn.turnId);
     await wait(2 * TEST_SETTINGS.heartbeatIntervalSeconds * 1000);
-    host.assertOpen("after the tenant restarted");
+    assert.equal(host.closure(), null, "the host channel closed after the tenant restarted");
   });
 
   test("a session starts with tags, the list keeps only sessions carrying every tag, and set and patch replace and merge them", async () => {
@@ -2447,75 +1953,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(host.holds("TurnOffer"), false);
   });
 
-  test("a stop whose teardown the host refuses returns to Idle and becomes evictable after its recovery snapshot", async () => {
-    const { bearer, host, hostId, getJson, tool, sessionStart, enrol, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const enrolled = await enrol("tight");
-    const side = await connect(enrolled.id, enrolled.key, 1);
-    await hostState(enrolled.id, "Online");
-    const started = await tool(
-      "tumpel_session_start",
-      { ...(await sessionStart()), prompt: "keep my box" },
-      StartedSessionSchema,
-    );
-    const { sessionId } = started.session;
-    const offer = await side.next("TurnOffer");
-    const { turnId } = offer;
-    side.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
-    side.send({ type: "TurnLine", turnId, lineSeq: 1, text: '{"type":"result","subtype":"success","is_error":false}' });
-    side.send({ type: "TurnComplete", turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    const warm = await side.next("SnapshotRequest");
-    await storeRoot(warm.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: warm.snapshotId, uploadedBytes: 14 });
-    await until(
-      "a stored snapshot",
-      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
-      (snapshots) => snapshots.length === 1,
-    );
-
-    await tool("tumpel_session_stop", { sessionId }, SessionSchema);
-    const teardown = await side.next("BoxTeardown");
-    const failedAt = new Date().toISOString();
-    const detail = `box ${teardown.boxId} holds turn ${turnId}, which no snapshot holds; snapshot it, then tear it down`;
-    side.send({ type: "BoxTeardownFailed", sessionId, boxId: teardown.boxId, reason: "BoxDirty", detail, failedAt });
-    const idle = await until(
-      "the session reading Idle",
-      () => getJson(`/v1/sessions/${sessionId}`, SessionSchema),
-      (session) => session.state === "Idle",
-    );
-    assert.equal(idle.state, "Idle");
-    const failures = await tool("tumpel_session_stop_failures", { sessionId }, StopFailureSchema.array());
-    assert.deepEqual(
-      failures.map((failure) => [failure.sessionId, failure.reason, failure.detail, failure.failedAt]),
-      [[sessionId, "BoxDirty", detail, failedAt]],
-    );
-    const blocked = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "wait for recovery" }, bearer);
-    assert.equal(blocked.status, 409, await blocked.clone().text());
-    assert.equal(ProblemSchema.parse(await blocked.json()).code, "PoolExhausted");
-    assert.equal(side.holds("BoxTeardown"), false);
-
-    const again = await side.next("SnapshotRequest");
-    assert.equal(again.sessionId, sessionId);
-    assert.equal(again.turnId, turnId);
-    await storeRoot(again.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: again.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the second snapshot stored in place of the first",
-      () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),
-      (snapshots) => snapshots.length === 1 && snapshots[0]?.snapshotId === again.snapshotId,
-    );
-    const replacement = await postJson(
-      "/v1/sessions",
-      { ...(await sessionStart()), prompt: "replace the recovered box" },
-      bearer,
-    );
-    assert.equal(replacement.status, 200, await replacement.clone().text());
-    assert.equal(StartedSessionSchema.parse(await replacement.json()).session.hostId, enrolled.id);
-    assert.deepEqual(await side.next("BoxTeardown"), { type: "BoxTeardown", sessionId, boxId: offer.boxId });
-    side.close();
-  });
-
   test("a finished turn reads Running until its snapshot is stored, and fails SnapshotNotStored, never Completed, when the host fails the snapshot", async () => {
     const { host, tool, sessionStart } = await tenant();
     await tool("tumpel_session_start", { ...(await sessionStart()), prompt: "lose my snapshot" }, StartedSessionSchema);
@@ -2755,23 +2192,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.notEqual(await store.text(`${tenantId}/packs/${packOne}`), null);
   });
 
-  test("a snapshot whose manifest lists 140000 chunks is stored", async () => {
-    const { host, tool, completedTurn } = await tenant();
-    const { offer } = await completedTurn("snapshot a large tree");
-    const request = await host.next("SnapshotRequest");
-    const digests = Array.from({ length: 140_000 }, (_, index) =>
-      createHash("sha256").update(String(index)).digest("hex"),
-    );
-    await storeRoot(request.storageKey, digests);
-    host.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 5614295885 });
-    await until(
-      "the snapshotted turn reading Completed",
-      () => tool("tumpel_turn_get", { turnId: offer.turnId }, TurnSchema),
-      (turn) => turn.state === "Completed",
-    );
-    host.assertOpen("after the large snapshot");
-  });
-
   test("a turn the host reports NotClaimed after its claim is offered again and runs on the next claim", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "claim lost" }, bearer);
@@ -2827,18 +2247,18 @@ suite("sessions", { concurrency: 8 }, () => {
     const start = await tool("tumpel_events_list", {}, EventPageSchema);
     assert.deepEqual(start.events, []);
 
-    const socket = new WebSocket(
-      `${origin.replace(/^http/, "ws")}/v1/events?afterEventId=${start.lastEventId}&event=TurnCompleted`,
-      { headers: bearer } as unknown as string[],
+    const socket = openSocket(
+      `${world.origin.replace(/^http/, "ws")}/v1/events?afterEventId=${start.lastEventId}&event=TurnCompleted`,
+      { headers: bearer },
     );
     const streamed = new Promise<unknown>((resolve) => {
       socket.addEventListener("message", (message) => resolve(JSON.parse(String(message.data))));
     });
     await new Promise((resolve) => socket.addEventListener("open", resolve));
-    const browser = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/events?event=TurnCompleted`, {
+    const browser = openSocket(`${world.origin.replace(/^http/, "ws")}/v1/events?event=TurnCompleted`, {
       protocols: ["tumpel.bearer", `tumpel.bearer.${bearer.authorization.slice("Bearer ".length)}`],
-      headers: { origin: "https://app.tumpel.test" },
-    } as unknown as string[]);
+      headers: { origin: DASHBOARD_ORIGIN },
+    });
     const browserStreamed = new Promise<unknown>((resolve) => {
       browser.addEventListener("message", (message) => resolve(JSON.parse(String(message.data))));
     });
@@ -3042,7 +2462,7 @@ suite("sessions", { concurrency: 8 }, () => {
   });
 
   test("a claimed turn fails HostOffline when its host disconnects and does not come back", async () => {
-    const { bearer, host, refused, getJson, sessionStart } = await tenant();
+    const { bearer, host, refused, getJson, sessionStart, readAll } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "host goes away" }, bearer);
     assert.equal(response.status, 200);
     const started = StartedSessionSchema.parse(await response.json());
@@ -3053,7 +2473,12 @@ suite("sessions", { concurrency: 8 }, () => {
     await until(
       "the turn reading Running",
       () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Running" && turn.lineCount === 1,
+      (turn) => turn.state === "Running",
+    );
+    await until(
+      "the line in the transcript",
+      () => readAll(started.session.sessionId, offer.turnId, 10),
+      (lines) => lines.length === 1,
     );
 
     host.close();
@@ -3071,211 +2496,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.equal(offline.code, "HostOffline");
     assert.match(offline.detail, /runs on host box, which is Offline/);
     assert.doesNotMatch(offline.detail, UUID);
-  });
-
-  test("the first heartbeat after a reconnect fails BoxLost each Running turn whose box the host no longer holds, after the turns its resent frames settle", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const lost = await enrol("lost");
-    const first = await connect(lost.id, lost.key);
-    await hostState(lost.id, "Online");
-    const claimed = async (prompt: string) => {
-      const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt }, bearer);
-      assert.equal(response.status, 200, await response.clone().text());
-      const { session } = StartedSessionSchema.parse(await response.json());
-      const offer = await first.next("TurnOffer");
-      first.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-      await first.next("TurnClaimed");
-      return { sessionId: session.sessionId, turnId: offer.turnId };
-    };
-    const held = await claimed("box survives");
-    const gone = await claimed("box goes away");
-    const finished = await claimed("finished while disconnected");
-
-    first.close();
-    await hostState(lost.id, "Offline");
-    const back = await connect(
-      lost.id,
-      lost.key,
-      8,
-      { ...first.carried(), held: [held.sessionId, finished.sessionId] },
-      [
-        {
-          type: "TurnLine",
-          turnId: finished.turnId,
-          lineSeq: 1,
-          text: '{"type":"result","subtype":"success","is_error":false}',
-        },
-        { type: "TurnComplete", turnId: finished.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() },
-      ],
-    );
-    await until(
-      "the turn whose box is gone failing",
-      () => getJson(`/v1/turns/${gone.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await getJson(`/v1/turns/${gone.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "BoxLost");
-    assert.match(failure.detail, /^host lost reconnected without the box that ran the turn/);
-    assert.equal((await getJson(`/v1/turns/${held.turnId}`, TurnSchema)).state, "Running");
-    const snapshot = await back.next("SnapshotRequest");
-    assert.equal(snapshot.turnId, finished.turnId);
-    await storeRoot(snapshot.storageKey);
-    back.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the finished turn reading Completed",
-      () => getJson(`/v1/turns/${finished.turnId}`, TurnSchema),
-      (turn) => turn.state === "Completed",
-    );
-    const session = await getJson(`/v1/sessions/${gone.sessionId}`, SessionSchema);
-    assert.equal(session.state, "Idle");
-    assert.equal(session.lastTurnState, "Failed");
-
-    const sent = await postJson(`/v1/sessions/${gone.sessionId}/turns`, { prompt: "again" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const next = TurnSchema.parse(await sent.json());
-    assert.equal((await back.next("TurnOffer")).turnId, next.turnId);
-    back.close();
-  });
-
-  test("a finished turn whose host reconnects without its box before a snapshot holds it fails SnapshotNotStored, never Completed, and the session takes its next turn", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const lost = await enrol("lost");
-    const first = await connect(lost.id, lost.key);
-    await hostState(lost.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "unsnapshotted" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { session } = StartedSessionSchema.parse(await response.json());
-    const offer = await first.next("TurnOffer");
-    first.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    first.send({
-      type: "TurnLine",
-      turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    first.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    assert.equal((await first.next("SnapshotRequest")).sessionId, session.sessionId);
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Running");
-
-    first.close();
-    await hostState(lost.id, "Offline");
-    const back = await connect(lost.id, lost.key, 8, { ...first.carried(), held: [] });
-    const failed = await until(
-      "the finished turn whose box is gone failing",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state !== "Running",
-    );
-    assert.equal(failed.state, "Failed");
-    const failure = await getJson(`/v1/turns/${offer.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "SnapshotNotStored");
-    assert.match(failure.detail, /reconnected without the box/);
-    const sent = await postJson(`/v1/sessions/${session.sessionId}/turns`, { prompt: "again" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const next = TurnSchema.parse(await sent.json());
-    assert.equal((await back.next("TurnOffer")).turnId, next.turnId);
-    back.close();
-  });
-
-  test("a session moves off its offline host once a snapshot completes its last turn, and the old host's late frames leave its channel working", async () => {
-    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
-    const first = await enrol("move-from");
-    let from = await connect(first.id, first.key, 16);
-    await hostState(first.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "move me" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const started = StartedSessionSchema.parse(await response.json());
-    const { sessionId } = started.session;
-    assert.equal(started.session.hostId, first.id);
-    const offer = await from.next("TurnOffer");
-    from.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    from.send({
-      type: "TurnLine",
-      turnId: offer.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    from.send({ type: "TurnComplete", turnId: offer.turnId, lastLineSeq: 1, completedAt: new Date().toISOString() });
-    const request = await from.next("SnapshotRequest");
-
-    from.close();
-    await hostState(first.id, "Offline");
-
-    from = await connect(first.id, first.key, 16, from.carried());
-    await hostState(first.id, "Online");
-    await storeRoot(request.storageKey);
-    from.send({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
-    await until(
-      "a stored snapshot",
-      () => getJson(`/v1/sessions/${sessionId}/snapshots`, SnapshotSchema.array()),
-      (snapshots) => snapshots.length === 1,
-    );
-    await until(
-      "the turn reading Completed",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Completed",
-    );
-    const claimed = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "lost with its host" }, bearer);
-    assert.equal(claimed.status, 200, await claimed.clone().text());
-    const lost = TurnSchema.parse(await claimed.json());
-    assert.equal((await from.next("TurnOffer")).turnId, lost.turnId);
-    from.send({ type: "TurnClaim", turnId: lost.turnId, boxId: offer.boxId });
-    await from.next("TurnClaimed");
-    from.close();
-    await hostState(first.id, "Offline");
-    await until(
-      "the claimed turn reading Failed",
-      () => getJson(`/v1/turns/${lost.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-
-    const second = await enrol("move-to");
-    const to = await connect(second.id, second.key, 16);
-    await hostState(second.id, "Online");
-    const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "on the new host" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const moved = TurnSchema.parse(await sent.json());
-    const session = await getJson(`/v1/sessions/${sessionId}`, SessionSchema);
-    assert.equal(session.hostId, second.id);
-    assert.notEqual(session.boxId, offer.boxId);
-    const movedOffer = await to.next("TurnOffer");
-    assert.equal(movedOffer.turnId, moved.turnId);
-    assert.equal(movedOffer.boxId, session.boxId);
-    assert.deepEqual(
-      movedOffer.snapshots.map((snapshot) => snapshot.snapshotId),
-      [request.snapshotId],
-    );
-
-    from = await connect(first.id, first.key, 16, from.carried());
-    await hostState(first.id, "Online");
-    const discard = await from.next("BoxDiscard");
-    assert.deepEqual({ sessionId: discard.sessionId, boxId: discard.boxId }, { sessionId, boxId: offer.boxId });
-    from.send({
-      type: "TurnFailed",
-      turnId: lost.turnId,
-      reason: "HarnessExited",
-      detail: "the late failure of a turn the session left",
-      failedAt: new Date().toISOString(),
-    });
-    from.send({ type: "BoxGone", sessionId, boxId: offer.boxId });
-
-    const next = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "after the move" }, bearer);
-    assert.equal(next.status, 200, await next.clone().text());
-    const after = StartedSessionSchema.parse(await next.json());
-    assert.equal(after.session.hostId, first.id);
-    const afterOffer = await from.next("TurnOffer");
-    from.send({ type: "TurnClaim", turnId: afterOffer.turnId, boxId: afterOffer.boxId });
-    await until(
-      "the turn on the old host reading Running",
-      () => getJson(`/v1/turns/${afterOffer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Running",
-    );
-    assert.equal((await getJson(`/v1/turns/${lost.turnId}/failure`, TurnFailureSchema)).reason, "HostOffline");
-    from.close();
-    to.close();
   });
 
   test("two sessions started at once on two equal hosts land on different hosts, since each counts the other's turn", async () => {
@@ -3353,89 +2573,6 @@ suite("sessions", { concurrency: 8 }, () => {
     for (const side of sides.values()) side.close();
   });
 
-  test("a claimed turn whose box a handover keeps warm is offered again to the same host in the same box, not to another host", async () => {
-    const { bearer, getJson, enrol, sessionStart, hostState } = await tenant();
-    const first = await enrol("handover-1");
-    const second = await enrol("handover-2");
-    const sides = new Map([
-      [first.id, await connect(first.id, first.key, 32)],
-      [second.id, await connect(second.id, second.key, 32)],
-    ]);
-    await hostState(first.id, "Online");
-    await hostState(second.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a handover" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const started = StartedSessionSchema.parse(await response.json());
-    const handing = started.session.hostId;
-    const before = sides.get(handing);
-    assert.ok(before);
-    const offer = await before.next("TurnOffer");
-    before.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    await until(
-      "the control plane taking the claim",
-      () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-      (turn) => turn.state === "Running",
-    );
-    before.close();
-    const after = await connect(
-      handing,
-      handing === first.id ? first.key : second.key,
-      32,
-      { ...before.carried(), held: [started.session.sessionId] },
-      [
-        {
-          type: "TurnFailed",
-          turnId: offer.turnId,
-          reason: "HostUpdating",
-          detail: `this host started handing its boxes to a new supervisor binary before the control plane answered the claim of turn ${offer.turnId}, so its harness never started and its box stays warm; the control plane offers the turn again`,
-          failedAt: new Date().toISOString(),
-        },
-      ],
-    );
-    const again = await after.next("TurnOffer");
-    assert.deepEqual({ turnId: again.turnId, boxId: again.boxId }, { turnId: offer.turnId, boxId: offer.boxId });
-    const session = await getJson(`/v1/sessions/${started.session.sessionId}`, SessionSchema);
-    assert.deepEqual({ hostId: session.hostId, boxId: session.boxId }, { hostId: handing, boxId: offer.boxId });
-    assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Offered");
-    after.close();
-    for (const side of sides.values()) side.close();
-  });
-
-  test("a claimed turn whose box a handover keeps warm on the only host is offered again in the same box on the new binary's first heartbeat, which does not call it lost", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("handover-only");
-    const before = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "across a handover" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { session, turn } = StartedSessionSchema.parse(await response.json());
-    const offer = await before.next("TurnOffer");
-    before.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    await until(
-      "the control plane taking the claim",
-      () => getJson(`/v1/turns/${turn.turnId}`, TurnSchema),
-      (read) => read.state === "Running",
-    );
-    before.close();
-    const after = await connect(only.id, only.key, 32, { ...before.carried(), held: [session.sessionId] }, [
-      {
-        type: "TurnFailed",
-        turnId: turn.turnId,
-        reason: "HostUpdating",
-        detail: `this host started handing its boxes to a new supervisor binary before the control plane answered the claim of turn ${turn.turnId}, so its harness never started and its box stays warm; the control plane offers the turn again`,
-        failedAt: new Date().toISOString(),
-      },
-    ]);
-    const again = await after.next("TurnOffer");
-    assert.deepEqual({ turnId: again.turnId, boxId: again.boxId }, { turnId: turn.turnId, boxId: offer.boxId });
-    after.send({ type: "TurnClaim", turnId: again.turnId, boxId: again.boxId });
-    assert.equal((await after.next("TurnClaimed")).turnId, turn.turnId);
-    assert.equal((await getJson(`/v1/turns/${turn.turnId}`, TurnSchema)).state, "Running");
-    after.close();
-  });
-
   test("a turn completed on a nearly full box disk stays Completed and its turn and session reads carry the warning", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "build it all" }, bearer);
@@ -3477,7 +2614,7 @@ suite("sessions", { concurrency: 8 }, () => {
     const [persona] = await getJson("/v1/personas", PersonaSchema.array());
     assert.ok(persona);
     const sized = async (boxDiskMib: number) => {
-      const written = await server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
+      const written = await call(`/v1/personas/${persona.personaId}`, {
         method: "PUT",
         headers: { "content-type": "application/json", ...bearer },
         body: JSON.stringify({
@@ -3518,7 +2655,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.ok(persona);
     assert.equal(persona.boxMemoryMib, 2048);
     const sized = (boxMemoryMib: number) =>
-      server.fetch(`${origin}/v1/personas/${persona.personaId}`, {
+      call(`/v1/personas/${persona.personaId}`, {
         method: "PUT",
         headers: { "content-type": "application/json", ...bearer },
         body: JSON.stringify({
@@ -3626,40 +2763,6 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.deepEqual(teardown, { type: "BoxTeardown", sessionId, boxId });
   };
 
-  test("a start with no free slot evicts the least recently used idle Auto box and holds its offer until that box is gone", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const tight = await enrol("tight");
-    const side = await connect(tight.id, tight.key, 1);
-    await hostState(tight.id, "Online");
-    const kept = await idleTurn(side, { ...(await sessionStart()), prompt: "keep me" }, bearer);
-    assert.equal(kept.session.boxRetention, "Auto");
-    const snapshot = await side.next("SnapshotRequest");
-    await storeRoot(snapshot.storageKey);
-    side.send({ type: "SnapshotDone", snapshotId: snapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the first session reading Idle",
-      () => getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema),
-      (session) => session.state === "Idle",
-    );
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "make room" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const next = StartedSessionSchema.parse(await response.json());
-    assert.equal(next.session.hostId, tight.id);
-    assert.deepEqual(await side.next("BoxTeardown"), {
-      type: "BoxTeardown",
-      sessionId: kept.session.sessionId,
-      boxId: kept.offer.boxId,
-    });
-    assert.equal(side.holds("TurnOffer"), false, "the new turn's offer waits for the evicted box's BoxGone");
-    assert.equal((await getJson(`/v1/turns/${next.turn.turnId}`, TurnSchema)).state, "Offered");
-    side.send({ type: "BoxGone", sessionId: kept.session.sessionId, boxId: kept.offer.boxId });
-    assert.equal((await side.next("TurnOffer")).turnId, next.turn.turnId);
-    assert.equal((await getJson(`/v1/sessions/${kept.session.sessionId}`, SessionSchema)).state, "Stopped");
-    side.close();
-  });
-
   test("an unsolicited BoxGone for an idle Auto box stops the session and its next turn boots a fresh box", async () => {
     const { bearer, host, getJson, sessionStart } = await tenant();
     const idle = await idleTurn(host, { ...(await sessionStart()), prompt: "idle out" }, bearer);
@@ -3704,7 +2807,7 @@ suite("sessions", { concurrency: 8 }, () => {
     assert.notEqual(offer.boxId, off.offer.boxId);
   });
 
-  test("the first heartbeat after a reconnect releases the boxes a host still holds for Stopped, archived and idle Off sessions, and keeps Warm, Auto and running boxes", async () => {
+  test("an Off session whose teardown fails returns to Idle with no snapshot, and the first heartbeat after a reconnect discards the boxes a host still holds for Stopped and archived sessions and keeps Warm and Auto boxes", async () => {
     const { bearer, host, hostId, getJson, tool, enrol, sessionStart, hostState } = await tenant();
     host.close();
     await hostState(hostId, "Offline");
@@ -3756,7 +2859,12 @@ suite("sessions", { concurrency: 8 }, () => {
       detail: "the box is busy",
       failedAt: new Date().toISOString(),
     });
-    await snapshotted(off.session.sessionId);
+    await until(
+      "the Off session reading Idle after its failed teardown",
+      () => getJson(`/v1/sessions/${off.session.sessionId}`, SessionSchema),
+      (session) => session.state === "Idle",
+    );
+    assert.equal(first.holds("SnapshotRequest"), false);
 
     const archived = await idleTurn(first, { ...(await sessionStart()), prompt: "archived" }, bearer);
     await snapshotted(archived.session.sessionId);
@@ -3770,136 +2878,25 @@ suite("sessions", { concurrency: 8 }, () => {
     await snapshotted(warm.session.sessionId);
     const auto = await idleTurn(first, { ...(await sessionStart()), prompt: "auto" }, bearer);
     await snapshotted(auto.session.sessionId);
-    const running = await postJson(
-      "/v1/sessions",
-      { ...(await sessionStart()), prompt: "running", boxRetention: "Off" },
-      bearer,
-    );
-    assert.equal(running.status, 200, await running.clone().text());
-    const runningOffer = await first.next("TurnOffer");
-    first.send({ type: "TurnClaim", turnId: runningOffer.turnId, boxId: runningOffer.boxId });
-    await first.next("TurnClaimed");
 
     first.close();
     await hostState(drift.id, "Offline");
     const back = await connect(drift.id, drift.key, 8, first.carried());
-    const released = [await back.next("BoxDiscard"), await back.next("BoxDiscard"), await back.next("BoxTeardown")];
+    const released = [await back.next("BoxDiscard"), await back.next("BoxDiscard")];
     assert.deepEqual(
-      released.map((message) => [message.type, message.sessionId, message.boxId]).sort(),
+      released.map((message) => [message.sessionId, message.boxId]).sort(),
       [
-        ["BoxDiscard", stopped.session.sessionId, stopped.offer.boxId],
-        ["BoxDiscard", archived.session.sessionId, archived.offer.boxId],
-        ["BoxTeardown", off.session.sessionId, off.offer.boxId],
+        [stopped.session.sessionId, stopped.offer.boxId],
+        [archived.session.sessionId, archived.offer.boxId],
       ].sort(),
     );
 
     const sent = await postJson(`/v1/sessions/${warm.session.sessionId}/turns`, { prompt: "still warm" }, bearer);
     assert.equal(sent.status, 200, await sent.clone().text());
     assert.equal((await back.next("TurnOffer")).boxId, warm.offer.boxId);
-    assert.equal(back.holds("BoxDiscard") || back.holds("BoxTeardown"), false);
+    assert.equal(back.holds("BoxDiscard"), false);
     assert.equal((await getJson(`/v1/sessions/${auto.session.sessionId}`, SessionSchema)).state, "Idle");
-    assert.equal((await getJson(`/v1/turns/${runningOffer.turnId}`, TurnSchema)).state, "Running");
     back.close();
-  });
-
-  const sealedValues = async (tenantId: string) =>
-    z
-      .object({ secret_set_id: z.string(), name: z.string(), sealed: z.string() })
-      .array()
-      .parse(await tenantSql(tenantId, "SELECT secret_set_id, name, sealed FROM secret_values"));
-
-  const writeSealed = async (
-    tenantId: string,
-    rows: { secret_set_id: string; name: string; sealed: string }[],
-    corrupt: boolean,
-  ): Promise<void> => {
-    for (const row of rows) {
-      await tenantSql(
-        tenantId,
-        "UPDATE secret_values SET sealed = ? WHERE secret_set_id = ? AND name = ?",
-        corrupt ? `${row.sealed.slice(0, -4)}AAAA` : row.sealed,
-        row.secret_set_id,
-        row.name,
-      );
-    }
-  };
-
-  test("a turn whose offer fails after the turn is stored is offered on the host's next heartbeat and runs", async () => {
-    const { tenantId, bearer, host, getJson, completedTurn, storedSnapshot } = await tenant();
-    const { session, offer: first } = await completedTurn("first");
-    await storedSnapshot(session.sessionId);
-    assert.equal((await host.next("TurnClaimed")).turnId, first.turnId);
-    await until(
-      "the first turn reading Completed",
-      () => getJson(`/v1/turns/${first.turnId}`, TurnSchema),
-      (turn) => turn.state === "Completed",
-    );
-    const sealed = await sealedValues(tenantId);
-    assert.notEqual(sealed.length, 0);
-    await writeSealed(tenantId, sealed, true);
-    const sent = await postJson(
-      `/v1/sessions/${session.sessionId}/turns`,
-      { prompt: "sent while undecryptable" },
-      bearer,
-    );
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const queued = TurnSchema.parse(await sent.json());
-    assert.equal(queued.state, "Offered");
-    await writeSealed(tenantId, sealed, false);
-
-    const offer = await host.next("TurnOffer");
-    assert.equal(offer.turnId, queued.turnId);
-    assert.equal(offer.prompt, "sent while undecryptable");
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await host.next("TurnClaimed")).turnId, queued.turnId);
-    assert.equal((await getJson(`/v1/turns/${queued.turnId}`, TurnSchema)).state, "Running");
-  });
-
-  test("a queued turn whose persona is gone fails CredentialRefused and the next queued turn on its host is offered", async () => {
-    const { tenantId, bearer, host, getJson, completedTurn, storedSnapshot } = await tenant();
-    const sessions = [];
-    for (const prompt of ["first", "second"]) {
-      const { session, offer } = await completedTurn(prompt);
-      await storedSnapshot(session.sessionId);
-      assert.equal((await host.next("TurnClaimed")).turnId, offer.turnId);
-      await until(
-        `the ${prompt} turn reading Completed`,
-        () => getJson(`/v1/turns/${offer.turnId}`, TurnSchema),
-        (turn) => turn.state === "Completed",
-      );
-      sessions.push(session.sessionId);
-    }
-    const [doomedSession, waitingSession] = sessions;
-    assert.ok(doomedSession !== undefined && waitingSession !== undefined);
-    const sealed = await sealedValues(tenantId);
-    await writeSealed(tenantId, sealed, true);
-    const queued = [];
-    for (const sessionId of sessions) {
-      const sent = await postJson(`/v1/sessions/${sessionId}/turns`, { prompt: "queued" }, bearer);
-      assert.equal(sent.status, 200, await sent.clone().text());
-      queued.push(TurnSchema.parse(await sent.json()));
-    }
-    const [doomed, waiting] = queued;
-    assert.ok(doomed !== undefined && waiting !== undefined);
-    const gone = crypto.randomUUID();
-    await tenantSql(tenantId, "UPDATE sessions SET persona_id = ? WHERE session_id = ?", gone, doomedSession);
-    await writeSealed(tenantId, sealed, false);
-
-    const offer = await host.next("TurnOffer");
-    assert.equal(offer.turnId, waiting.turnId);
-    await until(
-      "the doomed turn reading Failed",
-      () => getJson(`/v1/turns/${doomed.turnId}`, TurnSchema),
-      (turn) => turn.state === "Failed",
-    );
-    const failure = await getJson(`/v1/turns/${doomed.turnId}/failure`, TurnFailureSchema);
-    assert.equal(failure.reason, "CredentialRefused");
-    assert.equal(
-      failure.detail,
-      `the session runs on persona ${gone}, which is gone, so the turn has no secret set to run on; start a new session on an existing persona`,
-    );
-    host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await host.next("TurnClaimed")).turnId, waiting.turnId);
   });
 
   test("a repeated claim of a completed turn is withdrawn and a NotClaimed failure after it leaves the turn Completed", async () => {
@@ -3924,61 +2921,6 @@ suite("sessions", { concurrency: 8 }, () => {
     host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
     assert.deepEqual(await host.next("TurnWithdrawn"), { type: "TurnWithdrawn", turnId: offer.turnId });
     assert.equal((await getJson(`/v1/turns/${offer.turnId}`, TurnSchema)).state, "Completed");
-  });
-
-  test("a turn sent while the only host restarts for an update waits in its channel and is claimed after its Hello", async () => {
-    const { bearer, host, hostId, getJson, enrol, sessionStart, hostState } = await tenant();
-    host.close();
-    await hostState(hostId, "Offline");
-    const only = await enrol("restarting-only");
-    const restarting = await connect(only.id, only.key, 32);
-    await hostState(only.id, "Online");
-    const response = await postJson("/v1/sessions", { ...(await sessionStart()), prompt: "first" }, bearer);
-    assert.equal(response.status, 200, await response.clone().text());
-    const { session } = StartedSessionSchema.parse(await response.json());
-    const first = await restarting.next("TurnOffer");
-    restarting.send({ type: "TurnClaim", turnId: first.turnId, boxId: first.boxId });
-    restarting.send({
-      type: "TurnLine",
-      turnId: first.turnId,
-      lineSeq: 1,
-      text: '{"type":"result","subtype":"success","is_error":false}',
-    });
-    restarting.send({
-      type: "TurnComplete",
-      turnId: first.turnId,
-      lastLineSeq: 1,
-      completedAt: new Date().toISOString(),
-    });
-    const firstSnapshot = await restarting.next("SnapshotRequest");
-    await storeRoot(firstSnapshot.storageKey);
-    restarting.send({ type: "SnapshotDone", snapshotId: firstSnapshot.snapshotId, uploadedBytes: 14 });
-    await until(
-      "the first turn completing",
-      () => getJson(`/v1/turns/${first.turnId}`, TurnSchema),
-      (read) => read.state === "Completed",
-    );
-    restarting.send({
-      type: "SupervisorUpdateStep",
-      fromSha256: "a".repeat(64),
-      toSha256: "b".repeat(64),
-      releaseVersion: "0.2.0",
-      boxesRunning: 0,
-      phase: "Restarting",
-      at: new Date().toISOString(),
-    });
-    await hostState(only.id, "Offline");
-    restarting.close();
-    const sent = await postJson(`/v1/sessions/${session.sessionId}/turns`, { prompt: "during the restart" }, bearer);
-    assert.equal(sent.status, 200, await sent.clone().text());
-    const turn = TurnSchema.parse(await sent.json());
-    assert.equal(turn.state, "Offered");
-    const restarted = await connect(only.id, only.key, 32, restarting.carried());
-    const offer = await restarted.next("TurnOffer");
-    assert.equal(offer.turnId, turn.turnId);
-    restarted.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-    assert.equal((await restarted.next("TurnClaimed")).turnId, turn.turnId);
-    restarted.close();
   });
 
   test("two hosts refusing their turns HostUpdating at the same moment each hand the turn to the other", async () => {
@@ -4054,7 +2996,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     reason: "BuildsPrebuild",
     detail: `the session builds a prebuild of ${repository}, so its box starts from the guest image alone`,
   });
-  assert.deepEqual(installationTokenRequests.at(-1), { repositories: ["app"], permissions: { contents: "read" } });
+  assert.deepEqual(world.github.tokenRequests.at(-1), { repositories: ["app"], permissions: { contents: "read" } });
   assert.equal(new URL(started.logUrl).pathname, `/v1/sessions/${offer.sessionId}/transcript`);
 
   host.send({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });

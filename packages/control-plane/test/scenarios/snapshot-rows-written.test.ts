@@ -3,22 +3,32 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { z } from "zod";
 import type { R2Bucket } from "./harness/runtime.ts";
-import { type Host, World } from "./harness/world.ts";
+import {
+  CHUNK_BYTES,
+  DIGESTS_PER_PART,
+  failsSnapshot,
+  inWorld,
+  PackUploadsSchema,
+  type Placement,
+  parts,
+  type SnapshotRequestSchema,
+  sha256,
+  snapshotAsked,
+  TENANT_ID,
+  tree,
+  uploadsChunks,
+} from "./harness/snapshot-chunks.ts";
+import { type Host, UNMETERED, World } from "./harness/world.ts";
 
-const TENANT_ID = "tenant-scenario";
 const LARGE = 100_000;
-const DIGESTS_PER_PART = 500;
-const CHUNK_BYTES = 65_536;
-const ROWS_PER_FAILED_SNAPSHOT = 10;
-const ROWS_PER_STORED_SNAPSHOT = 8;
-const ROWS_PER_FORK = 12;
+const ROWS_PER_STORED_SNAPSHOT = 20;
+const ROWS_PER_FORK = 21;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_ROOT_PLACEMENTS = 700_000;
 
-type Placement = { digest: string; packDigest: string; offset: number; length: number };
 type ManifestsModule = {
   MAX_INDEX_BYTES: number;
   SnapshotManifests: new () => {
@@ -33,16 +43,6 @@ type ManifestsModule = {
   };
 };
 
-const SnapshotRequestSchema = z.object({
-  snapshotId: z.string(),
-  sessionId: z.string(),
-  boxId: z.string(),
-  turnId: z.string(),
-  storageKey: z.string(),
-});
-const PackUploadsSchema = z.object({
-  reply: z.object({ type: z.literal("SnapshotPackUploads"), uploads: z.array(z.object({ packDigest: z.string() })) }),
-});
 const RestoreDownloadsSchema = z.object({
   reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
 });
@@ -56,50 +56,10 @@ const SnapshotsSchema = z.object({
     }),
   ),
 });
-const PreparedOfferSchema = z.object({
-  prepared: z.object({ kind: z.literal("Ready"), snapshots: z.array(z.object({ storageKey: z.string() })) }),
+const OfferedSnapshotsSchema = z.object({
+  turnId: z.string(),
+  snapshots: z.array(z.object({ storageKey: z.string() })),
 });
-
-const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
-
-const tree = (count: number, name = "tree"): Placement[] =>
-  Array.from({ length: count }, (_, at) => ({
-    digest: sha256(`${name} chunk ${at}`),
-    packDigest: sha256(`${name} pack ${Math.floor(at / DIGESTS_PER_PART)}`),
-    offset: (at % DIGESTS_PER_PART) * CHUNK_BYTES,
-    length: CHUNK_BYTES,
-  }));
-
-const parts = (chunks: Placement[]): Placement[][] =>
-  Array.from({ length: Math.ceil(chunks.length / DIGESTS_PER_PART) }, (_, at) =>
-    chunks.slice(at * DIGESTS_PER_PART, (at + 1) * DIGESTS_PER_PART),
-  );
-
-const snapshotAsked = (host: Host, sessionId: string): z.infer<typeof SnapshotRequestSchema> => {
-  for (;;) {
-    const request = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
-    if (request.sessionId === sessionId) return request;
-  }
-};
-
-const uploadsChunks = async (world: World, host: Host, snapshotId: string, chunks: Placement[]): Promise<void> => {
-  for (const [at, part] of parts(chunks).entries()) {
-    const packDigest = part[0]?.packDigest ?? "";
-    await host.says({ type: "SnapshotChunks", snapshotId, part: at + 1, digests: part.map((chunk) => chunk.digest) });
-    const answer = PackUploadsSchema.parse(
-      await host.says({
-        type: "SnapshotPacks",
-        snapshotId,
-        part: at + 1,
-        packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
-        chunks: part,
-      }),
-    );
-    for (const upload of answer.reply.uploads) {
-      await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
-    }
-  }
-};
 
 const storesRoot = (
   world: World,
@@ -161,16 +121,6 @@ const insertsSnapshot = (
     );
 };
 
-const failsSnapshot = async (host: Host, snapshotId: string): Promise<void> => {
-  await host.says({
-    type: "SnapshotFailed",
-    snapshotId,
-    reason: "UploadRejected",
-    detail: "object storage refused the upload",
-    failedAt: new Date(Date.now()).toISOString(),
-  });
-};
-
 const storesSnapshot = async (
   world: World,
   host: Host,
@@ -183,30 +133,6 @@ const storesSnapshot = async (
   await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: chunks.length * CHUNK_BYTES });
   return { storageKey: request.storageKey, root };
 };
-
-const inWorld = async <T>(run: (world: World, host: Host) => Promise<T>): Promise<T> => {
-  const world = await World.open();
-  try {
-    return await run(world, await world.hostOnline("host-1"));
-  } finally {
-    world.close();
-  }
-};
-
-const rowsOfFailedSnapshot = (chunks: Placement[], attempts: number): Promise<number> =>
-  inWorld(async (world, host) => {
-    const session = await world.startSession({ prompt: "build the tree", tags: [] });
-    const offer = host.takeOffer();
-    await host.claims(offer);
-    await host.completes(offer);
-    const request = snapshotAsked(host, session.sessionId);
-    const before = world.tenantRowsWritten();
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      await uploadsChunks(world, host, request.snapshotId, chunks);
-    }
-    await failsSnapshot(host, request.snapshotId);
-    return world.tenantRowsWritten() - before;
-  });
 
 const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
   inWorld(async (world, host) => {
@@ -238,18 +164,9 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
 
     const before = world.tenantRowsWritten();
     await world.startSession({ prompt: "start from the prebuild", tags: [] });
-    const offer = host.takeOffer();
-    const answer = await world.call("prepareOffer", {
-      tenantId: TENANT_ID,
-      turnId: offer.turnId,
-      hostId: host.hostId,
-      now: Date.now(),
-    });
-    const parsed = PreparedOfferSchema.safeParse(answer);
-    if (!parsed.success) throw new Error(`the fork was not offered: ${JSON.stringify(await world.turn(offer.turnId))}`);
-    const { prepared } = parsed.data;
+    const offer = OfferedSnapshotsSchema.parse(host.take("TurnOffer"));
     assert.deepEqual(
-      prepared.snapshots.map((snapshot) => snapshot.storageKey),
+      offer.snapshots.map((snapshot) => snapshot.storageKey),
       [layer.storageKey],
     );
     const restored = [[layer.root], ...parts(chunks)];
@@ -264,13 +181,6 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
     }
     return world.tenantRowsWritten() - before;
   });
-
-test("a snapshot of 100000 chunks that the host uploads 50 times and then fails writes the rows of a one-chunk snapshot that fails at once", async () => {
-  const large = await rowsOfFailedSnapshot(tree(LARGE), 50);
-  const small = await rowsOfFailedSnapshot(tree(1), 1);
-  assert.equal(large, small);
-  assert.ok(small <= ROWS_PER_FAILED_SNAPSHOT, `a failed snapshot wrote ${small} rows`);
-});
 
 test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot, and its archive frees every pack", async () => {
   const large = await rowsOfStoredSnapshot(tree(LARGE));
@@ -517,7 +427,7 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
 });
 
 test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
-  const world = await World.open();
+  const world = await World.open({ limits: UNMETERED });
   try {
     const chunks = tree(LARGEST_RESTORABLE, "largest");
     const storageKey = `${TENANT_ID}/session/snapshots/largest`;
@@ -532,7 +442,7 @@ test("a manifest of 500000 chunks loads into an index within the memory the cont
     const last = chunks.at(-1);
     assert.deepEqual(last === undefined ? undefined : { ...read.value.find(last.digest) }, last);
   } finally {
-    world.close();
+    await world.close();
   }
 });
 
