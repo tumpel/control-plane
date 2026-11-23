@@ -408,9 +408,9 @@ export class HostChannel extends DurableObject<Env> {
         return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-      admitFrame: (seq) => {
+      admitFrame: () => {
         if (attachment === null) throw new Error("a frame reached a host channel with no connection");
-        const { window, refused } = admit(attachment.frames, seq, Date.now());
+        const { window, refused } = admit(attachment.frames, Date.now());
         attachment.frames = window;
         if (refused === null) return null;
         const retryAfter = new Date(refused.retryAfter);

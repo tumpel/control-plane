@@ -76,7 +76,7 @@ export interface ControlContext {
   prepareOffer(offer: StoredOffer): Promise<PreparedOffer>;
   prepareClaudeSetup(stored: StoredClaudeSetupOffer | StoredClaudeSetupCode): Promise<PreparedClaudeSetup>;
   messageVersions: MessageVersions;
-  admitFrame(seq: number): FrameRateRefusal | null;
+  admitFrame(): FrameRateRefusal | null;
   now(): Date;
 }
 
@@ -369,7 +369,7 @@ export const receive = async (
   }
   const arrived = arrival(connection.cursor, envelope.seq);
   if (arrived.kind === "Duplicate") return duplicate(connection, envelope.seq, context);
-  const overRate = context.admitFrame(envelope.seq);
+  const overRate = context.admitFrame();
   if (overRate !== null) {
     refuseOverRate(context.port, envelope.seq, overRate);
     return { connection, event: { kind: "FrameRateLimited", seq: envelope.seq, reason: overRate.reason } };

@@ -49,8 +49,8 @@ const openChannel = async () => {
       message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
     }),
     messageVersions: control.CONTROL_MESSAGE_VERSIONS,
-    admitFrame: (seq) => {
-      const { window, refused } = admit(frames, seq, clock.now);
+    admitFrame: () => {
+      const { window, refused } = admit(frames, clock.now);
       frames = window;
       if (refused === null) return null;
       return {
@@ -166,17 +166,4 @@ test("a host under the limit has every frame delivered", async () => {
 
   assert.equal(channel.delivered.length, 1200);
   assert.deepEqual(rateLimited(), []);
-});
-
-test("frames the host replays are not counted twice against the limit", () => {
-  let window = openWindow(FRAMES_PER_MINUTE);
-  const admitted = (seq: number): boolean => {
-    const admission = admit(window, seq, START);
-    window = admission.window;
-    return admission.refused === null;
-  };
-  for (let seq = 1; seq <= 400; seq++) assert.equal(admitted(seq), true);
-  for (let seq = 1; seq <= 400; seq++) assert.equal(admitted(seq), true);
-  for (let seq = 401; seq <= 600; seq++) assert.equal(admitted(seq), true);
-  assert.equal(admitted(601), false);
 });
