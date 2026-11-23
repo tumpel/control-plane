@@ -93,6 +93,7 @@ import {
   type BoxSize,
   degradedOnly,
   type HeldBox,
+  holdsWithinBudget,
   type ImageAvailability,
   placeSession,
   type ReportedHostUsage,
@@ -1294,6 +1295,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
     if (victims.length === 0) return this.offer(tenantId, session, turn);
+    this.ctx.storage.sql.exec("UPDATE turns SET offer_sent = 0 WHERE turn_id = ?", turn.turn_id);
     if ((await this.armOffer(tenantId, session, turn)) === null) return;
     const now = Date.now();
     for (const victim of victims) {
@@ -1452,9 +1454,52 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async evictionSettled(tenantId: string, sessionId: string): Promise<void> {
-    if (this.sessionRow(sessionId)?.state === "Stopping") return;
+    const settled = this.sessionRow(sessionId);
+    if (settled?.state === "Stopping") return;
     const next = this.nextQueued(sessionId);
     if (next !== null) await this.runQueued(tenantId, next);
+    if (settled !== null) await this.offerRoomed(tenantId, settled.host_id);
+  }
+
+  private async offerRoomed(tenantId: string, hostId: string): Promise<void> {
+    for (;;) {
+      const [waiting] = this.ctx.storage.sql
+        .exec<{ turn_id: string }>(
+          `SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id = t.session_id
+          WHERE t.host_id = ?1 AND t.state = 'Offered' AND t.offer_sent = 0
+            AND s.host_id = t.host_id AND s.box_id = t.box_id AND s.state IN ('Starting', 'Running')
+            AND NOT EXISTS (
+              SELECT 1 FROM turns e WHERE e.session_id = t.session_id AND e.state IN ('Offered', 'Running')
+                AND (e.created_at, e.turn_id) < (t.created_at, t.turn_id)
+            )
+          ORDER BY t.created_at, t.turn_id LIMIT 1`,
+          hostId,
+        )
+        .toArray();
+      if (waiting === undefined) return;
+      const usage = this.listHostUsage(tenantId).find((each) => each.hostId === hostId);
+      if (usage === undefined) return;
+      const turn = this.turnRow(waiting.turn_id);
+      const session = turn === null ? null : this.sessionRow(turn.session_id);
+      if (turn === null || session === null)
+        throw new Error(`turn ${waiting.turn_id} vanished while it waited for room`);
+      if (holdsWithinBudget(usage)) {
+        await this.offer(tenantId, session, turn);
+        continue;
+      }
+      if (this.stoppingOn(hostId)) return;
+      const host = await this.hostName(tenantId, hostId);
+      const detail = `the idle boxes stopped to make room for this turn stayed on host ${host}, so its box memory is still in use: it gives boxes ${usage.memoryBudgetMib} MiB and its boxes hold ${usage.memoryHeldMib} MiB; send the turn again`;
+      await this.failTurn(tenantId, turn.turn_id, "PoolExhausted", detail, iso(Date.now()));
+    }
+  }
+
+  private stoppingOn(hostId: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec("SELECT 1 FROM sessions WHERE host_id = ? AND state = ? LIMIT 1", hostId, "Stopping")
+        .toArray().length > 0
+    );
   }
 
   private async sendSettled(tenantId: string, turnId: string, hostId: string, sent: OfferSent | Error): Promise<void> {
@@ -1688,7 +1733,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const held = JSON.stringify(heldSessionIds);
     const gone = this.ctx.storage.sql
       .exec<{ session_id: string }>(
-        "UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state = 'Idle' AND session_id NOT IN (SELECT value FROM json_each(?)) RETURNING session_id",
+        `UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state IN ('Idle', 'Stopping')
+          AND session_id NOT IN (SELECT value FROM json_each(?))
+          AND (state = 'Idle' OR NOT EXISTS (SELECT 1 FROM snapshot_requests r WHERE r.session_id = sessions.session_id))
+        RETURNING session_id`,
         now,
         hostId,
         held,
@@ -1705,17 +1753,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
         held,
       )
       .toArray();
-    if (requests.length === 0) return;
-    const host = await this.hostName(tenantId, hostId);
-    const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
-    for (const request of requests) {
-      this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
-      await this.snapshotNotStored(tenantId, request, detail);
-      const session = this.sessionRow(request.session_id);
-      if (session === null) continue;
-      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
-      await this.prebuildUnstored(session, detail);
+    if (requests.length > 0) {
+      const host = await this.hostName(tenantId, hostId);
+      const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
+      for (const request of requests) {
+        this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
+        await this.snapshotNotStored(tenantId, request, detail);
+        const session = this.sessionRow(request.session_id);
+        if (session === null) continue;
+        if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
+        await this.prebuildUnstored(session, detail);
+      }
     }
+    await this.offerRoomed(tenantId, hostId);
   }
 
   private async releaseUnneededBoxes(
@@ -3373,8 +3423,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       message.reason === "HostUpdating" && turn.state === "Running" && (await this.lineCount(tenantId, turn)) === 0;
     if (handedOver || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
       this.ctx.storage.sql.exec(
-        "UPDATE turns SET state = 'Offered', offer_sent = ?, unheld_heartbeats = 0, updated_at = ? WHERE turn_id = ?",
-        handedOver ? 0 : 1,
+        "UPDATE turns SET state = 'Offered', offer_sent = 1, unheld_heartbeats = 0, updated_at = ? WHERE turn_id = ?",
         now,
         turn.turn_id,
       );

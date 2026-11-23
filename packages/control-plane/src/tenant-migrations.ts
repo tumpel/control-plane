@@ -102,6 +102,7 @@ import tenant0095 from "../migrations/tenant/0095_turns_in_flight.sql";
 import tenant0096 from "../migrations/tenant/0096_host_reports.sql";
 import tenant0097 from "../migrations/tenant/0097_reconcile_holdings.sql";
 import tenant0098 from "../migrations/tenant/0098_subscription_failures.sql";
+import tenant0099 from "../migrations/tenant/0099_sessions_host_state.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -209,4 +210,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0096_host_reports", sql: tenant0096 },
   { name: "0097_reconcile_holdings", sql: tenant0097 },
   { name: "0098_subscription_failures", sql: tenant0098 },
+  { name: "0099_sessions_host_state", sql: tenant0099 },
 ];
