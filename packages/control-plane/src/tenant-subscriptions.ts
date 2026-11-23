@@ -177,14 +177,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (row === null) return { kind: "NotFound" };
     if (row.state === "Ended") return { kind: "Ended", subscription: toSubscription(tenantId, row) };
     const sql = this.ctx.storage.sql;
-    if (JSON.parse(row.crew_tags).length > 0) {
-      const session = this.subscriptionSession(row.session_id);
-      if (session === undefined) throw new Error(`subscription ${subscriptionId} has no session ${row.session_id}`);
-      if (session.tumpelMcp !== 1) {
-        return { kind: "PersonaLacksTumpelMcp", personaId: session.personaId, personaName: session.personaName };
-      }
-    }
     if (row.state === "Paused") {
+      if (JSON.parse(row.crew_tags).length > 0) {
+        const session = this.subscriptionSession(row.session_id);
+        if (session === undefined) throw new Error(`subscription ${subscriptionId} has no session ${row.session_id}`);
+        if (session.tumpelMcp !== 1) {
+          return { kind: "PersonaLacksTumpelMcp", personaId: session.personaId, personaName: session.personaName };
+        }
+      }
       const oldest = oldestKept(sql, endOfLog(sql));
       if (row.cursor_event_id < oldest - 1) {
         return { kind: "CursorExpired", cursorEventId: row.cursor_event_id, oldestEventId: oldest };

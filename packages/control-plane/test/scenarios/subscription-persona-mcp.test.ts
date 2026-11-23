@@ -9,7 +9,7 @@ import {
 } from "@tumpel/schemas";
 import { TENANT_ID, World } from "./harness/world.ts";
 
-test("crew subscription creation refuses a persona without tumpelMcp before writing any rows", async (t) => {
+test("crew subscriptions require persona MCP at creation and keep active resume idempotent", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -86,8 +86,23 @@ test("crew subscription creation refuses a persona without tumpelMcp before writ
   const withCrewWritten = world.tenantRowsWritten();
   const withCrew = await world.fetch(world.owner, "POST", "/v1/subscriptions", JSON.stringify(create));
   assert.equal(withCrew.status, 200);
-  assert.equal(SubscriptionSchema.parse(await withCrew.json()).state, "Active");
+  const active = SubscriptionSchema.parse(await withCrew.json());
+  assert.equal(active.state, "Active");
   assert.equal(world.tenantRowsWritten() - withCrewWritten, 9);
+
+  const disabled = await world.fetch(
+    world.owner,
+    "PATCH",
+    `/v1/personas/${persona.personaId}`,
+    JSON.stringify({ tumpelMcp: false }),
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal(PersonaSchema.parse(await disabled.json()).tumpelMcp, false);
+  const activeResumeWritten = world.tenantRowsWritten();
+  const activeResume = await world.fetch(world.owner, "POST", `/v1/subscriptions/${active.subscriptionId}/resume`);
+  assert.equal(activeResume.status, 200);
+  assert.deepEqual(SubscriptionSchema.parse(await activeResume.json()), active);
+  assert.equal(world.tenantRowsWritten() - activeResumeWritten, 0);
 });
 
 test("resuming a legacy crew subscription refuses a persona without tumpelMcp without writing rows", async (t) => {
