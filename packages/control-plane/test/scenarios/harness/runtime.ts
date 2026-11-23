@@ -91,6 +91,8 @@ const bindable = (value: unknown): SQLInputValue => {
 const INDEX_ROOTS =
   "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND rootpage NOT IN (SELECT rootpage FROM sqlite_master WHERE type = 'table')";
 
+const INDEX_WRITES = new Set(["IdxInsert", "IdxDelete", "Delete"]);
+
 export class SqlStorage {
   private savepoint = 0;
   readonly db: DatabaseSync;
@@ -129,12 +131,16 @@ export class SqlStorage {
         .all()
         .map(({ rootpage }) => Number(rootpage)),
     );
-    const writes = new Set(
-      this.db
-        .prepare(`EXPLAIN ${query}`)
-        .all()
+    const program = this.db.prepare(`EXPLAIN ${query}`).all();
+    const roots = new Map(
+      program
         .filter(({ opcode, p2 }) => opcode === "OpenWrite" && indexes.has(Number(p2)))
-        .map(({ p2 }) => Number(p2)),
+        .map(({ p1, p2 }) => [Number(p1), Number(p2)]),
+    );
+    const writes = new Set(
+      program
+        .filter(({ opcode, p1 }) => INDEX_WRITES.has(String(opcode)) && roots.has(Number(p1)))
+        .map(({ p1 }) => roots.get(Number(p1))),
     ).size;
     this.opened.set(key, writes);
     return writes;

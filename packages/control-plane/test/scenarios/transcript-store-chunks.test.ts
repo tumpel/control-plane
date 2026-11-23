@@ -40,8 +40,11 @@ test("a tenant that restarts after storing a chunk goes on from the stored lines
 
   await world.restartTenant();
   await line(host, first.turnId, stored + 7);
-  host.report(USAGE);
-  await world.settle();
+  await world.until(
+    "the resent lines reaching the restarted tenant",
+    async () => (await world.turn(first.turnId)).lineCount,
+    (count) => count === stored + 7,
+  );
   await completes(host, session.sessionId, first.turnId, stored + 8);
   assert.equal((await world.turn(first.turnId)).lineCount, stored + 8);
 
