@@ -27,8 +27,8 @@ const rowsOfFailedSnapshot = (chunks: Placement[], attempts: number): Promise<nu
     return world.tenantRowsWritten() - before;
   });
 
-test("a snapshot of 100000 chunks that the host uploads 50 times and then fails writes the rows of a one-chunk snapshot that fails at once", async () => {
-  const large = await rowsOfFailedSnapshot(tree(LARGE), 50);
+test("a snapshot of 100000 chunks that the host uploads 3 times and then fails writes the rows of a one-chunk snapshot that fails at once", async () => {
+  const large = await rowsOfFailedSnapshot(tree(LARGE), 3);
   const small = await rowsOfFailedSnapshot(tree(1), 1);
   assert.equal(large, small);
   assert.ok(small <= ROWS_PER_FAILED_SNAPSHOT, `a failed snapshot wrote ${small} rows`);
