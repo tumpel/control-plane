@@ -258,13 +258,13 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     (await rest(EffectiveHarnessVersionSchema.array(), "GET", "/v1/harnesses/pins")).filter((row) => row.pinned),
     [{ harness: pinned.harness, harnessVersion: pinned.harnessVersion, pinned: true }],
   );
-  const unreleased = await send("PUT", "/v1/harnesses/pins", { harness: "Codex", harnessVersion: "0.169.0" }, bearer);
+  const unreleased = await send("PUT", "/v1/harnesses/pins", { harness: "Codex", harnessVersion: "0.169.1" }, bearer);
   assert.equal(unreleased.status, 422);
   assert.equal(ProblemSchema.parse(await unreleased.json()).code, "ImageNotReleased");
   await toolDone("tumpel_harness_unpin", { harness: entry.harness });
   assert.deepEqual(await rest(EffectiveHarnessVersionSchema.array(), "GET", "/v1/harnesses/pins"), [
     { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION, pinned: false },
-    { harness: "Codex", harnessVersion: "0.169.0", pinned: false },
+    { harness: "Codex", harnessVersion: "0.169.1", pinned: false },
     { harness: "OpenCode", harnessVersion: "1.19.5", pinned: false },
     { harness: "PiDev", harnessVersion: "1.5.2", pinned: false },
   ]);
