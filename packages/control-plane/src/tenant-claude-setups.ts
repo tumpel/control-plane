@@ -302,22 +302,6 @@ export class TenantClaudeSetups extends TenantPrebuilds {
     return { kind: "Stored" };
   }
 
-  protected async failHostClaudeSetups(
-    hostId: string,
-    reason: ClaudeSetupFailureReason,
-    detail: string,
-    now: number,
-  ): Promise<void> {
-    const rows = this.ctx.storage.sql
-      .exec<ClaudeSetupRow>(
-        `${CLAUDE_SETUP_SELECT} WHERE host_id = ? AND state IN ('Starting', 'AwaitingCode', 'Minting')`,
-        hostId,
-      )
-      .toArray();
-    for (const row of rows)
-      await this.discardClaudeSetupBox(row, await this.failClaudeSetup(row, reason, detail, now, true));
-  }
-
   protected async failUnheldClaudeSetups(hostId: string, held: readonly string[], now: number): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<ClaudeSetupRow>(

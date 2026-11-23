@@ -136,8 +136,8 @@ export type TurnSend = z.infer<typeof TurnSendSchema>;
 export type TurnFailure = z.infer<typeof TurnFailureSchema>;
 type SessionPrebuildLayer = z.infer<typeof SessionPrebuildLayerSchema>;
 type HostLoss = {
-  turn: "RateLimited" | "HostRevoked";
-  snapshot: "RateLimited" | "NotAnswered";
+  turn: "HostRevoked";
+  snapshot: "NotAnswered";
   turnDetail: string;
   snapshotDetail: string;
 };
@@ -3120,7 +3120,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return snapshots;
   }
 
-  protected async failHostTurns(tenantId: string, hostId: string, loss: HostLoss, now: number): Promise<string[]> {
+  protected async failHostTurns(tenantId: string, hostId: string, loss: HostLoss, now: number): Promise<void> {
     const running = this.ctx.storage.sql
       .exec<{ turn_id: string }>(
         "SELECT turn_id FROM turns WHERE host_id = ? AND state IN ('Offered', 'Running')",
@@ -3143,11 +3143,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       await this.prebuildUnstored(session, loss.snapshotDetail);
     }
-    return running.map(({ turn_id }) => turn_id);
-  }
-
-  protected async cancelHostTurns(hostId: string, turnIds: readonly string[]): Promise<void> {
-    for (const turnId of turnIds) await this.host(hostId).send({ type: "TurnCancel", turnId });
   }
 
   private async hostName(tenantId: string, hostId: string): Promise<string> {
