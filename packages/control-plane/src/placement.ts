@@ -70,6 +70,9 @@ const busyness = ({ host, usage }: Candidate): number =>
 const lacksDisk = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage, boxDiskMib: number): boolean =>
   diskHeldMib > 0 && diskHeldMib + boxDiskMib > diskBudgetMib;
 
+export const holdsWithinBudget = (usage: ReportedHostUsage): boolean =>
+  freeMemoryMib(usage) >= 0 && !lacksDisk(usage, 0);
+
 const assess = (
   host: Host,
   usages: ReadonlyMap<string, ReportedHostUsage>,

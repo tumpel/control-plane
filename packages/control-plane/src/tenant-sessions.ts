@@ -93,6 +93,7 @@ import {
   type BoxSize,
   degradedOnly,
   type HeldBox,
+  holdsWithinBudget,
   type ImageAvailability,
   placeSession,
   type ReportedHostUsage,
@@ -1294,6 +1295,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
     if (victims.length === 0) return this.offer(tenantId, session, turn);
+    this.ctx.storage.sql.exec("UPDATE turns SET offer_sent = 0 WHERE turn_id = ?", turn.turn_id);
     if ((await this.armOffer(tenantId, session, turn)) === null) return;
     const now = Date.now();
     for (const victim of victims) {
@@ -1460,26 +1462,44 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private async offerRoomed(tenantId: string, hostId: string): Promise<void> {
-    const roomed = this.ctx.storage.sql
-      .exec<{ turn_id: string }>(
-        `SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id = t.session_id
-        WHERE t.host_id = ?1 AND t.state = 'Offered' AND t.offer_sent = 0
-          AND s.host_id = t.host_id AND s.box_id = t.box_id AND s.state IN ('Starting', 'Running')
-          AND NOT EXISTS (SELECT 1 FROM sessions x WHERE x.host_id = ?1 AND x.state = 'Stopping')
-          AND NOT EXISTS (
-            SELECT 1 FROM turns e WHERE e.session_id = t.session_id AND e.state IN ('Offered', 'Running')
-              AND (e.created_at, e.turn_id) < (t.created_at, t.turn_id)
-          )
-        ORDER BY t.created_at, t.turn_id`,
-        hostId,
-      )
-      .toArray();
-    for (const { turn_id: turnId } of roomed) {
-      const turn = this.turnRow(turnId);
+    for (;;) {
+      const [waiting] = this.ctx.storage.sql
+        .exec<{ turn_id: string }>(
+          `SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id = t.session_id
+          WHERE t.host_id = ?1 AND t.state = 'Offered' AND t.offer_sent = 0
+            AND s.host_id = t.host_id AND s.box_id = t.box_id AND s.state IN ('Starting', 'Running')
+            AND NOT EXISTS (
+              SELECT 1 FROM turns e WHERE e.session_id = t.session_id AND e.state IN ('Offered', 'Running')
+                AND (e.created_at, e.turn_id) < (t.created_at, t.turn_id)
+            )
+          ORDER BY t.created_at, t.turn_id LIMIT 1`,
+          hostId,
+        )
+        .toArray();
+      if (waiting === undefined) return;
+      const usage = this.listHostUsage(tenantId).find((each) => each.hostId === hostId);
+      if (usage === undefined) return;
+      const turn = this.turnRow(waiting.turn_id);
       const session = turn === null ? null : this.sessionRow(turn.session_id);
-      if (turn === null || session === null) throw new Error(`turn ${turnId} vanished while it waited for room`);
-      await this.offer(tenantId, session, turn);
+      if (turn === null || session === null)
+        throw new Error(`turn ${waiting.turn_id} vanished while it waited for room`);
+      if (holdsWithinBudget(usage)) {
+        await this.offer(tenantId, session, turn);
+        continue;
+      }
+      if (this.stoppingOn(hostId)) return;
+      const host = await this.hostName(tenantId, hostId);
+      const detail = `the idle boxes stopped to make room for this turn stayed on host ${host}, so its box memory is still in use: it gives boxes ${usage.memoryBudgetMib} MiB and its boxes hold ${usage.memoryHeldMib} MiB; send the turn again`;
+      await this.failTurn(tenantId, turn.turn_id, "PoolExhausted", detail, iso(Date.now()));
     }
+  }
+
+  private stoppingOn(hostId: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec("SELECT 1 FROM sessions WHERE host_id = ? AND state = ? LIMIT 1", hostId, "Stopping")
+        .toArray().length > 0
+    );
   }
 
   private async sendSettled(tenantId: string, turnId: string, hostId: string, sent: OfferSent | Error): Promise<void> {
@@ -1721,6 +1741,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .toArray();
     for (const { session_id } of gone) this.sessionEntered(session_id, "Stopped", now);
     for (const { session_id } of gone) await this.evictionSettled(tenantId, session_id);
+    await this.failGoneSnapshots(tenantId, hostId, held, now);
+    await this.offerRoomed(tenantId, hostId);
+  }
+
+  private async failGoneSnapshots(tenantId: string, hostId: string, held: string, now: number): Promise<void> {
     const requests = this.ctx.storage.sql
       .exec<SnapshotRequestRow>(
         `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
@@ -2134,7 +2159,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         this.listHostUsage(tenantId),
         image.image,
         boxSizeOf(session),
-        this.heldBoxes().filter((each) => each.sessionId !== session.session_id),
+        this.heldBoxes(),
         now - presenceGraceMs(settingsOf(this.env)),
       );
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;

@@ -3,7 +3,6 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:c
 import { register } from "node:module";
 import { mock } from "node:test";
 import {
-  type BoxRetentionSchema,
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
   HostRecordSchema,
@@ -68,7 +67,6 @@ const imported = async <T>(path: string, name: string): Promise<T> => {
 };
 
 type Session = z.infer<typeof SessionSchema>;
-type BoxRetention = z.infer<typeof BoxRetentionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
 type Turn = z.infer<typeof TurnSchema>;
 export type TenantUsage = z.infer<typeof TenantUsageSchema>;
@@ -569,14 +567,14 @@ export class World {
     });
   }
 
-  async startSession(start: { prompt: string; tags: string[]; boxRetention?: BoxRetention }): Promise<Session> {
+  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
     const answer = z
       .object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) })
       .parse(await this.tryStartSession(start));
     return answer.started.started.session;
   }
 
-  async tryStartSession(start: { prompt: string; tags: string[]; boxRetention?: BoxRetention }): Promise<unknown> {
+  async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
     const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
       "hosts.ts",
       "listHostRecords",
@@ -597,7 +595,7 @@ export class World {
           repository: REPOSITORY,
           model: "opus",
           prompt: start.prompt,
-          boxRetention: start.boxRetention ?? "Auto",
+          boxRetention: "Auto",
           tags: start.tags,
         },
       },
