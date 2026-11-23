@@ -4,6 +4,7 @@ Read `doc/adr/000-tenets.md` first. Its tenets bind every change. Tenet 1, fail 
 
 Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architecture.md`.
 
+- When changing a client or release workflow, follow `rules/client-compatibility.md`.
 - When writing TypeScript, follow `rules/typescript.md`.
 - When a change needs a new or changed type, follow `rules/typespec.md`.
 - When changing a table, a migration or a stored record, follow `rules/data-modeling.md`.
