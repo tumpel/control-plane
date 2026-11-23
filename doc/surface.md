@@ -24,15 +24,6 @@ nothing: the server cannot read your environment, so they return the config entr
 
 | Operation                                | MCP tool                                     | CLI command                                  |
 | ---------------------------------------- | -------------------------------------------- | -------------------------------------------- |
-| `CircleCIConnections_authorize`          | `tumpel_circleci_authorize`                  | `tumpel circleci authorize`                  |
-| `CircleCIConnections_choose`             | `tumpel_circleci_choose`                     | `tumpel circleci choose`                     |
-| `CircleCIConnections_complete`           | `(none)`                                     | `tumpel circleci complete`                   |
-| `CircleCIConnections_delete`             | `tumpel_circleci_delete`                     | `tumpel circleci delete`                     |
-| `CircleCIConnections_get`                | `tumpel_circleci_get`                        | `tumpel circleci get`                        |
-| `CircleCIConnections_start`              | `tumpel_circleci_start`                      | `tumpel circleci start`                      |
-| `CircleCIProjects_add`                   | `tumpel_circleci_project_add`                | `tumpel circleci project add`                |
-| `CircleCIProjects_delete`                | `tumpel_circleci_project_delete`             | `tumpel circleci project delete`             |
-| `CircleCIProjects_list`                  | `tumpel_circleci_project_list`               | `tumpel circleci project list`               |
 | `ClaudeSetups_get`                       | `tumpel_claude_setup_get`                    | `tumpel claude-setup get`                    |
 | `ClaudeSetups_list`                      | `tumpel_claude_setup_list`                   | `tumpel claude-setup list`                   |
 | `ClaudeSetups_start`                     | `tumpel_claude_setup_start`                  | `tumpel claude-setup start`                  |
@@ -48,10 +39,7 @@ nothing: the server cannot read your environment, so they return the config entr
 | `EnrolmentTokens_list`                   | `tumpel_host_list_tokens`                    | `tumpel host list-tokens`                    |
 | `EnrolmentTokens_mint`                   | `tumpel_host_mint_token`                     | `tumpel host mint-token`                     |
 | `EnrolmentTokens_revoke`                 | `tumpel_host_revoke_token`                   | `tumpel host revoke-token`                   |
-| `Events_list`                            | `tumpel_events_wait`                         | `tumpel events wait`                         |
-| `GitHubActionsConnections_delete`        | `tumpel_github_actions_delete`               | `tumpel github-actions delete`               |
-| `GitHubActionsConnections_get`           | `tumpel_github_actions_get`                  | `tumpel github-actions get`                  |
-| `GitHubActionsConnections_start`         | `tumpel_github_actions_start`                | `tumpel github-actions start`                |
+| `Events_list`                            | `tumpel_events_list`                         | `tumpel events wait`                         |
 | `GitHubConnections_delete`               | `tumpel_github_delete`                       | `tumpel github delete`                       |
 | `GitHubConnections_get`                  | `tumpel_github_get`                          | `tumpel github get`                          |
 | `GitHubConnections_list`                 | `tumpel_github_list`                         | `tumpel github list`                         |
@@ -73,14 +61,13 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Invitations_create`                     | `tumpel_invitation_create`                   | `tumpel invitation create`                   |
 | `Invitations_list`                       | `tumpel_invitation_list`                     | `tumpel invitation list`                     |
 | `Invitations_revoke`                     | `tumpel_invitation_revoke`                   | `tumpel invitation revoke`                   |
+| `Limits_get`                             | `tumpel_limits_get`                          | `tumpel limits get`                          |
+| `Limits_set`                             | `tumpel_limits_set`                          | `tumpel limits set`                          |
 | `Members_list`                           | `tumpel_member_list`                         | `tumpel member list`                         |
 | `Members_remove`                         | `tumpel_member_remove`                       | `tumpel member remove`                       |
 | `Metrics_catalog`                        | `tumpel_metrics_catalog`                     | `tumpel metrics catalog`                     |
 | `Metrics_query`                          | `tumpel_metrics_query`                       | `tumpel metrics query`                       |
 | `Metrics_turns`                          | `tumpel_metrics_turns`                       | `tumpel metrics turns`                       |
-| `NamespaceConnections_delete`            | `tumpel_namespace_delete`                    | `tumpel namespace delete`                    |
-| `NamespaceConnections_get`               | `tumpel_namespace_get`                       | `tumpel namespace get`                       |
-| `NamespaceConnections_start`             | `tumpel_namespace_start`                     | `tumpel namespace start`                     |
 | `OAuthConnectors_authorize`              | `tumpel_connector_authorize`                 | `tumpel connector authorize`                 |
 | `OAuthConnectors_create`                 | `tumpel_connector_create_oauth`              | `tumpel connector create-oauth`              |
 | `OAuthGrants_list`                       | `tumpel_oauth_grant_list`                    | `tumpel oauth-grant list`                    |
@@ -152,12 +139,10 @@ nothing: the server cannot read your environment, so they return the config entr
 | `Turns_listSteers`                       | `tumpel_turn_list_steers`                    | `tumpel turn list-steers`                    |
 | `Turns_send`                             | `tumpel_turn_send`                           | `tumpel turn send`                           |
 | `Turns_steer`                            | `tumpel_turn_steer`                          | `tumpel turn steer`                          |
-| `Turns_wait`                             | `tumpel_turn_wait`                           | `tumpel turn wait`                           |
 
 CLI only: tenant operations with a CLI command and no MCP tool:
 
 - `ClaudeSetups_submitCode`: takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it.
-- `CircleCIConnections_complete`: takes the redirect address that carries CircleCI's one-time authorization code, which never passes through MCP; the dashboard, tumpel circleci authorize and tumpel circleci complete --stdin take it.
 
 Allowlist: operations that are not tenant operations, with no tool or command:
 
@@ -183,10 +168,6 @@ Allowlist: operations that are not tenant operations, with no tool or command:
 - `Releases_supervisor`: release download the installer and the supervisor fetch without sign-in.
 - `Releases_install`: install script a person pipes to sh before the CLI exists.
 - `Releases_rollout`: stage-wide rollout the release workflow reads with the drainToken it wrote to the release bucket, never a principal.
-- `PrebuildUploads_start`: build job wire, signed by the provider's OIDC job token, never by a principal.
-- `PrebuildUploads_complete`: build job wire, signed by the provider's OIDC job token, never by a principal.
-- `PrebuildInputs_read`: build job wire, signed by the provider's OIDC job token, never by a principal.
-- `CircleCIEvents_receive`: provider webhook, signed with the project binding's secret, never by a principal.
 - `ClaudeSetupBoxes_writeToken`: setup box wire, signed by the box's single-use token, never by a principal.
 - `ConnectorTokens_fetch`: box wire of the guest forwarder, signed by the turn's connector token, never by a principal.
 - `WebhookEndpoints_create`: delivery channels, not tenant config; no MCP/CLI by ruling 2026-11-19.

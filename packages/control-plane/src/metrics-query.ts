@@ -7,10 +7,10 @@ import type {
   MetricTurnQuerySchema,
   MetricWindowSchema,
 } from "@tumpel/schemas";
-import type { z } from "zod";
+import { z } from "zod";
 import type { Problem, ProblemStatus } from "./http.ts";
-import { type ExponentialHistogram, histogramQuantile, mergeHistograms, parseHistogram } from "./metrics-histogram.ts";
-import type { MetricsLimits, MetricsSql, SqlValue } from "./metrics-store.ts";
+import { type HistogramBin, histogramOfBins, histogramQuantile } from "./metrics-histogram.ts";
+import { DIMENSION_SLOTS, FIRST_SLOT_BLOB, type MetricsLimits, type MetricsSql } from "./metrics-store.ts";
 
 export type MetricWindow = z.infer<typeof MetricWindowSchema>;
 export type MetricSeriesQuery = z.infer<typeof MetricSeriesQuerySchema>;
@@ -27,16 +27,32 @@ export const MAX_BUCKETS = 500;
 export const MAX_GROUPS = 20;
 export const TURN_PAGE_SIZE = 200;
 export const OTHER_GROUP = "Other";
+export const WRITE_SKEW_MS = 10 * 60_000;
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 const BUCKET_MS: Record<MetricBucket, number> = { Minute: MINUTE_MS, Hour: HOUR_MS, Day: DAY_MS };
+const SAFE_TEXT = /^[A-Za-z0-9._:@/+-]{1,128}$/;
+const QUOTABLE = /^[A-Za-z0-9._:@/+=-]{1,257}$/;
 
 const refuse = (status: ProblemStatus, problem: Refused["problem"]): Refused => ({ ok: false, status, problem });
 
 const invalid = (detail: string, fix: string): Refused =>
   refuse(400, { code: "InvalidRequest", title: "Invalid metrics query", detail, fix });
+
+const unsafe = (what: string, text: string): Refused =>
+  invalid(
+    `the ${what} ${JSON.stringify(text)} holds characters or a length a metrics query cannot match`,
+    "Use at most 128 letters, digits and . _ : @ / + - in each metrics filter dimension, value, group and session id",
+  );
+
+const quoted = (text: string): string => {
+  if (!QUOTABLE.test(text)) {
+    throw new Error(`${JSON.stringify(text)} reached a metrics query unchecked; refuse it where the query is parsed`);
+  }
+  return `'${text}'`;
+};
 
 interface Offset {
   text: string;
@@ -82,25 +98,24 @@ export const parseFilter = (filter: readonly string[] | undefined): Outcome<Dime
       );
     }
     const dimension = entry.slice(0, colon);
-    parsed.set(dimension, [...(parsed.get(dimension) ?? []), entry.slice(colon + 1)]);
+    const value = entry.slice(colon + 1);
+    if (!SAFE_TEXT.test(dimension)) return unsafe("filter dimension", dimension);
+    if (!SAFE_TEXT.test(value)) return unsafe("filter value", value);
+    parsed.set(dimension, [...(parsed.get(dimension) ?? []), value]);
   }
   return { ok: true, value: parsed };
 };
 
-interface Clause {
-  sql: string;
-  bindings: SqlValue[];
-}
+const isDimensions = (value: unknown): value is Record<string, string> =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.values(value).every((entry) => typeof entry === "string");
 
-const filterClause = (filter: DimensionFilter): Clause => {
-  const parts = [...filter].map(([dimension, values]) => ({
-    sql: `s.series_id IN (SELECT series_id FROM series_dimension WHERE dimension = ? AND value IN (${values.map(() => "?").join(", ")}))`,
-    bindings: [dimension, ...values],
-  }));
-  return {
-    sql: parts.map((part) => ` AND ${part.sql}`).join(""),
-    bindings: parts.flatMap((part) => part.bindings),
-  };
+const dimensionsOf = (canonical: string): Record<string, string> => {
+  const parsed: unknown = JSON.parse(canonical);
+  if (isDimensions(parsed)) return parsed;
+  throw new Error(`a metric point has dimensions ${canonical}, not an object of strings; its writer is broken`);
 };
 
 const metricNotFound = (metric: string): Refused =>
@@ -111,71 +126,130 @@ const metricNotFound = (metric: string): Refused =>
     fix: "List the metrics with the metrics catalog and query one of their names",
   });
 
-interface Instrument {
+export interface Instrument {
   metric: string;
   unit: string;
   kind: "Turn" | "Sample";
   description: string;
 }
 
-const instrumentOf = (sql: MetricsSql, metric: string): Instrument | undefined =>
-  sql
-    .exec<{ metric: string; unit: string; kind: string; description: string }>(
-      "SELECT metric, unit, kind, description FROM metric WHERE metric = ?",
-      metric,
-    )
-    .toArray()
-    .map((row) => ({ ...row, kind: row.kind === "Turn" ? ("Turn" as const) : ("Sample" as const) }))[0];
+export const instrumentOrRefusal = (metric: string, instrument: Instrument | undefined): Outcome<Instrument> =>
+  instrument === undefined || !SAFE_TEXT.test(metric) ? metricNotFound(metric) : { ok: true, value: instrument };
 
-export const readCatalog = (sql: MetricsSql, query: MetricWindow): Outcome<MetricCatalog> => {
+const tooManyRows = (query: MetricWindow, rows: number, what: string): Refused =>
+  refuse(422, {
+    code: "MetricRangeTooLarge",
+    title: "Metric range too large",
+    detail: `the window from ${query.from} to ${query.to} holds more than ${rows} rows of ${what}`,
+    fix: "Query a shorter window, pick a larger bucket, or filter to fewer series",
+  });
+
+export interface AnalyticsTable {
+  dataset: string;
+  tenantId: string;
+}
+
+const slotBlobs = Array.from({ length: DIMENSION_SLOTS }, (_, slot) => `blob${FIRST_SLOT_BLOB + slot}`);
+
+const whereOf = (
+  table: AnalyticsTable,
+  metric: string | undefined,
+  from: number,
+  to: number,
+  filter: DimensionFilter,
+): string =>
+  [
+    `index1 = ${quoted(table.tenantId)}`,
+    ...(metric === undefined ? [] : [`blob1 = ${quoted(metric)}`]),
+    `timestamp >= toDateTime(${Math.floor((from - WRITE_SKEW_MS) / 1000)})`,
+    `double2 >= ${from}`,
+    `double2 < ${to}`,
+    ...[...filter].map(([dimension, values]) => {
+      const wanted = values.map((value) => quoted(`${dimension}=${value}`)).join(", ");
+      return `(${slotBlobs.map((blob) => `${blob} IN (${wanted})`).join(" OR ")})`;
+    }),
+  ].join(" AND ");
+
+const groupExpression = (dimension: string): string =>
+  slotBlobs.reduceRight(
+    (otherwise, blob) => `if(startsWith(${blob}, ${quoted(`${dimension}=`)}), ${blob}, ${otherwise})`,
+    "''",
+  );
+
+const sqlName = (dataset: string): string => {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(dataset)) {
+    throw new Error(`METRICS_DATASET ${JSON.stringify(dataset)} is not a dataset name; fix it in wrangler.jsonc`);
+  }
+  return dataset;
+};
+
+export interface CatalogPlan {
+  window: Window;
+  filter: DimensionFilter;
+  sql: string;
+}
+
+export const planCatalog = (
+  table: AnalyticsTable,
+  query: MetricWindow,
+  limits: MetricsLimits,
+): Outcome<CatalogPlan> => {
   const window = windowOf(query);
   if (!window.ok) return window;
   const filter = parseFilter(query.filter);
   if (!filter.ok) return filter;
-  const clause = filterClause(filter.value);
-  const seen = `FROM series s WHERE s.last_seen_at >= ? AND s.first_seen_at < ?${clause.sql}`;
-  const bindings = [window.value.from, window.value.to, ...clause.bindings];
-  const instruments = sql
-    .exec<{ metric: string; unit: string; kind: string; description: string }>(
-      `SELECT m.metric, m.unit, m.kind, m.description FROM metric m WHERE m.metric IN (SELECT s.metric ${seen}) ORDER BY m.metric`,
-      ...bindings,
-    )
-    .toArray();
-  const facetRows = sql
-    .exec<{ metric: string; dimension: string; value: string; series_count: number }>(
-      `SELECT s.metric, d.dimension, d.value, COUNT(*) AS series_count FROM series_dimension d JOIN series s ON s.series_id = d.series_id WHERE s.series_id IN (SELECT s.series_id ${seen}) GROUP BY s.metric, d.dimension, d.value ORDER BY s.metric, d.dimension, d.value`,
-      ...bindings,
-    )
-    .toArray();
-  const facets = new Map<string, Map<string, { value: string; seriesCount: number }[]>>();
-  for (const row of facetRows) {
-    const dimensions = facets.get(row.metric) ?? new Map();
-    facets.set(row.metric, dimensions);
-    dimensions.set(row.dimension, [
-      ...(dimensions.get(row.dimension) ?? []),
-      { value: row.value, seriesCount: row.series_count },
-    ]);
+  const { from, to } = window.value;
+  const sql = `SELECT blob1 AS metric, blob2 AS dimensions FROM ${sqlName(table.dataset)} WHERE ${whereOf(table, undefined, from, to, filter.value)} GROUP BY metric, dimensions ORDER BY metric, dimensions LIMIT ${limits.rowsPerQuery + 1}`;
+  return { ok: true, value: { window: window.value, filter: filter.value, sql } };
+};
+
+const CatalogRowSchema = z.object({ metric: z.string(), dimensions: z.string() });
+
+export const readCatalog = (
+  instruments: readonly Instrument[],
+  rows: readonly unknown[],
+  query: MetricWindow,
+  limits: MetricsLimits,
+): Outcome<MetricCatalog> => {
+  if (rows.length > limits.rowsPerQuery) return tooManyRows(query, limits.rowsPerQuery, "metric series");
+  const facets = new Map<string, Map<string, Map<string, number>>>();
+  for (const row of rows) {
+    const { metric, dimensions: canonical } = CatalogRowSchema.parse(row);
+    const dimensions = facets.get(metric) ?? new Map<string, Map<string, number>>();
+    facets.set(metric, dimensions);
+    for (const [dimension, value] of Object.entries(dimensionsOf(canonical))) {
+      const values = dimensions.get(dimension) ?? new Map<string, number>();
+      dimensions.set(dimension, values);
+      values.set(value, (values.get(value) ?? 0) + 1);
+    }
   }
+  const sorted = <T>(entries: Iterable<[string, T]>): [string, T][] =>
+    [...entries].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   return {
     ok: true,
     value: {
-      metrics: instruments.map(({ metric, unit, kind, description }) => ({
-        metric,
-        unit,
-        kind: kind === "Turn" ? "Turn" : "Sample",
-        description,
-        facets: [...(facets.get(metric) ?? new Map())].map(([dimension, values]) => ({ dimension, values })),
-      })),
+      metrics: instruments
+        .filter(({ metric }) => facets.has(metric))
+        .sort((left, right) => (left.metric < right.metric ? -1 : left.metric > right.metric ? 1 : 0))
+        .map(({ metric, unit, kind, description }) => ({
+          metric,
+          unit,
+          kind,
+          description,
+          facets: sorted(facets.get(metric) ?? new Map<string, Map<string, number>>()).map(([dimension, values]) => ({
+            dimension,
+            values: sorted(values).map(([value, seriesCount]) => ({ value, seriesCount })),
+          })),
+        })),
     },
   };
 };
 
 export interface BucketPlan {
   bucket: MetricBucket;
-  resolution: "Minute" | "Hour";
+  size: number;
   first: number;
   to: number;
-  startOf: (at: number) => number;
 }
 
 const startFor = (bucket: MetricBucket, offset: Offset): ((at: number) => number) => {
@@ -194,9 +268,8 @@ export const planBuckets = (
   if (!window.ok) return window;
   const { from, to, offset } = window.value;
   const size = BUCKET_MS[bucket];
-  const startOf = startFor(bucket, offset);
-  const first = startOf(from);
-  const oldest = bucket === "Minute" ? Math.ceil((now - limits.minuteRetentionMs) / size) * size : first;
+  const first = startFor(bucket, offset)(from);
+  const oldest = Math.ceil((now - limits.retentionMs) / size) * size;
   const tooOld = first < oldest;
   const tooMany = Math.ceil((to - first) / size) > MAX_BUCKETS;
   if (tooOld || tooMany) {
@@ -206,20 +279,68 @@ export const planBuckets = (
       code: "MetricRangeTooLarge",
       title: "Metric range too large",
       detail: tooOld
-        ? `Minute buckets reach back 8 days, and the window starts at ${query.from}`
+        ? `metrics reach back ${limits.retentionMs / DAY_MS} days, and the window starts at ${query.from}`
         : `the window from ${query.from} to ${query.to} holds more than ${MAX_BUCKETS} ${bucket} buckets`,
       fix: `Query from ${formatAt(fitFrom, offset)} to ${formatAt(fitTo, offset)}, or pick a larger bucket`,
     });
   }
-  return { ok: true, value: { bucket, resolution: bucket === "Minute" ? "Minute" : "Hour", first, to, startOf } };
+  return { ok: true, value: { bucket, size, first, to } };
 };
+
+export interface SeriesQueryPlan {
+  plan: BucketPlan;
+  groupBy: string[];
+  sql: string;
+}
+
+export const planSeriesQuery = (
+  table: AnalyticsTable,
+  metric: string,
+  query: MetricSeriesQuery,
+  now: number,
+  limits: MetricsLimits,
+): Outcome<SeriesQueryPlan> => {
+  const plan = planBuckets(query.bucket, query, now, limits);
+  if (!plan.ok) return plan;
+  const filter = parseFilter(query.filter);
+  if (!filter.ok) return filter;
+  const groupBy = query.groupBy ?? [];
+  const badGroup = groupBy.find((dimension) => !SAFE_TEXT.test(dimension));
+  if (badGroup !== undefined) return unsafe("group-by dimension", badGroup);
+  const { first, size, to } = plan.value;
+  const keys = ["bucket", ...groupBy.map((_, index) => `g${index}`), "side", "bin"].join(", ");
+  const columns = [
+    `floor((double2 - ${first}) / ${size}) AS bucket`,
+    ...groupBy.map((dimension, index) => `${groupExpression(dimension)} AS g${index}`),
+    "double3 AS side",
+    "double4 AS bin",
+    "sum(_sample_interval) AS weight",
+    "sum(double1 * _sample_interval) AS total",
+    "min(double1) AS low",
+    "max(double1) AS high",
+  ].join(", ");
+  const sql = `SELECT ${columns} FROM ${sqlName(table.dataset)} WHERE ${whereOf(table, metric, first, to, filter.value)} GROUP BY ${keys} ORDER BY ${keys} LIMIT ${limits.rowsPerQuery + 1}`;
+  return { ok: true, value: { plan: plan.value, groupBy, sql } };
+};
+
+const SeriesRowSchema = z
+  .object({
+    bucket: z.coerce.number(),
+    side: z.coerce.number(),
+    bin: z.coerce.number(),
+    weight: z.coerce.number(),
+    total: z.coerce.number(),
+    low: z.coerce.number(),
+    high: z.coerce.number(),
+  })
+  .catchall(z.unknown());
 
 interface Accumulator {
   count: number;
   sum: number;
   min: number;
   max: number;
-  histogram: ExponentialHistogram;
+  bins: HistogramBin[];
 }
 
 interface GroupRows {
@@ -227,16 +348,6 @@ interface GroupRows {
   total: number;
   buckets: Map<number, Accumulator>;
 }
-
-type RollupRow = {
-  dimensions: string;
-  bucket_start: number;
-  count: number;
-  sum: number;
-  min: number;
-  max: number;
-  histogram: string;
-};
 
 const added = (into: Map<number, Accumulator>, bucketStart: number, row: Accumulator): void => {
   const known = into.get(bucketStart);
@@ -249,25 +360,10 @@ const added = (into: Map<number, Accumulator>, bucketStart: number, row: Accumul
           sum: known.sum + row.sum,
           min: Math.min(known.min, row.min),
           max: Math.max(known.max, row.max),
-          histogram: mergeHistograms(known.histogram, row.histogram),
+          bins: [...known.bins, ...row.bins],
         },
   );
 };
-
-const isDimensions = (value: unknown): value is Record<string, string> =>
-  typeof value === "object" &&
-  value !== null &&
-  !Array.isArray(value) &&
-  Object.values(value).every((entry) => typeof entry === "string");
-
-const dimensionsOf = (canonical: string): Record<string, string> => {
-  const parsed: unknown = JSON.parse(canonical);
-  if (isDimensions(parsed)) return parsed;
-  throw new Error(`a stored series has dimensions ${canonical}, not an object of strings; its series row is corrupt`);
-};
-
-const groupOf = (dimensions: Record<string, string>, groupBy: readonly string[]): Record<string, string> =>
-  Object.fromEntries(groupBy.flatMap((key) => (key in dimensions ? [[key, dimensions[key] ?? ""]] : [])));
 
 const folded = (groups: GroupRows[], groupBy: readonly string[]): GroupRows[] => {
   const ranked = [...groups].sort(
@@ -287,67 +383,63 @@ const folded = (groups: GroupRows[], groupBy: readonly string[]): GroupRows[] =>
   return [...kept, other];
 };
 
-export const querySeries = (
-  sql: MetricsSql,
-  metric: string,
+const groupOfRow = (row: Record<string, unknown>, groupBy: readonly string[]): Record<string, string> =>
+  Object.fromEntries(
+    groupBy.flatMap((dimension, index) => {
+      const slot = row[`g${index}`];
+      if (typeof slot !== "string" || slot === "") return [];
+      return [[dimension, slot.slice(dimension.length + 1)]];
+    }),
+  );
+
+export const seriesSet = (
+  instrument: Instrument,
   query: MetricSeriesQuery,
-  now: number,
+  { plan, groupBy }: SeriesQueryPlan,
+  rows: readonly unknown[],
   limits: MetricsLimits,
 ): Outcome<MetricSeriesSet> => {
-  const plan = planBuckets(query.bucket, query, now, limits);
-  if (!plan.ok) return plan;
-  const filter = parseFilter(query.filter);
-  if (!filter.ok) return filter;
-  const instrument = instrumentOf(sql, metric);
-  if (instrument === undefined) return metricNotFound(metric);
-  const groupBy = query.groupBy ?? [];
-  const clause = filterClause(filter.value);
-  const rows = sql
-    .exec<RollupRow>(
-      `SELECT s.dimensions, r.bucket_start, r.count, r.sum, r.min, r.max, r.histogram FROM series s JOIN rollup r ON r.resolution = ? AND r.series_id = s.series_id AND r.bucket_start >= ? AND r.bucket_start < ? WHERE s.metric = ?${clause.sql}`,
-      plan.value.resolution,
-      plan.value.first,
-      plan.value.to,
-      metric,
-      ...clause.bindings,
-    )
-    .toArray();
+  if (rows.length > limits.rowsPerQuery) return tooManyRows(query, limits.rowsPerQuery, instrument.metric);
   const groups = new Map<string, GroupRows>();
-  for (const row of rows) {
-    const group = groupOf(dimensionsOf(row.dimensions), groupBy);
+  for (const raw of rows) {
+    const row = SeriesRowSchema.parse(raw);
+    const group = groupOfRow(row, groupBy);
     const key = JSON.stringify(group);
     const rowsOfGroup = groups.get(key) ?? { group, total: 0, buckets: new Map() };
     groups.set(key, rowsOfGroup);
-    rowsOfGroup.total += row.count;
-    added(rowsOfGroup.buckets, plan.value.startOf(row.bucket_start), {
-      count: row.count,
-      sum: row.sum,
-      min: row.min,
-      max: row.max,
-      histogram: parseHistogram(row.histogram),
+    rowsOfGroup.total += row.weight;
+    added(rowsOfGroup.buckets, plan.first + row.bucket * plan.size, {
+      count: row.weight,
+      sum: row.total,
+      min: row.low,
+      max: row.high,
+      bins: [{ side: row.side, index: row.bin, count: row.weight }],
     });
   }
   const offset = offsetOf(query.from);
   return {
     ok: true,
     value: {
-      metric,
+      metric: instrument.metric,
       unit: instrument.unit,
       bucket: query.bucket,
       series: folded([...groups.values()], groupBy).map(({ group, buckets }) => ({
         group,
         points: [...buckets]
           .sort(([left], [right]) => left - right)
-          .map(([bucketStart, { count, sum, min, max, histogram }]) => ({
-            bucketStart: formatAt(bucketStart, offset),
-            count,
-            sum,
-            min,
-            max,
-            p50: histogramQuantile(histogram, 0.5, { min, max }),
-            p90: histogramQuantile(histogram, 0.9, { min, max }),
-            p99: histogramQuantile(histogram, 0.99, { min, max }),
-          })),
+          .map(([bucketStart, { count, sum, min, max, bins }]) => {
+            const histogram = histogramOfBins(bins);
+            return {
+              bucketStart: formatAt(bucketStart, offset),
+              count,
+              sum,
+              min,
+              max,
+              p50: histogramQuantile(histogram, 0.5, { min, max }),
+              p90: histogramQuantile(histogram, 0.9, { min, max }),
+              p99: histogramQuantile(histogram, 0.99, { min, max }),
+            };
+          }),
       })),
     },
   };
@@ -355,22 +447,21 @@ export const querySeries = (
 
 interface TurnCursor {
   at: number;
-  seriesId: number;
   turnId: string;
 }
 
-const encodeCursor = ({ at, seriesId, turnId }: TurnCursor): string =>
-  btoa(JSON.stringify([at, seriesId, turnId]))
+const encodeCursor = ({ at, turnId }: TurnCursor): string =>
+  btoa(JSON.stringify([at, turnId]))
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replaceAll("=", "");
 
-const isCursorTuple = (value: unknown): value is [number, number, string] =>
+const isCursorTuple = (value: unknown): value is [number, string] =>
   Array.isArray(value) &&
-  value.length === 3 &&
+  value.length === 2 &&
   Number.isInteger(value[0]) &&
-  Number.isInteger(value[1]) &&
-  typeof value[2] === "string";
+  typeof value[1] === "string" &&
+  SAFE_TEXT.test(value[1]);
 
 const cursorJson = (cursor: string): unknown => {
   try {
@@ -383,21 +474,27 @@ const cursorJson = (cursor: string): unknown => {
 export const decodeCursor = (cursor: string): TurnCursor | undefined => {
   const decoded = cursorJson(cursor);
   if (!isCursorTuple(decoded)) return undefined;
-  const [at, seriesId, turnId] = decoded;
-  return { at, seriesId, turnId };
+  const [at, turnId] = decoded;
+  return { at, turnId };
 };
 
-export const readTurns = (
-  sql: MetricsSql,
+export interface TurnQueryPlan {
+  offset: Offset;
+  sql: string;
+  pageSize: number;
+}
+
+export const planTurnQuery = (
+  table: AnalyticsTable,
   metric: string,
   query: MetricTurnQuery,
   pageSize: number = TURN_PAGE_SIZE,
-): Outcome<MetricTurnPage> => {
+): Outcome<TurnQueryPlan> => {
   const window = windowOf(query);
   if (!window.ok) return window;
   const filter = parseFilter(query.filter);
   if (!filter.ok) return filter;
-  if (instrumentOf(sql, metric) === undefined) return metricNotFound(metric);
+  if (query.sessionId !== undefined && !SAFE_TEXT.test(query.sessionId)) return unsafe("session id", query.sessionId);
   const after = query.cursor === undefined || query.cursor === "" ? undefined : decodeCursor(query.cursor);
   if (query.cursor !== undefined && query.cursor !== "" && after === undefined) {
     return invalid(
@@ -405,44 +502,55 @@ export const readTurns = (
       "Pass the cursor of the previous page, or leave it out to read from the start of the window",
     );
   }
-  const clause = filterClause(filter.value);
-  const session =
-    query.sessionId === undefined
-      ? { sql: "", bindings: [] }
-      : { sql: " AND t.session_id = ?", bindings: [query.sessionId] };
-  const position =
-    after === undefined
-      ? { sql: "", bindings: [] }
-      : { sql: " AND (t.at, t.series_id, t.turn_id) > (?, ?, ?)", bindings: [after.at, after.seriesId, after.turnId] };
-  const rows = sql
-    .exec<{ series_id: number; at: number; turn_id: string; session_id: string; value: number; dimensions: string }>(
-      `SELECT t.series_id, t.at, t.turn_id, t.session_id, t.value, s.dimensions FROM turn_point t JOIN series s ON s.series_id = t.series_id WHERE s.metric = ? AND t.at >= ? AND t.at < ?${session.sql}${position.sql}${clause.sql} ORDER BY t.at, t.series_id, t.turn_id LIMIT ?`,
-      metric,
-      window.value.from,
-      window.value.to,
-      ...session.bindings,
-      ...position.bindings,
-      ...clause.bindings,
-      pageSize + 1,
-    )
-    .toArray();
-  const page = rows.slice(0, pageSize);
+  const { from, to, offset } = window.value;
+  const conditions = [
+    whereOf(table, metric, from, to, filter.value),
+    "blob3 != ''",
+    ...(query.sessionId === undefined ? [] : [`blob4 = ${quoted(query.sessionId)}`]),
+    ...(after === undefined
+      ? []
+      : [`(double2 > ${after.at} OR (double2 = ${after.at} AND blob3 > ${quoted(after.turnId)}))`]),
+  ];
+  const sql = `SELECT double2 AS at, blob3 AS turnId, blob4 AS sessionId, double1 AS value, blob2 AS dimensions FROM ${sqlName(table.dataset)} WHERE ${conditions.join(" AND ")} ORDER BY at, turnId LIMIT ${pageSize + 1}`;
+  return { ok: true, value: { offset, sql, pageSize } };
+};
+
+const TurnRowSchema = z.object({
+  at: z.coerce.number(),
+  turnId: z.string(),
+  sessionId: z.string(),
+  value: z.coerce.number(),
+  dimensions: z.string(),
+});
+
+export const turnPage = (rows: readonly unknown[], query: MetricTurnQuery, plan: TurnQueryPlan): MetricTurnPage => {
+  const page = rows.slice(0, plan.pageSize).map((row) => TurnRowSchema.parse(row));
   const last = page.at(-1);
   return {
-    ok: true,
-    value: {
-      points: page.map((row) => ({
-        turnId: row.turn_id,
-        sessionId: row.session_id,
-        at: formatAt(row.at, window.value.offset),
-        value: row.value,
-        dimensions: dimensionsOf(row.dimensions),
-      })),
-      cursor:
-        last === undefined
-          ? (query.cursor ?? "")
-          : encodeCursor({ at: last.at, seriesId: last.series_id, turnId: last.turn_id }),
-      finished: rows.length <= pageSize,
-    },
+    points: page.map((turn) => ({
+      turnId: turn.turnId,
+      sessionId: turn.sessionId,
+      at: formatAt(turn.at, plan.offset),
+      value: turn.value,
+      dimensions: dimensionsOf(turn.dimensions),
+    })),
+    cursor: last === undefined ? (query.cursor ?? "") : encodeCursor({ at: last.at, turnId: last.turnId }),
+    finished: rows.length <= plan.pageSize,
   };
 };
+
+type InstrumentRow = { metric: string; unit: string; kind: string; description: string };
+
+const instrumentOfRow = (row: InstrumentRow): Instrument => ({
+  ...row,
+  kind: row.kind === "Turn" ? "Turn" : "Sample",
+});
+
+export const instrumentOf = (sql: MetricsSql, metric: string): Instrument | undefined =>
+  sql
+    .exec<InstrumentRow>("SELECT metric, unit, kind, description FROM metric WHERE metric = ?", metric)
+    .toArray()
+    .map(instrumentOfRow)[0];
+
+export const instrumentsOf = (sql: MetricsSql): Instrument[] =>
+  sql.exec<InstrumentRow>("SELECT metric, unit, kind, description FROM metric").toArray().map(instrumentOfRow);

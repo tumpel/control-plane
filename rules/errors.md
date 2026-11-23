@@ -3,7 +3,7 @@
 1. Fail fast. Let an error propagate to the caller that can act on it.
 2. Catch an error only where the catch holds a concrete recovery. Never catch to log, rethrow or wrap.
 3. Never swallow an error. No empty catch, no catch that returns a default, no silent fallback.
-4. Never hedge a downstream call. No retries, no fallbacks, no catch-and-continue. A failed call fails the operation.
+4. Never hedge a downstream call. No fallbacks and no catch-and-continue. A failed call fails the operation. A retry follows rule 4 of `rules/storage.md`.
 5. Never throw to branch. Return a result type for an expected outcome. Throw, or return `Err`, only for a fault that aborts the operation.
 6. Validate external input once, at the boundary. External input is a request body, a channel frame, a config file, an environment variable or a third-party response. Inside the boundary, trust the parsed type.
 7. Every error a user or an operator sees states what failed and the fix. A user-facing failure is never a silent no-op.

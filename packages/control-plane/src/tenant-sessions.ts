@@ -18,6 +18,7 @@ import {
   SessionPrebuildLayerSchema,
   SessionSchema,
   type SessionStartSchema,
+  SessionStateSchema,
   type SessionTagsPatchSchema,
   type SetSessionTagsResultSchema,
   SnapshotRootSchema,
@@ -27,20 +28,23 @@ import {
   type SteerSchema,
   StopFailureSchema,
   TranscriptLineSchema,
+  TurnFailedEventSchema,
   TurnFailureSchema,
   TurnImageSchema,
   TurnSchema,
   type TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import { CONNECTORS_VERSION, TURN_CANCEL_VERSION } from "./channel/control.ts";
+import { errorOf } from "./backoff.ts";
+import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
 import type {
   BootImage,
   DispatchConnector,
   HostMessage,
-  HostUsage,
+  HostReportedHealth,
   PersonaFileDownload,
   PreparedOffer,
+  ReportedUsage,
   SnapshotDownload,
   StoredControlMessage,
 } from "./channel/protocol.ts";
@@ -81,42 +85,50 @@ import {
 } from "./github.ts";
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
-import { type HostRecord, hostOf, listHosts } from "./hosts";
+import { type HostEntry, type HostRecord, hostOf, listHosts, type OfferSent, withReportedHealth } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
-import { recordObjectCleanups } from "./object-cleanups.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
+  degradedOnly,
   type HeldBox,
+  holdsWithinBudget,
   type ImageAvailability,
   placeSession,
   type ReportedHostUsage,
   type Unplaceable,
-  waitForCapacity,
 } from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
-import type { DeadlineChanges, SessionDueDeadline } from "./session-timer";
 import { why } from "./sessions.ts";
-import { settingsOf, turnCredentialSeconds } from "./settings";
+import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
+import {
+  indexBytesOf,
+  LivePacks,
+  MAX_INDEX_BYTES,
+  MAX_PACKS_PER_MANIFEST,
+  type ManifestRead,
+  packKey,
+  packListKey,
+  type SnapshotIndex,
+  SnapshotManifests,
+  STORE_DELETE_BATCH,
+} from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
-import {
-  clearSupersededFailure,
-  forgetSupervisorUpdates,
-  restartDeadline,
-  type SupervisorUpdateMessage,
-} from "./supervisor-updates";
+import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
 import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
-import { ChunkWriter, linesWithin, type Range, rangeAfter, type TranscriptLine } from "./transcript";
 import {
-  type Dimensions,
-  DimensionsSchema,
-  offeredDimensions,
-  type TimingMetric,
-  timingBatch,
-} from "./turn-metrics.ts";
+  chunkKey,
+  chunksAfter,
+  deleteTranscript,
+  encodeChunk,
+  firstChunkAfter,
+  type Range,
+  type TranscriptLine,
+  transcriptPrefix,
+} from "./transcript";
 import { mintTurnToken, TUMPEL_CONNECTOR_ID, TURN_TOKEN_SIGNING_PURPOSE } from "./turn-token.ts";
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -156,7 +168,6 @@ type SetTags = z.infer<typeof SetSessionTagsResultSchema>["tagged"];
 type PatchTags = z.infer<typeof PatchSessionTagsResultSchema>["tagged"];
 
 export const SESSION_TAG_LIMIT = 16;
-export const CAPACITY_WAIT_LIMIT = 32;
 
 export type ReleaseUnreadable = { kind: "ReleaseUnreadable"; detail: string };
 
@@ -210,10 +221,7 @@ export type Stop =
   | { kind: "Stopping"; session: Session }
   | { kind: "NotFound" }
   | { kind: "InFlight"; turnId: string }
-  | { kind: "CancelUnspoken"; turnId: string; host: string }
   | { kind: "Archived" };
-
-export type WaitedTurns = { kind: "Read"; turns: Turn[] } | { kind: "NotFound"; turnId: string };
 
 export type Archive =
   | { kind: "Archived"; session: Session }
@@ -227,7 +235,9 @@ export type TranscriptCursor = {
   harness: Session["harness"];
   lastLineSeq: number;
   inFlight: boolean;
-} & ({ kind: "Chunk"; storageKey: string; range: Range } | { kind: "Lines"; lines: TranscriptLine[] });
+} & ({ kind: "Chunk"; storageKey: string; range: Range } | { kind: "Lines" });
+
+type UnheldTurnRow = { turn_id: string; state: string; offer_sent: number; unheld_heartbeats: number };
 
 type SessionRow = {
   session_id: string;
@@ -281,6 +291,8 @@ type PersonaRow = {
   boxRetention: BoxRetention;
   tumpelMcp: boolean;
 };
+
+export type OfferedPrompt = { kind: "Composed"; prompt: string } | { kind: "Uncomposable"; cause: string };
 
 export type TurnRow = {
   turn_id: string;
@@ -336,11 +348,49 @@ type PendingRow = {
   created_at: number;
 };
 
-type ChunkRow = {
-  storage_key: string;
-  line_seqs: string;
-  offsets: string;
+type HostReportRow = {
+  host_id: string;
+  box_capacity: number;
+  channel_protocol: number;
+  memory_budget_mib: number;
+  memory_held_mib: number;
+  memory_available_mib: number;
+  disk_budget_mib: number;
+  disk_held_mib: number;
+  load_average: number;
+  reported_health: HostReportedHealth;
+  heard_at: number;
+  created_at: number;
+  boxes_running: number;
+  boxes_warm: number;
+  boxes_memory_mib: number;
+  boxes_disk_mib: number;
 };
+
+const HEARD_REFRESH_MS = 30_000;
+
+export type HostReport = {
+  boxCapacity: number;
+  channelProtocol: number;
+  usage: ReportedUsage;
+  now: number;
+};
+
+type TurnSpan = { first: number; last: number };
+
+type RunningTail = { span: TurnSpan | null; last: number };
+
+type EndedTranscript = { lineCount: number; lastLineSeq: number };
+
+const withChunk = (tail: RunningTail, first: number, last: number): RunningTail => ({
+  span:
+    tail.span === null
+      ? { first, last }
+      : { first: Math.min(tail.span.first, first), last: Math.max(tail.span.last, last) },
+  last: Math.max(tail.last, last),
+});
+
+const linesIn = (tail: RunningTail): number => (tail.span === null ? 0 : tail.span.last - tail.span.first + 1);
 
 type SnapshotRow = {
   snapshot_id: string;
@@ -353,22 +403,6 @@ type SnapshotRow = {
   reason: string | null;
   detail: string | null;
   failed_at: string | null;
-  created_at: number;
-  updated_at: number;
-};
-
-type HostUsageRow = {
-  host_id: string;
-  box_capacity: number;
-  boxes_warm: number;
-  load_average: number;
-  memory_available_mib: number;
-  channel_protocol: number;
-  disk_budget_mib: number | null;
-  disk_held_mib: number | null;
-  memory_budget_mib: number | null;
-  memory_held_mib: number | null;
-  unreported_mib: number;
   created_at: number;
   updated_at: number;
 };
@@ -431,12 +465,11 @@ const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, NULL, reason, detail, failed_at, created_at, created_at FROM snapshot_failures
 )`;
 
+const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
-const STORE_DELETE_BATCH = 1000;
-const IDLE_EVICTION_MS = 15 * 60 * 1000;
 
-export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage | { type: "TelemetryBatch" }>;
+export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
@@ -452,7 +485,11 @@ type ChunkReply = Extract<
   { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
 >;
 type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
-export type TurnHandoff = { type: "TurnHandoff"; hostId: string; offer: StoredTurnOffer };
+type Handoff = { hostId: string; offer: StoredTurnOffer };
+type TurnHandoff = Handoff & { type: "TurnHandoff" };
+type StaleHosts = ReadonlyMap<string, number>;
+const NONE_STALE: StaleHosts = new Map();
+const UNKNOWN_SESSION_STATES: readonly string[] = ["Starting", "Running", "Idle", "Stopping"];
 export type Refused = { type: "Refused"; reason: string };
 type OfferedTurn = { type: "Offered"; turn: TurnRow; session: SessionRow };
 export type HostReply =
@@ -463,8 +500,6 @@ export type HostReply =
   | TurnHandoff;
 
 const refused = (reason: string): Refused => ({ type: "Refused", reason });
-
-const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
 
 const startedByOf = (row: SessionViewRow): SessionStartedBy => {
   if (row.origin_trigger_id !== null && row.origin_delivery_id !== null) {
@@ -481,8 +516,31 @@ const toSession = (
   row: SessionViewRow,
   lastTurnImage: TurnImage | null,
   prebuildLayer: SessionPrebuildLayer | null,
-): Session =>
-  SessionSchema.parse({
+  stale: StaleHosts,
+): Session => {
+  const lastTurn = toTurn(
+    tenantId,
+    {
+      turn_id: row.last_turn_id,
+      session_id: row.session_id,
+      host_id: row.last_turn_host_id,
+      box_id: row.last_turn_box_id,
+      prompt: row.last_turn_prompt,
+      goal: row.last_turn_goal,
+      warning: row.last_turn_warning,
+      state: row.last_turn_state,
+      line_count: row.last_turn_line_count,
+      created_at: row.last_turn_created_at,
+      updated_at: row.last_turn_at,
+      reason: row.last_turn_reason,
+      detail: row.last_turn_detail,
+      failed_at: row.last_turn_failed_at,
+    },
+    lastTurnImage,
+    stale,
+  );
+  const heardAt = UNKNOWN_SESSION_STATES.includes(row.state) ? stale.get(row.host_id) : undefined;
+  return SessionSchema.parse({
     sessionId: row.session_id,
     tenantId,
     principalId: row.principal_id,
@@ -506,37 +564,37 @@ const toSession = (
     harnessVersion: row.harness_version,
     model: row.model,
     boxRetention: row.box_retention,
-    state: row.state,
+    ...(heardAt === undefined ? { state: row.state } : { state: "Unknown", heardAt: iso(heardAt) }),
     lastTurnId: row.last_turn_id,
-    lastTurnState: row.last_turn_state,
+    lastTurnState: lastTurn.state,
     lastTurnAt: new Date(row.last_turn_at).toISOString(),
-    lastTurn: toTurn(
-      tenantId,
-      {
-        turn_id: row.last_turn_id,
-        session_id: row.session_id,
-        host_id: row.last_turn_host_id,
-        box_id: row.last_turn_box_id,
-        prompt: row.last_turn_prompt,
-        goal: row.last_turn_goal,
-        warning: row.last_turn_warning,
-        state: row.last_turn_state,
-        line_count: row.last_turn_line_count,
-        created_at: row.last_turn_created_at,
-        updated_at: row.last_turn_at,
-        reason: row.last_turn_reason,
-        detail: row.last_turn_detail,
-        failed_at: row.last_turn_failed_at,
-      },
-      lastTurnImage,
-    ),
+    lastTurn,
     lastTurnImage: lastTurnImage ?? undefined,
     prebuildLayer: prebuildLayer ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+};
 
-const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null): Turn =>
+const unknownTurnDetail = (hostId: string, heardAt: number): string =>
+  `host ${hostId} has not reported to the control plane since ${iso(heardAt)}, so the state of this turn is unknown until it reports again; check that its supervisor runs and reaches the control plane`;
+
+const turnState = (row: TurnRow, stale: StaleHosts): Record<string, unknown> => {
+  const heardAt = IN_FLIGHT.includes(row.state) ? stale.get(row.host_id) : undefined;
+  if (heardAt !== undefined)
+    return { state: "Unknown", heardAt: iso(heardAt), detail: unknownTurnDetail(row.host_id, heardAt) };
+  if (row.state === "Failed")
+    return {
+      state: row.state,
+      reason: row.reason,
+      detail: row.detail === null ? null : turnFailureDetail(row.detail),
+      failedAt: row.failed_at,
+    };
+  if (row.state === "Completed" && row.warning !== null) return { state: row.state, warning: row.warning };
+  return { state: row.state };
+};
+
+const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null, stale: StaleHosts): Turn =>
   TurnSchema.parse({
     turnId: row.turn_id,
     tenantId,
@@ -544,14 +602,34 @@ const toTurn = (tenantId: string, row: TurnRow, image: TurnImage | null = null):
     boxId: row.box_id,
     prompt: row.prompt,
     ...(row.goal === null ? {} : { goal: row.goal }),
-    state: row.state,
+    ...turnState(row, stale),
     lineCount: row.line_count,
-    ...(row.state === "Failed" ? { reason: row.reason, detail: row.detail, failedAt: row.failed_at } : {}),
-    ...(row.state === "Completed" && row.warning !== null ? { warning: row.warning } : {}),
     image: image ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+
+const undelivered = (host: string, sent: Exclude<OfferSent, "Sent"> | Error): [TurnFailureReason, string] => {
+  if (sent instanceof Error)
+    return [
+      "Undelivered",
+      `the turn did not reach host ${host}, so it never ran; check that its supervisor runs, then send the turn again: ${sent.message}`,
+    ];
+  if (sent === "Offline")
+    return [
+      "Undelivered",
+      `host ${host} is offline, so the turn never reached it; check that its supervisor runs, then send the turn again`,
+    ];
+  if (sent === "Degraded")
+    return [
+      "HostDegraded",
+      `host ${host} missed its heartbeat and counts as Degraded, so the turn never reached it; check that its supervisor runs and reaches the control plane, then send the turn again`,
+    ];
+  return [
+    "RateLimited",
+    `host ${host} is rate limited and takes no offers, so the turn never reached it; send the turn again once its health recovers`,
+  ];
+};
 
 const offerPrompt = (harness: string, turn: TurnRow): string => {
   if (turn.goal === null) return turn.prompt;
@@ -624,10 +702,9 @@ export const sealContext = (secretSetId: string, name: string): string => `${sec
 
 export abstract class TenantSessions extends DurableObject<Env> {
   protected eventsAppended = false;
-  private readonly offering = new Set<string>();
+  private readonly runningTails = new Map<string, Promise<RunningTail>>();
 
   protected abstract failPrebuild(
-    tenantId: string,
     prebuildId: string,
     from: readonly string[],
     report: FailureReport,
@@ -651,12 +728,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private async prebuildUnstored(tenantId: string, session: SessionRow, detail: string): Promise<void> {
+  private async prebuildUnstored(session: SessionRow, detail: string): Promise<void> {
     const prebuild = this.hostPrebuild(session.session_id);
     if (prebuild === null) return;
     const report = { phase: "Upload" as const, detail, fix: PREBUILD_FIX };
-    if (!(await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Building"], report, prebuild.log_url, Date.now())))
-      return;
+    if (!(await this.failPrebuild(prebuild.prebuild_id, ["Building"], report, prebuild.log_url, Date.now()))) return;
     await this.host(session.host_id).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id });
   }
 
@@ -715,7 +791,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     for (const { session_id } of superseded) await this.archiveSession(tenantId, session_id, now);
   }
 
-  private prebuildLayer(session: SessionRow, host: HostRecord, release: ReleaseRead): PrebuildLayer {
+  private prebuildLayer(session: SessionRow, host: HostEntry, release: ReleaseRead): PrebuildLayer {
     const none = (reason: LayerAbsence["reason"], detail: string): PrebuildLayer => ({
       record: { layer: "None", reason, detail },
       restored: [],
@@ -738,8 +814,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const sql = this.ctx.storage.sql;
     const [layer] = sql
-      .exec<StoredSnapshotRow & { session_id: string; prebuild_id: string }>(
-        `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, snapshots.session_id, prebuilds.prebuild_id FROM prebuilds
+      .exec<StoredSnapshotRow & { prebuild_id: string }>(
+        `SELECT snapshots.snapshot_id, snapshots.snapshot_seq, snapshots.storage_key, prebuilds.prebuild_id FROM prebuilds
         JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
         JOIN sessions ON sessions.session_id = prebuild_sessions.session_id
         WHERE sessions.state != 'Archived' AND prebuilds.repository = ? AND prebuilds.guest_image_digest = ? AND prebuilds.state = 'Done'
@@ -763,56 +839,76 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `every stored prebuild of ${session.repository} is built on another base image than ${base.imageDigest}, the base of the current release; start a prebuild of it again so later sessions start from its layer`,
       );
     }
-    sql.exec(
-      "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?, digest FROM session_chunks WHERE session_id = ?",
-      session.session_id,
-      layer.session_id,
-    );
     return { record: { layer: "Prebuild", prebuildId: layer.prebuild_id }, restored: [layer] };
   }
 
-  private readonly chunks = new ChunkWriter(
-    {
-      pending: (tenantId, sessionId, turnId) =>
-        this.ctx.storage.sql
-          .exec<PendingRow>(
-            "SELECT session_id, line_seq, turn_id, text, created_at FROM transcript_pending WHERE session_id = ? AND turn_id = ? ORDER BY line_seq",
-            sessionId,
-            turnId,
-          )
-          .toArray()
-          .map((row) => toLine(tenantId, row)),
-      record: (sessionId, turnId, storageKey, chunk) => {
-        const first = chunk.lineSeqs[0];
-        const last = chunk.lineSeqs.at(-1);
-        if (first === undefined || last === undefined) throw new Error(`transcript chunk ${storageKey} holds no lines`);
-        const sql = this.ctx.storage.sql;
-        this.ctx.storage.transactionSync(() => {
-          sql.exec(
-            "INSERT INTO transcript_chunks (session_id, first_line_seq, last_line_seq, turn_id, storage_key, line_seqs, offsets) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            sessionId,
-            first,
-            last,
-            turnId,
-            storageKey,
-            JSON.stringify(chunk.lineSeqs),
-            JSON.stringify(chunk.offsets),
-          );
-          sql.exec(
-            "DELETE FROM transcript_pending WHERE session_id = ? AND turn_id = ? AND line_seq <= ?",
-            sessionId,
-            turnId,
-            last,
-          );
-        });
-      },
-    },
-    this.env.STORE,
+  private readonly manifests = new SnapshotManifests();
+
+  private readonly live = new LivePacks(this.manifests, (after, limit) =>
+    this.ctx.storage.sql
+      .exec<{ storage_key: string }>(
+        "SELECT storage_key FROM snapshots WHERE storage_key > ? ORDER BY storage_key LIMIT ?",
+        after,
+        limit,
+      )
+      .toArray()
+      .map((row) => row.storage_key),
   );
 
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
     return row ?? null;
+  }
+
+  private rememberTail(turnId: string, tail: Promise<RunningTail>): Promise<RunningTail> {
+    this.runningTails.set(turnId, tail);
+    const forget = (): void => {
+      if (this.runningTails.get(turnId) === tail) this.runningTails.delete(turnId);
+    };
+    tail.then(undefined, forget);
+    return tail;
+  }
+
+  private runningTail(tenantId: string, turn: TurnRow): Promise<RunningTail> {
+    return this.runningTails.get(turn.turn_id) ?? this.rememberTail(turn.turn_id, this.listRunningTail(tenantId, turn));
+  }
+
+  private async listRunningTail(tenantId: string, turn: TurnRow): Promise<RunningTail> {
+    const session = this.sessionRow(turn.session_id);
+    if (session === null) throw new Error(`turn ${turn.turn_id} runs in session ${turn.session_id}, which is gone`);
+    const chunks = await chunksAfter(
+      this.env.STORE,
+      transcriptPrefix(tenantId, turn.session_id),
+      session.last_line_seq,
+    );
+    let tail: RunningTail = { span: null, last: session.last_line_seq };
+    for (const chunk of chunks) {
+      tail =
+        chunk.turnId === turn.turn_id
+          ? withChunk(tail, chunk.firstLineSeq, chunk.lastLineSeq)
+          : { span: tail.span, last: Math.max(tail.last, chunk.lastLineSeq) };
+    }
+    return tail;
+  }
+
+  private async lineCount(tenantId: string, turn: TurnRow): Promise<number> {
+    if (turn.state !== "Running") return turn.line_count;
+    return linesIn(await this.runningTail(tenantId, turn));
+  }
+
+  private async lastLineSeq(tenantId: string, session: SessionRow, turn: TurnRow): Promise<number> {
+    if (turn.state !== "Running") return session.last_line_seq;
+    return (await this.runningTail(tenantId, turn)).last;
+  }
+
+  private async endedTranscript(tenantId: string, turn: TurnRow): Promise<EndedTranscript> {
+    if (turn.state !== "Running") {
+      const session = this.sessionRow(turn.session_id);
+      if (session === null) throw new Error(`turn ${turn.turn_id} ends in session ${turn.session_id}, which is gone`);
+      return { lineCount: turn.line_count, lastLineSeq: session.last_line_seq };
+    }
+    const tail = await this.runningTail(tenantId, turn);
+    return { lineCount: linesIn(tail), lastLineSeq: tail.last };
   }
 
   private presentSession(tenantId: string, sessionId: string): Session {
@@ -826,25 +922,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row ?? null;
   }
 
-  private inFlightTurn(sessionId: string): string | null {
-    const [running] = this.ctx.storage.sql
-      .exec<{ turn_id: string }>(
-        `SELECT turn_id FROM turns WHERE session_id = ?1 AND state IN (${IN_FLIGHT.map((_, index) => `?${index + 2}`).join(", ")})
-        AND turn_id NOT IN (SELECT turn_id FROM turn_session_waits WHERE session_id = ?1)`,
+  private inFlightTurns(sessionId: string): { turn_id: string; state: string; offer_sent: number }[] {
+    return this.ctx.storage.sql
+      .exec<{ turn_id: string; state: string; offer_sent: number }>(
+        `SELECT turn_id, state, offer_sent FROM turns WHERE session_id = ? AND state IN (${IN_FLIGHT.map(() => "?").join(", ")})
+        ORDER BY created_at, turn_id`,
         sessionId,
         ...IN_FLIGHT,
       )
       .toArray();
-    return running?.turn_id ?? null;
   }
 
   private latestTurn(sessionId: string, state: string | null): TurnRow | null {
     const [row] = this.ctx.storage.sql
       .exec<TurnRow>(
-        `${TURN_SELECT} WHERE session_id = ?1 AND (?2 IS NULL OR state = ?2)
-        AND turn_id NOT IN (SELECT turn_id FROM turn_release_waits WHERE session_id = ?1)
-        AND turn_id NOT IN (SELECT turn_id FROM turn_session_waits WHERE session_id = ?1)
-        ORDER BY created_at DESC, turn_id DESC LIMIT 1`,
+        `${TURN_SELECT} AS v WHERE v.session_id = ?1 AND (?2 IS NULL OR v.state = ?2)
+        AND NOT (v.state IN ('Offered', 'Running') AND EXISTS (
+          SELECT 1 FROM turns AS older WHERE older.session_id = v.session_id AND older.state IN ('Offered', 'Running')
+          AND (older.created_at, older.turn_id) < (v.created_at, v.turn_id)))
+        ORDER BY v.created_at DESC, v.turn_id DESC LIMIT 1`,
         sessionId,
         state,
       )
@@ -867,8 +963,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return appendEvent(this.ctx.storage.sql, event, now);
   }
 
-  protected offeredPrompt(harness: string, turn: TurnRow): string {
-    return offerPrompt(harness, turn);
+  protected offeredPrompt(harness: string, turn: TurnRow): OfferedPrompt {
+    return { kind: "Composed", prompt: offerPrompt(harness, turn) };
   }
 
   private sessionEntered(sessionId: string, state: SessionState, now: number): void {
@@ -933,10 +1029,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       expiresAt,
     });
     return { kind: "Served", token: { accessToken, expiresAt: iso(expiresAt) } };
-  }
-
-  private usesConnectors(sessionId: string): boolean {
-    return sessionConnectorUses(this.ctx.storage.sql, sessionId).length > 0 || this.tumpelMcp(sessionId);
   }
 
   private boxSize(personaId: string): PersonaRow {
@@ -1173,147 +1265,85 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Identity", identity: commitIdentity({ githubUserId: user.github_user_id, login: user.login }) };
   }
 
-  private timers(tenantId: string, sessionId: string, changes: DeadlineChanges): Promise<void> {
-    return this.env.SESSION_TIMER.getByName(sessionId).set(tenantId, changes);
-  }
-
   protected host(hostId: string) {
     return this.env.HOST.get(this.env.HOST.idFromName(hostId));
   }
 
   private async offer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
-    this.offering.add(turn.turn_id);
-    await this.armOffer(tenantId, session, turn)
-      .then((offer) => this.host(session.host_id).send(offer))
-      .then(() => this.offerSent(turn.turn_id))
-      .catch((error: unknown) => {
-        console.error(
-          `OfferQueued: turn ${turn.turn_id} did not reach host ${session.host_id} and waits for its next heartbeat: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      })
-      .finally(() => this.offering.delete(turn.turn_id));
+    this.ctx.storage.sql.exec("UPDATE turns SET offer_sent = 1, unheld_heartbeats = 0 WHERE turn_id = ?", turn.turn_id);
+    const offer = await this.armOffer(tenantId, session, turn);
+    if (offer === null) return;
+    const refused = this.reportRefusesOffer(session.host_id, Date.now());
+    if (refused !== null) return this.sendSettled(tenantId, turn.turn_id, session.host_id, refused);
+    const sent = await this.host(session.host_id)
+      .send(offer)
+      .catch((error: unknown) => errorOf(error));
+    await this.sendSettled(tenantId, turn.turn_id, session.host_id, sent);
+  }
+
+  private reportRefusesOffer(hostId: string, now: number): "RateLimited" | "Degraded" | null {
+    const [row] = this.ctx.storage.sql
+      .exec<{ reported_health: string; heard_at: number }>(
+        "SELECT reported_health, heard_at FROM host_reports WHERE host_id = ?",
+        hostId,
+      )
+      .toArray();
+    if (row === undefined) return null;
+    if (row.reported_health === "RateLimited") return "RateLimited";
+    return row.heard_at < now - presenceGraceMs(settingsOf(this.env)) ? "Degraded" : null;
   }
 
   private async offerAfter(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<void> {
     if (victims.length === 0) return this.offer(tenantId, session, turn);
-    await this.armOffer(tenantId, session, turn);
+    this.ctx.storage.sql.exec("UPDATE turns SET offer_sent = 0 WHERE turn_id = ?", turn.turn_id);
+    if ((await this.armOffer(tenantId, session, turn)) === null) return;
     const now = Date.now();
     for (const victim of victims) {
       const evicted = this.sessionRow(victim.sessionId);
       if (evicted === null) throw new Error(`session ${victim.sessionId} was picked for eviction and then not found`);
-      await this.startBoxEviction(tenantId, evicted, turn.turn_id, now);
+      await this.startBoxEviction(tenantId, evicted, now);
     }
   }
 
-  private async startBoxEviction(
-    tenantId: string,
-    evicted: SessionRow,
-    waitingTurnId: string | null,
-    now: number,
-  ): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    this.ctx.storage.transactionSync(() => {
-      sql.exec(
-        "INSERT INTO box_evictions (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
-        evicted.session_id,
-        evicted.box_id,
-        now,
-      );
-      if (waitingTurnId === null) return;
-      sql.exec(
-        "INSERT INTO turn_eviction_waits (turn_id, session_id) VALUES (?, ?)",
-        waitingTurnId,
-        evicted.session_id,
-      );
-    });
+  private async startBoxEviction(tenantId: string, evicted: SessionRow, now: number): Promise<void> {
     if (evicted.state !== "Idle") return;
     const latest = this.latestTurn(evicted.session_id, null);
     if (latest === null) throw new Error(`session ${evicted.session_id} has no turn, though a start always offers one`);
     this.setSessionState(evicted.session_id, "Stopping", now);
-    await this.timers(tenantId, evicted.session_id, { Snapshot: null });
     await this.snapshotOrTeardown(tenantId, { ...evicted, state: "Stopping" }, latest);
   }
 
-  private releasing(sessionId: string): boolean {
-    return (
-      this.ctx.storage.sql
-        .exec(
-          "SELECT 1 FROM after_turn_releases WHERE session_id = ?1 UNION ALL SELECT 1 FROM box_evictions WHERE session_id = ?1",
-          sessionId,
-        )
-        .toArray().length > 0
-    );
-  }
-
-  private async queueTurn(tenantId: string, session: SessionRow, send: TurnSend, now: number): Promise<Sent> {
-    if (this.sessionRow(session.session_id)?.state !== "Stopping" || !this.releasing(session.session_id)) {
-      return { kind: "Stopping" };
-    }
-    const turn = this.ctx.storage.transactionSync(() => {
-      const queued = this.insertTurn(session.session_id, session.host_id, crypto.randomUUID(), send, now);
-      this.ctx.storage.sql.exec(
-        "INSERT INTO turn_release_waits (turn_id, session_id) VALUES (?, ?)",
-        queued.turn_id,
-        session.session_id,
-      );
-      return queued;
-    });
-    await this.timers(tenantId, session.session_id, {
-      Total: { turnId: turn.turn_id, at: turn.created_at + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-    });
-    return { kind: "Sent", turn: toTurn(tenantId, turn) };
-  }
-
-  private waitForSession(tenantId: string, session: SessionRow, send: TurnSend, now: number): Sent {
-    const turn = this.ctx.storage.transactionSync(() => {
-      const waiting = this.newTurn(session.session_id, session.host_id, session.box_id, send, now);
-      this.ctx.storage.sql.exec(
-        "INSERT INTO turn_session_waits (turn_id, session_id) VALUES (?, ?)",
-        waiting.turn_id,
-        session.session_id,
-      );
-      return waiting;
-    });
-    return { kind: "Sent", turn: toTurn(tenantId, turn) };
-  }
-
-  private waitingTurns(sessionId: string): string[] {
-    return this.ctx.storage.sql
-      .exec<{ turn_id: string }>(
-        "SELECT turn_id FROM turn_session_waits WHERE session_id = ? ORDER BY rowid",
-        sessionId,
-      )
-      .toArray()
+  protected waitingTurns(sessionId: string): string[] {
+    return this.inFlightTurns(sessionId)
+      .slice(1)
       .map((row) => row.turn_id);
   }
 
+  private nextQueued(sessionId: string): string | null {
+    const [head] = this.inFlightTurns(sessionId);
+    if (head === undefined || head.state !== "Offered") return null;
+    if (head.offer_sent === 1) return null;
+    return head.turn_id;
+  }
+
   protected takeNextWaiting(sessionId: string, now: number): string | null {
-    if (this.inFlightTurn(sessionId) !== null) return null;
-    const [next] = this.waitingTurns(sessionId);
-    if (next === undefined) return null;
+    const next = this.nextQueued(sessionId);
+    if (next === null) return null;
     const session = this.sessionRow(sessionId);
     if (session === null) throw new Error(`session ${sessionId} vanished while turn ${next} waited for it`);
     if (session.state === "Failed") {
       const detail =
         "the session could not clone its repository before the turn started, so it never ran; archive the session and start a new one on a repository that exists";
-      for (const turnId of this.waitingTurns(sessionId)) {
+      for (const { turn_id: turnId } of this.inFlightTurns(sessionId)) {
         this.cancelWaiting(sessionId, turnId, "RepositoryCloneFailed", detail, now);
       }
       return null;
     }
-    const sql = this.ctx.storage.sql;
-    sql.exec("DELETE FROM turn_session_waits WHERE turn_id = ?", next);
-    sql.exec("INSERT INTO turn_budget_starts (turn_id, started_at) VALUES (?, ?)", next, now);
-    this.holdOffer(next, session.host_id, now);
     return next;
   }
 
-  protected async startWaiting(tenantId: string, sessionId: string, turnId: string, now: number): Promise<void> {
+  protected async startWaiting(tenantId: string, sessionId: string, turnId: string): Promise<void> {
     if (this.sessionRow(sessionId)?.state !== "Stopping") return this.runQueued(tenantId, turnId);
-    this.ctx.storage.sql.exec("INSERT INTO turn_release_waits (turn_id, session_id) VALUES (?, ?)", turnId, sessionId);
-    await this.timers(tenantId, sessionId, {
-      Total: { turnId, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-    });
   }
 
   protected cancelWaiting(
@@ -1323,20 +1353,26 @@ export abstract class TenantSessions extends DurableObject<Env> {
     detail: string,
     now: number,
   ): void {
-    this.ctx.storage.sql.exec("DELETE FROM turn_session_waits WHERE turn_id = ?", turnId);
-    this.recordTurnFailure(sessionId, turnId, reason, detail, iso(now), now);
+    this.recordTurnFailure(sessionId, turnId, reason, detail, iso(now), 0, now);
   }
 
   private recordTurnFailure(
     sessionId: string,
     turnId: string,
     reason: TurnFailureReason,
-    detail: string,
+    fullDetail: string,
     failedAt: string,
+    lineCount: number,
     now: number,
   ): void {
     const sql = this.ctx.storage.sql;
-    sql.exec("UPDATE turns SET state = 'Failed', updated_at = ? WHERE turn_id = ?", now, turnId);
+    const detail = turnFailureDetail(fullDetail);
+    sql.exec(
+      "UPDATE turns SET state = 'Failed', line_count = ?, updated_at = ? WHERE turn_id = ?",
+      lineCount,
+      now,
+      turnId,
+    );
     this.appendEvent({ event: "TurnFailed", turnId, sessionId, reason, detail }, now);
     sql.exec(
       "INSERT INTO turn_failures (turn_id, session_id, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1350,10 +1386,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private budgetStart(turn: TurnRow): number {
-    const [started] = this.ctx.storage.sql
-      .exec<{ started_at: number }>("SELECT started_at FROM turn_budget_starts WHERE turn_id = ?", turn.turn_id)
+    const [ended] = this.ctx.storage.sql
+      .exec<{ at: number | null }>(
+        `SELECT MAX(updated_at) AS at FROM turns WHERE session_id = ? AND state NOT IN (${IN_FLIGHT.map(() => "?").join(", ")})
+        AND (created_at, turn_id) < (?, ?)`,
+        turn.session_id,
+        ...IN_FLIGHT,
+        turn.created_at,
+        turn.turn_id,
+      )
       .toArray();
-    return started?.started_at ?? turn.created_at;
+    return Math.max(turn.created_at, ended?.at ?? 0);
   }
 
   private async runQueued(tenantId: string, turnId: string): Promise<void> {
@@ -1378,21 +1421,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
           now,
           turnId,
         );
-        sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turnId);
         return { ...session, state: "Running", host_id: hostId, box_id: boxId };
       });
-    const connectors = this.usesConnectors(session.session_id);
-    if (session.state === "Idle" && (!connectors || this.channelProtocol(session.host_id) >= CONNECTORS_VERSION)) {
-      return this.offer(tenantId, move(session.host_id, session.box_id), turn);
-    }
-    if (session.state === "Idle") {
-      const handoff = await this.offerElsewhere(tenantId, move(session.host_id, session.box_id), turn);
-      if (handoff === null) return;
-      await this.host(handoff.hostId).send(handoff.offer);
-      return this.offerSent(turnId);
-    }
+    if (session.state === "Idle") return this.offer(tenantId, move(session.host_id, session.box_id), turn);
     if (session.state !== "Stopped") return;
-    const hosts = await listHosts(this.env.DB, tenantId);
+    const hosts = await this.hostRecords(tenantId);
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
     if (this.turnRow(turnId)?.state !== "Offered" || this.sessionRow(session.session_id)?.state !== "Stopped") return;
     if (image.kind === "ReleaseUnreadable") {
@@ -1404,123 +1437,123 @@ export abstract class TenantSessions extends DurableObject<Env> {
         this.listHostUsage(tenantId),
         image.image,
         boxSizeOf(session),
-        connectors,
         this.heldBoxes(),
+        now - presenceGraceMs(settingsOf(this.env)),
       );
     const stays = place(hosts.filter((host) => host.hostId === session.host_id && host.state === "Online"));
     const placement = stays.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
+    if (placement.kind === "Refused" && degradedOnly(placement.hosts)) {
+      const detail = `the session's box was released while the turn waited, and no host of your tenant is healthy: ${placement.hosts.map(why).join(", ")}`;
+      return this.failTurn(tenantId, turnId, "HostDegraded", detail, iso(now), "Stopped");
+    }
     if (placement.kind === "Refused") {
-      if (!this.waitsForCapacity(turnId) && this.capacityWaitCount() >= CAPACITY_WAIT_LIMIT) {
-        const detail = `the session's box was released while the turn waited, no host has room for a new one, and ${CAPACITY_WAIT_LIMIT} turns already wait for room: ${placement.hosts.map(why).join(", ")}`;
-        return this.failTurn(tenantId, turnId, "PoolExhausted", detail, iso(now), "Stopped");
-      }
-      sql.exec(
-        "INSERT INTO turn_capacity_waits (turn_id, created_at) VALUES (?, ?) ON CONFLICT (turn_id) DO NOTHING",
-        turnId,
-        now,
-      );
-      return this.timers(tenantId, session.session_id, {
-        Total: { turnId, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-      });
+      const detail = `the session's box was released while the turn waited, and no host has room for a new one: ${placement.hosts.map(why).join(", ")}`;
+      return this.failTurn(tenantId, turnId, "PoolExhausted", detail, iso(now), "Stopped");
     }
     await this.offerAfter(tenantId, move(placement.host.hostId, crypto.randomUUID()), turn, placement.evict);
   }
 
   private async evictionSettled(tenantId: string, sessionId: string): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    if (this.sessionRow(sessionId)?.state === "Stopping") return;
-    const queued = this.ctx.storage.transactionSync(() => {
-      const turnIds = sql
-        .exec<{ turn_id: string }>("SELECT turn_id FROM turn_release_waits WHERE session_id = ?", sessionId)
-        .toArray()
-        .map((row) => row.turn_id);
-      sql.exec("DELETE FROM turn_release_waits WHERE session_id = ?", sessionId);
-      sql.exec("DELETE FROM after_turn_releases WHERE session_id = ?", sessionId);
-      return turnIds;
-    });
-    for (const turnId of queued) await this.runQueued(tenantId, turnId);
-    const waiting = this.ctx.storage.transactionSync(() => {
-      const turnIds = sql
-        .exec<{ turn_id: string }>("SELECT turn_id FROM turn_eviction_waits WHERE session_id = ?", sessionId)
-        .toArray()
-        .map((row) => row.turn_id);
-      sql.exec("DELETE FROM turn_eviction_waits WHERE session_id = ?", sessionId);
-      sql.exec("DELETE FROM box_evictions WHERE session_id = ?", sessionId);
-      return turnIds.filter(
-        (turnId) => sql.exec("SELECT 1 FROM turn_eviction_waits WHERE turn_id = ?", turnId).toArray().length === 0,
-      );
-    });
-    for (const turnId of waiting) {
-      const turn = this.turnRow(turnId);
+    const settled = this.sessionRow(sessionId);
+    if (settled?.state === "Stopping") return;
+    const next = this.nextQueued(sessionId);
+    if (next !== null) await this.runQueued(tenantId, next);
+    if (settled !== null) await this.offerRoomed(tenantId, settled.host_id);
+  }
+
+  private async offerRoomed(tenantId: string, hostId: string): Promise<void> {
+    for (;;) {
+      const [waiting] = this.ctx.storage.sql
+        .exec<{ turn_id: string }>(
+          `SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id = t.session_id
+          WHERE t.host_id = ?1 AND t.state = 'Offered' AND t.offer_sent = 0
+            AND s.host_id = t.host_id AND s.box_id = t.box_id AND s.state IN ('Starting', 'Running')
+            AND NOT EXISTS (
+              SELECT 1 FROM turns e WHERE e.session_id = t.session_id AND e.state IN ('Offered', 'Running')
+                AND (e.created_at, e.turn_id) < (t.created_at, t.turn_id)
+            )
+          ORDER BY t.created_at, t.turn_id LIMIT 1`,
+          hostId,
+        )
+        .toArray();
+      if (waiting === undefined) return;
+      const usage = this.listHostUsage(tenantId).find((each) => each.hostId === hostId);
+      if (usage === undefined) return;
+      const turn = this.turnRow(waiting.turn_id);
       const session = turn === null ? null : this.sessionRow(turn.session_id);
-      if (turn === null || session === null || turn.state !== "Offered") continue;
-      await this.offer(tenantId, session, turn);
+      if (turn === null || session === null)
+        throw new Error(`turn ${waiting.turn_id} vanished while it waited for room`);
+      if (holdsWithinBudget(usage)) {
+        await this.offer(tenantId, session, turn);
+        continue;
+      }
+      if (this.stoppingOn(hostId)) return;
+      const host = await this.hostName(tenantId, hostId);
+      const detail = `the idle boxes stopped to make room for this turn stayed on host ${host}, so its box memory is still in use: it gives boxes ${usage.memoryBudgetMib} MiB and its boxes hold ${usage.memoryHeldMib} MiB; send the turn again`;
+      await this.failTurn(tenantId, turn.turn_id, "PoolExhausted", detail, iso(Date.now()));
     }
   }
 
-  protected offerSent(turnId: string): void {
-    this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", turnId);
-    this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turnId);
-  }
-
-  private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer> {
-    if (this.waitsForCapacity(turn.turn_id)) {
-      this.ctx.storage.transactionSync(() => {
-        this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
-        this.deferOffer(session, turn, Date.now());
-      });
-    }
-    await this.timers(tenantId, session.session_id, {
-      FirstLine: null,
-      Total: { turnId: turn.turn_id, at: this.budgetStart(turn) + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-      Snapshot: null,
-      Teardown: null,
-      HostOffline: null,
-    });
-    return this.offerMessage(session, turn);
-  }
-
-  private offerMessage(session: SessionRow, turn: TurnRow): StoredTurnOffer {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO unreported_box_offers (box_id, host_id, box_memory_mib)
-      SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM turns WHERE session_id = ?4 AND box_id = ?1 AND turn_id != ?5)
-      ON CONFLICT (box_id) DO NOTHING`,
-      session.box_id,
-      session.host_id,
-      session.box_memory_mib,
-      session.session_id,
-      turn.turn_id,
+  private stoppingOn(hostId: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec("SELECT 1 FROM sessions WHERE host_id = ? AND state = ? LIMIT 1", hostId, "Stopping")
+        .toArray().length > 0
     );
+  }
+
+  private async sendSettled(tenantId: string, turnId: string, hostId: string, sent: OfferSent | Error): Promise<void> {
+    if (sent === "Sent") return;
+    const host = await this.hostName(tenantId, hostId);
+    const [reason, detail] = undelivered(host, sent);
+    await this.failTurn(tenantId, turnId, reason, detail, iso(Date.now()));
+  }
+
+  private async armOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer | null> {
+    const offer = await this.composeOffer(tenantId, session, turn);
+    if (offer === null) return null;
+    return offer;
+  }
+
+  private async composeOffer(tenantId: string, session: SessionRow, turn: TurnRow): Promise<StoredTurnOffer | null> {
+    const composed = this.offerMessage(session, turn);
+    if (composed.kind === "Composed") return composed.offer;
+    const detail = `the turn's offer could not be composed, so it never reached a host; report this to the tumpel maintainers, then send the turn again: ${composed.cause}`;
+    await this.failTurn(
+      tenantId,
+      turn.turn_id,
+      "Undelivered",
+      boundedTo(TurnFailedEventSchema.shape.detail.maxLength, detail),
+      iso(Date.now()),
+    );
+    return null;
+  }
+
+  private offerMessage(
+    session: SessionRow,
+    turn: TurnRow,
+  ): { kind: "Composed"; offer: StoredTurnOffer } | { kind: "Uncomposable"; cause: string } {
+    const prompt = this.offeredPrompt(session.harness, turn);
+    if (prompt.kind === "Uncomposable") return prompt;
     const prebuild = this.hostPrebuild(session.session_id);
-    return {
+    const offer: StoredTurnOffer = {
       type: "TurnOffer",
       turnId: turn.turn_id,
       sessionId: session.session_id,
       boxId: session.box_id,
       repository: session.repository,
-      harness: SessionSchema.shape.harness.parse(session.harness),
+      harness: HarnessSchema.parse(session.harness),
       harnessVersion: session.harness_version,
       model: session.model,
-      prompt: this.offeredPrompt(session.harness, turn),
+      prompt: prompt.prompt,
       boxMemoryMib: session.box_memory_mib,
       boxDiskMib: session.box_disk_mib,
+      boxRetention: session.box_retention,
+      turnSeconds: settingsOf(this.env).turnTotalBudgetSeconds,
+      idleSeconds: BOX_IDLE_SECONDS,
       ...(prebuild === null ? {} : { prebuildCommitSha: prebuild.head_sha }),
     };
-  }
-
-  private insertTurn(sessionId: string, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
-    const turn = this.newTurn(sessionId, hostId, boxId, send, now);
-    this.holdOffer(turn.turn_id, hostId, now);
-    return turn;
-  }
-
-  private holdOffer(turnId: string, hostId: string, now: number): void {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO deferred_offers (turn_id, host_id, created_at) VALUES (?, ?, ?)",
-      turnId,
-      hostId,
-      now,
-    );
+    return { kind: "Composed", offer };
   }
 
   protected newTurn(sessionId: string, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
@@ -1563,128 +1596,169 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return turn;
   }
 
-  protected hostHello(
-    hostId: string,
-    boxCapacity: number,
-    usage: HostUsage,
-    now: number,
-    channelProtocol: number,
-  ): void {
+  private reportHost(hostId: string, report: HostReport): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO host_usage (host_id, box_capacity, boxes_warm, load_average, memory_available_mib, created_at, updated_at, channel_protocol)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (host_id) DO UPDATE SET box_capacity = excluded.box_capacity, boxes_warm = excluded.boxes_warm,
-        load_average = excluded.load_average, memory_available_mib = excluded.memory_available_mib, updated_at = excluded.updated_at,
-        channel_protocol = excluded.channel_protocol`,
+      `INSERT INTO host_reports (host_id, box_capacity, channel_protocol, memory_budget_mib, memory_held_mib,
+        memory_available_mib, disk_budget_mib, disk_held_mib, load_average, heard_at, created_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+      ON CONFLICT (host_id) DO UPDATE SET box_capacity = excluded.box_capacity,
+        channel_protocol = excluded.channel_protocol, memory_budget_mib = excluded.memory_budget_mib,
+        memory_held_mib = excluded.memory_held_mib, memory_available_mib = excluded.memory_available_mib,
+        disk_budget_mib = excluded.disk_budget_mib, disk_held_mib = excluded.disk_held_mib,
+        load_average = excluded.load_average, heard_at = excluded.heard_at
+      WHERE host_reports.box_capacity != excluded.box_capacity
+        OR host_reports.channel_protocol != excluded.channel_protocol
+        OR host_reports.memory_budget_mib != excluded.memory_budget_mib
+        OR host_reports.memory_held_mib != excluded.memory_held_mib
+        OR host_reports.heard_at < excluded.heard_at - ?11`,
       hostId,
-      boxCapacity,
-      usage.boxesWarm,
-      usage.loadAverage,
-      usage.memoryAvailableMib,
-      now,
-      now,
-      channelProtocol,
+      report.boxCapacity,
+      report.channelProtocol,
+      report.usage.memoryBudgetMib ?? null,
+      report.usage.memoryHeldMib ?? null,
+      report.usage.memoryAvailableMib,
+      report.usage.diskBudgetMib ?? null,
+      report.usage.diskHeldMib ?? null,
+      report.usage.loadAverage,
+      report.now,
+      HEARD_REFRESH_MS,
     );
-    this.hostReported(hostId, usage, now);
-    clearSupersededFailure(this.ctx.storage.sql, hostId);
   }
 
-  private hostReported(hostId: string, usage: HostUsage, now: number): void {
-    this.hostDiskUsage(hostId, usage, now);
-    this.hostMemoryUsage(hostId, usage, now);
-    this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE host_id = ?", hostId);
+  private unheldTurns(hostId: string, heldTurnIds: string[]): UnheldTurnRow[] {
+    return this.ctx.storage.sql
+      .exec<UnheldTurnRow>(
+        `SELECT turn_id, state, offer_sent, unheld_heartbeats FROM turns
+        WHERE host_id = ? AND state IN ('Offered', 'Running')
+          AND turn_id NOT IN (SELECT value FROM json_each(?))
+          AND turn_id NOT IN (SELECT turn_id FROM snapshot_requests)`,
+        hostId,
+        JSON.stringify(heldTurnIds),
+      )
+      .toArray();
   }
 
-  private hostMemoryUsage(hostId: string, usage: HostUsage, now: number): void {
+  private unheldRunningTurns(hostId: string, heldTurnIds: string[]): string[] {
+    return this.unheldTurns(hostId, heldTurnIds)
+      .filter((turn) => turn.state === "Running")
+      .map((turn) => turn.turn_id);
+  }
+
+  private judgeHeldTurns(hostId: string, heldTurnIds: string[]): string[] {
     const sql = this.ctx.storage.sql;
-    if (usage.memoryBudgetMib === undefined || usage.memoryHeldMib === undefined) {
-      sql.exec("DELETE FROM host_memory_usage WHERE host_id = ?", hostId);
-      return;
-    }
     sql.exec(
-      `INSERT INTO host_memory_usage (host_id, memory_budget_mib, memory_held_mib, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT (host_id) DO UPDATE SET memory_budget_mib = excluded.memory_budget_mib,
-        memory_held_mib = excluded.memory_held_mib, updated_at = excluded.updated_at`,
+      `UPDATE turns SET unheld_heartbeats = 0 WHERE turn_id IN (SELECT value FROM json_each(?))
+        AND host_id = ? AND state IN ('Offered', 'Running') AND unheld_heartbeats = 1`,
+      JSON.stringify(heldTurnIds),
       hostId,
-      usage.memoryBudgetMib,
-      usage.memoryHeldMib,
-      now,
     );
-  }
-
-  private hostDiskUsage(hostId: string, usage: HostUsage, now: number): void {
-    const sql = this.ctx.storage.sql;
-    if (usage.diskBudgetMib === undefined || usage.diskHeldMib === undefined) {
-      sql.exec("DELETE FROM host_disk_usage WHERE host_id = ?", hostId);
-      return;
+    const dropped: string[] = [];
+    for (const turn of this.unheldTurns(hostId, heldTurnIds)) {
+      if (turn.state === "Running" || turn.unheld_heartbeats === 1) dropped.push(turn.turn_id);
+      else if (turn.offer_sent === 1)
+        sql.exec("UPDATE turns SET unheld_heartbeats = 1 WHERE turn_id = ?", turn.turn_id);
     }
-    sql.exec(
-      `INSERT INTO host_disk_usage (host_id, disk_budget_mib, disk_held_mib, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT (host_id) DO UPDATE SET disk_budget_mib = excluded.disk_budget_mib, disk_held_mib = excluded.disk_held_mib,
-        updated_at = excluded.updated_at`,
-      hostId,
-      usage.diskBudgetMib,
-      usage.diskHeldMib,
-      now,
-    );
+    return dropped;
   }
 
-  protected hostUsage(hostId: string, usage: HostUsage, now: number): void {
-    const updated = this.ctx.storage.sql.exec(
-      "UPDATE host_usage SET boxes_warm = ?, load_average = ?, memory_available_mib = ?, updated_at = ? WHERE host_id = ?",
-      usage.boxesWarm,
-      usage.loadAverage,
-      usage.memoryAvailableMib,
-      now,
-      hostId,
-    );
-    if (updated.rowsWritten === 0) {
-      throw new Error(`host ${hostId} sent a Heartbeat, but its tenant holds no usage from its Hello`);
-    }
-    this.hostReported(hostId, usage, now);
+  private async dropTurns(tenantId: string, hostId: string, turnIds: string[], now: number): Promise<void> {
+    if (turnIds.length === 0) return;
+    const host = await this.hostName(tenantId, hostId);
+    for (const turnId of turnIds)
+      await this.failTurn(
+        tenantId,
+        turnId,
+        "HostDropped",
+        `host ${host} reported the turns it holds and this turn was not among them, so its work since the last snapshot is gone; send the turn again`,
+        iso(now),
+      );
   }
 
-  protected async reconcileHeldBoxes(
+  protected async hostHello(
+    tenantId: string,
+    hostId: string,
+    report: HostReport,
+    heldTurnIds: string[],
+  ): Promise<void> {
+    const dropped = this.ctx.storage.transactionSync(() => {
+      const [heard] = this.ctx.storage.sql
+        .exec<{ heard_at: number }>("SELECT heard_at FROM host_reports WHERE host_id = ?", hostId)
+        .toArray();
+      if (heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env)))
+        this.appendEvent({ event: "HostOnline", hostId }, report.now);
+      this.reportHost(hostId, report);
+      clearSupersededFailure(this.ctx.storage.sql, hostId);
+      return this.unheldRunningTurns(hostId, heldTurnIds);
+    });
+    await this.dropTurns(tenantId, hostId, dropped, report.now);
+  }
+
+  protected async hostHeartbeat(
+    tenantId: string,
+    hostId: string,
+    report: HostReport,
+    reportedHealth: HostReportedHealth,
+    held: { heldTurnIds: string[]; heldSessionIds: string[]; heldClaudeSetupIds: string[] },
+  ): Promise<void> {
+    const { heldTurnIds, heldSessionIds } = held;
+    const dropped = this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
+          disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, reported_health = ?8, heard_at = ?9
+        WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR reported_health != ?8 OR heard_at < ?9 - ?10)`,
+        hostId,
+        report.usage.memoryBudgetMib ?? null,
+        report.usage.memoryHeldMib ?? null,
+        report.usage.memoryAvailableMib,
+        report.usage.diskBudgetMib ?? null,
+        report.usage.diskHeldMib ?? null,
+        report.usage.loadAverage,
+        reportedHealth,
+        report.now,
+        HEARD_REFRESH_MS,
+      );
+      return this.judgeHeldTurns(hostId, heldTurnIds);
+    });
+    await this.dropTurns(tenantId, hostId, dropped, report.now);
+    await this.reconcileHeldSessions(tenantId, hostId, heldSessionIds, report.now);
+  }
+
+  private async reconcileHeldSessions(
     tenantId: string,
     hostId: string,
     heldSessionIds: string[],
     now: number,
   ): Promise<void> {
     await this.releaseUnneededBoxes(tenantId, hostId, heldSessionIds, now);
+    const held = JSON.stringify(heldSessionIds);
     const gone = this.ctx.storage.sql
       .exec<{ session_id: string }>(
-        "UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state = 'Idle' AND session_id NOT IN (SELECT value FROM json_each(?)) RETURNING session_id",
+        `UPDATE sessions SET state = 'Stopped', updated_at = ? WHERE host_id = ? AND state IN ('Idle', 'Stopping')
+          AND session_id NOT IN (SELECT value FROM json_each(?))
+          AND (state = 'Idle' OR NOT EXISTS (SELECT 1 FROM snapshot_requests r WHERE r.session_id = sessions.session_id))
+        RETURNING session_id`,
         now,
         hostId,
-        JSON.stringify(heldSessionIds),
+        held,
       )
       .toArray();
     for (const { session_id } of gone) this.sessionEntered(session_id, "Stopped", now);
-    for (const { session_id } of gone) {
-      await this.timers(tenantId, session_id, { Snapshot: null });
-      await this.evictionSettled(tenantId, session_id);
-    }
-    for (const sessionId of heldSessionIds) {
-      if (this.sessionRow(sessionId)?.host_id === hostId) await this.armIdleEviction(tenantId, sessionId);
-    }
-    const lost = this.ctx.storage.sql
-      .exec<{ turn_id: string }>(
-        "SELECT turn_id FROM turns WHERE host_id = ? AND state = 'Running' AND session_id NOT IN (SELECT value FROM json_each(?))",
+    for (const { session_id } of gone) await this.evictionSettled(tenantId, session_id);
+    const requests = this.ctx.storage.sql
+      .exec<SnapshotRequestRow>(
+        `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
+        FROM snapshot_requests r CROSS JOIN sessions s ON s.session_id = r.session_id
+        WHERE s.host_id = ? AND r.session_id NOT IN (SELECT value FROM json_each(?))`,
         hostId,
-        JSON.stringify(heldSessionIds),
+        held,
       )
       .toArray();
-    if (lost.length === 0) return;
-    const host = await this.hostName(tenantId, hostId);
-    for (const { turn_id } of lost) {
-      await this.failTurn(
-        tenantId,
-        turn_id,
-        "BoxLost",
-        `host ${host} reconnected without the box that ran the turn, so the turn's work since the last snapshot is gone; send the turn again`,
-        iso(now),
-      );
+    if (requests.length > 0) {
+      const host = await this.hostName(tenantId, hostId);
+      const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
+      await this.snapshotsGone(tenantId, requests, detail, "Idle", now);
     }
+    await this.offerRoomed(tenantId, hostId);
   }
 
   private async releaseUnneededBoxes(
@@ -1709,38 +1783,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const latest = this.latestTurn(session.session_id, null);
       if (latest === null)
         throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
-      this.startAfterTurnRelease(session, now);
-      await this.timers(tenantId, session.session_id, { Snapshot: null });
+      this.setSessionState(session.session_id, "Stopping", now);
       await this.snapshotOrTeardown(tenantId, { ...session, state: "Stopping" }, latest);
     }
   }
 
-  private startAfterTurnRelease(session: SessionRow, now: number): void {
-    this.ctx.storage.transactionSync(() => {
-      this.setSessionState(session.session_id, "Stopping", now);
-      this.ctx.storage.sql.exec(
-        "INSERT INTO after_turn_releases (session_id, box_id, started_at) VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING",
-        session.session_id,
-        session.box_id,
-        now,
-      );
-    });
-  }
-
-  protected forgetHostUsage(hostId: string): void {
-    this.ctx.storage.sql.exec("DELETE FROM host_usage WHERE host_id = ?", hostId);
-    this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE host_id = ?", hostId);
-    this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE host_id = ?", hostId);
+  protected async forgetHostUsage(hostId: string, now: number): Promise<void> {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) throw new Error(`the tenant Durable Object revoking host ${hostId} has no name`);
+    this.ctx.storage.sql.exec("DELETE FROM host_reports WHERE host_id = ?", hostId);
     forgetSupervisorUpdates(this.ctx.storage.sql, hostId);
+    const host = await this.hostName(tenantId, hostId);
+    await this.failRevokedHostWork(tenantId, hostId, host, now);
   }
 
   protected runningTurnsByHost(): RunningTurns[] {
     return this.ctx.storage.sql
       .exec<{ host_id: string; running: number }>(
         `SELECT t.host_id, COUNT(DISTINCT t.session_id) AS running FROM turns t JOIN sessions s ON s.session_id = t.session_id
-        WHERE t.state IN (${IN_FLIGHT.map(() => "?").join(", ")}) AND s.state != 'Stopped'
-        AND t.turn_id NOT IN (SELECT turn_id FROM turn_capacity_waits) GROUP BY t.host_id`,
-        ...IN_FLIGHT,
+        WHERE t.state IN ('Offered', 'Running') AND s.state != 'Stopped' GROUP BY t.host_id`,
       )
       .toArray()
       .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
@@ -1759,9 +1820,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `SELECT s.session_id, s.host_id, COALESCE(m.box_memory_mib, s.box_memory_mib) AS box_memory_mib, s.box_disk_mib,
           (COALESCE(r.box_retention, 'Auto') = 'Auto' AND s.state = 'Idle'
             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.session_id AND t.state IN ('Offered', 'Running'))
-            AND NOT EXISTS (SELECT 1 FROM after_turn_releases a WHERE a.session_id = s.session_id)
-            AND NOT EXISTS (SELECT 1 FROM box_evictions e WHERE e.session_id = s.session_id)
-            AND NOT EXISTS (SELECT 1 FROM box_eviction_blocks b WHERE b.session_id = s.session_id)
+            AND NOT EXISTS (
+              SELECT 1 FROM stop_failures x WHERE x.session_id = s.session_id
+                AND x.created_at >= COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), 0)
+                AND NOT EXISTS (SELECT 1 FROM snapshots p WHERE p.session_id = s.session_id AND p.updated_at > x.created_at)
+            )
             AND NOT EXISTS (
               SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
                 SELECT MAX(seq) FROM (
@@ -1786,37 +1849,47 @@ export abstract class TenantSessions extends DurableObject<Env> {
       }));
   }
 
+  protected async hostRecords(tenantId: string): Promise<HostRecord[]> {
+    return withReportedHealth(
+      await listHosts(this.env, tenantId),
+      this.listHostUsage(tenantId),
+      Date.now() - presenceGraceMs(settingsOf(this.env)),
+    );
+  }
+
   protected listHostUsage(tenantId: string): ReportedHostUsage[] {
-    const sql = this.ctx.storage.sql;
-    const running = new Map(this.runningTurnsByHost().map((each) => [each.hostId, each.runningTurns]));
-    return sql
-      .exec<HostUsageRow>(
-        `SELECT u.host_id, u.box_capacity, u.boxes_warm, u.load_average, u.memory_available_mib, u.channel_protocol,
-          d.disk_budget_mib, d.disk_held_mib, m.memory_budget_mib, m.memory_held_mib,
-          (SELECT COALESCE(SUM(o.box_memory_mib), 0) FROM unreported_box_offers o WHERE o.host_id = u.host_id) AS unreported_mib,
-          u.created_at, u.updated_at
-        FROM host_usage u LEFT JOIN host_disk_usage d ON d.host_id = u.host_id
-          LEFT JOIN host_memory_usage m ON m.host_id = u.host_id
-        ORDER BY u.created_at, u.host_id`,
+    return this.ctx.storage.sql
+      .exec<HostReportRow>(
+        `SELECT r.host_id, r.box_capacity, r.channel_protocol, r.memory_budget_mib, r.memory_held_mib,
+          r.memory_available_mib, r.disk_budget_mib, r.disk_held_mib, r.load_average, r.reported_health, r.heard_at,
+          r.created_at, COALESCE(b.running, 0) AS boxes_running, COALESCE(b.warm, 0) AS boxes_warm,
+          COALESCE(b.memory_mib, 0) AS boxes_memory_mib, COALESCE(b.disk_mib, 0) AS boxes_disk_mib
+        FROM host_reports r LEFT JOIN (
+          SELECT s.host_id, SUM(s.state IN ('Starting', 'Running')) AS running,
+            SUM(s.state IN ('Idle', 'Stopping')) AS warm,
+            SUM(COALESCE(m.box_memory_mib, s.box_memory_mib)) AS memory_mib, SUM(s.box_disk_mib) AS disk_mib
+          FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
+          WHERE s.state IN ('Starting', 'Running', 'Idle', 'Stopping') GROUP BY s.host_id
+        ) b ON b.host_id = r.host_id
+        ORDER BY r.created_at, r.host_id`,
       )
       .toArray()
       .map((row) => ({
         hostId: row.host_id,
         tenantId,
         boxCapacity: row.box_capacity,
-        boxesRunning: running.get(row.host_id) ?? 0,
+        boxesRunning: row.boxes_running,
         boxesWarm: row.boxes_warm,
         loadAverage: row.load_average,
         memoryAvailableMib: row.memory_available_mib,
-        ...(row.disk_budget_mib === null || row.disk_held_mib === null
-          ? {}
-          : { diskBudgetMib: row.disk_budget_mib, diskHeldMib: row.disk_held_mib }),
-        ...(row.memory_budget_mib === null || row.memory_held_mib === null
-          ? {}
-          : { memoryBudgetMib: row.memory_budget_mib, memoryHeldMib: row.memory_held_mib + row.unreported_mib }),
+        diskBudgetMib: row.disk_budget_mib,
+        diskHeldMib: Math.max(row.disk_held_mib, row.boxes_disk_mib),
+        memoryBudgetMib: row.memory_budget_mib,
+        memoryHeldMib: Math.max(row.memory_held_mib, row.boxes_memory_mib),
+        reportedHealth: row.reported_health,
         channelProtocol: row.channel_protocol,
         createdAt: row.created_at,
-        updatedAt: row.updated_at,
+        updatedAt: row.heard_at,
       }));
   }
 
@@ -1847,10 +1920,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(
         request,
         "NotAnswered",
-        `host ${from} went offline before it answered a snapshot, and the session moved to host ${to}`,
+        `host ${from} had not answered a snapshot when the session moved to host ${to}`,
         failedAt,
       );
-      this.dropPlacements(request.snapshot_id);
     }
   }
 
@@ -1871,7 +1943,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     fetchSeconds: number,
     now: number,
   ): Promise<
-    | { kind: "Released"; image: BootImage; host: HostRecord; release: ReleaseRead }
+    | { kind: "Released"; image: BootImage; host: HostEntry; release: ReleaseRead }
     | { kind: "NotReleased"; detail: string }
   > {
     const host = await hostOf(this.env.DB, tenantId, hostId);
@@ -1954,14 +2026,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.listHostUsage(tenantId),
       image.image,
       { boxMemoryMib, boxDiskMib },
-      uses.length > 0 || persona.tumpelMcp,
       this.heldBoxes(),
+      now - presenceGraceMs(settingsOf(this.env)),
     );
-    const placement = input.startedBy.kind === "Trigger" ? waitForCapacity(placed) : placed;
+    const placement = placed;
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
-    if (placement.kind === "Waiting" && placed.kind === "Refused" && this.capacityWaitCount() >= CAPACITY_WAIT_LIMIT) {
-      return { kind: "Unplaced", hosts: placed.hosts };
-    }
     const tags = this.startTags(input.startedBy, start.tags ?? []);
     if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
     const session: SessionRow = {
@@ -2024,27 +2093,24 @@ export abstract class TenantSessions extends DurableObject<Env> {
         );
       }
       record(session.session_id);
-      const first = this.insertTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
-      if (placement.kind === "Waiting") {
-        this.ctx.storage.sql.exec("DELETE FROM deferred_offers WHERE turn_id = ?", first.turn_id);
-        this.ctx.storage.sql.exec(
-          "INSERT INTO turn_capacity_waits (turn_id, created_at) VALUES (?, ?)",
-          first.turn_id,
-          now,
-        );
-      }
+      const first = this.newTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
       return first;
     });
-    if (placement.kind === "Placed") await this.offerAfter(tenantId, session, turn, placement.evict);
-    if (placement.kind === "Waiting") {
-      await this.timers(tenantId, session.session_id, {
-        Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-      });
-    }
+    await this.offerAfter(tenantId, session, turn, placement.evict);
     return {
       kind: "Started",
-      started: { session: this.presentSession(tenantId, session.session_id), turn: toTurn(tenantId, turn) },
+      started: {
+        session: this.presentSession(tenantId, session.session_id),
+        turn: toTurn(tenantId, turn, null, NONE_STALE),
+      },
     };
+  }
+
+  private sendWaiting(tenantId: string, session: SessionRow, send: TurnSend, now: number): Sent {
+    const turn = this.ctx.storage.transactionSync(() =>
+      this.newTurn(session.session_id, session.host_id, session.box_id, send, now),
+    );
+    return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
   }
 
   protected async sendTurn(
@@ -2057,7 +2123,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
-    if (session.state === "Stopping" && !this.releasing(sessionId)) return { kind: "Stopping" };
+    if (session.state === "Stopping") return { kind: "Stopping" };
     if (session.state === "Failed") return { kind: "Failed" };
     const refusal = this.refusedCredential(session, now);
     if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
@@ -2065,19 +2131,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    if (this.inFlightTurn(sessionId) !== null) return this.waitForSession(tenantId, session, send, now);
-    if (session.state === "Stopping") return this.queueTurn(tenantId, session, send, now);
-    const connectors = uses.length > 0 || this.tumpelMcp(sessionId);
-    const speaks = !connectors || this.channelProtocol(session.host_id) >= CONNECTORS_VERSION;
-    const online = speaks && hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
-    const backBy = hosts.some((host) => host.hostId === session.host_id && host.state === "Offline")
-      ? restartDeadline(this.ctx.storage.sql, session.host_id, settingsOf(this.env).heartbeatDeadlineSeconds * 1000)
-      : null;
-    if ((online && session.state !== "Stopped") || (!online && backBy !== null && backBy > now)) {
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
+    const online =
+      !this.staleHosts(now).has(session.host_id) &&
+      hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
+    if (online && session.state !== "Stopped") {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
       const turn = this.runTurn(session, session.host_id, boxId, send, now);
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
-      return { kind: "Sent", turn: toTurn(tenantId, turn) };
+      return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
     }
     const missingTurnIds = session.state === "Stopped" ? [] : this.unsnapshottedTurns(sessionId);
     if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
@@ -2090,63 +2152,59 @@ export abstract class TenantSessions extends DurableObject<Env> {
         this.listHostUsage(tenantId),
         image.image,
         boxSizeOf(session),
-        connectors,
         this.heldBoxes(),
+        now - presenceGraceMs(settingsOf(this.env)),
       );
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
     const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
-    if (this.inFlightTurn(sessionId) !== null) return this.waitForSession(tenantId, session, send, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, send, now);
     await this.offerAfter(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn, placement.evict);
-    await this.timers(tenantId, sessionId, { SnapshotAnswer: null });
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
-    return { kind: "Sent", turn: toTurn(tenantId, turn) };
+    return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
   }
 
-  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<TurnHandoff | null> {
-    return this.placeOffered(tenantId, session, turn, false, await listHosts(this.env.DB, tenantId));
+  private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
+    const handoff = await this.placeElsewhere(tenantId, session, turn);
+    if (handoff === null) return;
+    const sent = await this.host(handoff.hostId)
+      .send(handoff.offer)
+      .catch((error: unknown) => errorOf(error));
+    await this.sendSettled(tenantId, turn.turn_id, handoff.hostId, sent);
   }
 
-  private async placeOffered(
-    tenantId: string,
-    session: SessionRow,
-    turn: TurnRow,
-    staying: boolean,
-    listed: readonly HostRecord[],
-  ): Promise<TurnHandoff | null> {
+  private async placeElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<Handoff | null> {
     const now = Date.now();
-    const waiting = this.waitsForCapacity(turn.turn_id);
-    const stay = (): null => (waiting ? null : this.deferOffer(session, turn, now));
     const movable = this.unsnapshottedTurns(session.session_id).length === 0;
     const prebuild = this.hostPrebuild(session.session_id) !== null;
-    const hosts = listed.filter(
+    const hosts = (await this.hostRecords(tenantId)).filter(
       (host) =>
-        (host.hostId === session.host_id ? staying : movable) &&
-        (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
+        host.hostId !== session.host_id && movable && (!prebuild || host.architecture === PREBUILD_ARCHITECTURE),
     );
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
-    if (image.kind === "ReleaseUnreadable") return stay();
-    const usages = this.listHostUsage(tenantId).map((usage) =>
-      !waiting && usage.hostId === session.host_id ? { ...usage, boxesRunning: usage.boxesRunning - 1 } : usage,
-    );
+    if (image.kind === "ReleaseUnreadable") {
+      await this.failTurn(tenantId, turn.turn_id, "ImageNotReleased", image.detail, iso(now));
+      return null;
+    }
     const placement = placeSession(
       hosts,
-      usages,
+      this.listHostUsage(tenantId),
       image.image,
       boxSizeOf(session),
-      this.usesConnectors(session.session_id),
       this.heldBoxes().filter((each) => each.sessionId !== session.session_id),
+      now - presenceGraceMs(settingsOf(this.env)),
     );
-    if (placement.kind === "Refused") return stay();
-    if (placement.host.hostId === session.host_id) {
-      if (placement.evict.length > 0) return this.evictFirst(tenantId, session, turn, placement.evict);
-      return { type: "TurnHandoff", hostId: session.host_id, offer: await this.armOffer(tenantId, session, turn) };
+    if (placement.kind === "Refused") {
+      const healthy = !degradedOnly(placement.hosts);
+      const detail = `no host of your tenant ${healthy ? "has room for" : "is healthy enough to take"} the turn: ${placement.hosts.map(why).join(", ")}`;
+      await this.failTurn(tenantId, turn.turn_id, healthy ? "PoolExhausted" : "HostDegraded", detail, iso(now));
+      return null;
     }
     const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;
@@ -2169,89 +2227,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
         turn.turn_id,
       );
     });
-    await this.timers(tenantId, session.session_id, { SnapshotAnswer: null });
     const moved = { ...session, host_id: hostId, box_id: boxId };
     if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
     const offer = await this.armOffer(tenantId, moved, turn);
-    return { type: "TurnHandoff", hostId, offer };
+    if (offer === null) return null;
+    return { hostId, offer };
   }
 
   private async evictFirst(tenantId: string, session: SessionRow, turn: TurnRow, victims: HeldBox[]): Promise<null> {
-    this.offerSent(turn.turn_id);
     await this.offerAfter(tenantId, session, turn, victims);
     return null;
   }
 
-  private waitsForCapacity(turnId: string): boolean {
-    return (
-      this.ctx.storage.sql.exec("SELECT 1 FROM turn_capacity_waits WHERE turn_id = ?", turnId).toArray().length > 0
-    );
-  }
-
-  private capacityWaitCount(): number {
-    return this.ctx.storage.sql.exec<{ waits: number }>("SELECT COUNT(*) AS waits FROM turn_capacity_waits").one()
-      .waits;
-  }
-
-  private deferOffer(session: SessionRow, turn: TurnRow, now: number): null {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO deferred_offers (turn_id, host_id, created_at) VALUES (?, ?, ?) ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id",
-      turn.turn_id,
-      session.host_id,
-      now,
-    );
-    return null;
-  }
-
-  protected async deferredOffers(tenantId: string, hostId: string): Promise<TurnHandoff[]> {
-    const sql = this.ctx.storage.sql;
-    const pending = (query: string, ...bindings: string[]): string[] =>
-      sql
-        .exec<{ turn_id: string }>(query, ...bindings)
-        .toArray()
-        .map((row) => row.turn_id);
-    const deferred = pending("SELECT turn_id FROM deferred_offers WHERE host_id = ? ORDER BY created_at", hostId);
-    const waits = pending("SELECT turn_id FROM turn_capacity_waits ORDER BY created_at");
-    if (deferred.length === 0 && waits.length === 0) return [];
-    const hosts = await listHosts(this.env.DB, tenantId);
-    const handoffs: TurnHandoff[] = [];
-    for (const turnId of deferred) {
-      const handoff = await this.offerDeferred(tenantId, turnId, hosts);
-      if (handoff !== null) handoffs.push(handoff);
-    }
-    for (const turnId of waits) {
-      const handoff = await this.offerDeferred(tenantId, turnId, hosts);
-      if (handoff !== null) handoffs.push(handoff);
-      if (handoff === null && this.waitsForCapacity(turnId)) break;
-    }
-    return handoffs;
-  }
-
-  private async offerDeferred(
-    tenantId: string,
-    turnId: string,
-    hosts: readonly HostRecord[],
-  ): Promise<TurnHandoff | null> {
-    if (this.offering.has(turnId)) return null;
-    const turn = this.turnRow(turnId);
-    const session = turn === null ? null : this.sessionRow(turn.session_id);
-    if (turn === null || session === null || turn.state !== "Offered") {
-      this.offerSent(turnId);
-      return null;
-    }
-    this.offering.add(turnId);
-    try {
-      if (session.state !== "Stopped") return await this.placeOffered(tenantId, session, turn, true, hosts);
-      await this.runQueued(tenantId, turnId);
-      return null;
-    } finally {
-      this.offering.delete(turnId);
-    }
-  }
-
   private runTurn(session: SessionRow, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
     return this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("DELETE FROM box_eviction_blocks WHERE session_id = ?", session.session_id);
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
         hostId,
@@ -2259,7 +2248,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
         session.session_id,
       );
-      return this.insertTurn(session.session_id, hostId, boxId, send, now);
+      return this.newTurn(session.session_id, hostId, boxId, send, now);
     });
   }
 
@@ -2268,8 +2257,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const ended = turn !== null && turn.state !== "Running" && turn.state !== "Offered";
     return this.ctx.storage.sql
       .exec<{ steer_id: string; prompt: string; created_at: number; delivered: number }>(
-        `SELECT s.steer_id, s.prompt, s.created_at, d.steer_id IS NOT NULL AS delivered FROM steers AS s
-        LEFT JOIN steer_deliveries AS d ON d.steer_id = s.steer_id WHERE s.turn_id = ? ORDER BY s.created_at, s.steer_id`,
+        "SELECT steer_id, prompt, created_at, delivered FROM steers WHERE turn_id = ? ORDER BY created_at, steer_id",
         turnId,
       )
       .toArray()
@@ -2279,13 +2267,26 @@ export abstract class TenantSessions extends DurableObject<Env> {
       });
   }
 
-  protected steerTurn(tenantId: string, turnId: string, prompt: string, now: number): SteerSent {
+  protected async steerTurn(tenantId: string, turnId: string, prompt: string, now: number): Promise<SteerSent> {
     const turn = this.getTurn(tenantId, turnId);
     if (turn === null) return { kind: "NotFound" };
     if (turn.state !== "Running") return { kind: "NotRunning", state: turn.state };
     const sql = this.ctx.storage.sql;
-    const [inbox] = sql.exec("SELECT 1 FROM turn_steer_inboxes WHERE turn_id = ?", turnId).toArray();
-    if (inbox === undefined) return { kind: "Unsupported" };
+    const session = this.sessionRow(turn.sessionId);
+    if (session === null) throw new Error(`turn ${turnId} has no session ${turn.sessionId}`);
+    if (session.harness !== "ClaudeCode") return { kind: "Unsupported" };
+    if (this.hostPrebuild(session.session_id) !== null) return { kind: "Unsupported" };
+    const [held] = sql
+      .exec<{ digest: string }>(
+        "SELECT digest FROM persona_files WHERE persona_id = ? AND path = ?",
+        session.persona_id,
+        STEER_SETTINGS_PATH,
+      )
+      .toArray();
+    if ((await this.mergedSteerSettings(tenantId, session, held?.digest ?? null)) === null) {
+      return { kind: "Unsupported" };
+    }
+    if (this.turnRow(turnId)?.state !== "Running") return { kind: "NotRunning", state: turn.state };
     const steerId = crypto.randomUUID();
     sql.exec(
       "INSERT INTO steers (steer_id, turn_id, prompt, created_at) VALUES (?, ?, ?, ?)",
@@ -2301,48 +2302,46 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.getTurn(tenantId, turnId) === null ? null : this.steerRows(turnId);
   }
 
-  protected takeSteers(turnId: string, now: number): SteersTaken {
+  protected takeSteers(turnId: string): SteersTaken {
     return this.ctx.storage.transactionSync(() => {
       if (this.turnRow(turnId)?.state !== "Running") return { kind: "Closed" };
       const pending = this.steerRows(turnId).filter((steer) => steer.state === "Pending");
       for (const steer of pending) {
-        this.ctx.storage.sql.exec(
-          "INSERT INTO steer_deliveries (steer_id, delivered_at) VALUES (?, ?)",
-          steer.steerId,
-          now,
-        );
+        this.ctx.storage.sql.exec("UPDATE steers SET delivered = 1 WHERE steer_id = ?", steer.steerId);
       }
       return { kind: "Taken", prompts: pending.map((steer) => steer.prompt) };
     });
+  }
+
+  private async mergedSteerSettings(
+    tenantId: string,
+    session: SessionRow,
+    digest: string | null,
+  ): Promise<string | null> {
+    const blob = digest === null ? null : await this.env.STORE.get(personaFileKey(tenantId, digest));
+    if (digest !== null && blob === null) {
+      throw new Error(
+        `persona file ${STEER_SETTINGS_PATH} of session ${session.session_id} is gone from object storage`,
+      );
+    }
+    return steerSettings(blob === null ? null : await blob.text());
   }
 
   private async steerInbox(
     tenantId: string,
     session: SessionRow,
     turnId: string,
-    hostId: string,
     personaFiles: PersonaFileDownload[],
     turnKey: CryptoKey,
     seconds: number,
     now: number,
   ): Promise<{ connector: DispatchConnector; personaFiles: PersonaFileDownload[] } | null> {
-    if (session.harness !== "ClaudeCode" || this.channelProtocol(hostId) < CONNECTORS_VERSION) return null;
+    if (session.harness !== "ClaudeCode") return null;
     const held = personaFiles.find((file) => file.path === STEER_SETTINGS_PATH);
-    const blob = held === undefined ? null : await this.env.STORE.get(personaFileKey(tenantId, held.digest));
-    if (held !== undefined && blob === null) {
-      throw new Error(
-        `persona file ${STEER_SETTINGS_PATH} of session ${session.session_id} is gone from object storage`,
-      );
-    }
-    const merged = steerSettings(blob === null ? null : await blob.text());
+    const merged = await this.mergedSteerSettings(tenantId, session, held?.digest ?? null);
     if (merged === null) return null;
     const bytes = new Uint8Array(new TextEncoder().encode(merged));
     const digest = await sha256Hex(bytes);
-    this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO turn_steer_inboxes (turn_id, created_at) VALUES (?, ?)",
-      turnId,
-      now,
-    );
     await this.env.STORE.put(personaFileKey(tenantId, digest), bytes);
     const signer = signerOf(
       this.env,
@@ -2393,14 +2392,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state === "Stopping" || session.state === "Stopped" || session.state === "Failed") {
       return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
     }
-    const running = this.inFlightTurn(sessionId);
+    const running = this.inFlightTurns(sessionId)[0]?.turn_id ?? null;
     if (running !== null) {
       if (cancelledBy === null) return { kind: "InFlight", turnId: running };
       const turn = this.turnRow(running);
       if (turn === null) throw new Error(`turn ${running} is in flight but has no row`);
-      if (turn.state === "Running" && this.channelProtocol(session.host_id) < TURN_CANCEL_VERSION) {
-        return { kind: "CancelUnspoken", turnId: running, host: await this.hostName(tenantId, session.host_id) };
-      }
       const waited = `${cancelledBy} stopped the session and cancelled the turn while it waited for turn ${running}`;
       this.ctx.storage.transactionSync(() => {
         for (const turnId of this.waitingTurns(sessionId))
@@ -2413,37 +2409,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const latest = this.latestTurn(sessionId, null);
     if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
     this.setSessionState(sessionId, "Stopping", now);
-    await this.timers(tenantId, sessionId, { Snapshot: null });
     const stopping = { ...session, state: "Stopping", updated_at: now };
     await this.snapshotOrTeardown(tenantId, stopping, latest);
     return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
-  }
-
-  private channelProtocol(hostId: string): number {
-    const [row] = this.ctx.storage.sql
-      .exec<{ channel_protocol: number }>("SELECT channel_protocol FROM host_usage WHERE host_id = ?", hostId)
-      .toArray();
-    if (row === undefined) throw new Error(`host ${hostId} runs a turn but never said hello`);
-    return row.channel_protocol;
   }
 
   protected async archiveSession(tenantId: string, sessionId: string, now: number): Promise<Archive> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (!["Idle", "Stopped", "Failed", "Archived"].includes(session.state)) {
-      return { kind: "NotStopped", state: SessionSchema.shape.state.parse(session.state) };
+      return { kind: "NotStopped", state: SessionStateSchema.parse(session.state) };
     }
     const sql = this.ctx.storage.sql;
     if (session.state !== "Archived") this.setSessionState(sessionId, "Archived", now);
-    await this.timers(tenantId, sessionId, {
-      FirstLine: null,
-      Total: null,
-      Snapshot: null,
-      SnapshotAnswer: null,
-      Teardown: null,
-      TeardownAnswer: null,
-      HostOffline: null,
-    });
     if (session.state === "Idle") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
     }
@@ -2460,30 +2438,24 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (restoring !== undefined) return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
     const keys = sql
       .exec<{ storage_key: string }>(
-        "SELECT storage_key FROM snapshots WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
+        "SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
         sessionId,
       )
       .toArray()
-      .map((row) => row.storage_key);
+      .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
+    const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
+    await this.live.release(
+      this.env.STORE,
+      tenantId,
+      sessionId,
+      stored.map((snapshot) => snapshot.storage_key),
+    );
+    await this.deleteObjects([...keys, ...this.objectKeys(stored)]);
     this.ctx.storage.transactionSync(() => {
-      for (const pending of ["snapshot_packs", "snapshot_chunks"]) {
-        sql.exec(
-          `DELETE FROM ${pending} WHERE snapshot_id IN (SELECT snapshot_id FROM snapshot_requests WHERE session_id = ?1 UNION SELECT snapshot_id FROM snapshot_failures WHERE session_id = ?1)`,
-          sessionId,
-        );
-      }
-      sql.exec(
-        "DELETE FROM snapshot_manifest_chunks WHERE snapshot_id IN (SELECT snapshot_id FROM snapshots WHERE session_id = ?)",
-        sessionId,
-      );
-      sql.exec("DELETE FROM snapshots WHERE session_id = ?", sessionId);
+      this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
     });
-    for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
-      await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
-    }
-    sql.exec("DELETE FROM session_chunks WHERE session_id = ?", sessionId);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -2493,41 +2465,64 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
-    this.ctx.storage.transactionSync(() => {
-      recordObjectCleanups(
-        sql,
-        sql
-          .exec<{ storage_key: string }>("SELECT storage_key FROM transcript_chunks WHERE session_id = ?", sessionId)
-          .toArray()
-          .map((row) => row.storage_key),
-      );
-      sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
-    });
+    await deleteTranscript(this.env.STORE, transcriptPrefix(tenantId, sessionId));
+    sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
     return { kind: "Deleted" };
   }
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
     const sql = this.ctx.storage.sql;
-    const older = sql
-      .exec<{ snapshot_id: string; storage_key: string }>(
-        `SELECT snapshot_id, storage_key FROM snapshots WHERE session_id = ?1 AND snapshot_seq < ?2
-        UNION ALL SELECT snapshot_id, storage_key FROM snapshot_failures WHERE session_id = ?1 AND snapshot_seq < ?2 AND storage_key != ''`,
+    const failed = sql
+      .exec<{ storage_key: string }>(
+        "SELECT storage_key FROM snapshot_failures WHERE session_id = ? AND snapshot_seq < ? AND storage_key != ''",
         stored.session_id,
         stored.snapshot_seq,
       )
-      .toArray();
-    this.ctx.storage.transactionSync(() => {
-      for (const { snapshot_id } of older) {
-        this.dropPlacements(snapshot_id);
-        sql.exec("DELETE FROM snapshot_manifest_chunks WHERE snapshot_id = ?", snapshot_id);
-        sql.exec("DELETE FROM snapshots WHERE snapshot_id = ?", snapshot_id);
-      }
-    });
-    const keys = older.map((row) => row.storage_key);
+      .toArray()
+      .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
+    const older = this.storedSnapshots(
+      "WHERE session_id = ? AND snapshot_seq < ?",
+      stored.session_id,
+      stored.snapshot_seq,
+    );
+    await this.live.release(
+      this.env.STORE,
+      tenantId,
+      stored.session_id,
+      older.map((snapshot) => snapshot.storage_key),
+    );
+    await this.deleteObjects([...this.objectKeys(older), ...failed]);
+    this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
+    await this.archiveSupersededPrebuilds(tenantId, now);
+  }
+
+  private releaseSnapshots(snapshots: { snapshot_id: string; storage_key: string }[]): void {
+    for (const snapshot of snapshots) {
+      this.ctx.storage.sql.exec("DELETE FROM snapshots WHERE snapshot_id = ?", snapshot.snapshot_id);
+      this.manifests.forget(snapshot.storage_key);
+    }
+  }
+
+  private objectKeys(snapshots: { storage_key: string }[]): string[] {
+    return snapshots.flatMap((snapshot) => [snapshot.storage_key, packListKey(snapshot.storage_key)]);
+  }
+
+  private async deleteObjects(keys: string[]): Promise<void> {
     for (let start = 0; start < keys.length; start += STORE_DELETE_BATCH) {
       await this.env.STORE.delete(keys.slice(start, start + STORE_DELETE_BATCH));
     }
-    await this.archiveSupersededPrebuilds(tenantId, now);
+  }
+
+  private storedSnapshots(
+    select: string,
+    ...params: SqlStorageValue[]
+  ): { snapshot_id: string; storage_key: string }[] {
+    return this.ctx.storage.sql
+      .exec<{ snapshot_id: string; storage_key: string }>(
+        `SELECT snapshot_id, storage_key FROM snapshots ${select}`,
+        ...params,
+      )
+      .toArray();
   }
 
   private async snapshotOrTeardown(tenantId: string, session: SessionRow, latest: TurnRow): Promise<void> {
@@ -2538,7 +2533,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (pending !== undefined) return;
-    const now = Date.now();
     const [held] = this.ctx.storage.sql
       .exec<{ snapshot_id: string }>(
         "SELECT snapshot_id FROM snapshots WHERE session_id = ? AND turn_id = ? LIMIT 1",
@@ -2546,63 +2540,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
         latest.turn_id,
       )
       .toArray();
-    if (held !== undefined) {
-      return this.timers(tenantId, session.session_id, { Teardown: { turnId: latest.turn_id, at: now } });
-    }
-    return this.timers(tenantId, session.session_id, { Snapshot: { turnId: latest.turn_id, at: now } });
+    if (held !== undefined) return this.teardown(session);
+    return this.requestSnapshot(tenantId, session, latest);
   }
 
-  private async armIdleEviction(tenantId: string, sessionId: string): Promise<void> {
-    const session = this.sessionRow(sessionId);
-    if (session?.state !== "Idle" || session.box_retention !== "Auto" || this.inFlightTurn(sessionId) !== null) return;
-    const latest = this.latestTurn(sessionId, null);
-    if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
-    const sql = this.ctx.storage.sql;
-    const [pending] = sql.exec("SELECT 1 FROM snapshot_requests WHERE session_id = ? LIMIT 1", sessionId).toArray();
-    if (pending !== undefined) return;
-    const [stored] = sql
-      .exec<{ created_at: number }>(
-        "SELECT created_at FROM snapshots WHERE session_id = ? AND turn_id = ? ORDER BY created_at DESC LIMIT 1",
-        sessionId,
-        latest.turn_id,
-      )
-      .toArray();
-    if (stored !== undefined) {
-      return this.timers(tenantId, sessionId, {
-        Teardown: { turnId: latest.turn_id, at: stored.created_at + IDLE_EVICTION_MS },
-      });
-    }
-    const [failed] = sql
-      .exec("SELECT 1 FROM snapshot_failures WHERE session_id = ? AND turn_id = ? LIMIT 1", sessionId, latest.turn_id)
-      .toArray();
-    if (failed !== undefined) return;
-    await this.timers(tenantId, sessionId, {
-      Snapshot: { turnId: latest.turn_id, at: latest.updated_at + settingsOf(this.env).snapshotDelaySeconds * 1000 },
-    });
-  }
-
-  private snapshotHolds(sessionId: string, turnId: string): boolean {
-    const sql = this.ctx.storage.sql;
-    const [pending] = sql.exec("SELECT 1 FROM snapshot_requests WHERE session_id = ? LIMIT 1", sessionId).toArray();
-    const [stored] = sql
-      .exec("SELECT 1 FROM snapshots WHERE session_id = ? AND turn_id = ? LIMIT 1", sessionId, turnId)
-      .toArray();
-    return pending === undefined && stored !== undefined;
-  }
-
-  private async evictIdle(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
-    if (await this.hostOffline(session.host_id)) return;
-    if (this.latestTurn(session.session_id, null)?.turn_id !== turn.turn_id) return;
-    if (this.heldBoxes().find((held) => held.sessionId === session.session_id)?.evictable !== true) return;
-    if (!this.snapshotHolds(session.session_id, turn.turn_id)) return;
-    await this.startBoxEviction(tenantId, session, null, Date.now());
-  }
-
-  private async teardown(tenantId: string, session: SessionRow, turnId: string): Promise<void> {
-    const seconds = settingsOf(this.env).snapshotDeadlineSeconds;
-    await this.timers(tenantId, session.session_id, {
-      TeardownAnswer: { turnId, at: Date.now() + seconds * 1000 },
-    });
+  private async teardown(session: SessionRow): Promise<void> {
     await this.host(session.host_id).send({
       type: "BoxTeardown",
       sessionId: session.session_id,
@@ -2624,8 +2566,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} answered the teardown of box ${message.boxId} of session ${message.sessionId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
-    if (session.box_id !== message.boxId || session.state !== "Stopping") return null;
-    await this.timers(tenantId, session.session_id, { TeardownAnswer: null });
+    if (session.box_id !== message.boxId) return null;
+    if (message.type === "BoxGone" && session.state === "Running") {
+      await this.boxGoneUnderTurn(tenantId, hostId, session);
+      await this.evictionSettled(tenantId, session.session_id);
+      return null;
+    }
+    if (message.type === "BoxGone" && session.state === "Idle") {
+      this.setSessionState(session.session_id, "Stopped", Date.now());
+      await this.evictionSettled(tenantId, session.session_id);
+      return null;
+    }
+    if (session.state !== "Stopping") return null;
     if (message.type === "BoxGone") {
       this.setSessionState(session.session_id, "Stopped", Date.now());
       await this.evictionSettled(tenantId, session.session_id);
@@ -2633,8 +2585,50 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     this.recordStopFailure(session.session_id, message.reason, message.detail, message.failedAt);
     await this.returnToIdle(tenantId, session.session_id);
-    await this.rearmSnapshot(tenantId, session.session_id);
     return null;
+  }
+
+  private async boxGoneUnderTurn(tenantId: string, hostId: string, session: SessionRow): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const requests = sql
+      .exec<SnapshotRequestRow>(
+        "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ? AND box_id = ?",
+        session.session_id,
+        session.box_id,
+      )
+      .toArray();
+    const unasked = sql
+      .exec<{ turn_id: string }>(
+        `SELECT turn_id FROM turns WHERE session_id = ? AND box_id = ? AND state = 'Running'
+          AND turn_id NOT IN (SELECT turn_id FROM snapshot_requests)`,
+        session.session_id,
+        session.box_id,
+      )
+      .toArray();
+    if (requests.length === 0 && unasked.length === 0) return;
+    const host = await this.hostName(tenantId, hostId);
+    const detail = `host ${host} answered BoxGone for box ${session.box_id} while the session was Running, so the box and the work it held since the last snapshot are gone`;
+    const now = Date.now();
+    await this.snapshotsGone(tenantId, requests, detail, "Stopped", now);
+    for (const { turn_id } of unasked)
+      await this.failTurn(tenantId, turn_id, "BoxLost", `${detail}; send the turn again`, iso(now), "Stopped");
+  }
+
+  private async snapshotsGone(
+    tenantId: string,
+    requests: SnapshotRequestRow[],
+    detail: string,
+    sessionState: "Idle" | "Stopped",
+    now: number,
+  ): Promise<void> {
+    for (const request of requests) {
+      this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
+      await this.snapshotNotStored(tenantId, request, detail, sessionState);
+      const session = this.sessionRow(request.session_id);
+      if (session === null) continue;
+      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
+      await this.prebuildUnstored(session, detail);
+    }
   }
 
   private ranBox(session: SessionRow, boxId: string, hostId: string): boolean {
@@ -2661,7 +2655,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         failedAt,
         Date.now(),
       );
-      sql.exec("INSERT OR IGNORE INTO box_eviction_blocks (session_id) VALUES (?)", sessionId);
     });
   }
 
@@ -2670,25 +2663,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
     await this.evictionSettled(tenantId, sessionId);
   }
 
-  private async rearmSnapshot(tenantId: string, sessionId: string): Promise<void> {
-    const now = Date.now();
-    const turn = this.latestTurn(sessionId, null);
-    if (turn === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
-    await this.timers(tenantId, sessionId, {
-      Snapshot: { turnId: turn.turn_id, at: now + settingsOf(this.env).snapshotDelaySeconds * 1000 },
-    });
+  protected async readSession(tenantId: string, sessionId: string): Promise<Session | null> {
+    return this.getSession(tenantId, sessionId, this.staleHosts(Date.now()));
   }
 
-  protected getSession(tenantId: string, sessionId: string): Session | null {
+  private getSession(tenantId: string, sessionId: string, stale: StaleHosts = NONE_STALE): Session | null {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
     return row === undefined
       ? null
-      : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id));
+      : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id), stale);
   }
 
-  protected listSessions(tenantId: string, filter: SessionFilter): Session[] {
+  protected async listSessions(tenantId: string, filter: SessionFilter): Promise<Session[]> {
+    const stale = this.staleHosts(Date.now());
     return this.ctx.storage.sql
       .exec<SessionViewRow>(
         `${SESSION_VIEW_SELECT} WHERE (?1 IS NULL OR s.state = ?1) AND (?2 IS NULL OR s.host_id = ?2)
@@ -2705,7 +2694,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         filter.triggerId ?? null,
       )
       .toArray()
-      .map((row) => toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id)));
+      .map((row) =>
+        toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id), stale),
+      );
   }
 
   protected startTags(_startedBy: SessionStartedBy, tags: string[]): string[] {
@@ -2747,17 +2738,35 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Tagged", session: this.tagSession(tenantId, sessionId, tags, now) };
   }
 
-  protected listTurns(tenantId: string, sessionId: string): Turn[] | null {
+  protected async listTurns(tenantId: string, sessionId: string): Promise<Turn[] | null> {
     if (this.sessionRow(sessionId) === null) return null;
-    return this.ctx.storage.sql
-      .exec<TurnRow>(`${TURN_SELECT} WHERE session_id = ? ORDER BY created_at, turn_id`, sessionId)
-      .toArray()
-      .map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id)));
+    const stale = this.staleHosts(Date.now());
+    return this.turnRows(sessionId).map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id), stale));
   }
 
-  protected getTurn(tenantId: string, turnId: string): Turn | null {
+  private turnRows(sessionId: string): TurnRow[] {
+    return this.ctx.storage.sql
+      .exec<TurnRow>(`${TURN_SELECT} WHERE session_id = ? ORDER BY created_at, turn_id`, sessionId)
+      .toArray();
+  }
+
+  protected async readTurn(tenantId: string, turnId: string): Promise<Turn | null> {
+    return this.getTurn(tenantId, turnId, this.staleHosts(Date.now()));
+  }
+
+  private getTurn(tenantId: string, turnId: string, stale: StaleHosts = NONE_STALE): Turn | null {
     const row = this.turnRow(turnId);
-    return row === null ? null : toTurn(tenantId, row, this.turnImage(turnId));
+    return row === null ? null : toTurn(tenantId, row, this.turnImage(turnId), stale);
+  }
+
+  private staleHosts(now: number): StaleHosts {
+    const rows = this.ctx.storage.sql
+      .exec<{ host_id: string; heard_at: number }>(
+        "SELECT host_id, heard_at FROM host_reports WHERE heard_at < ?",
+        now - presenceGraceMs(settingsOf(this.env)),
+      )
+      .toArray();
+    return new Map(rows.map((row) => [row.host_id, row.heard_at]));
   }
 
   private turnImage(turnId: string): TurnImage | null {
@@ -2841,18 +2850,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  protected readTurns(tenantId: string, turnIds: string[]): WaitedTurns {
-    const missing = turnIds.find((turnId) => this.turnRow(turnId) === null);
-    if (missing !== undefined) return { kind: "NotFound", turnId: missing };
-    const turns = turnIds.map((turnId) => {
-      const turn = this.getTurn(tenantId, turnId);
-      if (turn === null) throw new Error(`turn ${turnId} vanished while the read collected it`);
-      return turn;
-    });
-    return { kind: "Read", turns };
-  }
-
-  protected getTurnFailure(tenantId: string, turnId: string): TurnFailure | null {
+  protected async getTurnFailure(tenantId: string, turnId: string): Promise<TurnFailure | null> {
     const [row] = this.ctx.storage.sql
       .exec<FailureRow>(
         "SELECT turn_id, session_id, reason, detail, failed_at, created_at FROM turn_failures WHERE turn_id = ?",
@@ -2865,7 +2863,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       tenantId,
       sessionId: row.session_id,
       reason: row.reason,
-      detail: row.detail,
+      detail: turnFailureDetail(row.detail),
       failedAt: row.failed_at,
       createdAt: row.created_at,
     });
@@ -2922,84 +2920,41 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row === undefined ? null : toSnapshot(tenantId, row);
   }
 
-  protected transcriptCursor(
+  protected async transcriptCursor(
     tenantId: string,
     sessionId: string,
     after: number,
     turnId: string | null,
-    limit: number,
-    maxBytes: number | null,
-  ): TranscriptCursor | null {
+  ): Promise<TranscriptCursor | null> {
     const session = this.sessionRow(sessionId);
     if (session === null) return null;
-    const sql = this.ctx.storage.sql;
-    const [tail] = sql
-      .exec<{ last_line_seq: number; in_flight: number }>(
-        `SELECT MAX(
-          COALESCE((SELECT MAX(last_line_seq) FROM transcript_chunks WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2)), 0),
-          COALESCE((SELECT MAX(line_seq) FROM transcript_pending WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2)), 0)
-        ) AS last_line_seq,
-        EXISTS (SELECT 1 FROM turns WHERE session_id = ?1 AND (?2 IS NULL OR turn_id = ?2) AND state IN (${IN_FLIGHT.map((_, index) => `?${index + 3}`).join(", ")})) AS in_flight`,
-        sessionId,
-        turnId,
-        ...IN_FLIGHT,
-      )
-      .toArray();
+    const turns = this.turnRows(sessionId);
+    const index = turnId === null ? -1 : turns.findIndex((turn) => turn.turn_id === turnId);
+    const read = turnId === null ? turns : turns.slice(index, index + 1);
+    const running = read.find((turn) => turn.state === "Running");
+    const tail = running === undefined ? null : await this.runningTail(tenantId, running);
+    const before = turns.slice(0, Math.max(index, 0)).reduce((lines, turn) => lines + turn.line_count, 0);
+    const ended = turnId === null ? session.last_line_seq : before + (read[0]?.line_count ?? 0);
     const known = {
-      sessionState: SessionSchema.shape.state.parse(session.state),
-      harness: SessionSchema.shape.harness.parse(session.harness),
-      lastLineSeq: tail?.last_line_seq ?? 0,
-      inFlight: tail?.in_flight === 1,
+      sessionState: SessionStateSchema.parse(session.state),
+      harness: HarnessSchema.parse(session.harness),
+      lastLineSeq: tail?.last ?? ended,
+      inFlight: read.some((turn) => IN_FLIGHT.includes(turn.state)),
     };
-    const [chunk] = sql
-      .exec<ChunkRow>(
-        `SELECT storage_key, line_seqs, offsets FROM transcript_chunks
-        WHERE session_id = ?1 AND last_line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3)
-        ORDER BY last_line_seq LIMIT 1`,
-        sessionId,
-        after,
-        turnId,
-      )
-      .toArray();
-    if (chunk !== undefined) {
-      const range = rangeAfter(JSON.parse(chunk.line_seqs), JSON.parse(chunk.offsets), after, limit, maxBytes);
-      if (range === null) throw new Error(`transcript chunk ${chunk.storage_key} holds no line after ${after}`);
-      return { ...known, kind: "Chunk", storageKey: chunk.storage_key, range };
-    }
-    const lines = sql
-      .exec<PendingRow>(
-        `SELECT session_id, line_seq, turn_id, text, created_at FROM transcript_pending
-        WHERE session_id = ?1 AND line_seq > ?2 AND (?3 IS NULL OR turn_id = ?3)
-        ORDER BY line_seq LIMIT ?4`,
-        sessionId,
-        after,
-        turnId,
-        limit,
-      )
-      .toArray()
-      .map((row) => toLine(tenantId, row));
-    return { ...known, kind: "Lines", lines: linesWithin(lines, maxBytes) };
-  }
-
-  protected turnMetricDimensions(turnIds: readonly string[]): Record<string, Dimensions> {
-    return Object.fromEntries(
-      this.ctx.storage.sql
-        .exec<{ turn_id: string; dimensions: string }>(
-          "SELECT turn_id, dimensions FROM turn_metric_dimensions WHERE turn_id IN (SELECT value FROM json_each(?))",
-          JSON.stringify(turnIds),
-        )
-        .toArray()
-        .map((row) => [row.turn_id, DimensionsSchema.parse(JSON.parse(row.dimensions))]),
-    );
+    const start = Math.max(after, before);
+    const chunk =
+      read.length === 0 || start >= known.lastLineSeq
+        ? null
+        : await firstChunkAfter(this.env.STORE, transcriptPrefix(tenantId, sessionId), start);
+    if (chunk !== null && (turnId === null || chunk.turnId === turnId))
+      return { ...known, kind: "Chunk", storageKey: chunk.storageKey, range: { offset: 0, length: chunk.size } };
+    return { ...known, kind: "Lines" };
   }
 
   protected async prepareOffer(tenantId: string, turnId: string, hostId: string, now: number): Promise<PreparedOffer> {
     const turn = this.turnRow(turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
-    if (turn === null || session === null) {
-      throw new Error(`host ${hostId} has an offer for turn ${turnId}, which tenant ${tenantId} does not hold`);
-    }
-    if (turn.state !== "Offered") return { kind: "Withdrawn" };
+    if (turn === null || session === null || turn.state !== "Offered") return { kind: "Withdrawn" };
     const entry = catalogEntry(session.harness, session.harness_version);
     if (entry === undefined) {
       const detail = `the session runs ${session.harness} ${session.harness_version}, which left the harness catalog, so no image runs the turn; start a new session on a listed version`;
@@ -3055,19 +3010,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.failTurn(tenantId, turnId, reason, `${refused.detail}; ${refused.fix}`, iso(now));
       return { kind: "Withdrawn" };
     }
-    this.ctx.storage.sql.exec(
-      `INSERT INTO turn_metric_dimensions (turn_id, dimensions, created_at) VALUES (?, ?, ?)
-      ON CONFLICT (turn_id) DO UPDATE SET dimensions = excluded.dimensions`,
-      turnId,
-      JSON.stringify(
-        offeredDimensions(
-          session.persona_id,
-          secretSetId,
-          prebuild === null ? checkModelCredential(entry, members, session.model, now) : null,
-        ),
-      ),
-      now,
-    );
     const settings = settingsOf(this.env);
     const guest = await this.guestImage(
       tenantId,
@@ -3157,7 +3099,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       prebuild === null ? await this.personaFiles(tenantId, session.persona_id, credentialSeconds, now) : [];
     const inbox =
       prebuild === null
-        ? await this.steerInbox(tenantId, session, turnId, hostId, files, turnKey, credentialSeconds, now)
+        ? await this.steerInbox(tenantId, session, turnId, files, turnKey, credentialSeconds, now)
         : null;
     const personaFiles = inbox === null ? files : inbox.personaFiles;
     if (inbox !== null) connectors.push(inbox.connector);
@@ -3182,7 +3124,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private firstBox(
     session: SessionRow,
     buildsPrebuild: boolean,
-    host: HostRecord,
+    host: HostEntry,
     release: ReleaseRead,
     now: number,
   ): StoredSnapshotRow[] {
@@ -3253,24 +3195,30 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return snapshots;
   }
 
-  protected async hostPresence(
-    tenantId: string,
-    hostId: string,
-    presence: "Online" | "Offline",
-    now: number,
-  ): Promise<void> {
-    this.appendEvent({ event: presence === "Online" ? "HostOnline" : "HostOffline", hostId }, now);
-    const inFlight = this.ctx.storage.sql
-      .exec<{ session_id: string; turn_id: string }>(
-        "SELECT session_id, turn_id FROM turns WHERE host_id = ? AND state = 'Running'",
+  private async failRevokedHostWork(tenantId: string, hostId: string, host: string, now: number): Promise<void> {
+    const turnDetail = `host ${host} was revoked during the turn; send the turn again on another host`;
+    const snapshotDetail = `host ${host} was revoked before it answered the snapshot`;
+    const running = this.ctx.storage.sql
+      .exec<{ turn_id: string }>(
+        "SELECT turn_id FROM turns WHERE host_id = ? AND state IN ('Offered', 'Running')",
         hostId,
       )
       .toArray();
-    const heartbeatDeadlineMs = settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
-    for (const { session_id, turn_id } of inFlight) {
-      await this.timers(tenantId, session_id, {
-        HostOffline: presence === "Offline" ? { turnId: turn_id, at: now + heartbeatDeadlineMs } : null,
-      });
+    for (const { turn_id } of running) await this.failTurn(tenantId, turn_id, "HostRevoked", turnDetail, iso(now));
+    const requests = this.ctx.storage.sql
+      .exec<SnapshotRequestRow>(
+        `SELECT r.snapshot_id, r.session_id, r.box_id, r.turn_id, r.snapshot_seq, r.storage_key
+        FROM snapshot_requests r JOIN sessions s ON s.session_id = r.session_id WHERE s.host_id = ?`,
+        hostId,
+      )
+      .toArray();
+    for (const request of requests) {
+      this.recordSnapshotFailure(request, "NotAnswered", snapshotDetail, iso(now));
+      await this.snapshotNotStored(tenantId, request, snapshotDetail);
+      const session = this.sessionRow(request.session_id);
+      if (session === null) continue;
+      if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
+      await this.prebuildUnstored(session, snapshotDetail);
     }
   }
 
@@ -3278,13 +3226,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const host = await hostOf(this.env.DB, tenantId, hostId);
     if (host === null) throw new Error(`host ${hostId} runs a session of tenant ${tenantId}, which does not list it`);
     return host.name;
-  }
-
-  private async hostOffline(hostId: string): Promise<boolean> {
-    const row = await this.env.DB.prepare("SELECT state FROM hosts WHERE host_id = ?")
-      .bind(hostId)
-      .first<{ state: string }>();
-    return row?.state === "Offline";
   }
 
   protected async hostMessage(
@@ -3301,10 +3242,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.storeCredentialFile(offered.session, message.credentialFile);
     }
     if (message.type === "TurnRepositoryCloneFailed") return this.cloneFailed(tenantId, hostId, message);
-    if (message.type === "TurnFailed")
-      return this.endingImageFetch(tenantId, hostId, message, () => this.turnFailed(tenantId, hostId, message));
-    if (message.type === "TurnClaim")
-      return this.endingImageFetch(tenantId, hostId, message, () => this.turnClaim(tenantId, hostId, message));
+    if (message.type === "TurnFailed") return this.turnFailed(tenantId, hostId, message);
+    if (message.type === "TurnClaim") return this.turnClaim(hostId, message);
     if (message.type === "SnapshotDone" || message.type === "SnapshotFailed") {
       return this.snapshotAnswer(tenantId, hostId, message);
     }
@@ -3313,7 +3252,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
-    await this.endingImageFetch(tenantId, hostId, message, () => this.turnEvent(tenantId, offered, message));
+    await this.turnEvent(tenantId, offered, message);
     return null;
   }
 
@@ -3341,49 +3280,42 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { request, now, expiresAt, seconds };
   }
 
-  private snapshotChunks(
+  private async restorableIndex(tenantId: string, sessionId: string): Promise<ManifestRead<SnapshotIndex> | null> {
+    const sql = this.ctx.storage.sql;
+    const [restorable] = [
+      ...sql
+        .exec<{ storage_key: string }>(
+          "SELECT storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq DESC LIMIT 1",
+          sessionId,
+        )
+        .toArray(),
+      ...sql
+        .exec<{ storage_key: string }>(
+          `SELECT snapshots.storage_key FROM session_prebuild_layers JOIN prebuild_sessions USING (prebuild_id)
+          JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
+          WHERE session_prebuild_layers.session_id = ? ORDER BY snapshots.snapshot_seq DESC LIMIT 1`,
+          sessionId,
+        )
+        .toArray(),
+    ];
+    if (restorable === undefined) return null;
+    return this.manifests.index(this.env.STORE, tenantId, restorable.storage_key);
+  }
+
+  private async snapshotChunks(
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotChunks" }>,
-  ): ChunkReply | Refused | null {
+  ): Promise<ChunkReply | Refused | null> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
     if (window === null || "type" in window) return window;
-    const sql = this.ctx.storage.sql;
-    const digests = JSON.stringify(message.digests);
-    const held = this.ctx.storage.transactionSync(() => {
-      sql.exec(
-        "INSERT OR IGNORE INTO session_chunks (session_id, digest) SELECT ?1, value FROM json_each(?2)",
-        window.request.session_id,
-        digests,
-      );
-      const held = sql
-        .exec<{ digest: string; pack_digest: string; byte_offset: number; byte_length: number }>(
-          "SELECT digest, MIN(pack_digest) AS pack_digest, byte_offset, byte_length FROM chunks WHERE digest IN (SELECT value FROM json_each(?1)) GROUP BY digest ORDER BY digest",
-          digests,
-        )
-        .toArray();
-      for (const row of held) {
-        sql.exec(
-          "INSERT OR IGNORE INTO snapshot_chunks (snapshot_id, digest, pack_digest, byte_offset, byte_length) VALUES (?, ?, ?, ?, ?)",
-          window.request.snapshot_id,
-          row.digest,
-          row.pack_digest,
-          row.byte_offset,
-          row.byte_length,
-        );
-      }
-      return held;
-    });
+    const index = await this.restorableIndex(tenantId, window.request.session_id);
+    const held = index?.kind === "Read" ? index.value : null;
     return {
       type: "SnapshotChunksHeld",
       snapshotId: message.snapshotId,
       part: message.part,
-      held: held.map((row) => ({
-        digest: row.digest,
-        packDigest: row.pack_digest,
-        offset: row.byte_offset,
-        length: row.byte_length,
-      })),
+      held: [...new Set(message.digests)].sort().flatMap((digest) => held?.find(digest) ?? []),
     };
   }
 
@@ -3401,43 +3333,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} placed chunk ${unlisted.digest} of snapshot ${message.snapshotId} in pack ${unlisted.packDigest}, which part ${message.part} does not list`,
       );
     }
-    const sql = this.ctx.storage.sql;
-    const { request } = window;
-    const missing = this.ctx.storage.transactionSync(() => {
-      for (const pack of message.packs) {
-        sql.exec(
-          "INSERT OR IGNORE INTO snapshot_packs (snapshot_id, pack_digest, size_bytes) VALUES (?, ?, ?)",
-          request.snapshot_id,
-          pack.packDigest,
-          pack.sizeBytes,
-        );
-      }
-      for (const chunk of message.chunks) {
-        sql.exec(
-          "INSERT OR IGNORE INTO snapshot_chunks (snapshot_id, digest, pack_digest, byte_offset, byte_length) VALUES (?, ?, ?, ?, ?)",
-          request.snapshot_id,
-          chunk.digest,
-          chunk.packDigest,
-          chunk.offset,
-          chunk.length,
-        );
-        sql.exec(
-          "INSERT OR IGNORE INTO session_chunks (session_id, digest) VALUES (?, ?)",
-          request.session_id,
-          chunk.digest,
-        );
-      }
-      const stored = new Set(
-        sql
-          .exec<{ pack_digest: string }>(
-            "SELECT pack_digest FROM packs WHERE pack_digest IN (SELECT value FROM json_each(?1))",
-            JSON.stringify([...listed]),
-          )
-          .toArray()
-          .map((row) => row.pack_digest),
-      );
-      return message.packs.filter((pack) => !stored.has(pack.packDigest));
-    });
+    const uploading = new Set(
+      await this.live.hold(
+        this.env.STORE,
+        tenantId,
+        window.request.session_id,
+        message.packs.map((pack) => pack.packDigest),
+      ),
+    );
+    const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
     const signer = signerOf(
       this.env,
       this.env.R2_BUCKET_NAME,
@@ -3492,25 +3396,26 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
     const seconds = Math.floor((expiresAt - now) / 1000);
     if (seconds < 1) return null;
-    const packs = sql
-      .exec<{ pack_digest: string; size_bytes: number; held: number }>(
-        `WITH asked AS (
-          SELECT json_extract(value, '$.digest') AS digest, json_extract(value, '$.packDigest') AS pack_digest,
-            json_extract(value, '$.offset') AS byte_offset, json_extract(value, '$.length') AS byte_length
-          FROM json_each(?1)
-        )
-        SELECT asked.pack_digest, packs.size_bytes, MIN(
-          EXISTS (SELECT 1 FROM chunks WHERE chunks.digest = asked.digest AND chunks.pack_digest = asked.pack_digest
-            AND chunks.byte_offset = asked.byte_offset AND chunks.byte_length = asked.byte_length)
-          AND EXISTS (SELECT 1 FROM session_chunks WHERE session_chunks.session_id = ?2 AND session_chunks.digest = asked.digest)
-        ) AS held
-        FROM asked JOIN packs ON packs.pack_digest = asked.pack_digest
-        GROUP BY asked.pack_digest ORDER BY asked.pack_digest`,
-        JSON.stringify(message.chunks),
-        session.session_id,
-      )
-      .toArray()
-      .filter((row) => row.held === 1);
+    const index = await this.restorableIndex(tenantId, session.session_id);
+    if (index !== null && index.kind !== "Read") {
+      throw new Error(`session ${session.session_id} restores a snapshot that is unreadable: ${index.detail}`);
+    }
+    const asked = new Map<string, boolean>();
+    for (const chunk of message.chunks) {
+      asked.set(
+        chunk.packDigest,
+        (asked.get(chunk.packDigest) ?? true) && index?.kind === "Read" && index.value.holds(chunk),
+      );
+    }
+    const held = [...asked]
+      .filter(([, all]) => all)
+      .map(([packDigest]) => packDigest)
+      .sort();
+    const heads = await Promise.all(held.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
+    const packs = held.flatMap((packDigest, at) => {
+      const head = heads[at];
+      return head === null || head === undefined ? [] : [{ pack_digest: packDigest, size_bytes: head.size }];
+    });
     const signer = signerOf(
       this.env,
       this.env.R2_BUCKET_NAME,
@@ -3538,10 +3443,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
+    const discard: HostReply = { type: "BoxDiscard", sessionId: session.session_id, boxId: turn.box_id };
+    if (turn.state === "Failed" && turn.reason === "RepositoryCloneFailed") return discard;
     if (!IN_FLIGHT.includes(turn.state)) return null;
     const detail = this.cloneFailureDetail(session, message.detail);
     await this.failTurn(tenantId, turn.turn_id, "RepositoryCloneFailed", detail, message.failedAt, "Failed");
-    return { type: "BoxDiscard", sessionId: session.session_id, boxId: session.box_id };
+    return discard;
   }
 
   private async turnFailed(tenantId: string, hostId: string, message: TurnFailed): Promise<HostReply | null> {
@@ -3549,30 +3456,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
     const now = Date.now();
-    if (message.reason === "PoolExhausted" && turn.state === "Offered") {
-      this.ctx.storage.sql.exec("DELETE FROM unreported_box_offers WHERE box_id = ?", turn.box_id);
-      this.ctx.storage.sql.exec(
-        `INSERT INTO turn_refusals (turn_id, host_id, detail, refused_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT (turn_id) DO UPDATE SET host_id = excluded.host_id, detail = excluded.detail, refused_at = excluded.refused_at`,
-        turn.turn_id,
-        hostId,
-        message.detail,
-        now,
-      );
-      return this.deferOffer(session, turn, now);
+    if (message.reason === "HostUpdating" && turn.state === "Offered") {
+      await this.offerElsewhere(tenantId, session, turn);
+      return null;
     }
-    if (message.reason === "HostUpdating" && turn.state === "Offered")
-      return this.offerElsewhere(tenantId, session, turn);
-    const handedOver = message.reason === "HostUpdating" && turn.state === "Running" && turn.line_count === 0;
+    const handedOver =
+      message.reason === "HostUpdating" && turn.state === "Running" && (await this.lineCount(tenantId, turn)) === 0;
     if (handedOver || (message.reason === "NotClaimed" && IN_FLIGHT.includes(turn.state))) {
       this.ctx.storage.sql.exec(
-        "UPDATE turns SET state = 'Offered', updated_at = ? WHERE turn_id = ?",
+        "UPDATE turns SET state = 'Offered', offer_sent = 1, unheld_heartbeats = 0, updated_at = ? WHERE turn_id = ?",
         now,
         turn.turn_id,
       );
       const offeredAgain = { ...turn, state: "Offered" as const };
-      if (handedOver) return this.deferOffer(session, offeredAgain, now);
-      return this.offerMessage(session, offeredAgain);
+      if (!handedOver) return this.composeOffer(tenantId, session, offeredAgain);
+      await this.offerElsewhere(tenantId, session, offeredAgain);
+      return null;
     }
     const detail =
       message.reason === "CredentialRefused" ? this.refusedSetDetail(session, message.detail) : message.detail;
@@ -3592,10 +3491,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { type: "Offered", turn, session };
   }
 
-  private async turnClaim(tenantId: string, hostId: string, message: TurnClaim): Promise<HostReply> {
+  private async turnClaim(hostId: string, message: TurnClaim): Promise<HostReply> {
+    const elsewhere = this.turnRow(message.turnId);
+    if (elsewhere !== null && elsewhere.host_id !== hostId) return { type: "TurnWithdrawn", turnId: elsewhere.turn_id };
     const offered = this.offeredTurn(hostId, message);
     if (offered.type === "Refused") return offered;
     const { turn, session } = offered;
+    if (turn.state === "Running" && turn.box_id === message.boxId) return { type: "TurnClaimed", turnId: turn.turn_id };
     if (turn.state !== "Offered") {
       if (session.state === "Stopped" && session.box_id === turn.box_id) {
         await this.host(hostId).send({ type: "BoxDiscard", sessionId: session.session_id, boxId: turn.box_id });
@@ -3606,11 +3508,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec("UPDATE turns SET state = 'Running', updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
-      sql.exec(
-        "INSERT INTO turn_claims (turn_id, claimed_at) VALUES (?, ?) ON CONFLICT (turn_id) DO UPDATE SET claimed_at = excluded.claimed_at",
-        turn.turn_id,
-        now,
-      );
       sql.exec("UPDATE sessions SET state = 'Running', updated_at = ? WHERE session_id = ?", now, session.session_id);
       this.appendEvent({ event: "TurnStarted", turnId: turn.turn_id, sessionId: session.session_id }, now);
       sql.exec(
@@ -3620,88 +3517,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
       );
     });
-    await this.timers(tenantId, session.session_id, {
-      Total: { turnId: turn.turn_id, at: now + settingsOf(this.env).turnTotalBudgetSeconds * 1000 },
-    });
     return { type: "TurnClaimed", turnId: turn.turn_id };
-  }
-
-  private async endingImageFetch<Reply>(
-    tenantId: string,
-    hostId: string,
-    message: TurnEvent | TurnFailed | TurnClaim,
-    handle: () => Promise<Reply>,
-  ): Promise<Reply> {
-    const now = Date.now();
-    const offered = this.offeredTurn(hostId, message);
-    if (offered.type === "Refused" || message.type === "TurnImageFetching") return handle();
-    const [fetch] = this.ctx.storage.sql
-      .exec<{ started_at: number }>(
-        "DELETE FROM turn_image_fetches WHERE turn_id = ? RETURNING started_at",
-        offered.turn.turn_id,
-      )
-      .toArray();
-    const reply = await handle();
-    if (fetch === undefined) return reply;
-    const { turn, session } = offered;
-    await this.recordTiming(tenantId, "turn.image_fetch.duration", turn, session, fetch.started_at, now);
-    return reply;
-  }
-
-  private async recordTiming(
-    tenantId: string,
-    metric: TimingMetric,
-    turn: TurnRow,
-    session: SessionRow,
-    startedAt: number,
-    endedAt: number,
-  ): Promise<void> {
-    const dimensions = { hostId: turn.host_id, harness: session.harness };
-    await this.env.TENANT_METRICS.getByName(tenantId)
-      .record(
-        timingBatch(metric, { turnId: turn.turn_id, sessionId: session.session_id, dimensions }, startedAt, endedAt),
-      )
-      .catch((error: unknown) => {
-        console.error(
-          `TurnTimingRejected: the metrics store refused ${metric} for turn ${turn.turn_id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
   }
 
   private async turnEvent(tenantId: string, { turn, session }: OfferedTurn, message: TurnEvent): Promise<void> {
     const now = Date.now();
     const sql = this.ctx.storage.sql;
-    if (message.type === "TurnImageFetching") {
-      sql.exec(
-        "INSERT INTO turn_image_fetches (turn_id, started_at) VALUES (?, ?) ON CONFLICT (turn_id) DO UPDATE SET started_at = excluded.started_at",
-        turn.turn_id,
-        now,
-      );
-      return;
-    }
-    if (message.type === "TurnRepositoryReady") {
-      if (turn.state !== "Running" || turn.line_count > 0) return;
-      const settings = settingsOf(this.env);
-      return this.timers(tenantId, session.session_id, {
-        FirstLine: { turnId: turn.turn_id, at: now + settings.turnFirstLineBudgetSeconds * 1000 },
-      });
-    }
+    if (message.type === "TurnImageFetching" || message.type === "TurnRepositoryReady") return;
     if (turn.state !== "Running") return;
-    if (message.type === "TurnLine") {
-      const [claim] =
-        turn.line_count === 0
-          ? sql
-              .exec<{ claimed_at: number }>(
-                "DELETE FROM turn_claims WHERE turn_id = ? RETURNING claimed_at",
-                turn.turn_id,
-              )
-              .toArray()
-          : [];
-      await this.appendLine(tenantId, session, turn, message.lineSeq, message.text, now);
-      if (claim === undefined) return;
-      return this.recordTiming(tenantId, "turn.first_output.duration", turn, session, claim.claimed_at, now);
-    }
-    const held = this.sessionRow(session.session_id)?.last_line_seq ?? 0;
+    if (message.type === "TurnLines")
+      return this.appendLines(tenantId, session, turn, message.firstLineSeq, message.lines, now);
+    const held = await this.lastLineSeq(tenantId, session, turn);
     if (message.lastLineSeq !== held) {
       return this.failTurn(
         tenantId,
@@ -3726,7 +3552,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (this.snapshotAsked(turn.turn_id)) return;
-    await this.chunks.write(tenantId, session.session_id, turn.turn_id, 1);
     if (message.warning !== undefined)
       sql.exec(
         "INSERT INTO turn_warnings (turn_id, warning, created_at) VALUES (?, ?, ?)",
@@ -3735,7 +3560,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         now,
       );
     await this.requestSnapshot(tenantId, session, turn);
-    await this.timers(tenantId, session.session_id, { FirstLine: null, Total: null, HostOffline: null });
   }
 
   private snapshotAsked(turnId: string): boolean {
@@ -3745,211 +3569,106 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return row !== undefined;
   }
 
-  private async snapshotNotStored(tenantId: string, request: SnapshotRequestRow, detail: string): Promise<void> {
+  private async snapshotNotStored(
+    tenantId: string,
+    request: SnapshotRequestRow,
+    detail: string,
+    sessionState: "Idle" | "Stopped" = "Idle",
+  ): Promise<void> {
     await this.failTurn(
       tenantId,
       request.turn_id,
       "SnapshotNotStored",
       `${detail}; send the turn again`,
       iso(Date.now()),
+      sessionState,
     );
   }
 
   private printedResult(turnId: string): boolean {
     const [row] = this.ctx.storage.sql
-      .exec<{ turn_id: string }>("SELECT turn_id FROM turn_results WHERE turn_id = ?", turnId)
+      .exec<{ result_printed: number }>("SELECT result_printed FROM turns WHERE turn_id = ?", turnId)
       .toArray();
-    return row !== undefined;
+    return row?.result_printed === 1;
   }
 
-  private async endTurn(tenantId: string, turn: TurnRow, now: number, record: () => void): Promise<void> {
-    await this.chunks.write(tenantId, turn.session_id, turn.turn_id, 1);
+  private async endTurn(
+    tenantId: string,
+    turn: TurnRow,
+    now: number,
+    record: (ended: EndedTranscript) => void,
+  ): Promise<void> {
+    const ended = await this.endedTranscript(tenantId, turn);
     const next = this.ctx.storage.transactionSync(() => {
-      record();
-      this.ctx.storage.sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", turn.turn_id);
-      this.ctx.storage.sql.exec("DELETE FROM turn_claims WHERE turn_id = ?", turn.turn_id);
-      this.ctx.storage.sql.exec("DELETE FROM turn_capacity_waits WHERE turn_id = ?", turn.turn_id);
+      record(ended);
       releaseConnectorCredentials(this.ctx.storage.sql);
       return this.takeNextWaiting(turn.session_id, now);
     });
+    this.runningTails.delete(turn.turn_id);
     const session = this.sessionRow(turn.session_id);
     const release = session?.state === "Idle" && session.box_retention === "Off";
-    if (release) this.startAfterTurnRelease(session, now);
-    const delay =
-      this.hostPrebuild(turn.session_id) === null && !release ? settingsOf(this.env).snapshotDelaySeconds * 1000 : 0;
-    await this.timers(tenantId, turn.session_id, {
-      FirstLine: null,
-      Total: null,
-      HostOffline: null,
-      Snapshot: { turnId: turn.turn_id, at: now + delay },
-    });
-    if (next !== null) await this.startWaiting(tenantId, turn.session_id, next, now);
+    if (release) this.setSessionState(session.session_id, "Stopping", now);
+    if (next !== null) return this.startWaiting(tenantId, turn.session_id, next);
+    const settled = this.sessionRow(turn.session_id);
+    if (settled?.state !== "Idle" && settled?.state !== "Stopping") return;
+    await this.requestSnapshot(tenantId, settled, turn);
   }
 
-  protected async deadlineReached(tenantId: string, due: SessionDueDeadline): Promise<void> {
-    const { turnId } = due.deadline;
-    const { name } = due;
-    const turn = this.turnRow(turnId);
-    if (turn === null) return;
-    const sessionId = turn.session_id;
-    const session = this.sessionRow(sessionId);
-    if (session === null) return;
-    const settings = settingsOf(this.env);
-    const failedAt = iso(Date.now());
-    if (name === "Snapshot") {
-      if (session.state !== "Idle" && session.state !== "Stopping") return;
-      return this.requestSnapshot(tenantId, session, turn);
-    }
-    const host = await this.hostName(tenantId, session.host_id);
-    if (name === "SnapshotAnswer") {
-      await this.snapshotUnanswered(tenantId, session, turn, host, failedAt);
-      await this.evictionSettled(tenantId, sessionId);
-      return this.prebuildUnstored(
-        tenantId,
-        session,
-        `host ${host} did not answer the snapshot within ${settings.snapshotDeadlineSeconds} seconds`,
-      );
-    }
-    if (name === "Teardown" && session.state === "Idle") return this.evictIdle(tenantId, session, turn);
-    if (name === "Teardown" && session.state === "Stopping") return this.teardown(tenantId, session, turnId);
-    if (name === "TeardownAnswer" && session.state === "Stopping") {
-      this.recordStopFailure(
-        sessionId,
-        "NotAnswered",
-        `host ${host} did not answer the teardown of the session's box within ${settings.snapshotDeadlineSeconds} seconds; check that its supervisor runs, then stop the session again`,
-        failedAt,
-      );
-      return this.returnToIdle(tenantId, sessionId);
-    }
-    if (name === "HostOffline" && turn.state === "Running" && (await this.hostOffline(session.host_id))) {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "HostOffline",
-        `host ${host} went offline during the turn and did not reconnect within ${settings.heartbeatDeadlineSeconds} seconds; check that its supervisor runs, then send the turn again`,
-        failedAt,
-      );
-    }
-    if (name === "FirstLine" && turn.state === "Running" && turn.line_count === 0) {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "NoFirstOutput",
-        `the harness wrote no line for the turn within ${settings.turnFirstLineBudgetSeconds} seconds of its repository being ready; check the box on host ${host}, then send the turn again`,
-        failedAt,
-      );
-    }
-    if (name === "Total" && turn.state === "Offered" && session.state === "Stopped") {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host of your tenant had room for the session's new box within ${settings.turnTotalBudgetSeconds} seconds of the turn's start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
-        failedAt,
-        "Stopped",
-      );
-    }
-    if (name === "Total" && turn.state === "Offered" && this.waitsForCapacity(turnId)) {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host of your tenant had room for the turn within ${settings.turnTotalBudgetSeconds} seconds of its start, so it never ran; wait for running turns to finish, raise boxCapacity in runtime.json or enrol another host, then send the turn again`,
-        failedAt,
-      );
-    }
-    if (name === "Total" && turn.state === "Offered") {
-      const [refusal] = this.ctx.storage.sql
-        .exec<{ host_id: string; detail: string }>(
-          "SELECT host_id, detail FROM turn_refusals WHERE turn_id = ?",
-          turnId,
-        )
-        .toArray();
-      if (refusal !== undefined) {
-        return this.failTurn(
-          tenantId,
-          turnId,
-          "Undelivered",
-          `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${await this.hostName(tenantId, refusal.host_id)} last refused it: ${refusal.detail}`,
-          failedAt,
-        );
-      }
-      const presence = (await this.hostOffline(session.host_id)) ? "is offline" : "is online but never claimed it";
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "Undelivered",
-        `no host took the turn within ${settings.turnTotalBudgetSeconds} seconds of its first offer, so it never ran; host ${host} ${presence}. Check that its supervisor runs and reads Online, then send the turn again`,
-        failedAt,
-      );
-    }
-    if (name === "Total" && turn.state === "Running") {
-      return this.failTurn(
-        tenantId,
-        turnId,
-        "TurnTimedOut",
-        `the turn did not finish within ${settings.turnTotalBudgetSeconds} seconds; send a smaller prompt or raise turnTotalBudgetSeconds`,
-        failedAt,
-      );
-    }
-  }
-
-  private async appendLine(
+  private async appendLines(
     tenantId: string,
     session: SessionRow,
     turn: TurnRow,
-    lineSeq: number,
-    text: string,
+    firstLineSeq: number,
+    texts: string[],
     now: number,
   ): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    const held = this.sessionRow(session.session_id)?.last_line_seq ?? 0;
-    if (lineSeq > held + 1) {
+    const last = await this.lastLineSeq(tenantId, session, turn);
+    const lastLineSeq = firstLineSeq + texts.length - 1;
+    if (lastLineSeq <= last) return;
+    if (firstLineSeq > last + 1) {
       return this.failTurn(
         tenantId,
         turn.turn_id,
         "TranscriptGap",
-        `the turn sent lineSeq ${lineSeq}, but the control plane holds lines up to ${held}; the lines in between were lost on the channel, so send the turn again`,
+        `the turn sent lines from lineSeq ${firstLineSeq}, but the control plane holds lines up to ${last}; the lines in between were lost on the channel, so send the turn again`,
         iso(now),
       );
     }
-    const succeeded = successResultOf(HarnessSchema.parse(session.harness))?.(parseJson(text)) === true;
-    const pending = this.ctx.storage.transactionSync(() => {
-      const [current] = sql
-        .exec<{ last_line_seq: number }>("SELECT last_line_seq FROM sessions WHERE session_id = ?", session.session_id)
-        .toArray();
-      if (current === undefined || lineSeq <= current.last_line_seq) return null;
-      sql.exec(
-        "INSERT INTO transcript_pending (session_id, line_seq, turn_id, text, created_at) VALUES (?, ?, ?, ?, ?)",
-        session.session_id,
-        lineSeq,
-        turn.turn_id,
+    const fresh = texts.slice(last + 1 - firstLineSeq);
+    const lines = fresh.map((text, at) =>
+      toLine(tenantId, {
+        session_id: session.session_id,
+        line_seq: last + 1 + at,
+        turn_id: turn.turn_id,
         text,
-        now,
+        created_at: now,
+      }),
+    );
+    const succeeded = successResultOf(HarnessSchema.parse(session.harness));
+    if (succeeded !== null && fresh.some((text) => succeeded(parseJson(text)) === true))
+      this.ctx.storage.sql.exec(
+        "UPDATE turns SET result_printed = 1 WHERE turn_id = ? AND result_printed = 0",
+        turn.turn_id,
       );
-      sql.exec("UPDATE turns SET line_count = line_count + 1, updated_at = ? WHERE turn_id = ?", now, turn.turn_id);
-      if (succeeded) {
-        sql.exec("INSERT OR IGNORE INTO turn_results (turn_id, created_at) VALUES (?, ?)", turn.turn_id, now);
-      }
-      sql.exec(
-        "UPDATE sessions SET last_line_seq = ?, updated_at = ? WHERE session_id = ?",
-        lineSeq,
-        now,
-        session.session_id,
+    const storageKey = chunkKey(tenantId, session.session_id, turn.turn_id, last + 1, lastLineSeq);
+    const refused = await this.env.STORE.put(storageKey, encodeChunk(lines).body).then(
+      () => null,
+      (error: unknown) => errorOf(error).message,
+    );
+    if (refused !== null) {
+      console.error(`TranscriptNotStored: the transcript store refused lines of turn ${turn.turn_id}: ${refused}`);
+      return this.failTurn(
+        tenantId,
+        turn.turn_id,
+        "TranscriptGap",
+        `TranscriptNotStored: the transcript store refused the lines of this turn, so the control plane dropped them; send the turn again: ${refused}`,
+        iso(now),
       );
-      const [count] = sql
-        .exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM transcript_pending WHERE session_id = ? AND turn_id = ?",
-          session.session_id,
-          turn.turn_id,
-        )
-        .toArray();
-      return count?.count ?? 0;
-    });
-    if (pending === null) return;
-    if (turn.line_count === 0) await this.timers(tenantId, session.session_id, { FirstLine: null });
-    if (pending >= settingsOf(this.env).transcriptChunkLines)
-      await this.chunks.write(tenantId, session.session_id, turn.turn_id, settingsOf(this.env).transcriptChunkLines);
+    }
+    this.rememberTail(
+      turn.turn_id,
+      this.runningTail(tenantId, turn).then((tail) => withChunk(tail, last + 1, lastLineSeq)),
+    );
   }
 
   private async failTurn(
@@ -3962,6 +3681,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const turn = this.turnRow(turnId);
     if (turn === null || !IN_FLIGHT.includes(turn.state)) return;
+    if (this.sessionRow(turn.session_id)?.host_id !== turn.host_id)
+      return this.recordTurnFailure(turn.session_id, turnId, reason, detail, failedAt, turn.line_count, Date.now());
     const unstored = reason === "SnapshotNotStored" || this.snapshotAsked(turnId);
     const failure = unstored
       ? {
@@ -3971,12 +3692,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
       : { reason, detail };
     const now = Date.now();
     const sql = this.ctx.storage.sql;
-    await this.endTurn(tenantId, turn, now, () => {
-      this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, now);
+    await this.endTurn(tenantId, turn, now, (ended) => {
+      this.recordTurnFailure(turn.session_id, turnId, failure.reason, failure.detail, failedAt, ended.lineCount, now);
       const unborn = sessionState === "Idle" && turn.state === "Offered" && this.boxUnborn(turn);
       const entered = unborn ? "Stopped" : sessionState;
-      if (unborn) sql.exec("DELETE FROM unreported_box_offers WHERE box_id = ?", turn.box_id);
-      sql.exec("UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?", entered, now, turn.session_id);
+      sql.exec(
+        "UPDATE sessions SET state = ?, last_line_seq = ?, updated_at = ? WHERE session_id = ?",
+        entered,
+        ended.lastLineSeq,
+        now,
+        turn.session_id,
+      );
       this.sessionEntered(turn.session_id, entered, now);
     });
     const prebuild = this.hostPrebuild(turn.session_id);
@@ -3987,7 +3713,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       detail: `turn ${turnId} failed ${failure.reason}: ${failure.detail}`,
       fix: PREBUILD_FIX,
     } as const;
-    await this.failPrebuild(tenantId, prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
+    await this.failPrebuild(prebuild.prebuild_id, ["Dispatched", "Building"], report, prebuild.log_url, now);
   }
 
   private boxUnborn(turn: TurnRow): boolean {
@@ -4033,9 +3759,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.env.R2_ACCESS_KEY_ID,
       this.env.R2_SECRET_ACCESS_KEY,
     ).presign("PUT", storageKey, deadlineSeconds, new Date(now));
-    await this.timers(tenantId, session.session_id, {
-      SnapshotAnswer: { turnId: turn.turn_id, at: now + deadlineSeconds * 1000 },
-    });
     await this.host(session.host_id).send({
       type: "SnapshotRequest",
       snapshotId,
@@ -4049,68 +3772,98 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  private async snapshotUnanswered(
+  private async snapshotChecked(
     tenantId: string,
-    session: SessionRow,
-    turn: TurnRow,
-    host: string,
-    failedAt: string,
-  ): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    const requests = sql
-      .exec<SnapshotRequestRow>(
-        "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ? AND turn_id = ?",
-        session.session_id,
-        turn.turn_id,
-      )
-      .toArray();
-    const seconds = settingsOf(this.env).snapshotDeadlineSeconds;
-    for (const request of requests) {
-      const detail = `host ${host} did not answer a snapshot within ${seconds} seconds, and its upload URL has expired; check that its supervisor runs`;
-      this.recordSnapshotFailure(request, "NotAnswered", detail, failedAt);
-      await this.snapshotNotStored(tenantId, request, detail);
+    hostId: string,
+    request: SnapshotRequestRow,
+  ): Promise<
+    | { kind: "Rejected"; detail: string }
+    | { kind: "Checked"; packs: ReadonlySet<string>; rootPacks: ReadonlySet<string> }
+  > {
+    const rejected = async (detail: string) => ({
+      kind: "Rejected" as const,
+      detail: `host ${await this.hostName(tenantId, hostId)} ${detail}`,
+    });
+    const root = await this.env.STORE.get(request.storage_key);
+    if (root === null) {
+      return rejected(
+        `answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`,
+      );
     }
-    if (requests.length > 0 && session.state === "Stopping")
-      this.setSessionState(session.session_id, "Idle", Date.now());
+    const parsed = SnapshotRootSchema.safeParse(await root.json());
+    if (!parsed.success) {
+      return rejected(
+        `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+      );
+    }
+    const indexBytes = indexBytesOf(parsed.data.manifest);
+    if (indexBytes > MAX_INDEX_BYTES) {
+      return rejected(
+        `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,
+      );
+    }
+    const named = await this.manifests.packs(this.env.STORE, tenantId, request.storage_key);
+    if (named.kind !== "Read") {
+      return rejected(
+        `stored snapshot ${request.snapshot_id} with a manifest the control plane cannot read, so it could never restore it and the session keeps its previous snapshot: ${named.detail}`,
+      );
+    }
+    if (named.value.size > MAX_PACKS_PER_MANIFEST) {
+      return rejected(
+        `stored snapshot ${request.snapshot_id} with chunks in ${named.value.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the session keeps its previous snapshot`,
+      );
+    }
+    return {
+      kind: "Checked",
+      packs: named.value,
+      rootPacks: new Set(parsed.data.manifest.map((placement) => placement.packDigest)),
+    };
   }
 
-  private dropPlacements(snapshotId: string): void {
-    const sql = this.ctx.storage.sql;
-    sql.exec("DELETE FROM snapshot_packs WHERE snapshot_id = ?", snapshotId);
-    sql.exec("DELETE FROM snapshot_chunks WHERE snapshot_id = ?", snapshotId);
-  }
-
-  private promotePlacements(snapshotId: string, now: number): void {
-    const sql = this.ctx.storage.sql;
-    sql.exec(
-      "INSERT OR IGNORE INTO packs (pack_digest, size_bytes, created_at) SELECT pack_digest, size_bytes, ?1 FROM snapshot_packs WHERE snapshot_id = ?2",
-      now,
-      snapshotId,
+  private async snapshotOutcome(
+    tenantId: string,
+    hostId: string,
+    request: SnapshotRequestRow,
+    uploadedBytes: number,
+  ): Promise<
+    | { kind: "Rejected"; detail: string }
+    | { kind: "Answered" }
+    | { kind: "Stored"; now: number; completes: boolean; next: string | null }
+  > {
+    const storageFailed = (error: unknown): string =>
+      `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`;
+    const checked = await this.snapshotChecked(tenantId, hostId, request).catch(
+      (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
     );
-    sql.exec(
-      "INSERT OR IGNORE INTO chunks (digest, pack_digest, byte_offset, byte_length) SELECT digest, pack_digest, byte_offset, byte_length FROM snapshot_chunks WHERE snapshot_id = ?",
-      snapshotId,
+    if (checked.kind === "Rejected") return checked;
+    const turn = this.turnRow(request.turn_id);
+    const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
+    const reused = new Set([...checked.packs].filter((packDigest) => !checked.rootPacks.has(packDigest)));
+    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs, reused).then(
+      (gone) => ({ gone }),
+      (error: unknown) => ({ failed: storageFailed(error) }),
     );
-    this.dropPlacements(snapshotId);
-  }
-
-  private async lateSnapshotDone(hostId: string, snapshotId: string): Promise<void> {
-    const [failure] = this.ctx.storage.sql
-      .exec<{ session_id: string; storage_key: string }>(
-        "SELECT session_id, storage_key FROM snapshot_failures WHERE snapshot_id = ? AND reason = 'NotAnswered'",
-        snapshotId,
-      )
+    if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
+    if (claimed.gone !== null) {
+      return {
+        kind: "Rejected",
+        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which neither a stored snapshot nor an upload of the session holds any longer, so the session keeps its previous snapshot`,
+      };
+    }
+    const [stillPending] = this.ctx.storage.sql
+      .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
       .toArray();
-    if (failure === undefined || this.sessionRow(failure.session_id)?.host_id !== hostId) return;
-    if ((await this.env.STORE.head(failure.storage_key)) === null) return;
-    this.ctx.storage.transactionSync(() => this.promotePlacements(snapshotId, Date.now()));
+    if (stillPending === undefined) {
+      await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
+      return { kind: "Answered" };
+    }
+    return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes, ended) };
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
-      if (reason !== "NotAnswered") this.dropPlacements(request.snapshot_id);
       sql.exec(
         "INSERT INTO snapshot_failures (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, reason, detail, failed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         request.snapshot_id,
@@ -4139,10 +3892,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         message.snapshotId,
       )
       .toArray();
-    if (request === undefined) {
-      if (message.type === "SnapshotDone") await this.lateSnapshotDone(hostId, message.snapshotId);
-      return null;
-    }
+    if (request === undefined) return null;
     const session = this.sessionRow(request.session_id);
     if (session?.host_id !== hostId) {
       return refused(
@@ -4150,71 +3900,32 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (message.type === "SnapshotFailed") {
-      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
-      await this.prebuildUnstored(tenantId, session, detail);
+      await this.prebuildUnstored(session, detail);
       await this.snapshotNotStored(tenantId, request, detail);
       if (session.state === "Stopping" && message.reason === "BoxNotFound") {
-        await this.timers(tenantId, session.session_id, { Teardown: { turnId: request.turn_id, at: Date.now() } });
+        if (this.sessionRow(session.session_id)?.state === "Stopping") await this.teardown(session);
       }
       if (session.state === "Stopping" && message.reason !== "BoxNotFound")
         await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
-    if ((await this.env.STORE.head(request.storage_key)) === null) {
-      await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
-      const detail = `host ${await this.hostName(tenantId, hostId)} answered SnapshotDone, but object storage holds no root under ${request.storage_key}; check the host's uploads to object storage`;
-      this.recordSnapshotFailure(request, "UploadRejected", detail, iso(Date.now()));
-      await this.prebuildUnstored(tenantId, session, detail);
-      await this.snapshotNotStored(tenantId, request, detail);
+    const outcome = await this.snapshotOutcome(tenantId, hostId, request, message.uploadedBytes);
+    if (outcome.kind === "Answered") return null;
+    if (outcome.kind === "Rejected") {
+      this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
+      await this.prebuildUnstored(session, outcome.detail);
+      await this.snapshotNotStored(tenantId, request, outcome.detail);
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
-    const root = await this.env.STORE.get(request.storage_key);
-    if (root === null) throw new Error(`snapshot root ${request.storage_key} was stored a moment ago and is gone`);
-    const parsed = SnapshotRootSchema.safeParse(await root.json());
-    if (!parsed.success) {
-      throw new Error(
-        `snapshot root ${request.storage_key} is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
-      );
-    }
-    const now = Date.now();
-    const completes = this.turnRow(request.turn_id)?.state === "Running";
-    const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
-    const next = this.ctx.storage.transactionSync(() => {
-      sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
-      sql.exec("DELETE FROM box_eviction_blocks WHERE session_id = ?", request.session_id);
-      this.promotePlacements(request.snapshot_id, now);
-      sql.exec(
-        "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        request.snapshot_id,
-        request.session_id,
-        request.box_id,
-        request.turn_id,
-        request.snapshot_seq,
-        request.storage_key,
-        message.uploadedBytes,
-        now,
-        now,
-      );
-      if (!completes) return null;
-      sql.exec("UPDATE turns SET state = 'Completed', updated_at = ? WHERE turn_id = ?", now, request.turn_id);
-      sql.exec("UPDATE sessions SET state = ?, updated_at = ? WHERE session_id = ?", state, now, request.session_id);
-      this.appendEvent({ event: "TurnCompleted", turnId: request.turn_id, sessionId: request.session_id }, now);
-      this.sessionEntered(request.session_id, state, now);
-      sql.exec("DELETE FROM turn_image_fetches WHERE turn_id = ?", request.turn_id);
-      sql.exec("DELETE FROM turn_claims WHERE turn_id = ?", request.turn_id);
-      releaseConnectorCredentials(sql);
-      return this.takeNextWaiting(request.session_id, now);
-    });
-    await this.timers(tenantId, request.session_id, { SnapshotAnswer: null });
+    const { now, completes, next } = outcome;
     await this.prebuildStored(tenantId, request, message.uploadedBytes, now);
     const completed = this.sessionRow(session.session_id);
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
-      this.startAfterTurnRelease(completed, now);
-    if (next !== null) await this.startWaiting(tenantId, request.session_id, next, now);
-    await this.armIdleEviction(tenantId, request.session_id);
+      this.setSessionState(completed.session_id, "Stopping", now);
+    if (next !== null) await this.startWaiting(tenantId, request.session_id, next);
     if (this.sessionRow(session.session_id)?.state === "Stopping") {
       const latest = this.latestTurn(session.session_id, null);
       if (latest === null)
@@ -4223,5 +3934,51 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     await this.collectSnapshots(tenantId, request, now);
     return null;
+  }
+
+  private storeSnapshot(
+    request: SnapshotRequestRow,
+    uploadedBytes: number,
+    ended: EndedTranscript | null,
+  ): { now: number; completes: boolean; next: string | null } {
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+    const completes = this.turnRow(request.turn_id)?.state === "Running";
+    const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
+    const next = this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
+      sql.exec(
+        "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        request.snapshot_id,
+        request.session_id,
+        request.box_id,
+        request.turn_id,
+        request.snapshot_seq,
+        request.storage_key,
+        uploadedBytes,
+        now,
+        now,
+      );
+      if (!completes || ended === null) return null;
+      sql.exec(
+        "UPDATE turns SET state = 'Completed', line_count = ?, updated_at = ? WHERE turn_id = ?",
+        ended.lineCount,
+        now,
+        request.turn_id,
+      );
+      sql.exec(
+        "UPDATE sessions SET state = ?, last_line_seq = ?, updated_at = ? WHERE session_id = ?",
+        state,
+        ended.lastLineSeq,
+        now,
+        request.session_id,
+      );
+      this.appendEvent({ event: "TurnCompleted", turnId: request.turn_id, sessionId: request.session_id }, now);
+      this.sessionEntered(request.session_id, state, now);
+      releaseConnectorCredentials(sql);
+      return this.takeNextWaiting(request.session_id, now);
+    });
+    if (completes) this.runningTails.delete(request.turn_id);
+    return { now, completes, next };
   }
 }

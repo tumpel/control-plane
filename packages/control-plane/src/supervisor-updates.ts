@@ -115,16 +115,6 @@ export const supervisorUpdatesByHost = (sql: SqlStorage, hostIds: string[]): Rec
   return byHost;
 };
 
-export const restartDeadline = (sql: SqlStorage, hostId: string, deadlineMs: number): number | null => {
-  const [step] = sql
-    .exec<{ at: string }>(
-      "SELECT at FROM supervisor_update_latest_steps WHERE host_id = ? AND phase = 'Restarting'",
-      hostId,
-    )
-    .toArray();
-  return step === undefined ? null : Date.parse(step.at) + deadlineMs;
-};
-
 export const clearSupersededFailure = (sql: SqlStorage, hostId: string): void => {
   sql.exec(
     `DELETE FROM supervisor_update_latest_failures WHERE host_id = ?1 AND EXISTS (

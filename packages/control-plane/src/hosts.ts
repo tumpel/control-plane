@@ -8,15 +8,16 @@ import {
 import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
-import { type HostRecord, HostRecordSchema } from "./host-record";
+import { type HostEntry, HostEntrySchema, type HostRecord } from "./host-record";
 import type { Problem, ProblemStatus } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { presenceGraceMs, settingsOf } from "./settings";
 import { NO_SUPERVISOR_UPDATES } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
 
 export type Host = z.infer<typeof HostSchema>;
-export type { HostRecord };
+export type { HostEntry, HostRecord };
 export type MintedEnrolmentToken = z.infer<typeof MintedEnrolmentTokenSchema>;
 export type EnrolmentToken = z.infer<typeof EnrolmentTokenSchema>;
 export type HostEnrol = z.infer<typeof HostEnrolSchema>;
@@ -44,12 +45,13 @@ const HOST_COLUMNS =
 
 const HOST_SELECT = `${HOST_COLUMNS}, labels`;
 
-const toHost = (row: HostRow): HostRecord =>
-  HostRecordSchema.parse({
+const toHost = (row: HostRow): HostEntry =>
+  HostEntrySchema.parse({
     hostId: row.host_id,
     tenantId: row.tenant_id,
     name: row.name,
     state: row.state,
+    health: "Healthy",
     architecture: row.architecture,
     cpuCount: row.cpu_count,
     memoryBytes: row.memory_bytes,
@@ -191,7 +193,7 @@ export const revokeEnrolmentToken = async (
 
 const refuse = (status: ProblemStatus, problem: Problem): Refused => ({ ok: false, status, problem });
 
-export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise<Outcome<Host>> => {
+export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise<Outcome<HostRecord>> => {
   const key = decodeBase64(body.publicKey);
   if (key === null || key.byteLength !== 32) {
     return refuse(400, {
@@ -253,20 +255,36 @@ export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise
     ).bind(now, tokenHash),
   ]);
   if (!inserted?.meta.changes) return spent;
-  const host = await hostOf(env.DB, token.tenant_id, hostId);
-  if (host === null) throw new Error(`host ${hostId} was enrolled and then not found`);
-  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS } };
+  const entry = await hostOf(env.DB, token.tenant_id, hostId);
+  if (entry === null) throw new Error(`host ${hostId} was enrolled and then not found`);
+  const [host] = await hostRecords(env, token.tenant_id, [entry]);
+  if (host === undefined) throw new Error(`host ${hostId} was enrolled and then lost its record`);
+  return { ok: true, value: host };
 };
 
-export const listHosts = async (db: D1Database, tenantId: string): Promise<HostRecord[]> => {
-  const { results } = await db
-    .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
+export type OfferSent = "Sent" | "RateLimited" | "Offline" | "Degraded";
+
+export const listHosts = async (env: Pick<Env, "DB">, tenantId: string): Promise<HostEntry[]> => {
+  const { results } = await env.DB.prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? ORDER BY created_at`)
     .bind(tenantId)
     .all<HostRow>();
   return results.map(toHost);
 };
 
-export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostRecord | null> => {
+type HostPresence =
+  | { state: HostEntry["state"]; presence: "Offline" }
+  | { state: "Online" | "Offline"; presence: "Online" | "Degraded"; heardAt: string };
+
+const presenceOf = (host: HostEntry, usage: { updatedAt: number } | undefined, heardSince: number): HostPresence => {
+  if (host.state === "Revoked") return { state: "Revoked", presence: "Offline" };
+  if (usage === undefined) return { state: host.state === "Enrolled" ? "Enrolled" : "Offline", presence: "Offline" };
+  const heardAt = new Date(usage.updatedAt).toISOString();
+  return usage.updatedAt < heardSince
+    ? { state: "Offline", presence: "Degraded", heardAt }
+    : { state: "Online", presence: "Online", heardAt };
+};
+
+export const hostOf = async (db: D1Database, tenantId: string, hostId: string): Promise<HostEntry | null> => {
   const row = await db
     .prepare(`SELECT ${HOST_SELECT} FROM hosts WHERE tenant_id = ? AND host_id = ?`)
     .bind(tenantId, hostId)
@@ -274,17 +292,56 @@ export const hostOf = async (db: D1Database, tenantId: string, hostId: string): 
   return row === null ? null : toHost(row);
 };
 
-export const hostReads = async (env: Env, tenantId: string, hosts: HostRecord[]): Promise<Host[]> => {
+export const withReportedHealth = (
+  hosts: HostEntry[],
+  reports: { hostId: string; reportedHealth: HostRecord["reportedHealth"]; updatedAt: number }[],
+  heardSince: number,
+): HostRecord[] => {
+  const byHost = new Map(reports.map((report) => [report.hostId, report]));
+  return hosts.map((host) => {
+    const report = byHost.get(host.hostId);
+    return {
+      ...host,
+      state: presenceOf(host, report, heardSince).state,
+      reportedHealth: report?.reportedHealth ?? "Healthy",
+    };
+  });
+};
+
+export const hostRecords = async (
+  env: Pick<Env, "TENANT" | "TUMPEL_SETTINGS">,
+  tenantId: string,
+  hosts: HostEntry[],
+): Promise<HostRecord[]> => {
+  const { usage } = await tenantApi(env.TENANT, tenantId).call("listHostUsage", { tenantId });
+  return withReportedHealth(hosts, usage, Date.now() - presenceGraceMs(settingsOf(env)));
+};
+
+export const listHostRecords = async (
+  env: Pick<Env, "DB" | "TENANT" | "TUMPEL_SETTINGS">,
+  tenantId: string,
+): Promise<HostRecord[]> => hostRecords(env, tenantId, await listHosts(env, tenantId));
+
+export const hostReads = async (env: Env, tenantId: string, hosts: HostEntry[]): Promise<Host[]> => {
   const hostIds = hosts.map((host) => host.hostId);
-  const [{ byHost: updates }, protocols] = await Promise.all([
-    tenantApi(env.TENANT, tenantId).call("supervisorUpdates", { hostIds }),
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const [{ byHost: updates }, { usage }, protocols] = await Promise.all([
+    tenant.call("supervisorUpdates", { hostIds }),
+    tenant.call("listHostUsage", { tenantId }),
     protocolsOf(env.DB, hostIds),
   ]);
-  return hosts.map((host) => ({
-    ...host,
-    ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES),
-    ...(protocols[host.hostId] ?? NO_PROTOCOLS),
-  }));
+  const reports = new Map(usage.map((report) => [report.hostId, report]));
+  const heardSince = Date.now() - presenceGraceMs(settingsOf(env));
+  return hosts.map((host) => {
+    const report = reports.get(host.hostId);
+    return {
+      ...host,
+      reportedHealth: report?.reportedHealth ?? "Healthy",
+      ...(updates[host.hostId] ?? NO_SUPERVISOR_UPDATES),
+      ...(protocols[host.hostId] ?? NO_PROTOCOLS),
+      ...presenceOf(host, report, heardSince),
+    };
+  });
 };
 
 export const hostNotFound = (hostId: string): Refused =>
@@ -296,14 +353,26 @@ export const hostNotFound = (hostId: string): Refused =>
   });
 
 export const revokeHost = async (env: Env, tenantId: string, hostId: string, now: number): Promise<Outcome<Host>> => {
-  const host = await hostOf(env.DB, tenantId, hostId);
-  if (host === null) return hostNotFound(hostId);
+  const entry = await hostOf(env.DB, tenantId, hostId);
+  if (entry === null) return hostNotFound(hostId);
+  const [host] = await hostRecords(env, tenantId, [entry]);
+  if (host === undefined) throw new Error(`host ${hostId} was read and then lost its record`);
   await env.DB.prepare("UPDATE hosts SET state = 'Revoked', updated_at = ? WHERE host_id = ? AND tenant_id = ?")
     .bind(now, hostId, tenantId)
     .run();
   await tenantApi(env.TENANT, tenantId).call("forgetHostUsage", { hostId });
   await env.HOST.get(env.HOST.idFromName(hostId)).revoke("the tenant revoked this host");
-  return { ok: true, value: { ...host, ...NO_SUPERVISOR_UPDATES, ...NO_PROTOCOLS, state: "Revoked", updatedAt: now } };
+  return {
+    ok: true,
+    value: {
+      ...host,
+      ...NO_SUPERVISOR_UPDATES,
+      ...NO_PROTOCOLS,
+      state: "Revoked",
+      updatedAt: now,
+      presence: "Offline",
+    },
+  };
 };
 
 const hostRevoked = (hostId: string): Refused =>
@@ -320,7 +389,7 @@ export const setHostLabels = async (
   hostId: string,
   labels: string[],
   now: number,
-): Promise<Outcome<HostRecord>> => {
+): Promise<Outcome<HostEntry>> => {
   const host = await hostOf(db, tenantId, hostId);
   if (host === null) return hostNotFound(hostId);
   if (host.state === "Revoked") return hostRevoked(hostId);
@@ -337,7 +406,7 @@ export const patchHostLabels = async (
   hostId: string,
   patch: z.infer<typeof HostLabelsPatchSchema>,
   now: number,
-): Promise<Outcome<HostRecord>> => {
+): Promise<Outcome<HostEntry>> => {
   const row = await db
     .prepare(
       `UPDATE hosts SET labels = (

@@ -1,9 +1,16 @@
-import { MetricPathSchema, MetricSeriesQuerySchema, MetricTurnQuerySchema, MetricWindowSchema } from "@tumpel/schemas";
+import {
+  MetricPathSchema,
+  MetricSeriesQuerySchema,
+  MetricTurnQuerySchema,
+  MetricWindowSchema,
+  TenantMetricCatalogSchema,
+} from "@tumpel/schemas";
 import type { z } from "zod";
 import type { Outcome } from "./hosts";
 import { issues, json, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
+import { tenantApi } from "./tenant-api.ts";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;
 
@@ -72,7 +79,10 @@ export const handleMetrics = async (
   if (metricPath === null) {
     const query = parsed(url, MetricWindowSchema, "metrics.catalog");
     if (!query.ok) return answer(query);
-    return answer(await store.catalog(query.value));
+    const catalog = await store.catalog(query.value);
+    if (!catalog.ok) return answer(catalog);
+    const { usage } = await tenantApi(env.TENANT, caller.tenantId).call("readUsage", { tenantId: caller.tenantId });
+    return json(TenantMetricCatalogSchema.parse({ ...catalog.value, usage }));
   }
   const metric = metricOf(metricPath[1] ?? "");
   if (!metric.ok) return answer(metric);

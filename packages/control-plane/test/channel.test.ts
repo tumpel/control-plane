@@ -3,11 +3,10 @@ import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { test } from "node:test";
 import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import * as control from "../src/channel/control.ts";
-import { refusedOrResent } from "../src/channel/failure.ts";
+import { refusal, resendable } from "../src/channel/failure.ts";
 import {
   type ControlEnvelope,
   emptyLedger,
-  HELD_SESSIONS_VERSION,
   type HostEnvelope,
   type HostMessage,
   helloBytes,
@@ -17,8 +16,17 @@ import {
   type StoredControlMessage,
 } from "../src/channel/protocol.ts";
 
+const NO_TELEMETRY = { instruments: [], samples: [], turns: [] };
+
 const HOST_ID = "host-1";
-const USAGE = { boxesWarm: 1, loadAverage: 0.5, memoryAvailableMib: 4096 };
+const USAGE = {
+  loadAverage: 0.5,
+  memoryAvailableMib: 4096,
+  memoryBudgetMib: 4096,
+  memoryHeldMib: 0,
+  diskBudgetMib: 100000,
+  diskHeldMib: 0,
+};
 
 const keyPair = (): { publicKey: string; privateKey: KeyObject } => {
   const pair = generateKeyPairSync("ed25519");
@@ -64,6 +72,9 @@ const turnOffer: StoredControlMessage = {
   harnessVersion: "1.0.0",
   model: "claude-test",
   prompt: "hello",
+  boxRetention: "Auto",
+  turnSeconds: 3600,
+  idleSeconds: 900,
 };
 
 const snapshotDone = (snapshotId: string): HostMessage => ({ type: "SnapshotDone", snapshotId, uploadedBytes: 10 });
@@ -131,15 +142,21 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           message: { type: "ClaudeSetupBoxDiscard", claudeSetupId: stored.claudeSetupId, boxId: stored.boxId },
         }),
         messageVersions,
+        admitFrame: () => null,
         now: () => new Date("2026-11-14T10:00:00+00:00"),
       } satisfies control.ControlContext,
       deliver: async (envelope: HostEnvelope) => {
         const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
         link.connection = received.connection;
-        if (received.event.kind === "Message") control.acknowledge(link.context, received.event.frame);
+        if (received.event.kind === "Message" && link.connection.phase === "Open")
+          link.connection = control.acknowledge(link.connection, received.event.frame.seq, link.context);
         if (received.event.kind !== "None") link.events.push(received.event);
       },
-      hello: async (privateKey: KeyObject = keys.privateKey, protocolVersion: number = ChannelProtocol.Version) => {
+      hello: async (
+        privateKey: KeyObject = keys.privateKey,
+        protocolVersion: number = ChannelProtocol.Oldest,
+        resendFrom = 1,
+      ) => {
         const [challenge] = sent;
         assert.equal(challenge?.type, "Challenge");
         await link.deliver({
@@ -150,7 +167,9 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
           signature: sign(null, helloBytes(challenge.nonce, HOST_ID), privateKey).toString("base64"),
           boxCapacity: 8,
           usage: USAGE,
-        });
+          heldTurnIds: [],
+          resendFrom,
+        } as HostEnvelope);
       },
       oldHello: async () => {
         const [challenge] = sent;
@@ -169,12 +188,14 @@ const setup = (revoked = false, newer: Partial<control.MessageVersions> = {}) =>
     link.connection = control.challenge(link.context.port);
     return link;
   };
-  return { connect, ledger, peer, turn };
+  return { connect, ledger, peer, turn, keys };
 };
 
 const closure = (link: { closed: Closed | null }): Closed | null => link.closed;
 
 const frames = (sent: ControlEnvelope[]) => sent.filter((envelope) => envelope.type === "Frame");
+
+const acks = (sent: ControlEnvelope[]) => sent.flatMap((envelope) => (envelope.type === "Ack" ? [envelope.seq] : []));
 
 test("the handshake verifies the signed nonce, welcomes the host and carries frames both ways", async () => {
   const channel = setup();
@@ -187,9 +208,11 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
       boxCapacity: 8,
       usage: USAGE,
       supervisorVersion: "0.1.0",
-      protocolVersion: ChannelProtocol.Version,
+      protocolVersion: ChannelProtocol.Oldest,
+      channelProtocol: ChannelProtocol.Oldest,
       channelProtocolOldest: undefined,
       guestProtocol: undefined,
+      heldTurnIds: [],
     },
   ]);
   assert.deepEqual(
@@ -201,41 +224,23 @@ test("the handshake verifies the signed nonce, welcomes the host and carries fra
   assert.deepEqual(frames(link.sent), [{ type: "Frame", seq: 1, ack: 0, message: snapshotRequest("snap-1") }]);
   await link.deliver(frame(1, 1, snapshotDone("snap-1")));
   assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 1, snapshotDone("snap-1")) });
-  assert.deepEqual(channel.ledger.current, { received: 1, sent: 1, unacked: [] });
+  assert.deepEqual(acks(link.sent), [1]);
   assert.equal(link.closed, null);
 });
 
-test("a Hello on ChannelProtocol.Oldest is welcomed on that version", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, ChannelProtocol.Oldest);
-  assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Oldest });
-  assert.deepEqual(link.events.at(-1), {
-    kind: "Welcomed",
-    boxCapacity: 8,
-    usage: USAGE,
-    supervisorVersion: "0.1.0",
-    protocolVersion: ChannelProtocol.Oldest,
-    channelProtocolOldest: undefined,
-    guestProtocol: undefined,
+for (const version of [ChannelProtocol.Oldest - 2, ChannelProtocol.Oldest - 1]) {
+  test(`a Hello on ${version}, below the stored frames of 37, is refused and the supervisor told to update`, async () => {
+    const link = setup().connect();
+    await link.hello(undefined, version);
+    assert.deepEqual(link.closed, {
+      code: CloseCode.UnsupportedVersion,
+      reason: `protocol version ${version} is not supported; this control plane speaks ${ChannelProtocol.Oldest} to ${ChannelProtocol.Version}, update the supervisor`,
+    });
+    assert.equal(link.connection.phase, "Closed");
   });
-});
+}
 
-test("a Hello on ChannelProtocol.Version is welcomed on that version", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, ChannelProtocol.Version);
-  assert.equal(link.connection.phase, "Open");
-  assert.deepEqual(link.sent.at(-1), { type: "Welcome", hostId: HOST_ID, protocolVersion: ChannelProtocol.Version });
-});
-
-test("a Hello one below ChannelProtocol.Oldest is refused as an unsupported version", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, ChannelProtocol.Oldest - 1);
-  assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
-  assert.equal(link.connection.phase, "Closed");
-});
-
-test("a Hello one above ChannelProtocol.Version is refused as an unsupported version", async () => {
+test("a Hello above ChannelProtocol.Version that names no older version it speaks is refused as an unsupported version", async () => {
   const link = setup().connect();
   await link.hello(undefined, ChannelProtocol.Version + 1);
   assert.equal(link.closed?.code, CloseCode.UnsupportedVersion);
@@ -322,14 +327,15 @@ test("a frame whose handling fails retryably stays unrecorded for the host to re
   const handle = async (envelope: HostEnvelope, error: unknown) => {
     const received = await control.receive(link.connection, JSON.stringify(envelope), link.context);
     link.connection = received.connection;
-    if (received.event.kind !== "Message") return received.event.kind;
-    const reply = refusedOrResent(received.event.frame.message.type, error);
-    control.acknowledge(link.context, received.event.frame);
+    if (received.event.kind !== "Message" || link.connection.phase !== "Open") return received.event.kind;
+    if (resendable(error)) return "Unstored";
+    const reply = refusal(received.event.frame.message.type, error);
     control.refuseFrame(link.context.port, received.event.frame.seq, reply.reason);
+    link.connection = control.acknowledge(link.connection, received.event.frame.seq, link.context);
     return reply.reason;
   };
   const retryable = Object.assign(new Error("Network connection lost."), { retryable: true });
-  await assert.rejects(handle(frame(1, 0, snapshotDone("snap-1")), retryable), /Network connection lost/);
+  assert.equal(await handle(frame(1, 0, snapshotDone("snap-1")), retryable), "Unstored");
   const deterministic = new Error("string or blob too big: SQLITE_TOOBIG");
   assert.match(
     String(await handle(frame(1, 0, snapshotDone("snap-1")), deterministic)),
@@ -345,10 +351,10 @@ test("a frame over the host frame bound is refused before it is read, and the ne
   const link = setup().connect();
   await link.hello();
   const line: HostMessage = {
-    type: "TurnLine",
+    type: "TurnLines",
     turnId: "turn-1",
-    lineSeq: 1,
-    text: "x".repeat(control.MAX_HOST_FRAME_BYTES),
+    firstLineSeq: 1,
+    lines: ["x".repeat(control.MAX_HOST_FRAME_BYTES)],
   };
   const received = await control.receive(link.connection, JSON.stringify(frame(1, 0, line)), link.context);
   link.connection = received.connection;
@@ -375,46 +381,7 @@ test("a frame and message carrying fields this control plane does not know are r
   await link.deliver(extended);
   assert.equal(link.closed, null);
   assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
-  assert.equal(channel.ledger.current.received, 1);
-});
-
-const telemetryBatch: HostMessage = {
-  type: "TelemetryBatch",
-  instruments: [{ metric: "host.load.1m", unit: "1", kind: "Sample", description: "one-minute load average" }],
-  samples: [{ metric: "host.load.1m", at: "2026-11-17T10:00:00+01:00", value: 0.5, dimensions: {} }],
-  turns: [],
-};
-
-test("a TelemetryBatch on a connection below its version is refused and acked, and the next frame follows it", async () => {
-  const channel = setup();
-  const link = channel.connect();
-  await link.hello(undefined, control.TELEMETRY_BATCH_VERSION - 1);
-  await link.deliver(frame(1, 0, telemetryBatch));
-  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
-  assert.equal(link.closed, null);
-  assert.deepEqual(
-    link.sent.filter((envelope) => envelope.type === "FrameRefused"),
-    [
-      {
-        type: "FrameRefused",
-        seq: 1,
-        reason: `frame 1 carries TelemetryBatch, which needs protocol version ${control.TELEMETRY_BATCH_VERSION}; this connection speaks ${control.TELEMETRY_BATCH_VERSION - 1}, update the supervisor`,
-      },
-    ],
-  );
-  assert.deepEqual(
-    link.events.slice(1).map((event) => event.kind),
-    ["FrameRefused", "Message"],
-  );
-  assert.equal(channel.ledger.current.received, 2);
-});
-
-test("a TelemetryBatch on a connection that speaks its version is accepted as a message", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, control.TELEMETRY_BATCH_VERSION);
-  await link.deliver(frame(1, 0, telemetryBatch));
-  assert.equal(link.closed, null);
-  assert.deepEqual(link.events.at(-1), { kind: "Message", frame: frame(1, 0, telemetryBatch) });
+  assert.deepEqual(acks(link.sent), [1]);
 });
 
 test("after a reconnect the control plane resends unacked frames, each turn offer with a freshly minted grant", async () => {
@@ -432,7 +399,7 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   assert.equal(JSON.stringify(channel.ledger.current).includes("secret-"), false);
 
   const second = channel.connect();
-  await second.hello();
+  await second.hello(undefined, ChannelProtocol.Oldest, 2);
   const resent = frames(second.sent);
   assert.deepEqual(
     resent.map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.ack, envelope.message.type]),
@@ -448,7 +415,6 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
   assert.equal(again.message.credential.credentialHandoverId, "grant-2");
   assert.deepEqual({ ...again.message, credential: offered.message.credential }, offered.message);
 
-  await second.deliver(frame(1, 0, snapshotDone("snap-1")));
   await second.deliver(frame(2, 2, snapshotDone("snap-2")));
   assert.deepEqual(
     [...first.events, ...second.events].filter((event) => event.kind === "Message"),
@@ -457,7 +423,6 @@ test("after a reconnect the control plane resends unacked frames, each turn offe
       { kind: "Message", frame: frame(2, 2, snapshotDone("snap-2")) },
     ],
   );
-  assert.deepEqual(channel.ledger.current, { received: 2, sent: 2, unacked: [] });
   assert.equal(second.closed, null);
 });
 
@@ -471,7 +436,7 @@ test("a frame whose handling failed stays unacknowledged, so its resend is handl
     link.context,
   );
   assert.deepEqual(failed.event, { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
-  assert.equal(channel.ledger.current.received, 0);
+  assert.deepEqual(acks(link.sent), []);
 
   const resent = await control.receive(
     failed.connection,
@@ -479,33 +444,47 @@ test("a frame whose handling failed stays unacknowledged, so its resend is handl
     link.context,
   );
   assert.deepEqual(resent.event, { kind: "Message", frame: frame(1, 0, snapshotDone("snap-1")) });
-  assert.ok(resent.event.kind === "Message");
-  control.acknowledge(link.context, resent.event.frame);
-  assert.equal(channel.ledger.current.received, 1);
+  assert.ok(resent.event.kind === "Message" && resent.connection.phase === "Open");
+  control.acknowledge(resent.connection, resent.event.frame.seq, link.context);
+  assert.deepEqual(acks(link.sent), [1]);
   assert.equal(link.closed, null);
 });
 
-test("two sends never take the same seq, and a frame sent while an offer is prepared goes out ahead of it in seq order", async () => {
+test("a frame is stored before its offer is prepared, and a frame sent while an offer is prepared goes out after it in seq order", async () => {
   const channel = setup();
   const link = channel.connect();
   await link.hello();
   let release = (): void => undefined;
+  let started = (): void => undefined;
+  const preparing = new Promise<void>((resolve) => {
+    started = resolve;
+  });
   const prepared = link.context.prepareOffer;
   link.context.prepareOffer = async () => {
     await new Promise<void>((resolve) => {
       release = resolve;
+      started();
     });
     return prepared();
   };
   const offering = control.send(link.connection, turnOffer, link.context);
-  await control.send(link.connection, { type: "TurnClaimed", turnId: "turn-0" }, link.context);
+  await preparing;
+  const claimed = control.send(link.connection, { type: "TurnClaimed", turnId: "turn-0" }, link.context);
+  assert.deepEqual(
+    channel.ledger.current.unacked.map((unacked) => [unacked.seq, unacked.message.type]),
+    [
+      [1, "TurnOffer"],
+      [2, "TurnClaimed"],
+    ],
+  );
+  assert.deepEqual(frames(link.sent), []);
   release();
-  await offering;
+  await Promise.all([offering, claimed]);
   assert.deepEqual(
     frames(link.sent).map((envelope) => envelope.type === "Frame" && [envelope.seq, envelope.message.type]),
     [
-      [1, "TurnClaimed"],
-      [2, "TurnOffer"],
+      [1, "TurnOffer"],
+      [2, "TurnClaimed"],
     ],
   );
 });
@@ -520,7 +499,7 @@ test("a Hello below an unacked frame's version is closed as an unsupported versi
   await link.hello();
   assert.deepEqual(link.closed, {
     code: CloseCode.UnsupportedVersion,
-    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${ChannelProtocol.Version}, update the supervisor`,
+    reason: `frame 2 carries TurnWithdrawn, which needs protocol version ${ChannelProtocol.Version + 1}; this connection speaks ${ChannelProtocol.Oldest}, update the supervisor`,
   });
   assert.equal(link.connection.phase, "Closed");
   assert.deepEqual(frames(link.sent), []);
@@ -581,34 +560,113 @@ test("revoke closes a live connection, and a revoked host's next Hello is closed
   assert.deepEqual(channel.ledger.current, before);
 });
 
-test("only the first heartbeat after Welcome reports the held sessions, once per connection", async () => {
+test("every heartbeat reports what the host holds", async () => {
   const channel = setup();
-  const first = channel.connect();
-  await first.hello();
-  const beat = (heldSessionIds: string[]): HostEnvelope => ({
-    type: "Heartbeat",
-    sentAt: "2026-11-18T10:00:00+01:00",
+  const current = channel.connect();
+  await current.hello();
+  const beat = (heldTurnIds: string[]) =>
+    ({
+      type: "Heartbeat",
+      sentAt: "2026-11-18T10:00:00+01:00",
+      usage: USAGE,
+      heldSessionIds: ["session-1"],
+      heldClaudeSetupIds: [],
+      heldTurnIds,
+      ack: 0,
+      telemetry: NO_TELEMETRY,
+    }) as HostEnvelope;
+  await current.deliver(beat(["turn-1"]));
+  await current.deliver(beat([]));
+  const reported = (heldTurnIds: string[]) => ({
+    kind: "Heartbeat",
     usage: USAGE,
-    heldSessionIds,
+    reportedHealth: "Healthy",
+    heldTurnIds,
+    heldSessionIds: ["session-1"],
+    heldClaudeSetupIds: [],
+    telemetry: NO_TELEMETRY,
   });
-  await first.deliver(beat(["session-1"]));
-  await first.deliver(beat([]));
-  assert.deepEqual(first.events.slice(1), [
-    { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: ["session-1"] },
-    { kind: "Heartbeat", usage: USAGE },
-  ]);
-
-  const second = channel.connect();
-  await second.hello();
-  await second.deliver(beat([]));
-  assert.deepEqual(second.events.at(-1), { kind: "FirstHeartbeat", usage: USAGE, heldSessionIds: [] });
+  assert.deepEqual(current.events.slice(1), [reported(["turn-1"]), reported([])]);
 });
 
-test("a heartbeat from a host before the held sessions version reports nothing", async () => {
-  const link = setup().connect();
-  await link.hello(undefined, HELD_SESSIONS_VERSION - 1);
-  const heartbeat = { type: "Heartbeat", sentAt: "2026-11-18T10:00:00+01:00", usage: USAGE };
-  const received = await control.receive(link.connection, JSON.stringify(heartbeat), link.context);
-  assert.deepEqual(received.event, { kind: "Heartbeat", usage: USAGE });
-  assert.equal(link.closed, null);
+test("a Hello offering 35 to 37, as supervisor rc.25 sends, is welcomed on 37 with no ack and its resendFrom as the cursor", async () => {
+  const channel = setup();
+  const link = channel.connect();
+  const [challenge] = link.sent;
+  assert.equal(challenge?.type, "Challenge");
+  await link.deliver({
+    type: "Hello",
+    hostId: HOST_ID,
+    protocolVersion: 37,
+    channelProtocolOldest: 35,
+    supervisorVersion: "0.1.0",
+    signature: sign(null, helloBytes(challenge.nonce, HOST_ID), channel.keys.privateKey).toString("base64"),
+    boxCapacity: 8,
+    usage: USAGE,
+    heldTurnIds: [],
+    resendFrom: 4,
+  } as HostEnvelope);
+  assert.deepEqual(link.connection, { phase: "Open", protocolVersion: 37, cursor: 3 });
+  assert.deepEqual(link.sent.at(-1), {
+    type: "Welcome",
+    hostId: HOST_ID,
+    protocolVersion: 37,
+  });
+});
+
+const stored37 = async () => {
+  const channel = setup();
+  const link = channel.connect();
+  await link.hello(undefined, ChannelProtocol.Oldest, 3);
+  return { channel, link };
+};
+
+test("on 37 a frame below resendFrom is a duplicate acked again, the next is acked once its effect is stored", async () => {
+  const { link } = await stored37();
+  await link.deliver(frame(2, 0, snapshotDone("snap-2")));
+  await link.deliver(frame(3, 0, snapshotDone("snap-3")));
+  await link.deliver(frame(3, 0, snapshotDone("snap-3")));
+  assert.deepEqual(
+    link.events.filter((event) => event.kind === "Message"),
+    [{ kind: "Message", frame: frame(3, 0, snapshotDone("snap-3")) }],
+  );
+  assert.deepEqual(acks(link.sent), [2, 3, 3]);
+  await control.send(link.connection, snapshotRequest("snap-4"), link.context);
+  assert.deepEqual(frames(link.sent).at(-1), { type: "Frame", seq: 1, ack: 3, message: snapshotRequest("snap-4") });
+  await link.deliver(frame(5, 0, snapshotDone("snap-5")));
+  assert.match(closure(link)?.reason ?? "", /expected seq 4, got 5/);
+});
+
+test("on 37 a Heartbeat ack drops the stored outbound frames up to it and carries its telemetry", async () => {
+  const { channel, link } = await stored37();
+  await control.send(link.connection, snapshotRequest("snap-1"), link.context);
+  await control.send(link.connection, snapshotRequest("snap-2"), link.context);
+  const telemetry = {
+    instruments: [],
+    samples: [{ metric: "host.load.1m", at: "2026-11-23T10:00:00+01:00", value: 0.5, dimensions: {} }],
+    turns: [],
+  };
+  await link.deliver({
+    type: "Heartbeat",
+    sentAt: "2026-11-23T10:00:00+01:00",
+    usage: USAGE,
+    heldSessionIds: [],
+    heldClaudeSetupIds: [],
+    heldTurnIds: [],
+    ack: 1,
+    telemetry,
+  } as HostEnvelope);
+  assert.deepEqual(
+    channel.ledger.current.unacked.map((unacked) => unacked.seq),
+    [2],
+  );
+  assert.deepEqual(link.events.at(-1), {
+    kind: "Heartbeat",
+    usage: USAGE,
+    reportedHealth: "Healthy",
+    heldTurnIds: [],
+    heldSessionIds: [],
+    heldClaudeSetupIds: [],
+    telemetry,
+  });
 });

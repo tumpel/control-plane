@@ -1,34 +1,27 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode } from "@tumpel/schemas";
-import host0001 from "../migrations/host/0001_host.sql";
-import host0002 from "../migrations/host/0002_host_without_tenant.sql";
+import { errorOf } from "./backoff.ts";
 import * as control from "./channel/control.ts";
-import { refusedOrResent } from "./channel/failure.ts";
-import {
-  type ControlEnvelope,
-  emptyLedger,
-  type Frame,
-  type HostMessage,
-  type HostUsage,
-  type Ledger,
-  type LedgerStore,
-  type StoredControlMessage,
-  type TelemetryBatch,
-} from "./channel/protocol.ts";
+import { refusal, resendable } from "./channel/failure.ts";
+import { admit, type FrameWindow, openWindow, rateLimitDetail } from "./channel/frame-rate.ts";
+import { HostLedger } from "./channel/ledger.ts";
+import type { ControlEnvelope, Frame, HostMessage, MetricBatch, StoredControlMessage } from "./channel/protocol.ts";
+import { durableDb } from "./db/client.ts";
+import * as hostSchema from "./db/host-schema.ts";
 import { migrateDurableObject } from "./durable-migrate";
+import { HOST_MIGRATIONS } from "./host-migrations.ts";
+import type { OfferSent } from "./hosts";
 import { problem } from "./http";
 import type { Env } from "./index";
-import { settingsOf } from "./settings";
+import { hostLimitsOf, limitsOf } from "./limits.ts";
+import { METRICS_LIMITS, metricBatches } from "./metrics-store.ts";
 import { isSupervisorUpdate } from "./supervisor-updates";
 import { tenantApi } from "./tenant-api.ts";
 import type { HostReply } from "./tenant-sessions";
 import { stampTurnPoints } from "./turn-metrics.ts";
 
-const HOST_MIGRATIONS = [
-  { name: "0001_host", sql: host0001 },
-  { name: "0002_host_without_tenant", sql: host0002 },
-];
 const CLOSE_REASON_LIMIT = 120;
+const STORE_FAILED = 1011;
 
 interface HostRow {
   host_id: string;
@@ -38,29 +31,32 @@ interface HostRow {
 
 interface Attachment {
   connection: control.ControlConnection;
-  lastReceivedAt: number;
-  lastSentAt: number;
+  boxCapacity: number | null;
+  frames: FrameWindow;
 }
 
-type Presence = "Online" | "Offline";
+type Heartbeat = Extract<control.ControlEvent, { kind: "Heartbeat" }>;
+
+type Handled = { kind: "Stored"; reply: HostReply | null } | { kind: "Unstored"; error: unknown };
+
+const boxCapacityOf = (attachment: Attachment): number => {
+  if (attachment.boxCapacity === null) throw new Error("a host channel took a Heartbeat on a connection with no Hello");
+  return attachment.boxCapacity;
+};
 
 const isAttachment = (value: unknown): value is Attachment =>
-  typeof value === "object" &&
-  value !== null &&
-  "connection" in value &&
-  "lastReceivedAt" in value &&
-  typeof value.lastReceivedAt === "number" &&
-  "lastSentAt" in value &&
-  typeof value.lastSentAt === "number";
+  typeof value === "object" && value !== null && "connection" in value && "boxCapacity" in value && "frames" in value;
 
 export class HostChannel extends DurableObject<Env> {
   private tenantId: string | undefined;
   private inbound: Promise<void> = Promise.resolve();
+  private readonly ledger: HostLedger;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.ledger = new HostLedger(durableDb(ctx.storage, hostSchema));
     void ctx.blockConcurrencyWhile(async () => {
-      migrateDurableObject(ctx.storage.sql, HOST_MIGRATIONS);
+      await migrateDurableObject(ctx.storage, HOST_MIGRATIONS);
     });
   }
 
@@ -91,22 +87,35 @@ export class HostChannel extends DurableObject<Env> {
     }
   }
 
-  async send(message: StoredControlMessage): Promise<void> {
+  async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    const open = this.ctx
+    if (message.type === "TurnOffer" && this.openSocket() === undefined) return "Offline";
+    if (this.openSocket() === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
+      return "Sent";
+    }
+    const spoken = await control.prepare(message, this.context(null, host, null));
+    const open = this.openSocket();
+    if (message.type === "TurnOffer" && open === undefined) return "Offline";
+    if (open === undefined) {
+      await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
+      return "Sent";
+    }
+    const attachment = this.attachment(open);
+    const sent = control.send(attachment.connection, message, this.context(open, host, attachment), spoken);
+    open.serializeAttachment(attachment);
+    await sent;
+    return "Sent";
+  }
+
+  private openSocket(): WebSocket | undefined {
+    return this.ctx
       .getWebSockets()
       .find(
         (socket) =>
           socket.readyState === WebSocket.READY_STATE_OPEN && this.attachment(socket).connection.phase === "Open",
       );
-    if (open === undefined) {
-      await control.send({ phase: "Closed" }, message, this.context(null, host, null));
-      return;
-    }
-    const attachment = this.attachment(open);
-    await control.send(attachment.connection, message, this.context(open, host, attachment));
-    open.serializeAttachment(attachment);
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -127,13 +136,18 @@ export class HostChannel extends DurableObject<Env> {
         fix: "Connect with tumpel-supervisor run",
       });
     }
+    const limits = await hostLimitsOf(this.env.DB, limitsOf(this.env), host.host_id);
+    if (limits === null)
+      throw new Error(`host ${host.host_id} has a channel but no row in the hosts table; enrol it again`);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
-    const now = Date.now();
-    const attachment: Attachment = { connection: { phase: "Closed" }, lastReceivedAt: now, lastSentAt: now };
+    const attachment: Attachment = {
+      connection: { phase: "Closed" },
+      boxCapacity: null,
+      frames: openWindow(limits.hostFramesPerMinute),
+    };
     attachment.connection = control.challenge(this.port(server, attachment));
     server.serializeAttachment(attachment);
-    await this.ctx.storage.setAlarm(now + this.deadlineMs());
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -153,54 +167,84 @@ export class HostChannel extends DurableObject<Env> {
     const context = this.context(socket, host, attachment);
     if (typeof message !== "string") {
       control.close(context.port, CloseCode.ProtocolError, "channel messages are JSON text, not binary");
-      return this.refreshPresence(socket);
+      return;
     }
     const now = Date.now();
-    attachment.lastReceivedAt = now;
     const { connection, event } = await control.receive(attachment.connection, message, context);
     attachment.connection = connection;
-    this.keep(socket, attachment);
-    if (event.kind === "Message") await this.deliver(host.host_id, event.frame, attachment, context);
+    if (event.kind === "Welcomed") attachment.boxCapacity = event.boxCapacity;
+    socket.serializeAttachment(attachment);
     if (event.kind === "FrameRefused") {
       console.error(`FrameRefused: host ${host.host_id} frame ${event.seq}: ${event.reason}`);
     }
-    if (event.kind === "Closed") return this.refreshPresence(socket);
-    if (event.kind === "FirstHeartbeat") await this.reconcileHeldBoxes(host.host_id, event.heldSessionIds, now);
-    if (event.kind === "Heartbeat" || event.kind === "FirstHeartbeat") {
-      await this.report(host.host_id, event.usage, now);
-      await this.sendDeferredOffers(host.host_id, attachment, context);
-    }
-    if (event.kind === "Welcomed") await this.hello(host.host_id, event, now);
-    if (
-      connection.phase === "Open" &&
-      now - attachment.lastSentAt >= (settingsOf(this.env).heartbeatIntervalSeconds * 1000) / 2
-    )
-      control.beat(context);
-    this.keep(socket, attachment);
-    await this.ctx.storage.setAlarm(attachment.lastReceivedAt + this.deadlineMs());
+    if (event.kind === "Message") return this.take(socket, host.host_id, event.frame, attachment, context);
+    if (event.kind === "Heartbeat") return this.heartbeat(host.host_id, event, now, attachment, context);
     if (event.kind !== "Welcomed") return;
+    await this.hello(host.host_id, event, now);
     for (const other of this.ctx.getWebSockets()) {
       if (other !== socket) other.close(CloseCode.Replaced, "a newer connection from this host replaced this one");
     }
-    await this.presence("Online");
-    await this.sendDeferredOffers(host.host_id, attachment, context);
-    this.keep(socket, attachment);
   }
 
-  private async deliver(
+  private async take(
+    socket: WebSocket,
     hostId: string,
     frame: Frame<HostMessage>,
     attachment: Attachment,
     context: control.ControlContext,
   ): Promise<void> {
-    const reply = await this.forward(hostId, frame.message).catch((error: unknown) =>
-      refusedOrResent(frame.message.type, error),
+    const handled = await this.forward(hostId, frame.message).then(
+      (reply): Handled => ({ kind: "Stored", reply }),
+      (error: unknown): Handled =>
+        resendable(error) ? { kind: "Unstored", error } : { kind: "Stored", reply: refusal(frame.message.type, error) },
     );
-    control.acknowledge(context, frame);
-    if (frame.message.type === "SupervisorUpdateFailed") return this.sendDeferredOffers(hostId, attachment, context);
+    if (handled.kind === "Unstored") {
+      const reason = `the control plane failed to store frame ${frame.seq} (${frame.message.type}): ${errorOf(handled.error).message}`;
+      console.error(`FrameUnstored: host ${hostId}: ${reason}`);
+      control.close(context.port, STORE_FAILED, reason);
+      return;
+    }
+    await this.answer(hostId, frame, handled.reply, attachment, context);
+    if (attachment.connection.phase !== "Open") return;
+    attachment.connection = control.acknowledge(attachment.connection, frame.seq, context);
+    socket.serializeAttachment(attachment);
+  }
+
+  private async heartbeat(
+    hostId: string,
+    beat: Heartbeat,
+    now: number,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
+    if (attachment.connection.phase !== "Open") return;
+    const tenantId = await this.tenantOf(hostId);
+    await this.telemetry(tenantId, hostId, beat.telemetry);
+    await tenantApi(this.env.TENANT, tenantId).call("hostHeartbeat", {
+      tenantId,
+      hostId,
+      boxCapacity: boxCapacityOf(attachment),
+      usage: beat.usage,
+      reportedHealth: beat.reportedHealth,
+      now,
+      channelProtocol: attachment.connection.protocolVersion,
+      heldSessionIds: beat.heldSessionIds,
+      heldClaudeSetupIds: beat.heldClaudeSetupIds,
+      heldTurnIds: beat.heldTurnIds,
+    });
+    control.beat(context);
+  }
+
+  private async answer(
+    hostId: string,
+    frame: Frame<HostMessage>,
+    reply: HostReply | null,
+    attachment: Attachment,
+    context: control.ControlContext,
+  ): Promise<void> {
     if (reply === null) return;
     if (reply.type === "TurnHandoff")
-      return this.env.HOST.get(this.env.HOST.idFromName(reply.hostId)).send(reply.offer);
+      throw new Error(`the tenant answered host ${hostId} with a TurnHandoff, which it sends itself`);
     if (reply.type === "Refused") {
       console.error(`FrameRefused: host ${hostId} frame ${frame.seq}: ${reply.reason}`);
       return control.refuseFrame(context.port, frame.seq, reply.reason);
@@ -208,93 +252,48 @@ export class HostChannel extends DurableObject<Env> {
     return control.send(attachment.connection, reply, context);
   }
 
-  private async sendDeferredOffers(
-    hostId: string,
-    attachment: Attachment,
-    context: control.ControlContext,
-  ): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    const tenant = tenantApi(this.env.TENANT, tenantId);
-    for (const handoff of (await tenant.call("deferredOffers", { tenantId, hostId })).handoffs) {
-      if (handoff.hostId === hostId) await control.send(attachment.connection, handoff.offer, context);
-      else await this.env.HOST.get(this.env.HOST.idFromName(handoff.hostId)).send(handoff.offer);
-      await tenant.call("offerSent", { turnId: handoff.offer.turnId });
-    }
-  }
-
-  override async webSocketClose(socket: WebSocket): Promise<void> {
-    await this.refreshPresence(socket);
-  }
-
-  override async webSocketError(socket: WebSocket): Promise<void> {
-    await this.refreshPresence(socket);
-  }
-
-  override async alarm(): Promise<void> {
-    const now = Date.now();
-    const deadlineMs = this.deadlineMs();
-    const live: number[] = [];
-    for (const socket of this.ctx.getWebSockets()) {
-      const { lastReceivedAt } = this.attachment(socket);
-      if (now - lastReceivedAt < deadlineMs) {
-        live.push(lastReceivedAt);
-        continue;
-      }
-      socket.close(CloseCode.HeartbeatDeadline, `nothing arrived for ${deadlineMs / 1000} seconds; reconnect`);
-    }
-    await this.refreshPresence();
-    if (live.length > 0) await this.ctx.storage.setAlarm(Math.min(...live) + deadlineMs);
-  }
-
-  private keep(socket: WebSocket, attachment: Attachment): void {
-    attachment.lastReceivedAt = Math.max(attachment.lastReceivedAt, this.attachment(socket).lastReceivedAt);
-    socket.serializeAttachment(attachment);
-  }
-
-  private deadlineMs(): number {
-    return settingsOf(this.env).heartbeatDeadlineSeconds * 1000;
-  }
-
   private async hello(hostId: string, welcomed: control.Welcomed, now: number): Promise<void> {
     const db = this.env.DB;
     const { channelProtocolOldest, guestProtocol } = welcomed;
     await db.batch([
       db
-        .prepare("UPDATE hosts SET supervisor_version = ?, updated_at = ? WHERE host_id = ?")
+        .prepare(
+          "UPDATE hosts SET supervisor_version = ?1, updated_at = ?2 WHERE host_id = ?3 AND supervisor_version IS NOT ?1",
+        )
         .bind(welcomed.supervisorVersion, now, hostId),
       channelProtocolOldest === undefined
         ? db.prepare("DELETE FROM host_channel_protocols WHERE host_id = ?").bind(hostId)
         : db
             .prepare(
-              "INSERT OR REPLACE INTO host_channel_protocols (host_id, channel_protocol_oldest, channel_protocol_version) VALUES (?, ?, ?)",
+              `INSERT INTO host_channel_protocols (host_id, channel_protocol_oldest, channel_protocol_version) VALUES (?, ?, ?)
+              ON CONFLICT (host_id) DO UPDATE SET channel_protocol_oldest = excluded.channel_protocol_oldest,
+                channel_protocol_version = excluded.channel_protocol_version
+              WHERE host_channel_protocols.channel_protocol_oldest IS NOT excluded.channel_protocol_oldest
+                OR host_channel_protocols.channel_protocol_version IS NOT excluded.channel_protocol_version`,
             )
             .bind(hostId, channelProtocolOldest, welcomed.protocolVersion),
       guestProtocol === undefined
         ? db.prepare("DELETE FROM host_guest_protocols WHERE host_id = ?").bind(hostId)
         : db
             .prepare(
-              "INSERT OR REPLACE INTO host_guest_protocols (host_id, guest_protocol_oldest, guest_protocol_version) VALUES (?, ?, ?)",
+              `INSERT INTO host_guest_protocols (host_id, guest_protocol_oldest, guest_protocol_version) VALUES (?, ?, ?)
+              ON CONFLICT (host_id) DO UPDATE SET guest_protocol_oldest = excluded.guest_protocol_oldest,
+                guest_protocol_version = excluded.guest_protocol_version
+              WHERE host_guest_protocols.guest_protocol_oldest IS NOT excluded.guest_protocol_oldest
+                OR host_guest_protocols.guest_protocol_version IS NOT excluded.guest_protocol_version`,
             )
             .bind(hostId, guestProtocol.guestProtocolOldest, guestProtocol.guestProtocolVersion),
     ]);
     const tenantId = await this.tenantOf(hostId);
     await tenantApi(this.env.TENANT, tenantId).call("hostHello", {
+      tenantId,
       hostId,
       boxCapacity: welcomed.boxCapacity,
       usage: welcomed.usage,
       now,
-      channelProtocol: welcomed.protocolVersion,
+      channelProtocol: welcomed.channelProtocol,
+      heldTurnIds: welcomed.heldTurnIds,
     });
-  }
-
-  private async report(hostId: string, usage: HostUsage, now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("hostUsage", { hostId, usage, now });
-  }
-
-  private async reconcileHeldBoxes(hostId: string, heldSessionIds: string[], now: number): Promise<void> {
-    const tenantId = await this.tenantOf(hostId);
-    await tenantApi(this.env.TENANT, tenantId).call("reconcileHeldBoxes", { tenantId, hostId, heldSessionIds, now });
   }
 
   private async tenantOf(hostId: string): Promise<string> {
@@ -309,16 +308,10 @@ export class HostChannel extends DurableObject<Env> {
 
   private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
     const tenantId = await this.tenantOf(hostId);
-    if (message.type === "TelemetryBatch") {
-      await this.telemetry(tenantId, hostId, message);
-      return null;
-    }
     const tenant = tenantApi(this.env.TENANT, tenantId);
     if (isSupervisorUpdate(message)) {
       if (message.type === "SupervisorUpdateStep" && message.phase === "WaitingForIdle") return null;
       await tenant.call("supervisorUpdate", { hostId, message });
-      if (message.type === "SupervisorUpdateStep" && message.phase === "Restarting") await this.presence("Offline");
-      else await this.refreshPresence();
       return null;
     }
     return (await tenant.call("hostMessage", { tenantId, hostId, message })).reply;
@@ -327,24 +320,22 @@ export class HostChannel extends DurableObject<Env> {
   private async telemetry(
     tenantId: string,
     hostId: string,
-    { instruments, samples, turns }: TelemetryBatch,
+    { instruments, samples, turns }: MetricBatch,
   ): Promise<void> {
+    if (instruments.length === 0 && samples.length === 0 && turns.length === 0) return;
     const signed = <Point extends { dimensions: Record<string, string> }>(point: Point): Point => ({
       ...point,
       dimensions: { ...point.dimensions, hostId },
     });
-    const turnIds = [...new Set(turns.map((point) => point.turnId))];
-    const offered =
-      turnIds.length === 0
-        ? {}
-        : (await tenantApi(this.env.TENANT, tenantId).call("turnMetricDimensions", { turnIds })).dimensions;
-    await this.env.TENANT_METRICS.getByName(tenantId)
-      .record({ instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, offered, hostId) })
-      .catch((error: unknown) => {
+    const metrics = this.env.TENANT_METRICS.getByName(tenantId);
+    const batch = { instruments, samples: samples.map(signed), turns: stampTurnPoints(turns, hostId) };
+    for (const part of metricBatches(batch, METRICS_LIMITS)) {
+      await metrics.record(part).catch((error: unknown) => {
         console.error(
           `TelemetryRejected: host ${hostId} sent a telemetry batch the metrics store refused: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
+    }
   }
 
   private host(): HostRow | null {
@@ -370,34 +361,8 @@ export class HostChannel extends DurableObject<Env> {
       };
     }
     return {
-      send: (envelope: ControlEnvelope) => {
-        socket.send(JSON.stringify(envelope));
-        attachment.lastSentAt = Date.now();
-      },
+      send: (envelope: ControlEnvelope) => socket.send(JSON.stringify(envelope)),
       close: (code: number, reason: string) => socket.close(code, reason.slice(0, CLOSE_REASON_LIMIT)),
-    };
-  }
-
-  private ledger(): LedgerStore<StoredControlMessage> {
-    const sql = this.ctx.storage.sql;
-    return {
-      load: (): Ledger<StoredControlMessage> => {
-        const [row] = sql
-          .exec<{ received: number; sent: number; unacked: string }>(
-            "SELECT received, sent, unacked FROM ledger WHERE ledger_id = 1",
-          )
-          .toArray();
-        if (row === undefined) return emptyLedger();
-        return { received: row.received, sent: row.sent, unacked: JSON.parse(row.unacked) };
-      },
-      save: (ledger: Ledger<StoredControlMessage>): void => {
-        sql.exec(
-          "INSERT OR REPLACE INTO ledger (ledger_id, received, sent, unacked) VALUES (1, ?, ?, ?)",
-          ledger.received,
-          ledger.sent,
-          JSON.stringify(ledger.unacked),
-        );
-      },
     };
   }
 
@@ -405,7 +370,7 @@ export class HostChannel extends DurableObject<Env> {
     return {
       port: this.port(socket, attachment),
       host: { hostId: host.host_id, publicKey: host.public_key, revoked: host.revoked === 1 },
-      ledger: this.ledger(),
+      ledger: this.ledger,
       prepareOffer: async (offer) => {
         const tenantId = await this.tenantOf(host.host_id);
         const { prepared } = await tenantApi(this.env.TENANT, tenantId).call("prepareOffer", {
@@ -427,38 +392,19 @@ export class HostChannel extends DurableObject<Env> {
         return prepared;
       },
       messageVersions: control.CONTROL_MESSAGE_VERSIONS,
+      admitFrame: () => {
+        if (attachment === null) throw new Error("a frame reached a host channel with no connection");
+        const { window, refused } = admit(attachment.frames, Date.now());
+        attachment.frames = window;
+        if (refused === null) return null;
+        const retryAfter = new Date(refused.retryAfter);
+        return {
+          reason: `${rateLimitDetail(host.host_id, refused.framesPerMinute)}, so the control plane recorded nothing of this frame; send no frames until ${retryAfter.toISOString()}`,
+          framesPerMinute: refused.framesPerMinute,
+          retryAfter,
+        };
+      },
       now: () => new Date(),
     };
-  }
-
-  private async refreshPresence(closing?: WebSocket): Promise<void> {
-    const open = this.ctx
-      .getWebSockets()
-      .some(
-        (socket) =>
-          socket !== closing &&
-          socket.readyState === WebSocket.READY_STATE_OPEN &&
-          this.attachment(socket).connection.phase === "Open",
-      );
-    await this.presence(open ? "Online" : "Offline");
-  }
-
-  private async presence(state: Presence): Promise<void> {
-    const host = this.host();
-    if (host === null) throw new Error("presence changed on a host object that was never registered");
-    const now = Date.now();
-    const changed = await this.env.DB.prepare(
-      "UPDATE hosts SET state = ?, updated_at = ? WHERE host_id = ? AND state NOT IN ('Revoked', ?)",
-    )
-      .bind(state, now, host.host_id, state)
-      .run();
-    if (changed.meta.changes === 0) return;
-    const tenantId = await this.tenantOf(host.host_id);
-    await tenantApi(this.env.TENANT, tenantId).call("hostPresence", {
-      tenantId,
-      hostId: host.host_id,
-      presence: state,
-      now,
-    });
   }
 }

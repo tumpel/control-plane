@@ -1,11 +1,69 @@
+import type { R2Bucket } from "@cloudflare/workers-types/index.ts";
 import { TranscriptLineSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import type { Compactor } from "./compact.ts";
 
 export type TranscriptLine = z.infer<typeof TranscriptLineSchema>;
 
-export const chunkKey = (tenantId: string, sessionId: string, turnId: string, firstLineSeq: number): string =>
-  `${tenantId}/${sessionId}/${turnId}/${String(firstLineSeq).padStart(16, "0")}.jsonl`;
+const LINE_SEQ_DIGITS = 16;
+
+const paddedLineSeq = (lineSeq: number): string => String(lineSeq).padStart(LINE_SEQ_DIGITS, "0");
+
+export const transcriptPrefix = (tenantId: string, sessionId: string): string =>
+  `${tenantId}/transcripts/${sessionId}/`;
+
+export const chunkKey = (
+  tenantId: string,
+  sessionId: string,
+  turnId: string,
+  firstLineSeq: number,
+  lastLineSeq: number,
+): string =>
+  `${transcriptPrefix(tenantId, sessionId)}${paddedLineSeq(lastLineSeq)}-${paddedLineSeq(firstLineSeq)}-${turnId}.jsonl`;
+
+const keysEndingAfter = (prefix: string, lineSeq: number): string => `${prefix}${paddedLineSeq(lineSeq)}~`;
+
+export type StoredChunk = {
+  storageKey: string;
+  firstLineSeq: number;
+  lastLineSeq: number;
+  turnId: string;
+  size: number;
+};
+
+const STORED_CHUNK = /^(\d+)-(\d+)-(.+)\.jsonl$/;
+
+const storedChunk = (prefix: string, { key: storageKey, size }: { key: string; size: number }): StoredChunk => {
+  const match = STORED_CHUNK.exec(storageKey.slice(prefix.length));
+  if (match === null || match[3] === undefined)
+    throw new Error(`transcript object ${storageKey} is not named <lastLineSeq>-<firstLineSeq>-<turnId>.jsonl`);
+  return { storageKey, lastLineSeq: Number(match[1]), firstLineSeq: Number(match[2]), turnId: match[3], size };
+};
+
+export const chunksAfter = async (store: R2Bucket, prefix: string, after: number): Promise<StoredChunk[]> => {
+  const chunks: StoredChunk[] = [];
+  for (let startAfter = keysEndingAfter(prefix, after); ; ) {
+    const listed = await store.list({ prefix, startAfter });
+    chunks.push(...listed.objects.map((object) => storedChunk(prefix, object)));
+    const last = listed.objects.at(-1);
+    if (!listed.truncated || last === undefined) return chunks;
+    startAfter = last.key;
+  }
+};
+
+export const firstChunkAfter = async (store: R2Bucket, prefix: string, after: number): Promise<StoredChunk | null> => {
+  const listed = await store.list({ prefix, startAfter: keysEndingAfter(prefix, after), limit: 1 });
+  const [first] = listed.objects;
+  return first === undefined ? null : storedChunk(prefix, first);
+};
+
+export const deleteTranscript = async (store: R2Bucket, prefix: string): Promise<void> => {
+  for (;;) {
+    const listed = await store.list({ prefix });
+    if (listed.objects.length > 0) await store.delete(listed.objects.map((object) => object.key));
+    if (!listed.truncated) return;
+  }
+};
 
 export interface Chunk {
   body: Uint8Array;
@@ -30,40 +88,6 @@ export interface Range {
   offset: number;
   length: number;
 }
-
-const offsetAt = (offsets: number[], index: number, lines: number): number => {
-  const offset = offsets[index];
-  if (offset === undefined)
-    throw new Error(`a transcript chunk index holds ${lines} lines but ${offsets.length} offsets`);
-  return offset;
-};
-
-export const rangeAfter = (
-  lineSeqs: number[],
-  offsets: number[],
-  after: number,
-  limit: number,
-  maxBytes: number | null,
-): Range | null => {
-  const first = lineSeqs.findIndex((lineSeq) => lineSeq > after);
-  if (first === -1) return null;
-  const offset = offsetAt(offsets, first, lineSeqs.length);
-  let end = Math.min(lineSeqs.length, first + limit);
-  while (maxBytes !== null && end > first + 1 && offsetAt(offsets, end, lineSeqs.length) - offset > maxBytes) end -= 1;
-  return { offset, length: offsetAt(offsets, end, lineSeqs.length) - offset };
-};
-
-export const linesWithin = (lines: TranscriptLine[], maxBytes: number | null): TranscriptLine[] => {
-  if (maxBytes === null) return lines;
-  let bytes = 0;
-  const kept: TranscriptLine[] = [];
-  for (const line of lines) {
-    bytes += encodeLine(line).byteLength;
-    if (kept.length > 0 && bytes > maxBytes) return kept;
-    kept.push(line);
-  }
-  return kept;
-};
 
 export const decodeLines = (text: string): TranscriptLine[] =>
   text
@@ -125,45 +149,3 @@ export const pageOf = (
   }
   return done(false);
 };
-
-export interface ChunkLedger {
-  pending(tenantId: string, sessionId: string, turnId: string): TranscriptLine[];
-  record(sessionId: string, turnId: string, storageKey: string, chunk: Chunk): void;
-}
-
-export interface ChunkStore {
-  put(key: string, body: Uint8Array): Promise<unknown>;
-}
-
-export class ChunkWriter {
-  readonly #writes = new Map<string, Promise<void>>();
-  readonly #ledger: ChunkLedger;
-  readonly #store: ChunkStore;
-
-  constructor(ledger: ChunkLedger, store: ChunkStore) {
-    this.#ledger = ledger;
-    this.#store = store;
-  }
-
-  write(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
-    const run = (): Promise<void> => this.#writeNow(tenantId, sessionId, turnId, minLines);
-    const previous = this.#writes.get(sessionId) ?? Promise.resolve();
-    const next = previous.then(run, run);
-    this.#writes.set(sessionId, next);
-    const forget = (): void => {
-      if (this.#writes.get(sessionId) === next) this.#writes.delete(sessionId);
-    };
-    next.then(forget, forget);
-    return next;
-  }
-
-  async #writeNow(tenantId: string, sessionId: string, turnId: string, minLines: number): Promise<void> {
-    const lines = this.#ledger.pending(tenantId, sessionId, turnId);
-    const first = lines[0];
-    if (first === undefined || lines.length < minLines) return;
-    const chunk = encodeChunk(lines);
-    const storageKey = chunkKey(tenantId, sessionId, turnId, first.lineSeq);
-    await this.#store.put(storageKey, chunk.body);
-    this.#ledger.record(sessionId, turnId, storageKey, chunk);
-  }
-}

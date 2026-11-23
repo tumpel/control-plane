@@ -1,5 +1,8 @@
 import { OAuthErrorSchema, type ProblemResponseSchema, ProblemSchema } from "@tumpel/schemas";
 import type { z } from "zod";
+import { MAX_BODY_BYTES } from "./limits.ts";
+
+export { MAX_BODY_BYTES, MAX_CONFIG_BODY_BYTES } from "./limits.ts";
 
 export type Problem = z.infer<typeof ProblemSchema>;
 export type ProblemStatus = z.infer<typeof ProblemResponseSchema>["statusCode"];
@@ -31,8 +34,13 @@ export const seeOther = (location: string): Response =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-export const MAX_BODY_BYTES = 4_000_000;
-export const MAX_CONFIG_BODY_BYTES = 16_000_000;
+export const bodyTooLarge = (detail: string): Response =>
+  problem(413, {
+    code: "BodyTooLarge",
+    title: "Request body too large",
+    detail,
+    fix: "Send a smaller body, or split it into several requests",
+  });
 
 export type BoundedBody = { ok: true; value: unknown } | { ok: false; detail: string };
 
@@ -75,12 +83,7 @@ export const parseBody = async <T>(
   if (!body.ok) {
     return {
       ok: false,
-      response: problem(400, {
-        code: "InvalidRequest",
-        title: "Request body too large",
-        detail: `${operation} refused the body: ${body.detail}`,
-        fix: "Send a smaller body",
-      }),
+      response: bodyTooLarge(`${operation} refused the body: ${body.detail}`),
     };
   }
   const parsed = schema.safeParse(body.value);
@@ -94,4 +97,41 @@ export const parseBody = async <T>(
       fix: "Send a JSON body that matches the operation's schema in typespec",
     }),
   };
+};
+
+const joined = (chunks: Uint8Array[], total: number): Uint8Array<ArrayBuffer> => {
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return bytes;
+};
+
+export const withinBodyBound = async (request: Request, bound: number): Promise<Request | Response> => {
+  if (request.body === null) return request;
+  const where = `${request.method} ${new URL(request.url).pathname}`;
+  const declared = request.headers.get("content-length");
+  if (declared !== null) {
+    const bytes = Number(declared);
+    if (bytes <= bound) return request;
+    return bodyTooLarge(
+      `the body declares ${bytes} bytes, over the ${bound}-byte bound on ${where}; nothing of it was read`,
+    );
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > bound) {
+      await reader.cancel();
+      return bodyTooLarge(`the body runs past the ${bound}-byte bound on ${where}; reading stopped there`);
+    }
+    chunks.push(value);
+  }
+  return new Request(request, { body: joined(chunks, total) });
 };

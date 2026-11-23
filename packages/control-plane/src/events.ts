@@ -21,7 +21,6 @@ const read = async (env: Env, caller: Caller, query: EventQuery, afterEventId: n
     events: query.event ?? [],
     sessionId: query.sessionId ?? null,
     triggerId: query.triggerId ?? null,
-    waitSeconds: 0,
   });
   if (listed.kind === "Read") return { kind: "Read", page: listed.page };
   return {
@@ -41,36 +40,10 @@ const subscriptionOf = (caller: Caller, query: EventQuery, cursor: number): Subs
 const openChannel = (env: Env, subscription: Subscription): Promise<Response> =>
   env.EVENTS.getByName(subscription.tenantId).fetch(channelUrl(subscription), { headers: { upgrade: "websocket" } });
 
-export const waitOnChannel = async (
-  env: Env,
-  subscription: Subscription,
-  waitSeconds: number,
-  wanted: (event: Record<string, unknown>) => boolean,
-): Promise<void> => {
-  const { webSocket } = await openChannel(env, subscription);
-  if (webSocket === null) throw new Error(`the event channel of tenant ${subscription.tenantId} answered no WebSocket`);
-  webSocket.accept();
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, waitSeconds * 1000);
-    const done = (): void => {
-      clearTimeout(timer);
-      resolve();
-    };
-    webSocket.addEventListener("message", (message) => {
-      if (wanted(JSON.parse(String(message.data)) as Record<string, unknown>)) done();
-    });
-    webSocket.addEventListener("close", done);
-  });
-  webSocket.close(1000, "the long poll ended");
-};
-
 export const listEvents = async (env: Env, caller: Caller, query: EventQuery): Promise<Response> => {
   const first = await read(env, caller, query, query.afterEventId ?? null);
   if (first.kind === "Expired") return first.response;
-  if (first.page.events.length > 0 || query.waitSeconds === 0) return json(first.page);
-  await waitOnChannel(env, subscriptionOf(caller, query, first.page.lastEventId), query.waitSeconds, () => true);
-  const next = await read(env, caller, query, first.page.lastEventId);
-  return next.kind === "Read" ? json(next.page) : next.response;
+  return json(first.page);
 };
 
 const followEvents = async (env: Env, caller: Caller, query: EventQuery): Promise<Response> => {
@@ -122,7 +95,6 @@ export const handleEvents = async (
     event: events.length > 0 ? events : undefined,
     sessionId: url.searchParams.get("sessionId") ?? undefined,
     triggerId: url.searchParams.get("triggerId") ?? undefined,
-    waitSeconds: number("waitSeconds"),
   });
   if (!query.success) {
     return problem(400, {

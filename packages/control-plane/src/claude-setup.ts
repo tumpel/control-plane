@@ -254,4 +254,6 @@ export const setupOffer = (
   tokenUrl: tokenUrl(row.endpoint, row.claude_setup_id),
   tokenCredential,
   expiresAt: iso(boxEndsAt(row.created_at, budgets)),
+  urlSeconds: budgets.claudeSetupUrlBudgetSeconds,
+  codeSeconds: budgets.claudeSetupCodeBudgetSeconds,
 });

@@ -1,10 +1,6 @@
 import {
   ApiKeyMemberSchema,
   ApiKeyUpdateSchema,
-  CircleCIAuthorizationChooseSchema,
-  CircleCIConnectionStartSchema,
-  CircleCIProjectAddSchema,
-  CircleCIProjectPathSchema,
   ClaudeSetupListQuerySchema,
   ClaudeSetupPathSchema,
   ClaudeSetupStartSchema,
@@ -23,7 +19,6 @@ import {
   EnrolmentTokenMintSchema,
   EnrolmentTokenPathSchema,
   EventQuerySchema,
-  GitHubActionsConnectionStartSchema,
   GitHubInstallationPathSchema,
   GitHubRepositoryPathSchema,
   HarnessPathSchema,
@@ -38,7 +33,6 @@ import {
   MetricSeriesQuerySchema,
   MetricTurnQuerySchema,
   MetricWindowSchema,
-  NamespaceConnectionStartSchema,
   OAuthConnectorCreateSchema,
   OAuthGrantPathSchema,
   OpenRouterAuthorizationPathSchema,
@@ -84,13 +78,13 @@ import {
   SubscriptionTokenUpdateSchema,
   TenantConfigApplySchema,
   TenantConfigPlanRequestSchema,
+  TenantLimitsSetSchema,
   TranscriptQuerySchema,
   TriggerCreateSchema,
   TriggerPatchSchema,
   TriggerPathSchema,
   TurnPathSchema,
   TurnSendSchema,
-  TurnWaitQuerySchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
 import manifest from "../package.json";
@@ -108,7 +102,7 @@ const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/;
 const SERVER_INFO = { name: "tumpel", version: manifest.version };
 
 const INSTRUCTIONS =
-  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true: follow the turn, or tumpel_turn_wait to learn when the first of several turns ends; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box.\n5. For a long job, such as working through a list of issues, start a session, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\n6. To start a session whenever something happens on GitHub, such as a pull request leaving draft, a push, a commit status or a label on an issue, create a trigger with tumpel_trigger_create: the event type, conditions on the webhook payload, a persona, a model and a prompt with {{field}} placeholders. Check it first on a sample payload with tumpel_trigger_test. Tumpel only listens, so the prompt tells the session how to report back. Only an Owner creates, changes or deletes a trigger; an agent inside a tumpel box tells its person instead.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, then ends its turn: crew events wake it, so it never sleeps or polls inside a turn. It keeps each crew task small enough to finish well inside the turn limit, and when a crew turn ends TurnTimedOut it splits the work and resends it. It arms auto-merge on a crew pull request only after the review has passed, unless the repository ruleset requires the review check. It pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
+  "tumpel runs coding harness sessions on machines your tenant owns. Start here:\n1. tumpel_whoami: check the endpoint and tenant you act in.\n2. tumpel_persona_list: pick the persona a session runs, its harness and secret set; tumpel_persona_create makes one, with a secretSetId from tumpel_secret_set_list.\n3. tumpel_session_start: start a session with a persona, a model, a first prompt and the repository as https://github.com/owner/name.\n4. tumpel_transcript_read with compact true follows the turn, and tumpel_turn_get reads its state; tumpel_turn_send sends the next prompt, tumpel_session_stop frees the box. Never wait for a turn inside your own turn: end your turn and let a subscription event wake you when it ends.\n5. For a long job, such as working through a list of issues, start a session, then give it a subscription with tumpel_subscription_create: the plan, the goal, the events to react to, the crew tags and an expiry. Each event of its crew, the sessions that carry those tags, then becomes a new turn of that session.\n6. To start a session whenever something happens on GitHub, such as a pull request leaving draft, a push, a commit status or a label on an issue, create a trigger with tumpel_trigger_create: the event type, conditions on the webhook payload, a persona, a model and a prompt with {{field}} placeholders. Check it first on a sample payload with tumpel_trigger_test. Tumpel only listens, so the prompt tells the session how to report back. Only an Owner creates, changes or deletes a trigger; an agent inside a tumpel box tells its person instead.\nA session with a subscription gives heavy work to crew sessions it starts with tumpel_session_start, which inherit its crew tags, then ends its turn: crew events wake it, so it never sleeps or polls inside a turn. It keeps each crew task small enough to finish well inside the turn limit, and when a crew turn ends TurnTimedOut it splits the work and resends it. It arms auto-merge on a crew pull request only after the review has passed, unless the repository ruleset requires the review check. It pauses with tumpel_subscription_pause and a short message when it needs a decision, and calls tumpel_subscription_complete once the goal holds. An agent inside a tumpel box never creates or resumes a subscription; it tells its person, who sets it up.\nIf a turn fails, tumpel_turn_failure says why and what to do. Secret values and sign-in codes never pass through MCP; the person enters them in the dashboard or on the CLI.";
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -130,9 +124,9 @@ type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 interface ToolDefinition {
   name: string;
   description: string;
-  input: z.ZodObject;
+  input: z.ZodType<Record<string, unknown>>;
   request: { method: Method; path: string; query?: string[] } | null;
-  answer: "rest" | "configSecretSet" | "memberCommand" | "circleCIStartCommand" | "connectorTokenCommand";
+  answer: "rest" | "configSecretSet" | "memberCommand" | "connectorTokenCommand";
 }
 
 const DONE: Record<string, string> = {
@@ -146,10 +140,6 @@ const DONE: Record<string, string> = {
   tumpel_trigger_delete: "Trigger deleted",
   tumpel_github_delete: "GitHub installation removed",
   tumpel_oauth_grant_revoke: "OAuth grant revoked",
-  tumpel_github_actions_delete: "GitHub Actions disconnected",
-  tumpel_namespace_delete: "Namespace disconnected",
-  tumpel_circleci_delete: "CircleCI disconnected",
-  tumpel_circleci_project_delete: "CircleCI project binding deleted",
   tumpel_secret_set_delete: "Secret set deleted",
   tumpel_connector_delete: "Connector deleted",
 };
@@ -215,13 +205,6 @@ const memberCommand = (args: z.infer<typeof MEMBER_WITHOUT_VALUE>): string => {
   return `Secret values never pass through MCP and this tool writes nothing. Pipe the value of ${member.name} into this command on your machine: tumpel secret-set set-member ${kind} ${args.secretSetId} ${flags.join(" ")} --stdin`;
 };
 
-const CIRCLECI_START_WITHOUT_TOKEN = CircleCIConnectionStartSchema.omit({ apiToken: true }).strict();
-
-const shellQuoted = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
-const circleCIStartCommand = (args: z.infer<typeof CIRCLECI_START_WITHOUT_TOKEN>): string =>
-  `CircleCI API tokens never pass through MCP and this tool writes nothing. Pipe a personal API token of a member of the organization into this command on your machine: tumpel circleci start --account-label ${shellQuoted(args.accountLabel)} --organization-id ${args.organizationId} --token-stdin. Or paste it in the dashboard's Connect CircleCI dialog.`;
-
 const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
   secretValues: z
     .array(ConfigSecretValueSchema.pick({ env: true }).strict())
@@ -231,7 +214,13 @@ const NO_SECRET_VALUES = TenantConfigApplySchema.extend({
     ),
 });
 
-const rest = (name: string, method: Method, path: string, input: z.ZodObject, description: string): ToolDefinition => ({
+const rest = (
+  name: string,
+  method: Method,
+  path: string,
+  input: z.ZodType<Record<string, unknown>>,
+  description: string,
+): ToolDefinition => ({
   name,
   description,
   input,
@@ -325,7 +314,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/hosts/usage",
     NO_ARGUMENTS,
-    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm, loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them when the host reports them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
+    "List the box slots and last reported usage of each host of the tenant that has connected since it enrolled and is not revoked. Returns hostId, boxCapacity, boxesRunning (the tenant's Offered and Running turns on the host), boxesWarm (its Idle and Stopping boxes), loadAverage, memoryAvailableMib, the disk and memory budgets and what boxes hold of them, with the memory of boxes offered since its last report counted as held, and updatedAt, when the last Hello or Heartbeat arrived.",
   ),
   rest(
     "tumpel_host_get",
@@ -382,6 +371,20 @@ export const TOOLS: ToolDefinition[] = [
     "/v1/harnesses/pins/{harness}",
     HarnessPathSchema,
     "Remove the tenant's pin for a harness.",
+  ),
+  rest(
+    "tumpel_limits_get",
+    "GET",
+    "/v1/limits",
+    NO_ARGUMENTS,
+    "Read the limits the tenant runs under. Returns {source, profile}: source is Free or Configured for the preset of the tenant's tier, or Custom for a profile of its own; profile has writesPerMinute, hostFramesPerMinute and usage, its budgets of {measure, window, limit}; a request rate is a Requests per Minute budget.",
+  ),
+  rest(
+    "tumpel_limits_set",
+    "PUT",
+    "/v1/limits",
+    TenantLimitsSetSchema,
+    "Set the limits the tenant runs under, Owner only: pass {reset: true} to drop the tenant's own profile and run under the preset of its tier, or every field of a profile (writesPerMinute, hostFramesPerMinute, usage). Refused InvalidRequest past the deployment's ceiling. A Free tenant may set values at or below the Free preset only; anything higher is refused AboveFreeTier. This tool never changes the tier; only the operator of the deployment moves a tenant between tiers. A host takes a new frame limit when it next connects.",
   ),
   rest(
     "tumpel_release_current",
@@ -528,113 +531,14 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/connections",
     NO_ARGUMENTS,
-    "List one row per connection kind: GitHub, GitHubActions, CircleCI, Namespace and OpenRouter, each NotConfigured, NotConnected or Connected with what it is connected as: GitHub logins, a build provider's account label, or the secret sets that hold an OpenRouter key.",
-  ),
-  rest(
-    "tumpel_github_actions_get",
-    "GET",
-    "/v1/github-actions-connection",
-    NO_ARGUMENTS,
-    "Read the tenant's GitHub Actions build provider connection.",
-  ),
-  rest(
-    "tumpel_github_actions_start",
-    "POST",
-    "/v1/github-actions-connection/start",
-    GitHubActionsConnectionStartSchema,
-    "Connect the tenant's own GitHub Actions account, replacing an earlier one. Takes {accountLabel, callerWorkflow}: callerWorkflow is the workflow file each repository holds, such as .github/workflows/tumpel-prebuild.yml, which calls Tumpel's reusable prebuild workflow.",
-  ),
-  rest(
-    "tumpel_github_actions_delete",
-    "DELETE",
-    "/v1/github-actions-connection",
-    NO_ARGUMENTS,
-    "Disconnect the tenant's GitHub Actions account.",
-  ),
-  rest(
-    "tumpel_namespace_get",
-    "GET",
-    "/v1/namespace-connection",
-    NO_ARGUMENTS,
-    "Read the tenant's Namespace build provider connection. Returns the issuer, subject pattern and audience to register at Namespace.",
-  ),
-  rest(
-    "tumpel_namespace_start",
-    "POST",
-    "/v1/namespace-connection/start",
-    NamespaceConnectionStartSchema,
-    "Connect the tenant's own Namespace workspace, replacing an earlier one. Takes {accountLabel, workspaceId}: workspaceId is the Namespace workspace id, such as tenant_123456789ab, that the builds run in; register the issuer, subject pattern and audience tumpel_namespace_get answers at Namespace first.",
-  ),
-  rest(
-    "tumpel_namespace_delete",
-    "DELETE",
-    "/v1/namespace-connection",
-    NO_ARGUMENTS,
-    "Disconnect the tenant's Namespace workspace.",
-  ),
-  rest(
-    "tumpel_circleci_get",
-    "GET",
-    "/v1/circleci-connection",
-    NO_ARGUMENTS,
-    "Read the tenant's CircleCI build provider connection. Returns the connection without its token, the orb and the config each repository commits.",
-  ),
-  {
-    name: "tumpel_circleci_start",
-    description:
-      "Draft the command that connects the tenant's CircleCI organization. Takes {accountLabel, organizationId}: organizationId is the organization id from CircleCI's Organization Settings. CircleCI API tokens never pass through MCP, so this tool writes nothing; it returns the tumpel circleci start command the user pipes a personal API token into.",
-    input: CIRCLECI_START_WITHOUT_TOKEN,
-    request: null,
-    answer: "circleCIStartCommand",
-  },
-  rest(
-    "tumpel_circleci_authorize",
-    "POST",
-    "/v1/circleci-connection/authorize",
-    NO_ARGUMENTS,
-    "Start connecting the tenant's CircleCI organization through CircleCI's OAuth consent page, the way that needs no token from the user. Returns the authorization, AwaitingRedirect with authorizeUrl and redirectDueAt. Give the person authorizeUrl; after they choose Allow the browser lands on a 127.0.0.1 address whose code never passes through MCP, so they run tumpel circleci authorize on their machine instead, which listens there, or paste that address into tumpel circleci complete --stdin. With several organizations the authorization turns ChoosingOrganization; pick one with tumpel_circleci_choose.",
-  ),
-  rest(
-    "tumpel_circleci_choose",
-    "POST",
-    "/v1/circleci-connection/choose",
-    CircleCIAuthorizationChooseSchema,
-    "Connect the organization a ChoosingOrganization CircleCI authorization lists. Takes {circleCIAuthorizationId, organizationId}. Returns the authorization, Completed with the organization and the token's expiresAt.",
-  ),
-  rest(
-    "tumpel_circleci_delete",
-    "DELETE",
-    "/v1/circleci-connection",
-    NO_ARGUMENTS,
-    "Disconnect the tenant's CircleCI organization and delete its project bindings.",
-  ),
-  rest(
-    "tumpel_circleci_project_list",
-    "GET",
-    "/v1/circleci-projects",
-    NO_ARGUMENTS,
-    "List the repositories bound to a CircleCI project.",
-  ),
-  rest(
-    "tumpel_circleci_project_add",
-    "POST",
-    "/v1/circleci-projects",
-    CircleCIProjectAddSchema,
-    "Bind a repository to its CircleCI project once. Takes {repository, projectSlug, pipelineDefinitionId}: projectSlug is gh/<owner>/<name> in a GitHub OAuth organization or circleci/<organization id>/<project id> in a GitHub App organization, and the pipeline definition must check out the repository.",
-  ),
-  rest(
-    "tumpel_circleci_project_delete",
-    "DELETE",
-    "/v1/circleci-projects/{circleCIProjectId}",
-    CircleCIProjectPathSchema,
-    "Delete a repository's CircleCI project binding.",
+    "List one row per connection kind: GitHub and OpenRouter, each NotConfigured, NotConnected or Connected with what it is connected as: GitHub logins or the secret sets that hold an OpenRouter key.",
   ),
   rest(
     "tumpel_prebuild_start",
     "POST",
     "/v1/prebuilds",
     PrebuildStartSchema.extend({ repository: PrebuildStartSchema.shape.repository.describe(REPOSITORY_FORMAT) }),
-    "Start a prebuild of a repository's default branch on one of the tenant's online Amd64 hosts that builds no other prebuild; provider is recorded on the prebuild. personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it, and whose harness version picks the guest image; the host clones with an installation token that reads the repository's contents. Returns the prebuild; a stored or running prebuild with the same key comes back unless rebuild is true. Refused DevcontainerMissing, naming the templates, when the repository holds no devcontainer.json; open a template pull request first. Refused NoHostAvailable when no such host is free.",
+    "Start a prebuild of a repository's default branch on one of the tenant's online Amd64 hosts that builds no other prebuild. personaId names the persona whose secret set's GITHUB_TOKEN reads the repository when the GitHub App installation does not cover it, and whose harness version picks the guest image; the host clones with an installation token that reads the repository's contents. Returns the prebuild; a stored or running prebuild with the same key comes back unless rebuild is true. Refused DevcontainerMissing, naming the templates, when the repository holds no devcontainer.json; open a template pull request first. Refused NoHostAvailable when no such host is free.",
   ),
   rest(
     "tumpel_prebuild_list",
@@ -1032,18 +936,11 @@ export const TOOLS: ToolDefinition[] = [
     "Read one turn; state is Offered, Running, Completed or Failed.",
   ),
   rest(
-    "tumpel_turn_wait",
-    "GET",
-    "/v1/turns/wait",
-    TurnWaitQuerySchema,
-    "Wait on up to 50 turns of any of the tenant's sessions until the first one is Completed or Failed, or until timeoutSeconds (at most 50) pass; answers at once when one has already ended. Returns every turn in the order asked, with its state, and a Failed turn with its failure {reason, detail}. Call it again with the turns still Offered or Running to wait on. Refused NotFound, naming the turn, when a turnId names no turn of the tenant.",
-  ),
-  rest(
-    "tumpel_events_wait",
+    "tumpel_events_list",
     "GET",
     "/v1/events",
     EventQuerySchema,
-    "Wait up to waitSeconds (at most 50) for the tenant's next events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle, HostOffline or PrebuildDone; answers at once when one has already happened. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Leave afterEventId out to wait for events from now on. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
+    "Read the tenant's events after afterEventId, such as TurnCompleted, TurnFailed, SessionIdle or PrebuildDone, or follow GET /v1/events over a WebSocket. Reads from the end of the log when afterEventId is left out. Filter with event (repeatable) and sessionId. Returns {events, lastEventId}; pass lastEventId as afterEventId on the next call so no event is missed. Refused EventCursorExpired when afterEventId is older than the 7 days the log keeps.",
   ),
   rest(
     "tumpel_turn_cancel",
@@ -1107,7 +1004,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/metrics",
     MetricWindowSchema,
-    "List every metric with series seen between from and to (ISO 8601 with an offset), each with its unit, kind and its dimensions with their values and series counts. filter takes dimension:value entries; one dimension repeated is OR, different dimensions AND. Returns {metrics: [{metric, unit, kind, description, facets}]}.",
+    "List every metric with series seen between from and to (ISO 8601 with an offset), each with its unit, kind and its dimensions with their values and series counts. filter takes dimension:value entries; one dimension repeated is OR, different dimensions AND. Returns {metrics: [{metric, unit, kind, description, facets}], usage: {tier, counters: [{measure, window, used, limit, resetsAt}]}}, where usage is the tenant's use of each of its limits in the current windows.",
   ),
   rest(
     "tumpel_metrics_query",
@@ -1181,9 +1078,6 @@ const runTool = async (
     return { ok: true, text: connectorTokenCommand(ConnectorPathSchema.parse(args)) };
   }
   if (tool.answer === "memberCommand") return { ok: true, text: memberCommand(MEMBER_WITHOUT_VALUE.parse(args)) };
-  if (tool.answer === "circleCIStartCommand") {
-    return { ok: true, text: circleCIStartCommand(CIRCLECI_START_WITHOUT_TOKEN.parse(args)) };
-  }
   const entry = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "secretSetId"));
   return { ok: true, text: JSON.stringify(ConfigSecretSetSchema.parse(entry)) };
 };
@@ -1251,7 +1145,7 @@ const listResult = (): unknown => ({
   tools: TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: z.toJSONSchema(tool.input),
+    inputSchema: { type: "object", ...z.toJSONSchema(tool.input) },
   })),
 });
 

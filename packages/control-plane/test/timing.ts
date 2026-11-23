@@ -7,25 +7,19 @@ export type Settings = z.infer<typeof ControlPlaneSettingsSchema>;
 
 export const TEST_SETTINGS: Settings = {
   dispatchGrantTtlSeconds: 300,
-  snapshotDelaySeconds: 30,
   snapshotDeadlineSeconds: 900,
   turnOfferTtlSeconds: 60,
   turnImageFetchBudgetSeconds: 900,
-  turnFirstLineBudgetSeconds: 120,
   turnTotalBudgetSeconds: 3600,
   transcriptChunkLines: 64,
-  prebuildUploadBudgetSeconds: 3600,
-  prebuildDispatchBudgetSeconds: 600,
-  prebuildBuildBudgetSeconds: 3600,
   claudeSetupUrlBudgetSeconds: 300,
   claudeSetupCodeBudgetSeconds: 600,
   claudeSetupMintBudgetSeconds: 120,
   claudeSetupMintGraceSeconds: 10,
   heartbeatIntervalSeconds: 1,
-  heartbeatDeadlineSeconds: 3,
+  heartbeatDeadlineSeconds: 90,
   devicePollIntervalSeconds: 1,
   deviceSlowDownStepSeconds: 1,
-  gitHubActionsIssuer: "https://token.actions.githubusercontent.com",
 };
 
 const POLL_MS = 50;

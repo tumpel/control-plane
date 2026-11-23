@@ -215,16 +215,3 @@ export const GitHubTriggerDeliverySchema = z.object({
   installation: z.object({ id: GitHubIdSchema }),
   repository: z.object({ html_url: z.string().url() }),
 });
-
-export const GitHubWorkflowRunEventSchema = z.object({
-  action: z.string(),
-  installation: z.object({ id: GitHubIdSchema }),
-  repository: z.object({ full_name: z.string() }),
-  workflow_run: z.object({
-    id: GitHubIdSchema,
-    path: z.string(),
-    head_sha: z.string(),
-    html_url: z.string().url(),
-    conclusion: z.string().nullable(),
-  }),
-});

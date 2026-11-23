@@ -8,23 +8,26 @@
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
-    "test": "node --test --test-timeout=90000 test/*.test.ts test/scenarios/*.test.ts",
-    "test:integration": "node ../../npm-scripts/release-fetch.mjs && TMPDIR=/dev/shm node --test --test-timeout=90000 test/integration/*.test.ts",
-    "test:files": "node --test --test-timeout=90000"
+    "test": "node --test --test-timeout=90000 test/*.test.ts test/scenarios/*.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.0",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
     "jsdom": "^31.0.1",
     "typescript": "^5.9.0",
-    "wrangler": "^4.150.0"
+    "undici": "^8.12.3",
+    "wrangler": "^4.150.0",
+    "ws": "^8.21.0"
   },
   "dependencies": {
     "@block65/webcrypto-web-push": "^2.0.0",
-    "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.26/tumpel-api-0.21.0-rc.26.tgz",
+    "@streamparser/json": "0.0.26",
+    "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v1.0.0-rc.54/tumpel-api-1.0.0-rc.54.tgz",
     "@tumpel/pages": "https://github.com/tumpel/dashboard/releases/download/v0.7.0/pages-0.7.0.tgz",
-    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v0.21.0-rc.26/tumpel-schemas-0.21.0-rc.26.tgz",
+    "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v1.0.0-rc.54/tumpel-schemas-1.0.0-rc.54.tgz",
+    "drizzle-orm": "^0.45.4",
     "uuid": "^14.0.3",
     "zod": "^4.6.7"
   }

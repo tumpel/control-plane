@@ -56,7 +56,6 @@ export class EventChannel extends DurableObject<Env> {
       events: subscription.events,
       sessionId: subscription.sessionId,
       triggerId: subscription.triggerId,
-      waitSeconds: 0,
     });
     if (listed.kind === "CursorExpired") return eventCursorExpired(subscription.cursor, listed.oldestEventId);
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
@@ -99,7 +98,6 @@ export class EventChannel extends DurableObject<Env> {
         events: [],
         sessionId: null,
         triggerId: null,
-        waitSeconds: 0,
       });
       if (listed.kind === "CursorExpired") {
         throw new Error(

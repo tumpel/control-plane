@@ -1,11 +1,43 @@
-import { createHash, randomUUID } from "node:crypto";
+import assert from "node:assert/strict";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { register } from "node:module";
-import { ChannelProtocol, SessionSchema, StartedSessionSchema, SubscriptionSchema, TurnSchema } from "@tumpel/schemas";
+import { mock } from "node:test";
+import {
+  DeviceAuthorizationSchema,
+  DeviceTokenSchema,
+  HostRecordSchema,
+  MintedEnrolmentTokenSchema,
+  SessionSchema,
+  StartedSessionSchema,
+  SubscriptionSchema,
+  type TenantLimitsProfileSchema,
+  TenantUsageSchema,
+  TurnSchema,
+  WhoamiSchema,
+} from "@tumpel/schemas";
+import { Agent, setGlobalDispatcher } from "undici";
 import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
-import { D1Database, migratedDatabase, R2Bucket, Runtime } from "./runtime.ts";
+import { ACCESS_AUDIENCE, AccessStub } from "./access.ts";
+import { GitHubStub, installApp } from "./github.ts";
+import {
+  D1Database,
+  flight,
+  ioClock,
+  migratedDatabase,
+  type Namespace,
+  R2Bucket,
+  RateLimiter,
+  Runtime,
+  type SqlStorage,
+  type Storage,
+} from "./runtime.ts";
+import { type RequestInit, request, ScenarioServer, settle } from "./server.ts";
+import { hostKey, Supervisor, type SupervisorOptions, until } from "./supervisor.ts";
+
+export type { TurnOffer } from "./supervisor.ts";
 
 register("./hooks.mjs", import.meta.url);
 
@@ -15,147 +47,154 @@ const MIGRATIONS = new URL("../../../migrations/", import.meta.url);
 type DurableObjectClass = new (ctx: never, env: never) => object;
 type TenantApi = { call(operation: string, input: unknown): Promise<unknown> };
 type HostRecord = { hostId: string };
+type Worker = { fetch(request: Request, env: unknown): Promise<Response> };
+type Tier = "Free" | "Configured";
+type Limit = { measure: string; window: string; limit: number };
+export type ScenarioLimits = {
+  defaultTier: Tier;
+  freeTenantsPerAccount: number;
+  configured: Limit[];
+  readsPerMinute: number;
+  writesPerMinute: number;
+  hostFramesPerMinute: number;
+  ceiling: z.infer<typeof TenantLimitsProfileSchema>;
+};
+export type Member = { tenantId: string; token: string };
 
 const imported = async <T>(path: string, name: string): Promise<T> => {
   const module: Record<string, unknown> = await import(new URL(path, SOURCE).href);
   return module[name] as T;
 };
 
-const StoredTurnOfferSchema = z.object({
-  type: z.literal("TurnOffer"),
-  turnId: z.string(),
-  sessionId: z.string(),
-  boxId: z.string(),
-  prompt: z.string(),
-});
-export type TurnOffer = z.infer<typeof StoredTurnOfferSchema>;
 type Session = z.infer<typeof SessionSchema>;
 type Subscription = z.infer<typeof SubscriptionSchema>;
 type Turn = z.infer<typeof TurnSchema>;
-
-const ControlMessageSchema = z.looseObject({ type: z.string() });
-type ControlMessage = z.infer<typeof ControlMessageSchema>;
+export type TenantUsage = z.infer<typeof TenantUsageSchema>;
 
 const START = Date.parse("2026-11-21T11:00:00Z");
-const TENANT_ID = "tenant-scenario";
-const PRINCIPAL_ID = "principal-scenario";
+export const TENANT_ID = "tenant-scenario";
+export const PRINCIPAL_ID = "principal-scenario";
+
+export type WorldOptions = {
+  webhookSenders: "Running" | "Unreachable";
+  vapidKey: "Valid" | "Unreadable";
+  vars: Record<string, unknown>;
+};
+type Settings = typeof TEST_SETTINGS;
+const STEP_MS = 50;
+
+const VAPID = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const VAPID_JWK = VAPID.privateKey.export({ format: "jwk" });
+const VAPID_PUBLIC_KEY = Buffer.concat([
+  Buffer.from([4]),
+  Buffer.from(VAPID_JWK.x ?? "", "base64url"),
+  Buffer.from(VAPID_JWK.y ?? "", "base64url"),
+]).toString("base64url");
+
+type TenantOperations = Record<string, (input: never) => unknown>;
+const REPOSITORY = "https://github.com/acme/app";
 
 export const SETTINGS = TEST_SETTINGS;
+export const BUDGETS = { memoryBudgetMib: 30000, memoryHeldMib: 0, diskBudgetMib: 1_000_000, diskHeldMib: 0 };
 
-export class Host {
-  private readonly inbox: ControlMessage[] = [];
-  private readonly lineSeqs = new Map<string, number>();
-  readonly hostId: string;
-  private readonly world: World;
+export const LIMITS: ScenarioLimits = {
+  defaultTier: "Configured",
+  freeTenantsPerAccount: 1,
+  configured: [{ measure: "RowsWritten", window: "Hour", limit: 1_000_000 }],
+  readsPerMinute: 600,
+  writesPerMinute: 120,
+  hostFramesPerMinute: 600,
+  ceiling: {
+    writesPerMinute: 120,
+    hostFramesPerMinute: 600,
+    usage: [{ measure: "RowsWritten", window: "Hour", limit: 1_000_000 }],
+  },
+};
 
-  constructor(hostId: string, world: World) {
-    this.hostId = hostId;
-    this.world = world;
-  }
+export const UNMETERED: ScenarioLimits = {
+  ...LIMITS,
+  hostFramesPerMinute: 1_000_000,
+  ceiling: { ...LIMITS.ceiling, hostFramesPerMinute: 1_000_000 },
+};
 
-  send(message: unknown): Promise<void> {
-    this.inbox.push(ControlMessageSchema.parse(message));
-    return Promise.resolve();
-  }
+export type Host = Supervisor;
 
-  received(type: string): ControlMessage[] {
-    return this.inbox.filter((message) => message.type === type);
-  }
-
-  take(type: string): ControlMessage {
-    const at = this.inbox.findIndex((message) => message.type === type);
-    if (at === -1) {
-      throw new Error(
-        `host ${this.hostId} was sent no ${type}; it holds ${JSON.stringify(this.inbox.map((message) => message.type))}`,
-      );
-    }
-    const [message] = this.inbox.splice(at, 1);
-    return ControlMessageSchema.parse(message);
-  }
-
-  takeOffer(): TurnOffer {
-    return StoredTurnOfferSchema.parse(this.take("TurnOffer"));
-  }
-
-  async says(message: Record<string, unknown>): Promise<unknown> {
-    return this.world.call("hostMessage", { tenantId: TENANT_ID, hostId: this.hostId, message });
-  }
-
-  async claims(offer: TurnOffer): Promise<void> {
-    await this.says({ type: "TurnClaim", turnId: offer.turnId, boxId: offer.boxId });
-  }
-
-  async finishes(offer: TurnOffer): Promise<void> {
-    const lineSeq = (this.lineSeqs.get(offer.sessionId) ?? 0) + 1;
-    this.lineSeqs.set(offer.sessionId, lineSeq);
-    const result = '{"type":"result","subtype":"success","is_error":false}';
-    await this.says({ type: "TurnLine", turnId: offer.turnId, lineSeq, text: result });
-    await this.says({
-      type: "TurnComplete",
-      turnId: offer.turnId,
-      lastLineSeq: lineSeq,
-      completedAt: new Date(Date.now()).toISOString(),
-    });
-    await this.answersSnapshot(offer.sessionId);
-  }
-
-  async answersSnapshot(sessionId: string): Promise<void> {
-    const request = z
-      .object({ snapshotId: z.string(), sessionId: z.string(), storageKey: z.string() })
-      .parse(this.take("SnapshotRequest"));
-    if (request.sessionId !== sessionId) throw new Error(`the snapshot asked for is of ${request.sessionId}`);
-    const manifest = JSON.stringify({ entries: [] });
-    const digest = createHash("sha256").update(manifest).digest("hex");
-    await this.world.store.put(`${request.storageKey.split("/")[0]}/packs/${digest}`, manifest);
-    await this.world.store.put(
-      request.storageKey,
-      JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
-    );
-    await this.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: manifest.length });
-  }
-
-  async tearsDownBox(sessionId: string): Promise<string> {
-    const teardown = z.object({ sessionId: z.string(), boxId: z.string() }).parse(this.take("BoxTeardown"));
-    if (teardown.sessionId !== sessionId) throw new Error(`the box torn down is of ${teardown.sessionId}`);
-    await this.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
-    return teardown.boxId;
-  }
-}
+type TenantSteps = {
+  expireSubscriptions(now: number): void;
+};
 
 export class World {
   readonly store = new R2Bucket();
   readonly releases = new R2Bucket();
   readonly db = new D1Database(migratedDatabase(MIGRATIONS));
-  private readonly hosts = new Map<string, Host>();
+  private readonly hosts = new Map<string, Supervisor>();
+  private readonly dispatcher = new Agent();
+  readonly dataPoints: { blobs?: string[]; doubles?: number[]; indexes?: string[] }[] = [];
   private api!: TenantApi;
-  private dispatch!: (request: Request) => Promise<Response>;
+  private tenants!: Namespace<object>;
+  private hostChannels!: Namespace<object>;
+  private server!: ScenarioServer;
+  github!: GitHubStub;
+  access!: AccessStub;
+  origin = "";
+  private tenantApi!: (namespace: unknown, tenantId: string) => TenantApi;
+  private worker!: Worker;
+  private env: Record<string, unknown> = {};
   readonly runtime: Runtime;
+  readonly limits: ScenarioLimits;
+  readonly tier: Tier;
+  owner!: Member;
 
-  private constructor(runtime: Runtime) {
+  private constructor(runtime: Runtime, limits: ScenarioLimits, tier: Tier) {
     this.runtime = runtime;
+    this.limits = limits;
+    this.tier = tier;
+    setGlobalDispatcher(this.dispatcher);
   }
 
-  static async open(): Promise<World> {
-    const world = new World(new Runtime(START));
-    await world.boot();
+  static async open(
+    options: Partial<WorldOptions> & { limits?: ScenarioLimits; tier?: Tier; start?: number } = {},
+  ): Promise<World> {
+    const { limits, tier, start, ...rest } = options;
+    const world = new World(new Runtime(start ?? START), limits ?? LIMITS, tier ?? "Configured");
+    await world
+      .boot({ webhookSenders: "Running", vapidKey: "Valid", vars: {}, ...rest })
+      .catch(async (error: unknown) => {
+        await world.close();
+        throw error;
+      });
     return world;
   }
 
-  private async boot(): Promise<void> {
+  get settings(): Settings {
+    return this.env.TUMPEL_SETTINGS as Settings;
+  }
+
+  private async boot(options: WorldOptions): Promise<void> {
     const Tenant = await imported<DurableObjectClass>("tenant.ts", "Tenant");
-    const SessionTimer = await imported<DurableObjectClass>("session-timer.ts", "SessionTimer");
-    const tenantApi = await imported<(namespace: unknown, tenantId: string) => TenantApi>("tenant-api.ts", "tenantApi");
-    const ignored = () =>
-      this.runtime.stubs(() => new Proxy({}, { get: () => () => Promise.resolve(undefined) }) as object);
+    const HostChannel = await imported<DurableObjectClass>("host-channel.ts", "HostChannel");
+    const EventChannel = await imported<DurableObjectClass>("event-channel.ts", "EventChannel");
+    const TenantMetrics = await imported<DurableObjectClass>("tenant-metrics.ts", "TenantMetrics");
+    const WebhookSender = await imported<DurableObjectClass>("webhook-sender.ts", "WebhookSender");
+    const unreachable = () =>
+      this.runtime.stubs(() => ({
+        wake: () => Promise.reject(new Error("the webhook sender Durable Object is unreachable")),
+      }));
+    this.tenantApi = await imported<(namespace: unknown, tenantId: string) => TenantApi>("tenant-api.ts", "tenantApi");
+    this.worker = await imported<Worker>("index.ts", "default");
+    this.github = await GitHubStub.listen();
+    this.access = await AccessStub.listen();
     const env: Record<string, unknown> = {
       DB: this.db,
       STORE: this.store,
       RELEASES: this.releases,
-      SESSION_TIMER: this.runtime.namespace(SessionTimer, () => env),
-      HOST: this.runtime.stubs((hostId) => this.host(hostId)),
-      EVENTS: ignored(),
-      WEBHOOKS: ignored(),
-      TENANT_METRICS: ignored(),
+      HOST: this.runtime.namespace(HostChannel, () => env),
+      EVENTS: this.runtime.namespace(EventChannel, () => env),
+      WEBHOOKS:
+        options.webhookSenders === "Running" ? this.runtime.namespace(WebhookSender, () => env, true) : unreachable(),
+      TENANT_METRICS: this.runtime.namespace(TenantMetrics, () => env),
+      METRICS: { writeDataPoint: (point: World["dataPoints"][number]) => this.dataPoints.push(point) },
+      METRICS_DATASET: "tumpel_metrics_scenario",
       TUMPEL_SETTINGS: SETTINGS,
       SECRETS_KEK: Buffer.alloc(32, 7).toString("base64"),
       R2_BUCKET_NAME: "store",
@@ -163,94 +202,420 @@ export class World {
       R2_SECRET_ACCESS_KEY: "scenario",
       R2_ACCOUNT_ID: "scenario",
       RELEASES_BUCKET_NAME: "releases",
+      RELEASES_ACCESS_KEY_ID: "scenario",
+      RELEASES_SECRET_ACCESS_KEY: "scenario",
       API_ORIGIN: "https://api.scenario.test",
-      DASHBOARD_ORIGIN: "https://dashboard.scenario.test",
-      GITHUB_API_ORIGIN: "https://github.scenario.test",
+      GITHUB_API_ORIGIN: this.github.origin,
+      ACCESS_ISSUER: this.access.issuer,
+      ACCESS_AUD: ACCESS_AUDIENCE,
+      VAPID_PRIVATE_KEY:
+        options.vapidKey === "Valid"
+          ? VAPID.privateKey.export({ format: "pem", type: "pkcs8" }).toString()
+          : "unreadable",
+      VAPID_PUBLIC_KEY,
+      VAPID_SUBJECT: "mailto:notifications@scenario.test",
+      DASHBOARD_ORIGIN: "https://app.scenario.test",
+      TUMPEL_LIMITS: this.limits,
+      TENANT_READ_RATE: new RateLimiter(this.limits.readsPerMinute),
+      TENANT_WRITE_RATE: new RateLimiter(this.limits.writesPerMinute),
+      WEBHOOK_RATE: new RateLimiter(600),
+      ...options.vars,
     };
-    env.TENANT = this.runtime.namespace(Tenant, () => env);
-    const worker = await imported<{ fetch(request: Request, env: Record<string, unknown>): Promise<Response> }>(
-      "index.ts",
-      "default",
-    );
-    this.dispatch = (request) => worker.fetch(request, env);
-    this.api = tenantApi(env.TENANT, TENANT_ID);
+    this.tenants = this.runtime.namespace(Tenant, () => env);
+    this.hostChannels = env.HOST as Namespace<object>;
+    env.TENANT = this.tenants;
+    this.env = env;
+    this.server = await ScenarioServer.listen((incoming) => this.worker.fetch(incoming, this.env));
+    this.origin = this.server.origin;
+    this.api = this.tenantApi(env.TENANT, TENANT_ID);
     await this.releases.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
+    this.owner = await this.member(TENANT_ID, PRINCIPAL_ID, this.tier);
     await this.call("open", { tenantId: TENANT_ID, now: Date.now() });
+    await this.holdsAgentCredentials();
   }
 
-  async fetch(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await this.dispatch(new Request(`https://api.scenario.test${path}`, init));
+  private async member(tenantId: string, principalId: string, tier: Tier): Promise<Member> {
+    const now = Date.now();
+    const token = randomBytes(32).toString("base64url");
+    this.db.sql.exec(
+      "INSERT INTO tenants (tenant_id, name, tier, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      tenantId,
+      tenantId,
+      tier,
+      now,
+      now,
+    );
+    this.db.sql.exec(
+      "INSERT INTO principals (principal_id, email, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      principalId,
+      `${principalId}@scenario.test`,
+      now,
+      now,
+    );
+    this.db.sql.exec(
+      "INSERT INTO memberships (tenant_id, principal_id, role, created_at) VALUES (?, ?, 'Owner', ?)",
+      tenantId,
+      principalId,
+      now,
+    );
+    this.db.sql.exec(
+      "INSERT INTO devices (device_id, token_sha256, tenant_id, principal_id, name, created_at, last_used_at) VALUES (?, ?, ?, ?, 'scenario', ?, ?)",
+      randomUUID(),
+      createHash("sha256").update(token).digest("hex"),
+      tenantId,
+      principalId,
+      now,
+      now,
+    );
+    return { tenantId, token };
+  }
+
+  async tenant(name: string, tier: Tier): Promise<Member> {
+    const member = await this.member(`tenant-${name}`, `principal-${name}`, tier);
+    await this.tenantApi(this.env.TENANT, member.tenantId).call("open", { tenantId: member.tenantId, now: Date.now() });
     await this.runtime.settle();
+    return member;
+  }
+
+  async fetch(member: Member, method: string, path: string, body?: string): Promise<Response> {
+    return this.request(path, {
+      method,
+      headers: { authorization: `Bearer ${member.token}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body }),
+    });
+  }
+
+  postJson(path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+    return this.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  }
+
+  browser(email: string): Record<string, string> {
+    return { "cf-access-jwt-assertion": this.access.assertion(email), origin: this.origin };
+  }
+
+  async signUp(
+    name: string,
+    email: string,
+  ): Promise<{ tenantId: string; token: string; bearer: Record<string, string> }> {
+    const signedUp = await this.postJson("/v1/tenants", { name }, this.browser(email));
+    if (signedUp.status !== 200) throw new Error(`signing up answered ${signedUp.status}: ${await signedUp.text()}`);
+    const { tenantId } = WhoamiSchema.parse(await signedUp.json()).tenant;
+    return { tenantId, ...(await this.device(tenantId, email)) };
+  }
+
+  async device(tenantId: string, email: string): Promise<{ token: string; bearer: Record<string, string> }> {
+    const started = DeviceAuthorizationSchema.parse(
+      await (await this.postJson("/v1/device/code", { device_name: `${email} scenario` })).json(),
+    );
+    const approved = await this.postJson(
+      "/v1/device/approve",
+      { userCode: started.user_code, tenantId },
+      this.browser(email),
+    );
+    if (approved.status !== 200)
+      throw new Error(`approving the device answered ${approved.status}: ${await approved.text()}`);
+    await this.passes(started.interval * 1000);
+    const granted = await this.postJson("/v1/device/token", {
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: started.device_code,
+    });
+    if (granted.status !== 200) throw new Error(`the device token answered ${granted.status}: ${await granted.text()}`);
+    const token = DeviceTokenSchema.parse(await granted.json()).access_token;
+    return { token, bearer: { authorization: `Bearer ${token}` } };
+  }
+
+  async callTenant(tenantId: string, operation: string, input: unknown): Promise<unknown> {
+    const result = await this.tenantApi(this.tenants, tenantId).call(operation, input);
+    await this.settle();
+    return result;
+  }
+
+  async request(path: string, init: RequestInit = {}): Promise<Response> {
+    const response = await request(`${this.origin}${path}`, init);
+    await this.settle();
     return response;
+  }
+
+  async settle(): Promise<void> {
+    await settle(this.runtime);
+  }
+
+  async tick(ms: number): Promise<void> {
+    mock.timers.tick(ms);
+    await this.settle();
+  }
+
+  until<T>(what: string, read: () => Promise<T> | T, done: (value: T) => boolean): Promise<T> {
+    return until(this, what, read, done);
+  }
+
+  private storageOf(member: Member): Storage {
+    return this.tenantStorage(member.tenantId);
+  }
+
+  tenantStorage(tenantId: string): Storage {
+    const held = this.tenants.instances.get(tenantId);
+    if (held === undefined) throw new Error(`tenant ${tenantId} has no Durable Object yet`);
+    return held.ctx.storage;
+  }
+
+  hostStorage(hostId: string): Storage {
+    const held = this.hostChannels.instances.get(hostId);
+    if (held === undefined) throw new Error(`host ${hostId} has no channel Durable Object yet`);
+    return held.ctx.storage;
+  }
+
+  hostRows(hostId: string): number {
+    return this.hostStorage(hostId).sql.rowsWritten;
+  }
+
+  hibernateHostChannel(hostId: string): void {
+    this.hostChannels.hibernate(hostId);
+  }
+
+  rowsWritten(member: Member): number {
+    return this.storageOf(member).sql.rowsWritten;
+  }
+
+  events(member: Member): string[] {
+    return this.storageOf(member)
+      .sql.db.prepare("SELECT payload FROM events ORDER BY event_id")
+      .all()
+      .map((row) => z.object({ event: z.string() }).parse(JSON.parse(String(row.payload))).event);
+  }
+
+  async usage(member: Member): Promise<TenantUsage> {
+    const read = await this.tenantApi(this.env.TENANT, member.tenantId).call("readUsage", {
+      tenantId: member.tenantId,
+    });
+    return z.object({ usage: TenantUsageSchema }).parse(read).usage;
   }
 
   host(hostId: string): Host {
     const held = this.hosts.get(hostId);
-    if (held !== undefined) return held;
-    const host = new Host(hostId, this);
-    this.hosts.set(hostId, host);
-    return host;
+    if (held === undefined) throw new Error(`no supervisor connected as host ${hostId}`);
+    return held;
   }
 
   async call(operation: string, input: unknown): Promise<unknown> {
     const result = await this.api.call(operation, input);
-    await this.runtime.settle();
+    await this.settle();
     return result;
   }
 
-  async hostOnline(name: string): Promise<Host> {
-    const hostId = randomUUID();
-    const now = Date.now();
-    this.db.sql.exec(
-      `INSERT INTO hosts (host_id, tenant_id, name, state, architecture, cpu_count, memory_bytes, public_key, supervisor_version, created_at, updated_at)
-      VALUES (?, ?, ?, 'Online', 'Amd64', 8, ?, 'key', '0.1.0', ?, ?)`,
-      hostId,
-      TENANT_ID,
-      name,
-      32 * 1024 ** 3,
-      now,
-      now,
-    );
-    await this.call("hostHello", {
-      hostId,
-      boxCapacity: 8,
-      usage: { boxesWarm: 0, loadAverage: 0, memoryAvailableMib: 30000 },
-      now,
-      channelProtocol: ChannelProtocol.Version,
+  async enrol(
+    member: Member,
+    name: string,
+    key = hostKey(),
+  ): Promise<{ hostId: string; key: ReturnType<typeof hostKey> }> {
+    const minted = await this.fetch(member, "POST", "/v1/enrolment-tokens", JSON.stringify({ expiresInSeconds: 600 }));
+    if (minted.status !== 200)
+      throw new Error(`minting an enrolment token answered ${minted.status}: ${await minted.text()}`);
+    const { token } = MintedEnrolmentTokenSchema.parse(await minted.json());
+    const enrolled = await this.request("/v1/hosts/enrol", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enrolmentToken: token,
+        name,
+        architecture: "Amd64",
+        cpuCount: 8,
+        memoryBytes: 32 * 1024 ** 3,
+        publicKey: key.publicKey,
+        supervisorVersion: "0.1.0",
+      }),
     });
-    return this.host(hostId);
+    if (enrolled.status !== 200) throw new Error(`enrolling answered ${enrolled.status}: ${await enrolled.text()}`);
+    return { hostId: HostRecordSchema.parse(await enrolled.json()).hostId, key };
   }
 
-  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
-    const listHosts = await imported<(db: unknown, tenantId: string) => Promise<HostRecord[]>>("hosts.ts", "listHosts");
+  async connect(
+    hostId: string,
+    key: ReturnType<typeof hostKey>,
+    options: Partial<Omit<SupervisorOptions, "store">> = {},
+  ): Promise<Supervisor> {
+    const supervisor = await Supervisor.connect(this, this.origin, hostId, key.privateKey, {
+      heartbeatMs: this.settings.heartbeatIntervalSeconds * 1000,
+      store: this.store,
+      ...options,
+    });
+    this.hosts.get(hostId)?.quiet();
+    this.hosts.set(hostId, supervisor);
+    return supervisor;
+  }
+
+  async reconnect(host: Supervisor, options: Partial<SupervisorOptions> = {}): Promise<Supervisor> {
+    const supervisor = await host.reconnect(options);
+    this.hosts.set(host.hostId, supervisor);
+    return supervisor;
+  }
+
+  async online(
+    member: Member,
+    name: string,
+    options: Partial<Omit<SupervisorOptions, "store">> = {},
+  ): Promise<Supervisor> {
+    const { hostId, key } = await this.enrol(member, name);
+    const supervisor = await this.connect(hostId, key, options);
+    await this.until(
+      `host ${hostId} reporting to its tenant`,
+      () =>
+        this.tenants
+          .instance(member.tenantId)
+          .ctx.storage.sql.exec("SELECT heard_at FROM host_reports WHERE host_id = ?", hostId)
+          .toArray().length,
+      (reports) => reports === 1 && supervisor.isWelcomed(),
+    );
+    return supervisor;
+  }
+
+  async computeMs(operation: string, input: unknown): Promise<number> {
+    const spent = ioClock.spentMs;
+    const started = performance.now();
+    await this.api.call(operation, input).catch((error: unknown) => {
+      if (error instanceof Error && /as invalid:/.test(error.message)) throw error;
+    });
+    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    await this.runtime.settle();
+    return elapsed;
+  }
+
+  hostOnline(name: string): Promise<Host> {
+    return this.online(this.owner, name);
+  }
+
+  async restartTenant(tenantId: string = TENANT_ID): Promise<void> {
+    this.tenants.restart(tenantId);
+    await this.runtime.settle();
+  }
+
+  tenantRowsWritten(): number {
+    return this.tenants.instance(TENANT_ID).ctx.storage.sql.rowsWritten;
+  }
+
+  private async defaultPersona(): Promise<string> {
     const personas = z
       .object({ personas: z.array(z.object({ personaId: z.string() })) })
       .parse(await this.call("listPersonas", { tenantId: TENANT_ID }));
     const [persona] = personas.personas;
     if (persona === undefined) throw new Error("the tenant opened without a default persona");
-    const answer = z.object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) }).parse(
-      await this.call("startSession", {
+    return persona.personaId;
+  }
+
+  async holdsAgentCredentials(): Promise<void> {
+    const personas = z
+      .object({ personas: z.array(z.object({ secretSetId: z.string() })) })
+      .parse(await this.call("listPersonas", { tenantId: TENANT_ID }));
+    const [persona] = personas.personas;
+    if (persona === undefined) throw new Error("the tenant opened without a default persona");
+    const members = [
+      { kind: "ApiKey", name: "ANTHROPIC_API_KEY", provider: "Anthropic", value: "sk-ant-scenario" },
+      { kind: "Variable", name: "GITHUB_TOKEN", value: "ghp-scenario" },
+    ];
+    for (const member of members) {
+      await this.call("setSecretMember", {
         tenantId: TENANT_ID,
+        secretSetId: persona.secretSetId,
+        member,
+        githubUser: member.kind === "Variable" ? { githubUserId: 1, login: "scenario" } : null,
         now: Date.now(),
-        input: {
-          principalId: PRINCIPAL_ID,
-          startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
-          hosts: await listHosts(this.db, TENANT_ID),
-          harness: "ClaudeCode",
-          harnessVersion: CLAUDE_CODE_VERSION,
-          endpoint: "https://api.scenario.test",
-          start: {
-            personaId: persona.personaId,
-            repository: "https://github.com/acme/app",
-            model: "claude-opus",
-            prompt: start.prompt,
-            boxRetention: "Auto",
-            tags: start.tags,
-          },
-        },
-      }),
+      });
+    }
+  }
+
+  async startPrebuild(): Promise<void> {
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHostRecords",
     );
+    await installApp(this.db, TENANT_ID, "acme");
+    const personaId = await this.defaultPersona();
+    const prebuildId = randomUUID();
+    const [base] = CLAUDE_CODE_AMD64_RELEASE.bases;
+    if (base === undefined) throw new Error("the release fixture carries no base image");
+    await this.call("startHostPrebuild", {
+      tenantId: TENANT_ID,
+      commit: {
+        prebuildId,
+        personaId,
+        key: { repository: REPOSITORY, inputDigest: "7".repeat(64), guestImageDigest: base.imageDigest },
+        configSource: "RepositoryFile",
+        defaultBranch: "main",
+        headSha: "8".repeat(40),
+        rootfsKey: "rootfs/scenario",
+      },
+      input: {
+        principalId: PRINCIPAL_ID,
+        startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
+        hosts: await listHosts(this.env, TENANT_ID),
+        harness: "ClaudeCode",
+        harnessVersion: CLAUDE_CODE_VERSION,
+        endpoint: "https://api.scenario.test",
+        start: {
+          personaId,
+          repository: REPOSITORY,
+          model: "prebuild",
+          prompt: `Run the setup step for prebuild ${prebuildId}`,
+        },
+      },
+      apiOrigin: "https://api.scenario.test",
+      now: Date.now(),
+    });
+  }
+
+  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
+    const answer = z
+      .object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) })
+      .parse(await this.tryStartSession(start));
     return answer.started.started.session;
+  }
+
+  async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHostRecords",
+    );
+    const personaId = await this.defaultPersona();
+    return this.call("startSession", {
+      tenantId: TENANT_ID,
+      now: Date.now(),
+      input: {
+        principalId: PRINCIPAL_ID,
+        startedBy: { kind: "Person", principalId: PRINCIPAL_ID },
+        hosts: await listHosts(this.env, TENANT_ID),
+        harness: "ClaudeCode",
+        harnessVersion: CLAUDE_CODE_VERSION,
+        endpoint: "https://api.scenario.test",
+        start: {
+          personaId,
+          repository: REPOSITORY,
+          model: "opus",
+          prompt: start.prompt,
+          boxRetention: "Auto",
+          tags: start.tags,
+        },
+      },
+    });
+  }
+
+  async sendTurn(sessionId: string, prompt: string): Promise<{ turnId: string }> {
+    const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
+      "hosts.ts",
+      "listHostRecords",
+    );
+    return z.object({ sent: z.object({ kind: z.literal("Sent"), turn: z.object({ turnId: z.string() }) }) }).parse(
+      await this.call("sendTurn", {
+        tenantId: TENANT_ID,
+        sessionId,
+        send: { prompt },
+        hosts: await listHosts(this.env, TENANT_ID),
+        now: Date.now(),
+      }),
+    ).sent.turn;
   }
 
   async session(sessionId: string): Promise<Session> {
@@ -288,11 +653,58 @@ export class World {
       .parse(await this.call("getSubscription", { tenantId: TENANT_ID, subscriptionId })).subscription;
   }
 
-  async passes(ms: number): Promise<void> {
-    await this.runtime.advance(ms);
+  tenantOperations(): TenantOperations {
+    return (this.tenants.instance(TENANT_ID).object as { operations: TenantOperations }).operations;
   }
 
-  close(): void {
+  tenantSteps(): TenantSteps {
+    return this.tenants.instance(TENANT_ID).object as TenantSteps;
+  }
+
+  tenantSql(): SqlStorage {
+    return this.tenants.instance(TENANT_ID).ctx.storage.sql;
+  }
+
+  async transcript(
+    sessionId: string,
+    query: { after?: number; turnId?: string; limit?: number },
+  ): Promise<{ lines: { lineSeq: number; turnId: string }[]; cursor: number; finished: boolean }> {
+    const readTranscript = await imported<
+      (env: unknown, caller: unknown, sessionId: string, query: unknown) => Promise<unknown>
+    >("sessions.ts", "readTranscript");
+    const outcome = await readTranscript(
+      this.env,
+      { tenantId: TENANT_ID, principalId: PRINCIPAL_ID },
+      sessionId,
+      query,
+    );
+    return z
+      .object({
+        ok: z.literal(true),
+        value: z.object({
+          lines: z.array(z.object({ lineSeq: z.number(), turnId: z.string() })),
+          cursor: z.number(),
+          finished: z.boolean(),
+        }),
+      })
+      .parse(outcome).value;
+  }
+
+  async passes(ms: number): Promise<void> {
+    await this.settle();
+    for (let left = ms; left > 0; left -= STEP_MS) await this.tick(Math.min(STEP_MS, left));
+  }
+
+  async close(): Promise<void> {
+    for (const host of this.hosts.values()) host.quiet();
+    await this.server?.close();
+    await this.github?.close();
+    await this.access?.close();
+    await this.dispatcher.destroy();
+    await this.runtime.settle();
+    const faults = flight.faults;
+    flight.reset();
     this.runtime.close();
+    assert.deepEqual(faults, [], "a Durable Object or the Worker threw during the scenario");
   }
 }

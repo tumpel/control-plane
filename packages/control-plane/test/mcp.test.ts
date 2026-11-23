@@ -13,15 +13,15 @@ import {
   EffectiveHarnessVersionSchema,
   HarnessCatalogEntrySchema,
   HarnessPinSchema,
+  HostRecordSchema,
   HostSchema,
-  MetricCatalogSchema,
   MintedEnrolmentTokenSchema,
   OAuthClientSchema,
   OAuthTokenSchema,
   PersonaSchema,
   ProblemSchema,
   SecretSetSchema,
-  StoredPersonaSchema,
+  TenantMetricCatalogSchema,
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -175,7 +175,7 @@ const enrolHost = async (): Promise<string> => {
     supervisorVersion: "0.1.0",
   });
   assert.equal(enrolled.status, 200);
-  return HostSchema.parse(await enrolled.json()).hostId;
+  return HostRecordSchema.parse(await enrolled.json()).hostId;
 };
 
 before(async () => {
@@ -258,13 +258,13 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     (await rest(EffectiveHarnessVersionSchema.array(), "GET", "/v1/harnesses/pins")).filter((row) => row.pinned),
     [{ harness: pinned.harness, harnessVersion: pinned.harnessVersion, pinned: true }],
   );
-  const unreleased = await send("PUT", "/v1/harnesses/pins", { harness: "Codex", harnessVersion: "0.169.0" }, bearer);
+  const unreleased = await send("PUT", "/v1/harnesses/pins", { harness: "Codex", harnessVersion: "0.169.1" }, bearer);
   assert.equal(unreleased.status, 422);
   assert.equal(ProblemSchema.parse(await unreleased.json()).code, "ImageNotReleased");
   await toolDone("tumpel_harness_unpin", { harness: entry.harness });
   assert.deepEqual(await rest(EffectiveHarnessVersionSchema.array(), "GET", "/v1/harnesses/pins"), [
     { harness: "ClaudeCode", harnessVersion: CLAUDE_CODE_VERSION, pinned: false },
-    { harness: "Codex", harnessVersion: "0.169.0", pinned: false },
+    { harness: "Codex", harnessVersion: "0.169.1", pinned: false },
     { harness: "OpenCode", harnessVersion: "1.19.5", pinned: false },
     { harness: "PiDev", harnessVersion: "1.5.2", pinned: false },
   ]);
@@ -273,13 +273,13 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   const windowQuery = new URLSearchParams({ ...window });
   windowQuery.append("filter", "harness:Pi");
   windowQuery.append("filter", "harness:Codex");
-  assert.deepEqual(
-    await toolJson(MetricCatalogSchema, "tumpel_metrics_catalog", {
-      ...window,
-      filter: ["harness:Pi", "harness:Codex"],
-    }),
-    await rest(MetricCatalogSchema, "GET", `/v1/metrics?${windowQuery}`),
-  );
+  const catalogByTool = await toolJson(TenantMetricCatalogSchema, "tumpel_metrics_catalog", {
+    ...window,
+    filter: ["harness:Pi", "harness:Codex"],
+  });
+  const catalogByRest = await rest(TenantMetricCatalogSchema, "GET", `/v1/metrics?${windowQuery}`);
+  assert.deepEqual(catalogByTool.metrics, catalogByRest.metrics);
+  assert.equal(catalogByRest.usage.tier, "Configured");
   const unknownMetric = await call(`/v1/metrics/turn.nope/series?${windowQuery}&bucket=Hour`, { headers: bearer });
   assert.equal(unknownMetric.status, 404);
   assert.equal(ProblemSchema.parse(await unknownMetric.json()).code, "MetricNotFound");
@@ -430,8 +430,8 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
   );
   await toolDone("tumpel_connector_delete", { connectorId: recall.connectorId, updatedAt: disconnected.updatedAt });
   assert.deepEqual(
-    await toolJson(StoredPersonaSchema.array(), "tumpel_persona_list"),
-    await rest(StoredPersonaSchema.array(), "GET", "/v1/personas"),
+    await toolJson(PersonaSchema.array(), "tumpel_persona_list"),
+    await rest(PersonaSchema.array(), "GET", "/v1/personas"),
   );
   await toolDone("tumpel_persona_delete", { personaId: persona.personaId });
   assert.equal((await call(`/v1/personas/${persona.personaId}`, { headers: bearer })).status, 404);
