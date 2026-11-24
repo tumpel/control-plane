@@ -72,18 +72,46 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
 
   const secondBefore = world.tenantRowsWritten();
   await host.dropsIdleBox(extra.offer);
-  const stopBaseline = world.tenantRowsWritten() - secondBefore;
+  const secondWrites = world.tenantRowsWritten() - secondBefore;
   assert.equal(signals(), 1);
   assert.equal(host.holds("TurnOffer"), false);
-  assert.equal(signalDelta, 30);
-  assert.equal(stopBaseline, 7);
   await host.claims(first);
   await host.finishes(first);
 
-  host.report({ memoryHeldMib: DEFAULT_USAGE.memoryBudgetMib - 2_048 });
+  host.report({ memoryHeldMib: 0 });
   await world.settle();
   assert.equal(signals(), 1);
+  const unmatched = await startBox(world, host, personaId, "unmatched work", "Warm");
+  const ordinary = await startBox(world, host, personaId, "ordinary crew work", "Warm", ["crew:x"]);
+  const completionBefore = world.tenantRowsWritten();
+  await host.finishes(unmatched.offer);
+  const completionWrites = world.tenantRowsWritten() - completionBefore;
+  assert.equal(host.holds("TurnOffer"), false);
+  const crewBefore = world.tenantRowsWritten();
+  await host.finishes(ordinary.offer);
+  const crewFailureResetWrites = 1;
+  const crewWakeWrites = world.tenantRowsWritten() - crewBefore - completionWrites - crewFailureResetWrites;
+  assert.equal(crewWakeWrites, 20, "ordinary crew wake writes for the idle Foreman");
+  const crewWake = host.takeOffer();
+  assert.equal(crewWake.sessionId, first.sessionId);
+  assert.match(crewWake.prompt, /"event":"TurnCompleted"/);
+  await host.claims(crewWake);
+  await host.finishes(crewWake);
+
+  const noRefusalBefore = world.tenantRowsWritten();
+  await host.dropsIdleBox(unmatched.offer);
+  const stopBaseline = world.tenantRowsWritten() - noRefusalBefore;
+  assert.equal(stopBaseline, 7);
+  assert.equal(signals(), 1);
+  assert.equal(host.holds("TurnOffer"), false);
+  assert.equal(secondWrites - stopBaseline, 0);
+  assert.equal(signalDelta - stopBaseline, 23);
+  assert.equal(signalDelta - stopBaseline - 3, crewWakeWrites);
+
+  const refusalBefore = world.tenantRowsWritten();
   await refuse();
+  assert.equal(world.tenantRowsWritten() - refusalBefore, 23);
+  assert.equal(world.tenantRowsWritten() - refusalBefore - 3, crewWakeWrites);
   const newRefusal = host.takeOffer();
   await host.claims(newRefusal);
   await host.finishes(newRefusal);
