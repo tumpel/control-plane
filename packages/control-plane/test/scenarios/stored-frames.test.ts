@@ -132,7 +132,7 @@ test("a turn of 201 lines, its telemetry on five heartbeats and a snapshot stays
 
   const spent = { tenant: world.tenantRowsWritten() - tenant, channel: world.hostRows(host.hostId) - channel };
   assert.ok(
-    spent.tenant <= 53 + 3 && spent.channel <= 5,
-    `the turn wrote ${JSON.stringify(spent)} rows, including the events_start_signals index charge for TurnStarted, TurnCompleted and SessionIdle`,
+    spent.tenant <= 53 + 3 + 5 && spent.channel <= 5,
+    `the turn wrote ${JSON.stringify(spent)} rows, including 5 for SessionStarted and one extra index charge each for TurnStarted, TurnCompleted and SessionIdle`,
   );
 });

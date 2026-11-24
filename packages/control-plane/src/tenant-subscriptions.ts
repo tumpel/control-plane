@@ -23,9 +23,14 @@ import type { TenantInput } from "./tenant-api.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
 import {
   type HostHeadroom,
+  type IssueOfSession,
+  type NewSession,
   type OfferedPrompt,
   type Sent,
   type Session,
+  type SessionStarted,
+  type StartedSession,
+  type StartedSessionFromIssue,
   TenantSessions,
   type TurnRow,
 } from "./tenant-sessions.ts";
@@ -42,6 +47,7 @@ type Completed = z.infer<typeof CompleteSubscriptionResultSchema>["completed"];
 
 const DELIVERY_FAILURE_LIMIT = 3;
 const CREW_FAILURE_LIMIT = 10;
+const STARTS_REFUSED_LIMIT = 10;
 
 type SubscriptionRow = {
   subscription_id: string;
@@ -331,6 +337,37 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return super.tumpelMcp(sessionId) || this.subscribed(sessionId);
   }
 
+  protected override async startSession(
+    tenantId: string,
+    input: NewSession,
+    now: number,
+  ): Promise<SessionStarted<StartedSession>> {
+    const started = await super.startSession(tenantId, input, now);
+    this.recordSuccessfulStart(started, input.startedBy, now);
+    return started;
+  }
+
+  protected override async startSessionFromIssue(
+    tenantId: string,
+    input: NewSession,
+    issue: IssueOfSession,
+    now: number,
+  ): Promise<SessionStarted<StartedSessionFromIssue>> {
+    const started = await super.startSessionFromIssue(tenantId, input, issue, now);
+    this.recordSuccessfulStart(started, input.startedBy, now);
+    return started;
+  }
+
+  private recordSuccessfulStart(
+    started: SessionStarted<StartedSession>,
+    caller: Session["startedBy"],
+    now: number,
+  ): void {
+    if (started.kind !== "Started") return;
+    const { sessionId } = started.started.session;
+    this.ctx.storage.transactionSync(() => this.appendEvent({ event: "SessionStarted", sessionId, caller }, now));
+  }
+
   protected override async sendTurn(input: TenantInput<"sendTurn">): Promise<Sent> {
     const sent = await super.sendTurn(input);
     if (
@@ -402,6 +439,14 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const eventId = super.appendEvent(event, now);
     if (event.event === "StartRefused" || event.event === "CapacityAvailable") {
       this.wakeSignal(eventId, event.event, now);
+      return eventId;
+    }
+    if (event.event === "SessionStarted") {
+      if (event.caller.kind === "Turn") {
+        durableDb(this.ctx.storage, {}).run(query`
+          UPDATE subscriptions SET starts_refused_in_a_row = 0
+          WHERE session_id = ${event.caller.sessionId} AND starts_refused_in_a_row > 0`);
+      }
       return eventId;
     }
     if (!("sessionId" in event)) return eventId;
@@ -515,6 +560,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (batch?.kind === "Malformed") {
       if (row.state === "Active") this.pause(row, { kind: "DeliveryFailed", turnId: turn.turn_id }, Date.now());
       return { kind: "Uncomposable", cause: batch.cause };
+    }
+    if (batch?.wake && row.starts_refused_in_a_row >= STARTS_REFUSED_LIMIT) {
+      if (row.state === "Active") this.pause(row, { kind: "StartsRefused" }, Date.now());
+      return {
+        kind: "Uncomposable",
+        cause: "the subscription claimed ten refusal or capacity deliveries without starting a crew session",
+      };
     }
     const prompt = batch?.prompt ?? plan;
     const lastEventId = batch?.lastEventId ?? row.cursor_event_id;
