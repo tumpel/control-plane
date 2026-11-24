@@ -682,30 +682,27 @@ test("a disk-only report after BoxGone releases the pending wake", async (t) => 
   assert.equal(host.holds("TurnOffer"), false);
 });
 
-test("an unclaimed refusal offer leaves another recipient free to claim its delivery", async (t) => {
+test("unclaimed refusal offers do not block the next delivery batch", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
-  const first = await world.startSession({ prompt: "first foreman", tags: [], boxRetention: "Warm" });
-  const firstTurn = host.takeOffer();
-  await host.claims(firstTurn);
-  await host.finishes(firstTurn);
-  await world.subscribe(first, {
-    prompt: "first refused starts",
-    goal: "finish",
-    events: ["StartRefused"],
-    crewTags: [],
-  });
-  const second = await world.startSession({ prompt: "second foreman", tags: [], boxRetention: "Warm" });
-  const secondTurn = host.takeOffer();
-  await host.claims(secondTurn);
-  await host.finishes(secondTurn);
-  await world.subscribe(second, {
-    prompt: "second refused starts",
-    goal: "finish",
-    events: ["StartRefused"],
-    crewTags: [],
-  });
+  host.quiet();
+  const foremen = [];
+  for (let each = 0; each < 9; each++) {
+    const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+    const initial = host.takeOffer();
+    await host.claims(initial);
+    await host.finishes(initial);
+    await world.subscribe(foreman, {
+      prompt: "handle refused starts",
+      goal: "finish",
+      events: ["StartRefused"],
+      crewTags: [],
+    });
+    foremen.push(foreman);
+  }
+  const [first] = foremen;
+  assert.ok(first);
   const before = world.tenantRowsWritten();
   const refused = await world.fetch(
     world.owner,
@@ -719,16 +716,18 @@ test("an unclaimed refusal offer leaves another recipient free to claim its deli
     }),
   );
   assert.equal(refused.status, 422);
-  assert.ok(world.tenantRowsWritten() - before <= 44);
-  const delivery = host.takeOffer();
-  const next = host.takeOffer();
-  assert.deepEqual(new Set([delivery.sessionId, next.sessionId]), new Set([first.sessionId, second.sessionId]));
-  assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
-  assert.equal((next.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
-  await host.claims(next);
-  await host.claims(delivery);
-  await host.finishes(delivery);
-  await host.finishes(next);
+  assert.ok(world.tenantRowsWritten() - before <= 191);
+  const deliveries = foremen.map(() => host.takeOffer());
+  assert.equal(host.holds("TurnOffer"), false);
+  assert.deepEqual(
+    new Set(deliveries.map((turn) => turn.sessionId)),
+    new Set(foremen.map(({ sessionId }) => sessionId)),
+  );
+  for (const delivery of deliveries) {
+    assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
+    await host.claims(delivery);
+    await host.finishes(delivery);
+  }
   assert.equal(host.holds("TurnOffer"), false);
 });
 

@@ -205,7 +205,7 @@ type CapacityCause = "PoolExhausted" | "NoHostAvailable";
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
 export abstract class TenantSubscriptions extends TenantSessions {
-  private capacityChanged = false;
+  private capacityChanged = true;
   private readonly capacityCauses = new Map<string, CapacityCause>();
   private capacityScheduleChanged = false;
   private capacityRetryAt: number | null = null;
@@ -554,7 +554,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
       for (const row of this.openSubscriptions(event.sessionId)) this.end(row, ended, now);
     }
     this.matchCrew(event, now);
-    if (event.event === "SessionIdle" || event.event === "SessionStopped") {
+    if ((event.event === "SessionIdle" || event.event === "SessionStopped") && this.subscribed(event.sessionId)) {
       this.refusalScanPending = true;
       this.capacityScheduleChanged = true;
     }
