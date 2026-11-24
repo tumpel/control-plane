@@ -52,43 +52,6 @@ test("capacity keeps a signal paired with the refusal it followed while the reci
   assert.equal(host.holds("TurnOffer"), false);
 });
 
-test("capacity contract event readback and delivery preserve the stored refusal detail", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
-  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
-  const initial = host.takeOffer();
-  await host.claims(initial);
-  await world.subscribe(foreman, { prompt: "read refusals", goal: "finish", events: ["StartRefused"], crewTags: [] });
-  const detail = "The requested box needs more memory than the host has free.";
-  const event = {
-    event: "StartRefused",
-    operation: "Start",
-    personaId: foreman.personaId,
-    model: "opus",
-    caller: { kind: "Person", principalId: "principal-scenario" },
-    crewTags: [],
-    refusal: { code: "PoolExhausted", detail },
-  };
-  const now = Date.now();
-  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now });
-  const response = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
-  assert.equal(response.status, 200);
-  const { events } = await response.json();
-  assert.equal(events.length, 1);
-  const expected = { ...event, tenantId: TENANT_ID, createdAt: now, eventId: events[0].eventId };
-  assert.deepEqual(events, [expected]);
-  await host.finishes(initial);
-  const delivery = host.takeOffer();
-  const delivered = delivery.prompt
-    .split("\n")
-    .filter((line) => line.startsWith("{"))
-    .map((line) => JSON.parse(line));
-  assert.deepEqual(delivered, [expected]);
-  await host.claims(delivery);
-  await host.finishes(delivery);
-});
-
 test("capacity contract rejects inherited tag overflow before recording a malformed preflight event", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
@@ -261,9 +224,7 @@ test("capacity contract excludes expired refusals from delivery and public readb
   world
     .tenantSql()
     .exec(
-      "INSERT INTO room_refusals (event_id, box_memory_mib, box_disk_mib, amd64, arm64, harness, harness_version) SELECT event_id, 2048, 32768, 1, 0, ?, ? FROM events WHERE created_at = ?",
-      "ClaudeCode",
-      "2.1.153",
+      "INSERT INTO room_refusals (event_id, box_memory_mib, box_disk_mib, amd64, arm64) SELECT event_id, 2048, 32768, 1, 0 FROM events WHERE created_at = ?",
       expired,
     );
   await world.hostOnline("host-2");

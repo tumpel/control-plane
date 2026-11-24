@@ -1046,7 +1046,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Served", token: { accessToken, expiresAt: iso(expiresAt) } };
   }
 
-  protected boxSize(personaId: string): PersonaRow {
+  private boxSize(personaId: string): PersonaRow {
     const persona = this.personaRow(personaId);
     if (persona === null) throw new Error(`persona ${personaId} is gone, so its box size is unknown`);
     return persona;
@@ -1983,7 +1983,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
   }
 
-  protected async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
+  private async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
     const release = await readRelease(this.env.RELEASES, now);
     if (release.kind === "Unreadable")
       return { kind: "ReleaseUnreadable", detail: `the published release is unreadable: ${release.detail}` };

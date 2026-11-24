@@ -55,18 +55,11 @@ test("StartRefused records start refusals and delivers the answered problem once
   assert.equal(repeated.status, 409);
   assert.deepEqual(ProblemSchema.parse(await repeated.json()), problem);
   assert.equal(world.tenantRowsWritten() - afterFirst, 3);
-  const { listed } = ListEventsResultSchema.parse(
-    await world.call("listEvents", {
-      tenantId: TENANT_ID,
-      afterEventId: 0,
-      events: ["StartRefused"],
-      sessionId: null,
-      triggerId: null,
-    }),
-  );
-  assert.equal(listed.kind, "Read");
-  assert.equal(listed.page.events.length, 2);
-  const event = listed.page.events[0];
+  const readback = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(readback.status, 200);
+  const { events } = await readback.json();
+  assert.equal(events.length, 2);
+  const event = events[0];
   assert.equal(event?.event, "StartRefused");
   assert.deepEqual(event.refusal, { code: "PoolExhausted", detail: problem.detail });
   assert.equal(event.operation, "Start");
@@ -78,8 +71,13 @@ test("StartRefused records start refusals and delivers the answered problem once
   await host.finishes(offer);
   const delivery = host.takeOffer();
   assert.equal(delivery.sessionId, foreman.sessionId);
-  assert.match(delivery.prompt, /PoolExhausted/);
-  assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
+  assert.deepEqual(
+    delivery.prompt
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line)),
+    [events[1]],
+  );
   await host.claims(delivery);
   await host.finishes(delivery);
   assert.equal(host.holds("TurnOffer"), false);

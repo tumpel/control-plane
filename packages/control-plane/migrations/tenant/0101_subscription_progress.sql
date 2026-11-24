@@ -9,9 +9,7 @@ CREATE TABLE room_refusals (
   box_memory_mib INTEGER NOT NULL,
   box_disk_mib INTEGER NOT NULL,
   amd64 INTEGER NOT NULL CHECK (amd64 IN (0, 1)),
-  arm64 INTEGER NOT NULL CHECK (arm64 IN (0, 1)),
-  harness TEXT NOT NULL,
-  harness_version TEXT NOT NULL
+  arm64 INTEGER NOT NULL CHECK (arm64 IN (0, 1))
 );
 CREATE TABLE capacity_rooms (
   event_id INTEGER PRIMARY KEY REFERENCES events (event_id) ON DELETE CASCADE,

@@ -343,6 +343,7 @@ export class Tenant extends TenantConnectors {
     await this.opened;
     const tenantId = this.tenantName();
     const more = await this.startDeliveries(tenantId);
+    await this.meterUsage(null);
     this.wakeEvents();
     this.wakeWebhooks();
     this.ctx.waitUntil(this.deliverPushes(tenantId));

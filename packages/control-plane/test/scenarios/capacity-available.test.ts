@@ -778,10 +778,10 @@ test("a failed capacity offer keeps its signal and retries after backoff on the 
   const remaining = Number(state.refusal_delivery_retry_at) - Date.now();
   assert.ok(remaining > 0);
   await world.tick(remaining - 1);
-  await spare.beats();
   assert.equal(back.holds("TurnOffer"), false);
-  await world.tick(1);
   const before = world.tenantRowsWritten();
+  await world.restartTenant();
+  await world.tick(1);
   await spare.beats();
   const retry = back.takeOffer();
   assert.match(retry.prompt, /"event":"CapacityAvailable"/);
@@ -838,6 +838,7 @@ test("ten failed refusal offers pause only the subscription whose host cannot de
   assert.match(delivered.prompt, /"event":"StartRefused"/);
   await spare.claims(delivered);
   await spare.finishes(delivered);
+  assert.ok((await world.subscription(healthy.subscriptionId)).cursorEventId > healthy.cursorEventId);
   for (let attempt = 1; attempt <= 10; attempt++) {
     const progress = world
       .tenantSql()
@@ -848,12 +849,15 @@ test("ten failed refusal offers pause only the subscription whose host cannot de
       .one();
     assert.equal(progress.refusal_delivery_attempts, attempt);
     assert.equal(progress.cursor_event_id, subscription.cursorEventId);
+    if (attempt === 10) {
+      assert.equal(progress.refusal_delivery_retry_at, 0);
+      break;
+    }
     const wait = Number(progress.refusal_delivery_retry_at) - Date.now();
     assert.ok(wait > 0 && wait <= 1000 * 2 ** (attempt - 1));
-    await world.tick(wait - 1);
     const before = world.tenantRowsWritten();
-    await spare.beats();
-    assert.ok(world.tenantRowsWritten() - before <= 1);
+    await world.tick(wait - 1);
+    assert.equal(world.tenantRowsWritten() - before, 0);
     await world.tick(1);
     await spare.beats();
     assert.ok(world.tenantRowsWritten() - before <= 50);
@@ -862,6 +866,9 @@ test("ten failed refusal offers pause only the subscription whose host cannot de
   assert.equal(paused.state, "Paused");
   assert.equal(paused.reason.kind, "DeliveryFailed");
   assert.equal((await world.subscription(healthy.subscriptionId)).state, "Active");
+  const pausedWrites = world.tenantRowsWritten();
+  await world.tick(512_000);
+  assert.equal(world.tenantRowsWritten(), pausedWrites);
   assert.equal(
     world
       .tenantSql()
@@ -872,4 +879,69 @@ test("ten failed refusal offers pause only the subscription whose host cannot de
       .one().refusal_delivery_attempts,
     10,
   );
+});
+
+test("a crew turn can be delivered while an earlier start refusal waits to retry", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const lead = host.takeOffer();
+  await host.claims(lead);
+  await host.finishes(lead);
+  const spare = await world.hostOnline("host-2");
+  spare.quiet();
+  const crew = await world.startSession({ prompt: "crew work", tags: [], boxRetention: "Warm" });
+  const work = spare.takeOffer();
+  await spare.claims(work);
+  await world.subscribe(foreman, {
+    prompt: "handle work",
+    goal: "finish",
+    events: ["StartRefused", "TurnCompleted"],
+    crewTags: [],
+  });
+
+  await host.closesSocket();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: crew.personaId,
+      repository: "https://github.com/acme/app",
+      model: "unsupported-model",
+      prompt: "more crew work",
+    }),
+  );
+  assert.equal(refused.status, 422);
+  const readback = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(readback.status, 200);
+  const { events } = await readback.json();
+  assert.equal(events.length, 1);
+  const back = await world.reconnect(host);
+  back.quiet();
+
+  await spare.finishes(work);
+  const crewDelivery = back.takeOffer();
+  assert.match(crewDelivery.prompt, /"event":"TurnCompleted"/);
+  assert.doesNotMatch(crewDelivery.prompt, /"event":"StartRefused"/);
+  await back.claims(crewDelivery);
+  await back.finishes(crewDelivery);
+  const before = world.tenantRowsWritten();
+  await world.tick(1000);
+  assert.ok(world.tenantRowsWritten() - before <= 22);
+  await spare.beats();
+  const retry = back.takeOffer();
+  assert.deepEqual(
+    retry.prompt
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line)),
+    events,
+  );
+  await back.claims(retry);
+  await back.finishes(retry);
+  assert.equal(back.holds("TurnOffer"), false);
 });
