@@ -65,7 +65,10 @@ const namesFor = (operationId) => {
   const verb = VERBS[operationId] ?? kebab(op);
   const parts = [noun, verb].filter(Boolean);
   const command = [noun, CLI_VERBS[operationId] ?? verb].filter(Boolean);
-  return { tool: `tumpel_${parts.join("_").replaceAll(/[- ]/g, "_")}`, command: `tumpel ${command.join(" ")}` };
+  return {
+    tool: MCP_ONLY[operationId]?.tool ?? `tumpel_${parts.join("_").replaceAll(/[- ]/g, "_")}`,
+    command: `tumpel ${command.join(" ")}`,
+  };
 };
 
 const operations = () => {
@@ -127,11 +130,30 @@ const ALLOWLIST = {
 };
 
 const CLI_ONLY = {
+  Personas_list: "the pinned CLI lists full personas through GET /v1/personas",
   ClaudeSetups_submitCode:
     "takes the one-time Claude sign-in code, a secret value, which never passes through MCP; the dashboard and tumpel claude-setup submit-code --stdin take it",
 };
 
-const tools = () => new Set([...readFileSync(MCP, "utf8").matchAll(/"(tumpel_[a-z_]+)"/g)].map((match) => match[1]));
+const MCP_ONLY = {
+  Personas_listMetadata: {
+    tool: "tumpel_persona_list",
+    reason: "MCP lists persona and file metadata through GET /v2/personas; the pinned CLI keeps the full v1 list",
+  },
+};
+
+const tools = () => {
+  const source = readFileSync(MCP, "utf8");
+  return {
+    names: new Set([...source.matchAll(/"(tumpel_[a-z_]+)"/g)].map((match) => match[1])),
+    routes: new Map(
+      [...source.matchAll(/rest\(\s*"(tumpel_[a-z_]+)",\s*"([A-Z]+)",\s*"([^"]+)"/g)].map(([, name, method, path]) => [
+        name,
+        `${method} ${path}`,
+      ]),
+    ),
+  };
+};
 
 const commands = () => {
   const source = readFileSync(CLI, "utf8");
@@ -162,10 +184,7 @@ const render = (rows) =>
   [
     "# Public surface",
     "",
-    "Every tenant operation is one MCP tool and one CLI command, backed by the same REST handler, so an",
-    "MCP session sets up and runs a whole tenant. `npm run surface` writes this file; `npm run surface:check`",
-    "fails when an operation lacks a tool or a command and is not on the allowlist, when an allowlist entry",
-    "names no operation or one that has a tool, or when this file is stale.",
+    "Tenant operations have an MCP tool and a CLI command backed by the same REST handler, except for the CLI-only and MCP-only operations listed below. `npm run surface` writes this file; `npm run surface:check` checks client names and declared MCP REST routes against the contract and rejects stale output.",
     "",
     "Naming: an operation `Group_op` is the tool `tumpel_<noun>_<verb>` and the command",
     "`tumpel <noun> <verb>`, where the verb is `op` in kebab-case and the noun comes from the group:",
@@ -189,13 +208,21 @@ const render = (rows) =>
     ...table([
       ["Operation", "MCP tool", "CLI command"],
       ...rows.map((row) =>
-        [row.operationId, row.operationId in CLI_ONLY ? "(none)" : row.tool, row.command].map((cell) => `\`${cell}\``),
+        [
+          row.operationId,
+          row.operationId in CLI_ONLY ? "(none)" : row.tool,
+          row.operationId in MCP_ONLY ? "(none)" : row.command,
+        ].map((cell) => `\`${cell}\``),
       ),
     ]),
     "",
     "CLI only: tenant operations with a CLI command and no MCP tool:",
     "",
     ...Object.entries(CLI_ONLY).map(([operationId, reason]) => `- \`${operationId}\`: ${reason}.`),
+    "",
+    "MCP only: tenant operations with an MCP tool and no CLI command:",
+    "",
+    ...Object.entries(MCP_ONLY).map(([operationId, { reason }]) => `- \`${operationId}\`: ${reason}.`),
     "",
     "Allowlist: operations that are not tenant operations, with no tool or command:",
     "",
@@ -209,7 +236,7 @@ const rows = all
   .map((op) => ({ ...op, ...namesFor(op.operationId) }))
   .sort((a, b) => a.operationId.localeCompare(b.operationId));
 
-const toolNames = tools();
+const { names: toolNames, routes: toolRoutes } = tools();
 const commandNames = commands();
 const failures = [
   ...Object.keys(ALLOWLIST)
@@ -221,19 +248,37 @@ const failures = [
   ...Object.keys(CLI_ONLY)
     .filter((operationId) => !all.some((op) => op.operationId === operationId))
     .map((operationId) => `the CLI-only list names ${operationId}, which is no operation`),
-  ...Object.keys(CLI_ONLY)
-    .filter((operationId) => toolNames.has(namesFor(operationId).tool))
+  ...all
+    .filter((op) => op.operationId in CLI_ONLY)
+    .filter((op) => {
+      const { tool } = namesFor(op.operationId);
+      return toolNames.has(tool) && (!toolRoutes.has(tool) || toolRoutes.get(tool) === `${op.method} ${op.path}`);
+    })
     .map(
-      (operationId) => `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the CLI-only list`,
+      ({ operationId }) =>
+        `${operationId} has the MCP tool ${namesFor(operationId).tool} and must leave the CLI-only list`,
     ),
+  ...Object.keys(MCP_ONLY)
+    .filter((operationId) => !all.some((op) => op.operationId === operationId))
+    .map((operationId) => `the MCP-only list names ${operationId}, which is no operation`),
+  ...Object.keys(MCP_ONLY)
+    .filter((operationId) => commandNames.has(namesFor(operationId).command))
+    .map((operationId) => `${operationId} has a CLI command and must leave the MCP-only list`),
   ...rows
     .filter((row) => !(row.operationId in CLI_ONLY) && !toolNames.has(row.tool))
     .map((row) => `${row.operationId} has no MCP tool ${row.tool}`),
   ...rows
-    .filter((row) => !commandNames.has(row.command))
+    .filter((row) => !(row.operationId in CLI_ONLY) && toolRoutes.has(row.tool))
+    .filter((row) => toolRoutes.get(row.tool) !== `${row.method} ${row.path}`)
+    .map(
+      (row) =>
+        `${row.operationId} expects ${row.method} ${row.path}, but ${row.tool} calls ${toolRoutes.get(row.tool)}`,
+    ),
+  ...rows
+    .filter((row) => !(row.operationId in MCP_ONLY) && !commandNames.has(row.command))
     .map((row) => `${row.operationId} has no CLI command ${row.command}`),
   ...[...toolNames]
-    .filter((tool) => !rows.some((row) => row.tool === tool))
+    .filter((tool) => !rows.some((row) => !(row.operationId in CLI_ONLY) && row.tool === tool))
     .map((tool) => `the MCP tool ${tool} names no operation`),
 ];
 
@@ -247,5 +292,5 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log(
-  `surface: ${rows.length} operations each have a CLI command and all but ${Object.keys(CLI_ONLY).length} an MCP tool; ${Object.keys(ALLOWLIST).length} allowlisted`,
+  `surface: ${rows.length} operations; ${Object.keys(CLI_ONLY).length} CLI-only; ${Object.keys(MCP_ONLY).length} MCP-only; ${Object.keys(ALLOWLIST).length} allowlisted`,
 );
