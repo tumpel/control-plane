@@ -63,8 +63,6 @@ import { memberRows, sealContext } from "./tenant-sessions";
 import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
-const StartRefusalEventSchema = StartRefusedEventSchema.omit({ eventId: true, tenantId: true, createdAt: true });
-
 export type PersonaWrite = Pick<
   StoredPersona,
   "name" | "harness" | "secretSetId" | "connectorIds" | "boxRetention" | "tumpelMcp"
@@ -314,27 +312,6 @@ export class Tenant extends TenantConnectors {
     if (saved !== null) await this.ctx.storage.put(USAGE_KEY, saved);
   }
 
-  async recordStartRefusal(
-    refusal: z.infer<typeof StartRefusedEventSchema>["refusal"],
-    attempt: Pick<z.infer<typeof StartRefusedEventSchema>, "operation" | "personaId" | "model" | "crewTags">,
-    caller: z.infer<typeof StartRefusedEventSchema>["caller"],
-    now: number,
-  ): Promise<void> {
-    await this.opened;
-    await this.settleTier();
-    const event = StartRefusalEventSchema.parse({
-      ...attempt,
-      event: "StartRefused",
-      caller,
-      refusal: {
-        code: refusal.code,
-        detail: boundedTo(StartRefusedEventSchema.shape.refusal.shape.detail.maxLength, refusal.detail),
-      },
-    });
-    this.appendStartRefusal(event, now);
-    await this.afterOperation(null);
-  }
-
   async handle(request: TenantRequest): Promise<TenantResponse> {
     await this.opened;
     await this.settleTier();
@@ -391,6 +368,19 @@ export class Tenant extends TenantConnectors {
   }
 
   private readonly operations: TenantHandlers = {
+    recordStartRefusal: ({ event, now }) => {
+      this.appendStartRefusal(
+        {
+          ...event,
+          refusal: {
+            ...event.refusal,
+            detail: boundedTo(StartRefusedEventSchema.shape.refusal.shape.detail.maxLength, event.refusal.detail),
+          },
+        },
+        now,
+      );
+      return {};
+    },
     listPersonas: ({ tenantId }) => ({ personas: this.listPersonas(tenantId) }),
     getPersona: ({ tenantId, personaId }) => ({ persona: this.getPersona(tenantId, personaId) }),
     createPersona: ({ tenantId, persona, now }) => ({ written: this.createPersona(tenantId, persona, now) }),

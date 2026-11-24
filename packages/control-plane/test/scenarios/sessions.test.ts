@@ -1539,7 +1539,7 @@ suite("sessions", () => {
     const hostAfter = await hostRows();
 
     const spent = { tenantWritten: tenantAfter - tenantBefore, hostWritten: hostAfter - hostBefore };
-    assert.ok(spent.tenantWritten <= 53, `the turn wrote ${spent.tenantWritten} tenant rows`);
+    assert.ok(spent.tenantWritten <= 58, `the turn wrote ${spent.tenantWritten} tenant rows`);
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
   });
 
@@ -2385,7 +2385,7 @@ suite("sessions", () => {
     const all = await tool("tumpel_events_list", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
     assert.deepEqual(
       all.events.map((event) => event.event),
-      ["TurnStarted", "TurnCompleted", "SessionIdle"],
+      ["SessionStarted", "TurnStarted", "TurnCompleted", "SessionIdle"],
     );
     assert.deepEqual(
       (await tool("tumpel_events_list", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,

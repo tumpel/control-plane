@@ -367,12 +367,16 @@ const recordRefusal = async <T>(
   if (outcome.ok) return outcome;
   const code = StartRefusalCodeSchema.safeParse(outcome.problem.code);
   if (code.success) {
-    await env.TENANT.getByName(caller.tenantId).recordStartRefusal(
-      { code: code.data, detail: outcome.problem.detail },
-      attempt,
-      caller.origin,
+    await tenantOf(env, caller).call("recordStartRefusal", {
+      tenantId: caller.tenantId,
+      event: {
+        ...attempt,
+        event: "StartRefused",
+        refusal: { code: code.data, detail: outcome.problem.detail },
+        caller: caller.origin,
+      },
       now,
-    );
+    });
   }
   return outcome;
 };

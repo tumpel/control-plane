@@ -567,14 +567,22 @@ export class World {
     });
   }
 
-  async startSession(start: { prompt: string; tags: string[] }): Promise<Session> {
+  async startSession(start: {
+    prompt: string;
+    tags: string[];
+    boxRetention?: Session["boxRetention"];
+  }): Promise<Session> {
     const answer = z
       .object({ started: z.object({ kind: z.literal("Started"), started: StartedSessionSchema }) })
       .parse(await this.tryStartSession(start));
     return answer.started.started.session;
   }
 
-  async tryStartSession(start: { prompt: string; tags: string[] }): Promise<unknown> {
+  async tryStartSession(start: {
+    prompt: string;
+    tags: string[];
+    boxRetention?: Session["boxRetention"];
+  }): Promise<unknown> {
     const listHosts = await imported<(env: unknown, tenantId: string) => Promise<HostRecord[]>>(
       "hosts.ts",
       "listHostRecords",
@@ -595,7 +603,7 @@ export class World {
           repository: REPOSITORY,
           model: "opus",
           prompt: start.prompt,
-          boxRetention: "Auto",
+          boxRetention: start.boxRetention ?? "Auto",
           tags: start.tags,
         },
       },

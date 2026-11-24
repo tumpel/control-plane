@@ -2110,6 +2110,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const first = this.newTurn(session.session_id, session.host_id, session.box_id, { prompt: start.prompt }, now);
       return first;
     });
+    this.appendEvent({ event: "SessionStarted", sessionId: session.session_id, caller: input.startedBy }, now);
     await this.offerAfter(tenantId, session, turn, placement.evict);
     return {
       kind: "Started",

@@ -538,3 +538,44 @@ test("delivery composition matches a refusal's crew tags without a calling sessi
   assert.ok((await world.subscription(matched.subscriptionId)).cursorEventId > matched.cursorEventId);
   assert.equal((await world.subscription(unmatched.subscriptionId)).cursorEventId, unmatched.cursorEventId);
 });
+
+test("refusal appends prune one expired event per request independently of the backlog", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const session = await world.startSession({ prompt: "start work", tags: [] });
+  const turn = host.takeOffer();
+  await host.claims(turn);
+  for (let each = 0; each < 101; each++) {
+    world
+      .tenantSql()
+      .exec(
+        "INSERT INTO events (payload, created_at) VALUES (?, ?)",
+        JSON.stringify({ event: "HostOnline", hostId: host.hostId }),
+        Date.now() - 8 * 24 * 60 * 60 * 1000,
+      );
+  }
+  for (let each = 0; each < 3; each++) {
+    const written = world.tenantRowsWritten();
+    const refused = await world.fetch(
+      world.owner,
+      "POST",
+      "/v1/sessions",
+      JSON.stringify({
+        personaId: session.personaId,
+        repository: "https://github.com/acme/app",
+        model: "unsupported-model",
+        prompt: "crew work",
+      }),
+    );
+    assert.equal(refused.status, 422);
+    assert.equal(world.tenantRowsWritten() - written, 4);
+    assert.equal(
+      world
+        .tenantSql()
+        .exec("SELECT event_id FROM events WHERE created_at < ?", Date.now() - 7 * 24 * 60 * 60 * 1000)
+        .toArray().length,
+      100 - each,
+    );
+  }
+});

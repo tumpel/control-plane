@@ -29,7 +29,10 @@ export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number)
       event.sessionId,
     );
   }
-  if (event.event !== "StartRefused") sql.exec("DELETE FROM events WHERE created_at < ?", now - EVENT_RETENTION_MS);
+  sql.exec(
+    "DELETE FROM events WHERE event_id IN (SELECT event_id FROM events WHERE created_at < ? ORDER BY event_id LIMIT 1)",
+    now - EVENT_RETENTION_MS,
+  );
   return row.event_id;
 };
 
@@ -37,7 +40,12 @@ export const endOfLog = (sql: SqlStorage): number =>
   sql.exec<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'").toArray()[0]?.seq ?? 0;
 
 export const oldestKept = (sql: SqlStorage, end: number): number =>
-  sql.exec<{ oldest: number | null }>("SELECT MIN(event_id) AS oldest FROM events").one().oldest ?? end + 1;
+  sql
+    .exec<{ oldest: number | null }>(
+      "SELECT MIN(event_id) AS oldest FROM events WHERE created_at >= ?",
+      Date.now() - EVENT_RETENTION_MS,
+    )
+    .one().oldest ?? end + 1;
 
 type EventRow = { event_id: number; payload: string; created_at: number };
 
@@ -50,7 +58,7 @@ export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
   const rows = sql
     .exec<EventRow>(
       `SELECT events.event_id, events.payload, events.created_at FROM events
-        WHERE events.event_id > ?1
+        WHERE events.event_id > ?1 AND events.created_at >= ?7
           AND (?2 = 0 OR json_extract(events.payload, '$.event') IN (SELECT value FROM json_each(?3)))
           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM event_sessions
                 WHERE event_sessions.event_id = events.event_id AND event_sessions.session_id = ?4))
@@ -62,6 +70,7 @@ export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
       input.sessionId,
       PAGE_SIZE,
       input.triggerId,
+      Date.now() - EVENT_RETENTION_MS,
     )
     .toArray();
   const events = rows.map((row) =>

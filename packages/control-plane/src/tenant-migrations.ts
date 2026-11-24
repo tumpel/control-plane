@@ -103,8 +103,7 @@ import tenant0096 from "../migrations/tenant/0096_host_reports.sql";
 import tenant0097 from "../migrations/tenant/0097_reconcile_holdings.sql";
 import tenant0098 from "../migrations/tenant/0098_subscription_failures.sql";
 import tenant0099 from "../migrations/tenant/0099_sessions_host_state.sql";
-import tenant0100 from "../migrations/tenant/0100_start_refusals.sql";
-import tenant0101 from "../migrations/tenant/0101_drop_start_refusal_slots.sql";
+import tenant0100 from "../migrations/tenant/0100_subscription_capacity.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -213,6 +212,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0097_reconcile_holdings", sql: tenant0097 },
   { name: "0098_subscription_failures", sql: tenant0098 },
   { name: "0099_sessions_host_state", sql: tenant0099 },
-  { name: "0100_start_refusals", sql: tenant0100 },
-  { name: "0101_drop_start_refusal_slots", sql: tenant0101 },
+  { name: "0100_subscription_capacity", sql: tenant0100 },
 ];
