@@ -2406,14 +2406,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (session.state === "Stopping") {
       const latest = this.latestTurn(sessionId, null);
       if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
-      const unanswered = this.ctx.storage.sql
-        .exec<SnapshotRequestRow>(
-          "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ?",
+      const pending = this.ctx.storage.sql
+        .exec<SnapshotRequestRow & { created_at: number }>(
+          "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at FROM snapshot_requests WHERE session_id = ?",
           sessionId,
         )
         .toArray();
-      for (const request of unanswered) {
-        const detail = `the host had not answered snapshot ${request.snapshot_id} when the session was stopped again, so the stop asked the host again`;
+      if (pending.some((request) => this.uploadSecondsLeft(request.created_at, now) >= 1)) {
+        return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
+      }
+      for (const { created_at: _, ...request } of pending) {
+        const detail = `the host had not answered snapshot ${request.snapshot_id} when its upload URLs expired, so stopping the session again asked the host again`;
         this.recordSnapshotFailure(request, "NotAnswered", detail, iso(now));
       }
       await this.snapshotOrTeardown(tenantId, session, latest);
@@ -3308,10 +3311,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     const now = Date.now();
-    const expiresAt = request.created_at + settingsOf(this.env).snapshotDeadlineSeconds * 1000;
-    const seconds = Math.floor((expiresAt - now) / 1000);
+    const seconds = this.uploadSecondsLeft(request.created_at, now);
     if (seconds < 1) return null;
-    return { request, now, expiresAt, seconds };
+    return { request, now, expiresAt: this.uploadExpiresAt(request.created_at), seconds };
+  }
+
+  private uploadExpiresAt(createdAt: number): number {
+    return createdAt + settingsOf(this.env).snapshotDeadlineSeconds * 1000;
+  }
+
+  private uploadSecondsLeft(createdAt: number, now: number): number {
+    return Math.floor((this.uploadExpiresAt(createdAt) - now) / 1000);
   }
 
   private async restorableIndex(tenantId: string, sessionId: string): Promise<ManifestRead<SnapshotIndex> | null> {
