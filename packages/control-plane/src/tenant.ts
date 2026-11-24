@@ -4,20 +4,26 @@ import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
   type PersonaPatchChangeSchema,
+  ProblemSchema,
   type SecretSetCreateSchema,
   type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
+  SessionStartedBySchema,
+  StartRefusalCodeSchema,
+  StartRefusedEventSchema,
   TenantTierSchema,
 } from "@tumpel/schemas";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
+import { boundedTo } from "./bounded-detail.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { tenantLimits, tenants } from "./db/central-schema.ts";
 import { centralDb } from "./db/client.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
+import { pinnedEntry } from "./harness-catalog.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import {
@@ -41,6 +47,7 @@ import {
   type UnreadableSecretSet,
 } from "./secret-members.ts";
 import { checkStart } from "./sessions.ts";
+import { StartRefusalAttemptSchema, StartRefusalEventSchema } from "./start-refusals.ts";
 import {
   recordSupervisorUpdate,
   type SupervisorUpdateMessage,
@@ -310,6 +317,35 @@ export class Tenant extends TenantConnectors {
     if (saved !== null) await this.ctx.storage.put(USAGE_KEY, saved);
   }
 
+  async recordStartRefusal(
+    problem: z.infer<typeof ProblemSchema>,
+    attempt: z.infer<typeof StartRefusalAttemptSchema>,
+    startedBy: z.infer<typeof SessionStartedBySchema>,
+    now: number,
+  ): Promise<void> {
+    await this.opened;
+    await this.settleTier();
+    const refusal = ProblemSchema.parse(problem);
+    const input = StartRefusalAttemptSchema.parse(attempt);
+    const origin = SessionStartedBySchema.parse(startedBy);
+    const code = StartRefusalCodeSchema.safeParse(refusal.code);
+    if (!code.success) return;
+    const persona = this.getPersona(this.tenantName(), input.personaId);
+    const version = persona === null ? undefined : pinnedEntry(this.listPins(), persona.harness)?.harnessVersion;
+    const event = StartRefusalEventSchema.parse({
+      ...input,
+      event: "StartRefused",
+      harnessVersion: input.operation === "Start" ? (version ?? "") : input.harnessVersion,
+      refusal: {
+        code: code.data,
+        detail: boundedTo(StartRefusedEventSchema.shape.refusal.shape.detail.maxLength, refusal.detail),
+      },
+    });
+    this.expireSubscriptions(now);
+    this.appendStartRefusal(event, origin, now);
+    await this.afterOperation(null);
+  }
+
   async handle(request: TenantRequest): Promise<TenantResponse> {
     await this.opened;
     await this.settleTier();
@@ -332,12 +368,16 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
+    await this.afterOperation(operation);
+    return response;
+  }
+
+  private async afterOperation(operation: string | null): Promise<void> {
     await this.meterUsage(operation);
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     this.wakeWebhooks();
     this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
-    return response;
   }
 
   private tenantName(): string {
@@ -481,11 +521,7 @@ export class Tenant extends TenantConnectors {
     repositoryReadToken: async ({ tenantId, personaId, repository, now, permissions }) => ({
       read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
     }),
-    startSession: async ({ tenantId, input, now }) => {
-      const started = await this.startSession(tenantId, input, now);
-      this.recordStartRefusal(input, started, now);
-      return { started };
-    },
+    startSession: async ({ tenantId, input, now }) => ({ started: await this.startSession(tenantId, input, now) }),
     startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
       started: await this.startSessionFromIssue(tenantId, input, issue, now),
     }),

@@ -12,17 +12,9 @@ import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
-import { recordSessionStartRefusal, START_REFUSAL_EVENTS } from "./start-refusals.ts";
+import { recordStartRefusal, START_REFUSAL_EVENTS } from "./start-refusals.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import {
-  type NewSession,
-  type OfferedPrompt,
-  type Session,
-  type SessionStarted,
-  type StartedSession,
-  TenantSessions,
-  type TurnRow,
-} from "./tenant-sessions.ts";
+import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];
@@ -115,15 +107,17 @@ const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events A
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
 export abstract class TenantSubscriptions extends TenantSessions {
-  protected recordStartRefusal(input: NewSession, result: SessionStarted<StartedSession>, now: number): void {
-    if (result.kind !== "Unplaced") return;
-    recordSessionStartRefusal(
+  protected appendStartRefusal(
+    event: Extract<NewTenantEvent, { event: "StartRefused" }>,
+    startedBy: Session["startedBy"],
+    now: number,
+  ): void {
+    recordStartRefusal(
       this.ctx.storage,
-      input,
-      result,
-      this.startTags(input.startedBy, input.start.tags ?? []),
+      { ...event, crewTags: event.operation === "Start" ? this.startTags(startedBy, event.crewTags) : event.crewTags },
+      startedBy.kind === "Turn" ? startedBy.sessionId : null,
       now,
-      (event, at) => this.appendEvent(event, at),
+      (refused, at) => this.appendEvent(refused, at),
       (subscriptionId, at) => this.ensureDelivery(subscriptionId, at),
     );
   }

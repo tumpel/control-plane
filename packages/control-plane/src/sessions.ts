@@ -7,6 +7,8 @@ import {
   SessionStopQuerySchema,
   SessionTagsPatchSchema,
   SessionTagsSchema,
+  StartRefusalCodeSchema,
+  type StartRefusedEventSchema,
   SteerCreateSchema,
   type SteerSchema,
   TranscriptPageSchema,
@@ -355,7 +357,65 @@ export const placed = <T>(
   return ok(started.started);
 };
 
+const recordRefusal = async <T>(
+  env: Env,
+  caller: Caller,
+  attempt: Pick<
+    z.infer<typeof StartRefusedEventSchema>,
+    "operation" | "personaId" | "model" | "harnessVersion" | "crewTags"
+  >,
+  outcome: Outcome<T>,
+  now: number,
+): Promise<Outcome<T>> => {
+  if (!outcome.ok && StartRefusalCodeSchema.safeParse(outcome.problem.code).success) {
+    await env.TENANT.getByName(caller.tenantId).recordStartRefusal(outcome.problem, attempt, caller.origin, now);
+  }
+  return outcome;
+};
+
 export const startSession = async (
+  env: Env,
+  caller: Caller,
+  start: SessionStart,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<StartedSession>> =>
+  recordRefusal(
+    env,
+    caller,
+    {
+      operation: "Start",
+      personaId: start.personaId,
+      model: start.model,
+      harnessVersion: "",
+      crewTags: start.tags ?? [],
+    },
+    await startSessionResult(env, caller, start, endpoint, now),
+    now,
+  );
+
+export const startSessionFromIssue = async (
+  env: Env,
+  caller: Caller,
+  start: SessionStartFromIssue,
+  endpoint: string,
+  now: number,
+): Promise<Outcome<StartedSessionFromIssue>> =>
+  recordRefusal(
+    env,
+    caller,
+    {
+      operation: "Start",
+      personaId: start.personaId,
+      model: start.model,
+      harnessVersion: "",
+      crewTags: start.tags ?? [],
+    },
+    await startSessionFromIssueResult(env, caller, start, endpoint, now),
+    now,
+  );
+
+const startSessionResult = async (
   env: Env,
   caller: Caller,
   start: SessionStart,
@@ -370,7 +430,7 @@ export const startSession = async (
   );
 };
 
-export const startSessionFromIssue = async (
+const startSessionFromIssueResult = async (
   env: Env,
   caller: Caller,
   start: SessionStartFromIssue,
@@ -503,9 +563,32 @@ export const sendTurn = async (
   send: TurnSend,
   now: number,
 ): Promise<Outcome<Turn>> => {
-  const tenant = tenantOf(env, caller);
-  const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
+  const { session } = await tenantOf(env, caller).call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
+  return recordRefusal(
+    env,
+    caller,
+    {
+      operation: "Send",
+      personaId: session.personaId,
+      model: session.model,
+      harnessVersion: session.harnessVersion,
+      crewTags: session.tags,
+    },
+    await sendTurnResult(env, caller, session, send, now),
+    now,
+  );
+};
+
+const sendTurnResult = async (
+  env: Env,
+  caller: Caller,
+  session: Session,
+  send: TurnSend,
+  now: number,
+): Promise<Outcome<Turn>> => {
+  const tenant = tenantOf(env, caller);
+  const sessionId = session.sessionId;
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
