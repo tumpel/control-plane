@@ -12,7 +12,6 @@ import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
-import { recordStartRefusal, START_REFUSAL_EVENTS } from "./start-refusals.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
 import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
@@ -98,6 +97,13 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
   return SubscriptionSchema.parse({ ...base, ...JSON.parse(row.variant) });
 };
 
+const START_REFUSAL_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e
+  WHERE e.event_id > ?2 AND json_extract(e.payload, '$.event') = 'StartRefused'
+    AND EXISTS (SELECT 1 FROM subscription_events WHERE subscription_id = ?1 AND event = 'StartRefused')
+    AND (json_extract(e.payload, '$.caller.sessionId') = (SELECT session_id FROM subscriptions WHERE subscription_id = ?1)
+      OR NOT EXISTS (SELECT 1 FROM subscription_crew_tags AS c WHERE c.subscription_id = ?1
+        AND c.tag NOT IN (SELECT value FROM json_each(json_extract(e.payload, '$.crewTags')))))`;
+
 const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e JOIN event_sessions AS es ON es.event_id = e.event_id
   WHERE e.event_id > ?2
     AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = ?1)
@@ -107,20 +113,30 @@ const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events A
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
 export abstract class TenantSubscriptions extends TenantSessions {
-  protected appendStartRefusal(
-    event: Extract<NewTenantEvent, { event: "StartRefused" }>,
-    startedBy: Session["startedBy"],
-    now: number,
-  ): void {
-    recordStartRefusal(
-      this.ctx.storage,
-      { ...event, crewTags: event.operation === "Start" ? this.startTags(startedBy, event.crewTags) : event.crewTags },
-      startedBy.kind === "Turn" ? startedBy.sessionId : null,
+  protected appendStartRefusal(event: Extract<NewTenantEvent, { event: "StartRefused" }>, now: number): void {
+    this.appendEvent(
+      {
+        ...event,
+        crewTags: event.operation === "Start" ? this.startTags(event.caller, event.crewTags) : event.crewTags,
+      },
       now,
-      (refused, at) => this.appendEvent(refused, at),
-      (subscriptionId, at) => this.ensureDelivery(subscriptionId, at),
     );
   }
+
+  private queueStartRefusal(now: number): void {
+    const row = durableDb(this.ctx.storage, {}).get<{ subscriptionId: string }>(
+      query.raw(`
+      SELECT s.subscription_id AS subscriptionId FROM subscriptions AS s
+      JOIN subscription_actives AS a ON a.subscription_id = s.subscription_id
+      WHERE NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.session_id = s.session_id AND t.state IN ('Offered', 'Running'))
+        AND NOT EXISTS (SELECT 1 FROM subscription_turns AS st WHERE st.subscription_id = s.subscription_id)
+        AND EXISTS (${START_REFUSAL_EVENTS.replaceAll("?1", "s.subscription_id").replaceAll("?2", "s.cursor_event_id")})
+      ORDER BY s.subscription_id LIMIT 1`),
+    );
+    if (row === undefined) return;
+    this.ensureDelivery(row.subscriptionId, now);
+  }
+
   protected getSubscription(tenantId: string, subscriptionId: string): Subscription | null {
     const row = this.subscriptionRow(subscriptionId);
     return row === null ? null : toSubscription(tenantId, row);
@@ -298,6 +314,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
   }
 
   protected async startDeliveries(tenantId: string): Promise<void> {
+    this.queueStartRefusal(Date.now());
     const sessions = this.ctx.storage.sql
       .exec<{ session_id: string }>(
         `SELECT DISTINCT t.session_id FROM subscription_turns AS st JOIN turns AS t ON t.turn_id = st.turn_id

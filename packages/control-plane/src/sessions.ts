@@ -360,15 +360,19 @@ export const placed = <T>(
 const recordRefusal = async <T>(
   env: Env,
   caller: Caller,
-  attempt: Pick<
-    z.infer<typeof StartRefusedEventSchema>,
-    "operation" | "personaId" | "model" | "harnessVersion" | "crewTags"
-  >,
+  attempt: Pick<z.infer<typeof StartRefusedEventSchema>, "operation" | "personaId" | "model" | "crewTags">,
   outcome: Outcome<T>,
   now: number,
 ): Promise<Outcome<T>> => {
-  if (!outcome.ok && StartRefusalCodeSchema.safeParse(outcome.problem.code).success) {
-    await env.TENANT.getByName(caller.tenantId).recordStartRefusal(outcome.problem, attempt, caller.origin, now);
+  if (outcome.ok) return outcome;
+  const code = StartRefusalCodeSchema.safeParse(outcome.problem.code);
+  if (code.success) {
+    await env.TENANT.getByName(caller.tenantId).recordStartRefusal(
+      { code: code.data, detail: outcome.problem.detail },
+      attempt,
+      caller.origin,
+      now,
+    );
   }
   return outcome;
 };
@@ -387,7 +391,6 @@ export const startSession = async (
       operation: "Start",
       personaId: start.personaId,
       model: start.model,
-      harnessVersion: "",
       crewTags: start.tags ?? [],
     },
     await startSessionResult(env, caller, start, endpoint, now),
@@ -408,7 +411,6 @@ export const startSessionFromIssue = async (
       operation: "Start",
       personaId: start.personaId,
       model: start.model,
-      harnessVersion: "",
       crewTags: start.tags ?? [],
     },
     await startSessionFromIssueResult(env, caller, start, endpoint, now),
@@ -572,7 +574,6 @@ export const sendTurn = async (
       operation: "Send",
       personaId: session.personaId,
       model: session.model,
-      harnessVersion: session.harnessVersion,
       crewTags: session.tags,
     },
     await sendTurnResult(env, caller, session, send, now),

@@ -4,13 +4,10 @@ import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
   type PersonaPatchChangeSchema,
-  ProblemSchema,
   type SecretSetCreateSchema,
   type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
-  SessionStartedBySchema,
-  StartRefusalCodeSchema,
   StartRefusedEventSchema,
   TenantTierSchema,
 } from "@tumpel/schemas";
@@ -23,7 +20,6 @@ import { centralDb } from "./db/client.ts";
 import { migrateDurableObject } from "./durable-migrate";
 import { seal, unseal } from "./envelope.ts";
 import { type GitHubUser, REPOSITORY_TOKEN } from "./github.ts";
-import { pinnedEntry } from "./harness-catalog.ts";
 import type { Env } from "./index";
 import { type LegacyMember, legacyMembers, type PlaintextRow } from "./legacy-secrets.ts";
 import {
@@ -47,7 +43,6 @@ import {
   type UnreadableSecretSet,
 } from "./secret-members.ts";
 import { checkStart } from "./sessions.ts";
-import { StartRefusalAttemptSchema, StartRefusalEventSchema } from "./start-refusals.ts";
 import {
   recordSupervisorUpdate,
   type SupervisorUpdateMessage,
@@ -67,6 +62,8 @@ import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
+
+const StartRefusalEventSchema = StartRefusedEventSchema.omit({ eventId: true, tenantId: true, createdAt: true });
 
 export type PersonaWrite = Pick<
   StoredPersona,
@@ -318,30 +315,23 @@ export class Tenant extends TenantConnectors {
   }
 
   async recordStartRefusal(
-    problem: z.infer<typeof ProblemSchema>,
-    attempt: z.infer<typeof StartRefusalAttemptSchema>,
-    startedBy: z.infer<typeof SessionStartedBySchema>,
+    refusal: z.infer<typeof StartRefusedEventSchema>["refusal"],
+    attempt: Pick<z.infer<typeof StartRefusedEventSchema>, "operation" | "personaId" | "model" | "crewTags">,
+    caller: z.infer<typeof StartRefusedEventSchema>["caller"],
     now: number,
   ): Promise<void> {
     await this.opened;
     await this.settleTier();
-    const refusal = ProblemSchema.parse(problem);
-    const input = StartRefusalAttemptSchema.parse(attempt);
-    const origin = SessionStartedBySchema.parse(startedBy);
-    const code = StartRefusalCodeSchema.parse(refusal.code);
-    const persona = this.getPersona(this.tenantName(), input.personaId);
-    const version = persona === null ? undefined : pinnedEntry(this.listPins(), persona.harness)?.harnessVersion;
     const event = StartRefusalEventSchema.parse({
-      ...input,
+      ...attempt,
       event: "StartRefused",
-      harnessVersion: input.operation === "Start" ? (version ?? "") : input.harnessVersion,
+      caller,
       refusal: {
-        code,
+        code: refusal.code,
         detail: boundedTo(StartRefusedEventSchema.shape.refusal.shape.detail.maxLength, refusal.detail),
       },
     });
-    this.expireSubscriptions(now);
-    this.appendStartRefusal(event, origin, now);
+    this.appendStartRefusal(event, now);
     await this.afterOperation(null);
   }
 

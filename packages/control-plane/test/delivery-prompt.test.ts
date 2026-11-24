@@ -69,10 +69,10 @@ test("a start refusal too long to inline reads back by event id without a sessio
       payload: JSON.stringify({
         event: "StartRefused",
         operation: "Start",
+        caller: { kind: "Person", principalId: "person-1" },
         refusal: { code: "HarnessNotInCatalog", detail: "x".repeat(5000) },
         personaId: "persona-1",
         model: "model-1",
-        harnessVersion: "old-version",
         crewTags: ["crew:work"],
       }),
     },

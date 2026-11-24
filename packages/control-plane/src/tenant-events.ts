@@ -29,7 +29,7 @@ export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number)
       event.sessionId,
     );
   }
-  sql.exec("DELETE FROM events WHERE created_at < ?", now - EVENT_RETENTION_MS);
+  if (event.event !== "StartRefused") sql.exec("DELETE FROM events WHERE created_at < ?", now - EVENT_RETENTION_MS);
   return row.event_id;
 };
 
