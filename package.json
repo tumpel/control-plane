@@ -19,7 +19,8 @@
     "secrets:check": "node npm-scripts/secrets-check.mjs",
     "templates:check": "node npm-scripts/templates-check.mjs",
     "check": "npm run lint && npm run comments:check && npm run secrets:check && npm run templates:check && npm run typecheck && npm run surface:check",
-    "test": "npm test --workspaces --if-present && node --test --test-timeout=30000 npm-scripts/*.test.mjs",
+    "test": "npm test --workspaces --if-present && npm run test:scripts",
+    "test:scripts": "node --test --test-timeout=30000 npm-scripts/*.test.mjs",
     "deploy": "node npm-scripts/deploy.mjs",
     "deploy:infra": "node npm-scripts/deploy.mjs infra",
     "deploy:code": "node npm-scripts/deploy.mjs code",
@@ -34,6 +35,8 @@
     "harness:layer": "node npm-scripts/harness-layer.mjs",
     "smoke:pi": "node npm-scripts/pi-smoke.mjs",
     "release:publish": "node npm-scripts/release-publish.mjs",
+    "release:update-dashboard": "node npm-scripts/update-dashboard.mjs",
+    "release:dispatch-deploy": "node npm-scripts/dispatch-deploy.mjs",
     "release:secrets": "node npm-scripts/release-secrets.mjs",
     "db:schema": "node npm-scripts/db-schema.mjs"
   },

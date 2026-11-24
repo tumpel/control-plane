@@ -4,7 +4,7 @@ import { z } from "zod";
 import { SnapshotRequestSchema } from "./harness/snapshot-chunks.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
-test("a stop held by snapshots the host never answered asks the host again when stopped again, and reaches Stopped when the host holds no such box", async (t) => {
+test("a stop held by snapshots whose upload URLs expired unanswered asks the host again when stopped again, and reaches Stopped when the host holds no such box", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -29,6 +29,7 @@ test("a stop held by snapshots the host never answered asks the host again when 
   assert.equal((await world.session(sessionId)).state, "Stopping");
   assert.equal((await world.turn(queued.turnId)).state, "Failed");
 
+  await world.tick((world.settings.snapshotDeadlineSeconds + 1) * 1000);
   await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: Date.now() });
   await world.settle();
   const failures = z.array(z.object({ reason: z.string() })).parse(
@@ -53,4 +54,78 @@ test("a stop held by snapshots the host never answered asks the host again when 
 
   assert.equal((await world.session(sessionId)).state, "Stopped");
   assert.equal(host.received("BoxTeardown").length, 0);
+});
+
+test("a stop held by a snapshot still inside its upload window leaves it alone when stopped again, and the host storing it completes the stop", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const { sessionId } = await world.startSession({ prompt: "upload a large box", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  await world.call("stopSession", {
+    tenantId: TENANT_ID,
+    sessionId,
+    cancelledBy: "owner@scenario.test",
+    now: Date.now(),
+  });
+  await world.settle();
+  const asked = host.received("SnapshotRequest").length;
+
+  await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: Date.now() });
+  await world.settle();
+
+  assert.equal(host.received("SnapshotRequest").length, asked);
+  assert.deepEqual(
+    world.tenantSql().exec("SELECT snapshot_id FROM snapshot_failures WHERE session_id = ?", sessionId).toArray(),
+    [],
+  );
+  assert.equal((await world.session(sessionId)).state, "Stopping");
+  for (let answered = 0; answered < asked; answered += 1) await host.answersSnapshot(sessionId);
+  const teardown = z.object({ boxId: z.string() }).parse(host.take("BoxTeardown"));
+  await host.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+
+  assert.equal((await world.session(sessionId)).state, "Stopped");
+});
+
+test("a stop held by an expired turn snapshot and a live stop snapshot gives up the expired one when stopped again, and the live upload completes the stop", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const { sessionId } = await world.startSession({ prompt: "lose the turn snapshot", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const lost = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
+  await world.tick((world.settings.snapshotDeadlineSeconds + 1) * 1000);
+  await world.call("stopSession", {
+    tenantId: TENANT_ID,
+    sessionId,
+    cancelledBy: "owner@scenario.test",
+    now: Date.now(),
+  });
+  await world.settle();
+  const asked = host.received("SnapshotRequest").length;
+
+  await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: Date.now() });
+  await world.settle();
+
+  assert.equal(host.received("SnapshotRequest").length, asked);
+  assert.deepEqual(
+    z
+      .array(z.object({ snapshot_id: z.string(), reason: z.string() }))
+      .parse(
+        world
+          .tenantSql()
+          .exec("SELECT snapshot_id, reason FROM snapshot_failures WHERE session_id = ?", sessionId)
+          .toArray(),
+      ),
+    [{ snapshot_id: lost.snapshotId, reason: "NotAnswered" }],
+  );
+  for (let answered = 0; answered < asked; answered += 1) await host.answersSnapshot(sessionId);
+  const teardown = z.object({ boxId: z.string() }).parse(host.take("BoxTeardown"));
+  await host.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
+
+  assert.equal((await world.session(sessionId)).state, "Stopped");
 });
