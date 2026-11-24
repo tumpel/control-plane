@@ -328,8 +328,7 @@ export class Tenant extends TenantConnectors {
     const refusal = ProblemSchema.parse(problem);
     const input = StartRefusalAttemptSchema.parse(attempt);
     const origin = SessionStartedBySchema.parse(startedBy);
-    const code = StartRefusalCodeSchema.safeParse(refusal.code);
-    if (!code.success) return;
+    const code = StartRefusalCodeSchema.parse(refusal.code);
     const persona = this.getPersona(this.tenantName(), input.personaId);
     const version = persona === null ? undefined : pinnedEntry(this.listPins(), persona.harness)?.harnessVersion;
     const event = StartRefusalEventSchema.parse({
@@ -337,7 +336,7 @@ export class Tenant extends TenantConnectors {
       event: "StartRefused",
       harnessVersion: input.operation === "Start" ? (version ?? "") : input.harnessVersion,
       refusal: {
-        code: code.data,
+        code,
         detail: boundedTo(StartRefusedEventSchema.shape.refusal.shape.detail.maxLength, refusal.detail),
       },
     });
