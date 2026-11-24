@@ -279,6 +279,13 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   }
   for (const [at, sessionId] of sessions.entries()) {
     const session = await world.session(sessionId);
+    const enabled = await world.fetch(
+      world.owner,
+      "PATCH",
+      `/v1/personas/${session.personaId}`,
+      JSON.stringify({ tumpelMcp: true }),
+    );
+    assert.equal(enabled.status, 200);
     for (let each = 0; each < SUBSCRIPTIONS_PER_SESSION; each++) {
       await world.subscribe(session, {
         prompt: `hand out step ${each}`,

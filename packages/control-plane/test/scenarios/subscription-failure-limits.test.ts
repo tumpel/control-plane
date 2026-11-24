@@ -8,6 +8,13 @@ test("a foreman pauses CrewFailing only after the limit of crew failures in a ro
   const host = await world.hostOnline("host-1");
 
   const foreman = await world.startSession({ prompt: "plan the epic", tags: ["role:foreman"] });
+  const enabled = await world.fetch(
+    world.owner,
+    "PATCH",
+    `/v1/personas/${foreman.personaId}`,
+    JSON.stringify({ tumpelMcp: true }),
+  );
+  assert.equal(enabled.status, 200);
   const subscription = await world.subscribe(foreman, {
     prompt: "hand out the next step of the epic",
     goal: "the epic is merged",
@@ -63,6 +70,13 @@ test("a foreman pauses DeliveryFailed only after the limit of delivery failures 
   const host = await world.hostOnline("host-1");
 
   const foreman = await world.startSession({ prompt: "plan the epic", tags: ["role:foreman"] });
+  const enabled = await world.fetch(
+    world.owner,
+    "PATCH",
+    `/v1/personas/${foreman.personaId}`,
+    JSON.stringify({ tumpelMcp: true }),
+  );
+  assert.equal(enabled.status, 200);
   const subscription = await world.subscribe(foreman, {
     prompt: "hand out the next step of the epic",
     goal: "the epic is merged",
