@@ -169,6 +169,7 @@ export interface NewSession {
 }
 
 export type HostHeadroom = {
+  reported_health: HostReportedHealth;
   memory_held_mib: number | null;
   memory_budget_mib: number | null;
   disk_held_mib: number | null;
@@ -1620,11 +1621,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected hostHeadroom(hostId: string): HostHeadroom | undefined {
     return durableDb(this.ctx.storage, {}).get<HostHeadroom>(query`
-      SELECT memory_held_mib, memory_budget_mib, disk_held_mib, disk_budget_mib
+      SELECT reported_health, memory_held_mib, memory_budget_mib, disk_held_mib, disk_budget_mib
       FROM host_reports WHERE host_id = ${hostId}`);
   }
 
-  protected abstract reportCommitted(hostId: string, before: HostHeadroom, now: number): void;
+  protected abstract reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void;
 
   private reportHost(hostId: string, report: HostReport): void {
     this.ctx.storage.sql.exec(
@@ -1714,9 +1715,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const [heard] = this.ctx.storage.sql
         .exec<{ heard_at: number }>("SELECT heard_at FROM host_reports WHERE host_id = ?", hostId)
         .toArray();
-      if (heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env)))
-        this.appendEvent({ event: "HostOnline", hostId }, report.now);
-      const before = this.roomRefusalPending() ? this.hostHeadroom(hostId) : undefined;
+      const becamePresent = heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env));
+      if (becamePresent) this.appendEvent({ event: "HostOnline", hostId }, report.now);
+      const before = this.roomRefusalPending()
+        ? becamePresent
+          ? "BecamePresent"
+          : this.hostHeadroom(hostId)
+        : undefined;
       this.reportHost(hostId, report);
       if (before !== undefined) this.reportCommitted(hostId, before, report.now);
       clearSupersededFailure(this.ctx.storage.sql, hostId);

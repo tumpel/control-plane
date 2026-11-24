@@ -434,9 +434,17 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return durableDb(this.ctx.storage, {}).get(query.raw(`${roomRefusals("")} LIMIT 1`)) !== undefined;
   }
 
-  protected override reportCommitted(hostId: string, before: HostHeadroom, now: number): void {
+  protected override reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void {
+    if (before === "BecamePresent") {
+      this.appendEvent({ event: "CapacityAvailable", hostId, code: "NoHostAvailable" }, now);
+      return;
+    }
     const after = this.hostHeadroom(hostId);
     if (after === undefined) throw new Error(`host ${hostId} has no committed report`);
+    if (before.reported_health !== "Healthy" && after.reported_health === "Healthy") {
+      this.appendEvent({ event: "CapacityAvailable", hostId, code: "HostDegraded" }, now);
+      return;
+    }
     if (
       rose(after.memory_held_mib, before.memory_held_mib) ||
       rose(after.disk_held_mib, before.disk_held_mib) ||

@@ -179,3 +179,50 @@ test("F2 commits a disk-only change on the heard-at refresh", async (t) => {
   assert.equal(signals(), 1);
   takeCapacity();
 });
+
+test("F2 emits one HostDegraded signal when the host reports Healthy again", async (t) => {
+  const { world, host, signals, takeCapacity } = await f2(t, true, false);
+  const heartbeat = () => ({
+    type: "Heartbeat",
+    sentAt: new Date(Date.now()).toISOString(),
+    usage: { ...DEFAULT_USAGE, memoryHeldMib: DEFAULT_USAGE.memoryBudgetMib, diskHeldMib: 100_000 },
+    ...host.holding(),
+    ack: host.carried().received,
+    telemetry: { instruments: [], samples: [], turns: [] },
+  });
+  host.raw({ ...heartbeat(), health: "RateLimited" });
+  await world.settle();
+  assert.equal(signals(), 0);
+  const before = world.tenantRowsWritten();
+  host.raw({ ...heartbeat(), health: "Healthy" });
+  await world.settle();
+  assert.equal(signals(), 1);
+  assert.equal(world.tenantRowsWritten() - before, 24);
+  assert.match(takeCapacity().prompt, /"code":"HostDegraded"/);
+  await host.beats();
+  assert.equal(signals(), 1);
+});
+
+for (const presence of ["new host", "reconnect after grace"] as const) {
+  test(`F2 emits one NoHostAvailable signal on ${presence}`, async (t) => {
+    const { world, host, signals } = await f2(t, false, false);
+    if (presence === "reconnect after grace") {
+      await host.closesSocket();
+      await world.passes(world.settings.heartbeatDeadlineSeconds * 1000 + 1);
+    }
+    const before = world.tenantRowsWritten();
+    const arrived = presence === "new host" ? await world.hostOnline("host-2") : await world.reconnect(host);
+    await world.settle();
+    assert.equal(signals(), 1);
+    const signal = world
+      .tenantSql()
+      .exec(`
+      SELECT json_extract(payload, '$.hostId') AS hostId, json_extract(payload, '$.code') AS code
+      FROM events WHERE json_extract(payload, '$.event') = 'CapacityAvailable'`)
+      .one();
+    assert.deepEqual({ ...signal }, { hostId: arrived.hostId, code: "NoHostAvailable" });
+    assert.equal(world.tenantRowsWritten() - before, 28);
+    await arrived.beats();
+    assert.equal(signals(), 1);
+  });
+}
