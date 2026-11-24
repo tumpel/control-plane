@@ -10,7 +10,7 @@ import {
 } from "./harness/snapshot-chunks.ts";
 
 const LARGE = 100_000;
-const ROWS_PER_FAILED_SNAPSHOT = 25;
+const ROWS_PER_FAILED_SNAPSHOT = 25 + 2;
 
 const rowsOfFailedSnapshot = (chunks: Placement[], attempts: number): Promise<number> =>
   inWorld(async (world, host) => {
@@ -31,5 +31,8 @@ test("a snapshot of 100000 chunks that the host uploads 3 times and then fails w
   const large = await rowsOfFailedSnapshot(tree(LARGE), 3);
   const small = await rowsOfFailedSnapshot(tree(1), 1);
   assert.equal(large, small);
-  assert.ok(small <= ROWS_PER_FAILED_SNAPSHOT, `a failed snapshot wrote ${small} rows`);
+  assert.ok(
+    small <= ROWS_PER_FAILED_SNAPSHOT,
+    `a failed snapshot wrote ${small} rows, including the events_start_signals index charge for TurnFailed and SessionIdle`,
+  );
 });
