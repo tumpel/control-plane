@@ -741,6 +741,8 @@ const readChunk = async (env: Env, storageKey: string, range: Range): Promise<Tr
 const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLine[]> =>
   cursor.kind === "Lines" ? [] : readChunk(env, cursor.storageKey, cursor.range);
 
+const COMPACT_READ_RAW_BYTES_PER_PAGE_BYTE = 8;
+
 const compactChunks = async (
   env: Env,
   prefix: string,
@@ -751,7 +753,7 @@ const compactChunks = async (
   if (cursor.kind === "Lines") return [];
   const listed = await chunksFrom(env.STORE, prefix, cursor.storageKey, cursor.range.length);
   const other = turnId === null ? -1 : listed.findIndex((chunk) => chunk.turnId !== turnId);
-  return chunksWithin(other === -1 ? listed : listed.slice(0, other), maxBytes);
+  return chunksWithin(other === -1 ? listed : listed.slice(0, other), maxBytes * COMPACT_READ_RAW_BYTES_PER_PAGE_BYTE);
 };
 
 export const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {

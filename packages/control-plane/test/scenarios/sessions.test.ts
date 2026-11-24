@@ -933,7 +933,7 @@ suite("sessions", () => {
     );
   });
 
-  test("a compact read of a running turn fills one page from more than eight stored chunks up to maxBytes, and the next page goes on from its cursor", async () => {
+  test("a compact read of a running turn fills one page with assistant lines from more than eight stored chunks, past chunks that compact to nothing, up to maxBytes, and the next page goes on from its cursor", async () => {
     const { github, host, tool, sessionStart, createPersona, readAll } = await tenant();
     await createPersona("Busy", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
@@ -953,19 +953,24 @@ suite("sessions", () => {
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
       (turn) => turn.state === "Running",
     );
-    const words = Array.from({ length: 20 }, (_, index) => `step ${index + 1} ${"x".repeat(400)}`);
+    const words = Array.from({ length: 30 }, (_, index) => `step ${index + 1} ${"x".repeat(400)}`);
+    const toolResult = JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", content: "y".repeat(1000) }] },
+    });
     words.forEach((text, index) => {
+      host.send({ type: "TurnLines", turnId, firstLineSeq: 2 * index + 1, lines: [toolResult] });
       host.send({
         type: "TurnLines",
         turnId,
-        firstLineSeq: index + 1,
+        firstLineSeq: 2 * index + 2,
         lines: [JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } })],
       });
     });
     await until(
-      "twenty lines in the transcript",
-      () => readAll(sessionId, turnId, 20),
-      (lines) => lines.length === 20,
+      "sixty lines in the transcript",
+      () => readAll(sessionId, turnId, 60),
+      (lines) => lines.length === 60,
     );
     const maxBytes = 8000;
     const first = await tool(
@@ -973,33 +978,36 @@ suite("sessions", () => {
       { sessionId, compact: true, maxBytes },
       CompactTranscriptPageSchema,
     );
-    const firstSeqs = first.turns.flatMap((turn) => turn.lines.map((line) => line.lineSeq));
-    assert.ok(firstSeqs.length > 8, `one page holds ${firstSeqs.length} lines, more than eight chunks`);
-    assert.ok(firstSeqs.length < 20, `one page holds ${firstSeqs.length} lines, bounded by maxBytes`);
+    const firstLines = first.turns.flatMap((turn) => turn.lines);
+    const kept = firstLines.length;
+    assert.ok(kept > 8, `one page holds ${kept} assistant lines past the tool results that compact to nothing`);
+    assert.ok(kept < 30, `one page holds ${kept} assistant lines, bounded by maxBytes`);
     assert.deepEqual(
-      firstSeqs,
-      Array.from({ length: firstSeqs.length }, (_, index) => index + 1),
+      firstLines.map((line) => line.lineSeq),
+      Array.from({ length: kept }, (_, index) => 2 * index + 2),
     );
-    assert.equal(first.cursor, firstSeqs.length);
+    assert.deepEqual(
+      firstLines.map((line) => line.text),
+      words.slice(0, kept),
+    );
+    assert.ok(
+      first.cursor >= 2 * kept && first.cursor < 2 * kept + 2,
+      `cursor ${first.cursor} follows line ${2 * kept}`,
+    );
     assert.equal(first.finished, false);
     const next = await tool(
       "tumpel_transcript_read",
       { sessionId, compact: true, maxBytes, after: first.cursor },
       CompactTranscriptPageSchema,
     );
-    const nextSeqs = next.turns.flatMap((turn) => turn.lines.map((line) => line.lineSeq));
-    assert.deepEqual(
-      [...firstSeqs, ...nextSeqs],
-      Array.from({ length: 20 }, (_, index) => index + 1),
-    );
     assert.deepEqual(
       next.turns.flatMap((turn) => turn.lines.map((line) => line.text)),
-      words.slice(first.cursor),
+      words.slice(kept),
     );
-    assert.equal(next.cursor, 20);
+    assert.equal(next.cursor, 60);
     assert.equal(next.finished, false);
 
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 20, completedAt: new Date().toISOString() });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 60, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
     await snapshotDone(host, request, 4096);

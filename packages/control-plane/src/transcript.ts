@@ -70,11 +70,11 @@ export const chunksFrom = async (
   ];
 };
 
-export const chunksWithin = (chunks: readonly StoredChunk[], maxBytes: number): StoredChunk[] => {
+export const chunksWithin = (chunks: readonly StoredChunk[], budget: number): StoredChunk[] => {
   const within: StoredChunk[] = [];
   let bytes = 0;
   for (const chunk of chunks) {
-    if (within.length > 0 && bytes + chunk.size > maxBytes) return within;
+    if (within.length > 0 && bytes + chunk.size > budget) return within;
     bytes += chunk.size;
     within.push(chunk);
   }
