@@ -56,7 +56,7 @@ test("Fixture Recorder records the refused start and rejects 17 inherited tags w
   const meterBefore = world.tenantRowsWritten();
   assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
   assert.equal(logicalEvents() - rowsBefore, 1);
-  assert.equal(world.tenantRowsWritten() - meterBefore, 3);
+  assert.equal(world.tenantRowsWritten() - meterBefore, 2);
   const recorded = ListEventsResultSchema.parse(
     await world.call("listEvents", { ...list, afterEventId: cursor.page.lastEventId }),
   ).listed;

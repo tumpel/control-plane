@@ -20,8 +20,8 @@ import {
 import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const LARGE = 100_000;
-const ROWS_PER_STORED_SNAPSHOT = 20 + 2;
-const ROWS_PER_FORK = 21 + 5;
+const ROWS_PER_STORED_SNAPSHOT = 20;
+const ROWS_PER_FORK = 21;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
@@ -191,17 +191,14 @@ test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot
   const large = await rowsOfStoredSnapshot(tree(LARGE));
   const small = await rowsOfStoredSnapshot(tree(1));
   assert.equal(large, small);
-  assert.ok(
-    small <= ROWS_PER_STORED_SNAPSHOT,
-    `a stored snapshot wrote ${small} rows, including the events_start_signals index charge for TurnCompleted and SessionIdle`,
-  );
+  assert.ok(small <= ROWS_PER_STORED_SNAPSHOT, `a stored snapshot wrote ${small} rows`);
 });
 
 test("a session forked from a prebuild of 100000 chunks writes the rows of a fork from a one-chunk prebuild", async () => {
   const large = await rowsOfFork(tree(LARGE));
   const small = await rowsOfFork(tree(1));
   assert.equal(large, small);
-  assert.ok(small <= ROWS_PER_FORK, `a fork wrote ${small} rows, including 5 for SessionStarted`);
+  assert.ok(small <= ROWS_PER_FORK, `a fork wrote ${small} rows`);
 });
 
 test("sessions that snapshot at once read each manifest once, however many parts they send", async () => {

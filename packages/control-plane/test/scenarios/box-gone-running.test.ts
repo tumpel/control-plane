@@ -5,7 +5,7 @@ import { z } from "zod";
 import { snapshotAsked } from "./harness/snapshot-chunks.ts";
 import { UNMETERED, World } from "./harness/world.ts";
 
-const ROWS_PER_BOX_GONE_UNDER_TURN = 21 + 2;
+const ROWS_PER_BOX_GONE_UNDER_TURN = 21;
 const HOST_REPORT = "host host-1 answered BoxGone for box";
 
 test("a BoxGone for the box of a Running session fails its snapshot and its turn with the host's report", async (t) => {
@@ -57,8 +57,5 @@ test("a BoxGone for the box of a Running session fails its snapshot and its turn
   assert.equal(turn.state === "Failed" ? turn.reason : null, "SnapshotNotStored");
   assert.ok(turn.state === "Failed" && turn.detail.includes(HOST_REPORT), JSON.stringify(turn));
   assert.equal((await world.session(offer.sessionId)).state, "Stopped");
-  assert.ok(
-    written <= ROWS_PER_BOX_GONE_UNDER_TURN,
-    `a BoxGone on a Running session wrote ${written} rows, including the events_start_signals index charge for TurnFailed and SessionStopped`,
-  );
+  assert.ok(written <= ROWS_PER_BOX_GONE_UNDER_TURN, `a BoxGone on a Running session wrote ${written} rows`);
 });

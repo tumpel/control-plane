@@ -499,12 +499,16 @@ export class Tenant extends TenantConnectors {
       read: await this.repositoryReadToken(tenantId, personaId, repository, now, permissions),
     }),
     startSession: async ({ tenantId, input, now }) => ({
-      started: (await this.startSession(tenantId, input, now)).outcome,
+      started: await this.startSession(tenantId, input, now),
     }),
     startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
-      started: (await this.startSessionFromIssue(tenantId, input, issue, now)).outcome,
+      started: await this.startSessionFromIssue(tenantId, input, issue, now),
     }),
-    sendTurn: async (input) => ({ sent: await this.sendTurn(input) }),
+    sendTurn: async (input) => {
+      const sent = await this.sendTurn(input);
+      if (sent.kind === "Sent" && input.caller.kind === "Turn") this.recordProgress(input.caller.sessionId);
+      return { sent };
+    },
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),

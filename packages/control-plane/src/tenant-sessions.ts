@@ -101,11 +101,11 @@ import {
   type ReportedHostUsage,
   shortOf,
   type Unplaceable,
-  why,
 } from "./placement";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
+import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
@@ -202,8 +202,6 @@ export type Started<T> =
   | ReleaseUnreadable;
 
 export type SessionStarted<T> = Started<T> | z.infer<typeof SessionTagsOverLimitSchema>;
-
-export type SessionStartDecision<T> = { outcome: SessionStarted<T>; crewTags: string[] };
 
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
 
@@ -1619,7 +1617,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return turn;
   }
 
-  protected abstract roomRefusalPending(): boolean;
+  protected abstract hasUnsignaledRoomWait(): boolean;
 
   protected hostHeadroom(hostId: string): HostHeadroom | undefined {
     return durableDb(this.ctx.storage, {}).get<HostHeadroom>(query`
@@ -1719,7 +1717,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         .toArray();
       const becamePresent = heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env));
       if (becamePresent) this.appendEvent({ event: "HostOnline", hostId }, report.now);
-      const before = this.roomRefusalPending()
+      const before = this.hasUnsignaledRoomWait()
         ? becamePresent
           ? "BecamePresent"
           : this.hostHeadroom(hostId)
@@ -1741,7 +1739,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const { heldTurnIds, heldSessionIds } = held;
     const dropped = this.ctx.storage.transactionSync(() => {
-      const before = this.roomRefusalPending() ? this.hostHeadroom(hostId) : undefined;
+      const before = this.hasUnsignaledRoomWait() ? this.hostHeadroom(hostId) : undefined;
       this.ctx.storage.sql.exec(
         `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
           disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, reported_health = ?8, heard_at = ?9
@@ -2025,11 +2023,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  protected startSession(
-    tenantId: string,
-    input: NewSession,
-    now: number,
-  ): Promise<SessionStartDecision<StartedSession>> {
+  protected startSession(tenantId: string, input: NewSession, now: number): Promise<SessionStarted<StartedSession>> {
     return this.begin(tenantId, input, now, () => undefined);
   }
 
@@ -2038,8 +2032,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     input: NewSession,
     issue: IssueOfSession,
     now: number,
-  ): Promise<SessionStartDecision<StartedSessionFromIssue>> {
-    const { outcome, crewTags } = await this.begin(tenantId, input, now, (sessionId) => {
+  ): Promise<SessionStarted<StartedSessionFromIssue>> {
+    const begun = await this.begin(tenantId, input, now, (sessionId) => {
       this.ctx.storage.sql.exec(
         "INSERT INTO session_issues (session_id, issue_number, title, html_url, branch) VALUES (?, ?, ?, ?, ?)",
         sessionId,
@@ -2049,13 +2043,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
         issue.branch,
       );
     });
-    if (outcome.kind !== "Started") return { outcome, crewTags };
+    if (begun.kind !== "Started") return begun;
     return {
-      outcome: {
-        kind: "Started",
-        started: { ...outcome.started, issue: { sessionId: outcome.started.session.sessionId, ...issue } },
-      },
-      crewTags,
+      kind: "Started",
+      started: { ...begun.started, issue: { sessionId: begun.started.session.sessionId, ...issue } },
     };
   }
 
@@ -2064,21 +2055,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
     input: NewSession,
     now: number,
     record: (sessionId: string) => void,
-  ): Promise<SessionStartDecision<StartedSession>> {
+  ): Promise<SessionStarted<StartedSession>> {
     const { start } = input;
-    const crewTags = this.startTags(input.startedBy, start.tags ?? []);
-    if (crewTags.length > SESSION_TAG_LIMIT) {
-      return { outcome: { kind: "TagsOverLimit", tagCount: crewTags.length }, crewTags };
-    }
+    const tags = this.startTags(input.startedBy, start.tags ?? []);
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tagCount: tags.length };
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
-    if (image.kind === "ReleaseUnreadable") return { outcome: image, crewTags };
-    if (await deployDraining(this.env.RELEASES)) return { outcome: { kind: "Draining" }, crewTags };
+    if (image.kind === "ReleaseUnreadable") return image;
+    if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
     const uses = personaConnectorUses(this.ctx.storage.sql, start.personaId);
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
-    if (unusable.length > 0) return { outcome: { kind: "ConnectorDisconnected", names: unusable }, crewTags };
+    if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     const persona = this.boxSize(start.personaId);
     const { boxMemoryMib, boxDiskMib } = persona;
-    const placement = placeSession(
+    const placed = placeSession(
       input.hosts,
       this.listHostUsage(tenantId),
       image.image,
@@ -2086,7 +2075,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.heldBoxes(),
       now - presenceGraceMs(settingsOf(this.env)),
     );
-    if (placement.kind === "Refused") return { outcome: { kind: "Unplaced", hosts: placement.hosts }, crewTags };
+    const placement = placed;
+    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
@@ -2137,8 +2127,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         session.session_id,
         session.box_retention,
       );
-      this.writeTags(session.session_id, crewTags);
+      this.writeTags(session.session_id, tags);
       if (input.startedBy.kind === "Turn") {
+        this.recordProgress(input.startedBy.sessionId);
         this.ctx.storage.sql.exec(
           "INSERT INTO session_origins (session_id, origin_session_id, origin_turn_id) VALUES (?, ?, ?)",
           session.session_id,
@@ -2152,15 +2143,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
     await this.offerAfter(tenantId, session, turn, placement.evict);
     return {
-      outcome: {
-        kind: "Started",
-        started: {
-          session: this.presentSession(tenantId, session.session_id),
-          turn: toTurn(tenantId, turn, null, NONE_STALE),
-        },
+      kind: "Started",
+      started: {
+        session: this.presentSession(tenantId, session.session_id),
+        turn: toTurn(tenantId, turn, null, NONE_STALE),
       },
-      crewTags,
     };
+  }
+
+  protected recordProgress(sessionId: string): void {
+    durableDb(this.ctx.storage, {}).run(query`UPDATE subscriptions SET wakes_without_progress = 0
+      WHERE session_id = ${sessionId} AND wakes_without_progress > 0`);
   }
 
   private sendWaiting(tenantId: string, session: SessionRow, send: TurnSend, now: number): Sent {

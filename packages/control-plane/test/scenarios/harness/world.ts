@@ -10,7 +10,6 @@ import {
   type RecordStartRefusalInputSchema,
   SessionSchema,
   StartedSessionSchema,
-  type SubscriptionPauseReasonSchema,
   SubscriptionSchema,
   type TenantLimitsProfileSchema,
   TenantUsageSchema,
@@ -127,9 +126,6 @@ export type Host = Supervisor;
 
 type TenantSteps = {
   expireSubscriptions(now: number): void;
-  subscriptionRow(subscriptionId: string): object | null;
-  offeredPrompt(harness: string, turn: object): unknown;
-  pause(row: object, reason: z.infer<typeof SubscriptionPauseReasonSchema>, now: number): void;
 };
 
 export class World {

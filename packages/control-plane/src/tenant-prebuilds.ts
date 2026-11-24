@@ -205,7 +205,7 @@ export class TenantPrebuilds extends TenantPushSubscriptions {
     now: number,
   ): Promise<Started<Prebuild>> {
     const hosts = input.hosts.filter((host) => host.architecture === PREBUILD_ARCHITECTURE);
-    const { outcome: begun } = await this.begin(tenantId, { ...input, hosts }, now, (sessionId) => {
+    const begun = await this.begin(tenantId, { ...input, hosts }, now, (sessionId) => {
       this.writePrebuildCommit(
         { ...commit, logUrl: `${apiOrigin}/v1/sessions/${sessionId}/transcript` },
         "Dispatched",

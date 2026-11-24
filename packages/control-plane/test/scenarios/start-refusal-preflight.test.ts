@@ -35,7 +35,7 @@ test("Fixture Person preflight records catalog and model refusals from the two s
   const catalogProblem = ProblemSchema.parse(await catalog.json());
   assert.equal(catalogProblem.code, "HarnessNotInCatalog");
   assert.equal(count() - beforeCatalog, 1);
-  assert.equal(world.tenantRowsWritten() - catalogMeter, 3);
+  assert.equal(world.tenantRowsWritten() - catalogMeter, 2);
 
   await world.call("unpin", { harness: "ClaudeCode" });
   await world.call("setSecretMember", {
@@ -64,7 +64,7 @@ test("Fixture Person preflight records catalog and model refusals from the two s
   const modelProblem = ProblemSchema.parse(await model.json());
   assert.equal(modelProblem.code, "ModelUnsupported");
   assert.equal(count() - beforeModel, 1);
-  assert.equal(world.tenantRowsWritten() - modelMeter, 3);
+  assert.equal(world.tenantRowsWritten() - modelMeter, 2);
 
   const listed = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
   assert.equal(listed.status, 200);
@@ -88,7 +88,7 @@ test("Fixture Person preflight records catalog and model refusals from the two s
   );
 });
 
-test("Fixture Foreman preflight reports 17 tags before recording a refused model", async (t) => {
+test("Fixture Foreman preflight keeps its model refusal when more than 16 tags would be inherited", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   await world.holdsAgentCredentials();
@@ -149,8 +149,7 @@ test("Fixture Foreman preflight reports 17 tags before recording a refused model
   );
   assert.equal(refused.status, 422);
   const problem = ProblemSchema.parse(await refused.json());
-  assert.equal(problem.title, "Too many tags");
-  assert.match(problem.detail, /would carry 17 tags/);
+  assert.equal(problem.code, "ModelUnsupported");
   assert.equal(count() - rows, 0);
   assert.equal(world.tenantRowsWritten() - before, 0);
 });

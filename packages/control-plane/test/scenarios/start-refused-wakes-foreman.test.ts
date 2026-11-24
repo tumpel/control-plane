@@ -7,7 +7,6 @@ import {
   ProblemSchema,
   StartedSessionSchema,
   StartRefusedEventSchema,
-  TenantEventSchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
 import { RELEASE_CACHE_MS } from "../../src/releases.ts";
@@ -84,7 +83,7 @@ test("F1 records session placement refusals and excludes a refused prebuild and 
   assert.equal(refused.status, 409, await refused.clone().text());
   const pool = ProblemSchema.parse(await refused.json());
   assert.equal(pool.code, "PoolExhausted");
-  assert.equal(world.tenantRowsWritten() - beforeStart, 11);
+  assert.equal(world.tenantRowsWritten() - beforeStart, 12);
   const first = await listRefusals();
   assert.equal(first.length, 1);
 
@@ -136,7 +135,7 @@ test("F1 records session placement refusals and excludes a refused prebuild and 
   assert.equal(unreadable.status, 422, await unreadable.clone().text());
   const image = ProblemSchema.parse(await unreadable.json());
   assert.equal(image.code, "ImageNotReleased");
-  assert.equal(world.tenantRowsWritten() - beforeUnreadable, 3);
+  assert.equal(world.tenantRowsWritten() - beforeUnreadable, 2);
   const recorded = await listRefusals();
   assert.deepEqual(
     recorded.map(({ operation, caller, crewTags, refusal }) => ({ operation, caller, crewTags, refusal })),
@@ -212,10 +211,10 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       Number(
         sql
           .exec(
-            "SELECT starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?",
+            "SELECT wakes_without_progress FROM subscriptions WHERE subscription_id = ?",
             subscription.subscriptionId,
           )
-          .one().starts_refused_in_a_row,
+          .one().wakes_without_progress,
       );
     const quiet = world.tenantRowsWritten();
     await world.tick(3_600_000);
@@ -243,7 +242,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       assert.equal(world.tenantRowsWritten() - before, writes);
     };
     for (let attempt = 1; attempt <= 6; attempt++) {
-      await refuse(foremanTurn.member, attempt === 1 ? 11 : 3);
+      await refuse(foremanTurn.member, attempt === 1 ? (code === "PoolExhausted" ? 12 : 10) : 2);
       assert.equal(count("StartRefused"), attempt);
       assert.equal(deliveries(), 1);
     }
@@ -266,7 +265,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       assert.equal(host.holds("TurnOffer"), false);
       const beforeStop = world.tenantRowsWritten();
       await host.dropsIdleBox(fullBox.offer);
-      assert.equal(world.tenantRowsWritten() - beforeStop, 30);
+      assert.equal(world.tenantRowsWritten() - beforeStop, 29);
       assert.equal((await world.session(fullBox.session.sessionId)).state, "Stopped");
       assert.equal(count("CapacityAvailable"), 1);
       assert.equal(deliveries(), 1);
@@ -283,7 +282,6 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
     if (code === "HarnessNotInCatalog") await world.call("unpin", { harness: "ClaudeCode" });
     host.report({ memoryHeldMib: 0 });
     await world.settle();
-    const sessionStarts = count("SessionStarted");
     const retryBefore = world.tenantRowsWritten();
     const retry = await world.fetch(
       wake.member,
@@ -293,21 +291,9 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
     );
     assert.equal(retry.status, 200, await retry.clone().text());
     const { session: crew } = StartedSessionSchema.parse(await retry.json());
-    assert.equal(world.tenantRowsWritten() - retryBefore, 32);
-    assert.equal(count("SessionStarted") - sessionStarts, 1);
+    assert.equal(world.tenantRowsWritten() - retryBefore, 27);
     assert.equal(count("CapacityAvailable"), fullBox === null ? 0 : 1);
     assert.equal(counter(), 0);
-    const listed = await world.fetch(
-      world.owner,
-      "GET",
-      `/v1/events?afterEventId=0&event=SessionStarted&sessionId=${crew.sessionId}`,
-    );
-    assert.equal(listed.status, 200);
-    const page = z.object({ events: TenantEventSchema.array() }).parse(await listed.json());
-    assert.deepEqual(
-      page.events.map((event) => event.event === "SessionStarted" && event.caller),
-      [{ kind: "Turn", sessionId: foreman.sessionId, turnId: wake.offer.turnId }],
-    );
     const crewOffer = host.takeOffer();
     assert.equal(crewOffer.sessionId, crew.sessionId);
     await host.claims(crewOffer);
@@ -318,7 +304,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       await world.call("pin", { pin: { harness: "ClaudeCode", harnessVersion: "2.1.1" }, now: Date.now() });
     }
     for (let claimed = 1; claimed <= 10; claimed++) {
-      await refuse(wake.member, 11);
+      await refuse(wake.member, claimed === 1 && code === "PoolExhausted" ? 12 : 10);
       assert.equal(deliveries(), 1);
       await host.finishes(wake.offer);
       wake = await claimForeman(world, host, foreman.sessionId);
@@ -326,7 +312,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       assert.equal(counter(), claimed);
     }
     assert.equal((await world.subscription(subscription.subscriptionId)).state, "Active");
-    await refuse(wake.member, 11);
+    await refuse(wake.member, 10);
     await host.finishes(wake.offer);
     assert.equal(host.holds("TurnOffer"), false);
     assert.equal(counter(), 10);

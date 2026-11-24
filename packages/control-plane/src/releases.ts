@@ -102,7 +102,11 @@ export const releaseUnreadable = (detail: string, retry: string): Problem => ({
   fix: `Ask the operator to publish a release with the release workflow, then ${retry}`,
 });
 
-export const imageNotReleased = (harness: string, harnessVersion: string, retry: string): Problem => ({
+export const imageNotReleased = (
+  harness: string,
+  harnessVersion: string,
+  retry: string,
+): Problem & { code: "ImageNotReleased" } => ({
   code: "ImageNotReleased",
   title: "No guest image for this harness version",
   detail: `the published release carries no ${harness} ${harnessVersion} guest image`,

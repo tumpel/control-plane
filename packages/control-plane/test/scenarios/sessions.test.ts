@@ -1539,10 +1539,7 @@ suite("sessions", () => {
     const hostAfter = await hostRows();
 
     const spent = { tenantWritten: tenantAfter - tenantBefore, hostWritten: hostAfter - hostBefore };
-    assert.ok(
-      spent.tenantWritten <= 53 + 3 + 5,
-      `the turn wrote ${spent.tenantWritten} tenant rows, including 5 for SessionStarted and one extra index charge each for TurnStarted, TurnCompleted and SessionIdle`,
-    );
+    assert.ok(spent.tenantWritten <= 53, `the turn wrote ${spent.tenantWritten} tenant rows`);
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
   });
 
@@ -2388,7 +2385,7 @@ suite("sessions", () => {
     const all = await tool("tumpel_events_list", { afterEventId: start.lastEventId, sessionId }, EventPageSchema);
     assert.deepEqual(
       all.events.map((event) => event.event),
-      ["SessionStarted", "TurnStarted", "TurnCompleted", "SessionIdle"],
+      ["TurnStarted", "TurnCompleted", "SessionIdle"],
     );
     assert.deepEqual(
       (await tool("tumpel_events_list", { afterEventId: all.lastEventId, sessionId }, EventPageSchema)).events,
@@ -2438,14 +2435,6 @@ suite("sessions", () => {
       branch: "ticket/12-fix-the-login-it-loops",
     };
     assert.deepEqual(started.issue, issue);
-    const startedEvents = await getJson(
-      `/v1/events?afterEventId=0&event=SessionStarted&sessionId=${sessionId}`,
-      EventPageSchema,
-    );
-    assert.deepEqual(
-      startedEvents.events.map((event) => event.event === "SessionStarted" && [event.sessionId, event.caller.kind]),
-      [[sessionId, "Person"]],
-    );
 
     const offer = await host.next("TurnOffer");
     assert.equal(offer.turnId, started.turn.turnId);
@@ -3046,11 +3035,6 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
   ]);
   assert.deepEqual({ files: offer.personaFiles, snapshots: offer.snapshots }, { files: [], snapshots: [] });
   const building = await getJson(`/v1/sessions/${offer.sessionId}`, SessionSchema);
-  const startedEvents = await getJson(
-    `/v1/events?afterEventId=0&event=SessionStarted&sessionId=${offer.sessionId}`,
-    EventPageSchema,
-  );
-  assert.deepEqual(startedEvents.events, []);
   assert.deepEqual(building.prebuildLayer, {
     layer: "None",
     reason: "BuildsPrebuild",

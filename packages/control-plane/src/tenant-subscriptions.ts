@@ -1,36 +1,22 @@
-import { credentialProblem } from "@tumpel/api/credentials";
 import {
   type CompleteSubscriptionResultSchema,
   type CreateSubscriptionInputSchema,
   type CreateSubscriptionResultSchema,
   type PauseSubscriptionResultSchema,
   type ResumeSubscriptionResultSchema,
-  StartRefusalCodeSchema,
-  StartRefusalSchema,
   type SubscriptionFilterSchema,
   type SubscriptionPauseReasonSchema,
   SubscriptionSchema,
 } from "@tumpel/schemas";
 import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
-import { boundedTo } from "./bounded-detail.ts";
 import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
-import type { Problem } from "./http.ts";
-import { stranded, unplaced } from "./placement.ts";
-import { releaseUnreadable } from "./releases.ts";
-import type { TenantInput } from "./tenant-api.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
 import {
   type HostHeadroom,
-  type IssueOfSession,
-  type NewSession,
   type OfferedPrompt,
-  type Sent,
   type Session,
-  type SessionStartDecision,
-  type StartedSession,
-  type StartedSessionFromIssue,
   TenantSessions,
   type TurnRow,
 } from "./tenant-sessions.ts";
@@ -58,7 +44,7 @@ type SubscriptionRow = {
   cursor_event_id: number;
   crew_failures_in_a_row: number;
   delivery_failures_in_a_row: number;
-  starts_refused_in_a_row: number;
+  wakes_without_progress: number;
   state: Subscription["state"];
   variant: string;
   created_at: number;
@@ -90,7 +76,7 @@ const crewMatch = (subscription: string, session: string, tags: string): string 
     AND c.tag NOT IN (SELECT value FROM json_each(${tags})))`;
 
 const SUBSCRIPTION_SELECT = `${SUBSCRIPTION_STATES} SELECT s.subscription_id, s.session_id, s.prompt, s.goal, s.expires_at, s.cursor_event_id,
-  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, s.starts_refused_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
+  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, s.wakes_without_progress, st.state, st.variant, s.created_at, s.updated_at,
   (SELECT json_group_array(event) FROM (SELECT event FROM subscription_events WHERE subscription_id = s.subscription_id ORDER BY event)) AS events,
   (SELECT json_group_array(tag) FROM (SELECT tag FROM subscription_crew_tags WHERE subscription_id = s.subscription_id ORDER BY tag)) AS crew_tags
   FROM subscriptions AS s JOIN states AS st ON st.subscription_id = s.subscription_id`;
@@ -124,29 +110,16 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
   return SubscriptionSchema.parse({ ...base, ...JSON.parse(row.variant) });
 };
 
-const signalIndex = (event: string): string =>
-  `json_extract(${event}.payload, '$.event') IN ('StartRefused', 'CapacityAvailable')`;
-
 const refusalMatch = (subscription: string, event: string): string =>
   `(json_extract(${event}.payload, '$.caller.sessionId') = (SELECT session_id FROM subscriptions WHERE subscription_id = ${subscription})
   OR NOT EXISTS (SELECT 1 FROM subscription_crew_tags AS c WHERE c.subscription_id = ${subscription}
     AND c.tag NOT IN (SELECT value FROM json_each(${event}.payload, '$.crewTags'))))`;
 
-const roomRefusals = (before: string): string =>
-  `SELECT 1 FROM events AS r WHERE ${signalIndex("r")}
-    AND json_extract(r.payload, '$.refusal.code') IN ('PoolExhausted', 'NoHostAvailable', 'HostDegraded', 'HostOffline')
-    AND r.event_id > COALESCE((SELECT p.event_id FROM events AS p WHERE ${signalIndex("p")}
-      AND json_extract(p.payload, '$.event') = 'CapacityAvailable' ${before}
-      ORDER BY p.event_id DESC LIMIT 1), 0)`;
-
-const capacityMatch = (subscription: string): string =>
-  `EXISTS (${roomRefusals("AND p.event_id < e.event_id")}
-    AND r.event_id < e.event_id AND ${refusalMatch(subscription, "r")})`;
-
 const eventMatch = (subscription: string, crew: string): string =>
   `CASE json_extract(e.payload, '$.event')
     WHEN 'StartRefused' THEN ${refusalMatch(subscription, "e")}
-    WHEN 'CapacityAvailable' THEN ${capacityMatch(subscription)}
+    WHEN 'CapacityAvailable' THEN EXISTS (SELECT 1 FROM subscription_room_waits AS w
+      WHERE w.subscription_id = ${subscription} AND w.signal_event_id = e.event_id)
     ELSE ${crew} END`;
 
 const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e
@@ -249,7 +222,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
         this.clearState(subscriptionId);
         sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
         sql.exec(
-          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, starts_refused_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
+          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, wakes_without_progress = 0, updated_at = ? WHERE subscription_id = ?",
           now,
           subscriptionId,
         );
@@ -337,106 +310,6 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return super.tumpelMcp(sessionId) || this.subscribed(sessionId);
   }
 
-  protected override async startSession(
-    tenantId: string,
-    input: NewSession,
-    now: number,
-  ): Promise<SessionStartDecision<StartedSession>> {
-    const decision = await super.startSession(tenantId, input, now);
-    this.recordSessionStart(decision, input, now);
-    return decision;
-  }
-
-  protected override async startSessionFromIssue(
-    tenantId: string,
-    input: NewSession,
-    issue: IssueOfSession,
-    now: number,
-  ): Promise<SessionStartDecision<StartedSessionFromIssue>> {
-    const decision = await super.startSessionFromIssue(tenantId, input, issue, now);
-    this.recordSessionStart(decision, input, now);
-    return decision;
-  }
-
-  private recordSessionStart(
-    { outcome, crewTags }: SessionStartDecision<StartedSession>,
-    { startedBy: caller, start: { personaId, model } }: NewSession,
-    now: number,
-  ): void {
-    if (outcome.kind === "Started") {
-      const { sessionId } = outcome.started.session;
-      this.ctx.storage.transactionSync(() => this.appendEvent({ event: "SessionStarted", sessionId, caller }, now));
-      return;
-    }
-    if (caller.kind === "Trigger") return;
-    if (outcome.kind === "Unplaced") {
-      this.appendStartRefusal(
-        { operation: "Start", personaId, model, caller, crewTags },
-        unplaced(outcome.hosts, "start again").problem,
-        now,
-      );
-    }
-    if (outcome.kind === "ReleaseUnreadable") {
-      this.appendStartRefusal(
-        { operation: "Start", personaId, model, caller, crewTags },
-        releaseUnreadable(outcome.detail, "start again"),
-        now,
-      );
-    }
-  }
-
-  protected override async sendTurn(input: TenantInput<"sendTurn">): Promise<Sent> {
-    const sent = await super.sendTurn(input);
-    if (
-      sent.kind !== "Unplaced" &&
-      sent.kind !== "Stranded" &&
-      sent.kind !== "CredentialRefused" &&
-      sent.kind !== "ReleaseUnreadable"
-    )
-      return sent;
-
-    const { tenantId, sessionId, caller, hosts, now } = input;
-    const session = this.getSession(tenantId, sessionId);
-    if (session === null) throw new Error(`refused send lost its session ${sessionId}`);
-    let problem: Problem;
-    switch (sent.kind) {
-      case "Unplaced":
-        problem = unplaced(sent.hosts, "send the turn again").problem;
-        break;
-      case "Stranded":
-        problem = stranded(session, hosts, sent.missingTurnIds).problem;
-        break;
-      case "CredentialRefused":
-        problem = credentialProblem(
-          sent.refusal,
-          `the secret set of persona ${sent.personaId}`,
-          session.harness,
-          "send again",
-        );
-        break;
-      case "ReleaseUnreadable":
-        problem = releaseUnreadable(sent.detail, "send the turn again");
-        break;
-    }
-    this.appendStartRefusal(
-      { operation: "Send", personaId: session.personaId, model: session.model, caller, crewTags: session.tags },
-      problem,
-      now,
-    );
-    return sent;
-  }
-
-  private appendStartRefusal(
-    context: Omit<Extract<NewTenantEvent, { event: "StartRefused" }>, "event" | "refusal">,
-    problem: Problem,
-    now: number,
-  ): void {
-    const reason = StartRefusalCodeSchema.safeParse(problem.code);
-    if (!reason.success) return;
-    const refusal = { code: reason.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, problem.detail) };
-    this.ctx.storage.transactionSync(() => this.appendEvent({ event: "StartRefused", ...context, refusal }, now));
-  }
-
   protected async startDeliveries(tenantId: string): Promise<void> {
     const sessions = this.ctx.storage.sql
       .exec<{ session_id: string }>(
@@ -453,15 +326,18 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
     const eventId = super.appendEvent(event, now);
-    if (event.event === "StartRefused" || event.event === "CapacityAvailable") {
-      this.wakeSignal(eventId, event.event, now);
+    if (event.event === "StartRefused") {
+      this.routeRefusal(eventId, event.refusal.code, now);
       return eventId;
     }
-    if (event.event === "SessionStarted") {
-      if (event.caller.kind === "Turn") {
-        durableDb(this.ctx.storage, {}).run(query`
-          UPDATE subscriptions SET starts_refused_in_a_row = 0
-          WHERE session_id = ${event.caller.sessionId} AND starts_refused_in_a_row > 0`);
+    if (event.event === "CapacityAvailable") {
+      const waits = durableDb(this.ctx.storage, {}).all<{ subscription_id: string; active: number }>(
+        query`UPDATE subscription_room_waits SET signal_event_id = ${eventId} WHERE signal_event_id = 0
+          RETURNING subscription_id, EXISTS (SELECT 1 FROM subscription_actives AS a
+            WHERE a.subscription_id = subscription_room_waits.subscription_id) AS active`,
+      );
+      for (const wait of waits) {
+        if (wait.active === 1) this.ensureDelivery(wait.subscription_id, now);
       }
       return eventId;
     }
@@ -478,7 +354,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
         event.event === "SessionFailed" ||
         event.event === "SessionArchived" ||
         event.event === "SessionIdle") &&
-      this.roomRefusalPending() &&
+      this.hasUnsignaledRoomWait() &&
       (event.event !== "SessionIdle" ||
         this.heldBoxes().some((box) => box.sessionId === event.sessionId && box.evictable))
     ) {
@@ -491,8 +367,12 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return eventId;
   }
 
-  protected override roomRefusalPending(): boolean {
-    return durableDb(this.ctx.storage, {}).get(query.raw(`${roomRefusals("")} LIMIT 1`)) !== undefined;
+  protected override hasUnsignaledRoomWait(): boolean {
+    return (
+      durableDb(this.ctx.storage, {}).get(
+        query`SELECT 1 FROM subscription_room_waits WHERE signal_event_id = 0 LIMIT 1`,
+      ) !== undefined
+    );
   }
 
   protected override reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void {
@@ -516,16 +396,31 @@ export abstract class TenantSubscriptions extends TenantSessions {
     }
   }
 
-  private wakeSignal(eventId: number, event: "StartRefused" | "CapacityAvailable", now: number): void {
+  private routeRefusal(
+    eventId: number,
+    code: Extract<NewTenantEvent, { event: "StartRefused" }>["refusal"]["code"],
+    now: number,
+  ): void {
+    const room =
+      code === "PoolExhausted" || code === "NoHostAvailable" || code === "HostDegraded" || code === "HostOffline";
     const db = durableDb(this.ctx.storage, {});
-    const recipients = db.all<{ subscription_id: string }>(
-      query`SELECT a.subscription_id FROM subscription_actives AS a
-        JOIN subscription_events AS se USING (subscription_id)
-        CROSS JOIN events AS e
-        WHERE e.event_id = ${eventId} AND se.event = ${event} AND ${query.raw(eventMatch("a.subscription_id", "0"))}
-        ORDER BY a.subscription_id`,
+    const recipients = db.all<{ subscription_id: string; wake: number; wait: number }>(
+      query`WITH recipients AS (SELECT live.subscription_id,
+        EXISTS (SELECT 1 FROM subscription_actives AS a JOIN subscription_events AS se USING (subscription_id)
+          WHERE a.subscription_id = live.subscription_id AND se.event = 'StartRefused') AS wake,
+        (${Number(room)} AND EXISTS (SELECT 1 FROM subscription_events AS se
+          WHERE se.subscription_id = live.subscription_id AND se.event = 'CapacityAvailable')) AS wait
+        FROM (${query.raw(LIVE_SUBSCRIPTIONS)}) AS live CROSS JOIN events AS e
+        WHERE e.event_id = ${eventId} AND ${query.raw(refusalMatch("live.subscription_id", "e"))})
+        SELECT subscription_id, wake, wait FROM recipients WHERE wake = 1 OR wait = 1 ORDER BY subscription_id`,
     );
-    for (const { subscription_id: subscriptionId } of recipients) this.ensureDelivery(subscriptionId, now);
+    for (const { subscription_id: subscriptionId, wake, wait } of recipients) {
+      if (wait === 1)
+        db.run(query`
+        INSERT INTO subscription_room_waits (subscription_id, refused_event_id)
+        VALUES (${subscriptionId}, ${eventId}) ON CONFLICT (subscription_id) DO NOTHING`);
+      if (wake === 1) this.ensureDelivery(subscriptionId, now);
+    }
   }
 
   private acknowledgeDelivery(turnId: string): void {
@@ -539,9 +434,11 @@ export abstract class TenantSubscriptions extends TenantSessions {
       WHERE subscription_id = ${delivery.subscription_id} AND cursor_event_id < ${delivery.last_event_id}`);
     if (delivery.wake === 0) return;
     db.run(query`
-      UPDATE subscriptions SET starts_refused_in_a_row = starts_refused_in_a_row + 1
+      UPDATE subscriptions SET wakes_without_progress = wakes_without_progress + 1
       WHERE subscription_id = ${delivery.subscription_id}`);
     db.run(query`UPDATE subscription_turns SET wake = 0 WHERE turn_id = ${turnId}`);
+    db.run(query`DELETE FROM subscription_room_waits WHERE subscription_id = ${delivery.subscription_id}
+      AND signal_event_id > 0 AND signal_event_id <= ${delivery.last_event_id}`);
   }
 
   protected override offeredPrompt(harness: string, turn: TurnRow): OfferedPrompt {
@@ -577,11 +474,11 @@ export abstract class TenantSubscriptions extends TenantSessions {
       if (row.state === "Active") this.pause(row, { kind: "DeliveryFailed", turnId: turn.turn_id }, Date.now());
       return { kind: "Uncomposable", cause: batch.cause };
     }
-    if (batch?.wake && row.starts_refused_in_a_row >= STARTS_REFUSED_LIMIT) {
+    if (batch?.wake && row.wakes_without_progress >= STARTS_REFUSED_LIMIT) {
       if (row.state === "Active") this.pause(row, { kind: "StartsRefused" }, Date.now());
       return {
         kind: "Uncomposable",
-        cause: "the subscription claimed ten refusal or capacity deliveries without starting a crew session",
+        cause: "the subscription claimed ten refusal or capacity deliveries without a successful start or send",
       };
     }
     const prompt = batch?.prompt ?? plan;
@@ -726,6 +623,9 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const sql = this.ctx.storage.sql;
     this.cancelDelivery(row, now);
     this.clearState(row.subscription_id);
+    durableDb(this.ctx.storage, {}).run(
+      query`DELETE FROM subscription_room_waits WHERE subscription_id = ${row.subscription_id}`,
+    );
     sql.exec("UPDATE subscriptions SET updated_at = ? WHERE subscription_id = ?", now, row.subscription_id);
     sql.exec(
       "INSERT INTO subscription_ends (subscription_id, reason, ended_at) VALUES (?, ?, ?)",

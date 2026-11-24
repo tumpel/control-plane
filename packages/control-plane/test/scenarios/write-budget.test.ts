@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { World } from "./harness/world.ts";
 
 const STEADY_ROWS_BUDGET = 100;
-const TURN_ROWS_BUDGET = 53 + 3 + 5;
+const TURN_ROWS_BUDGET = 53;
 
 const SESSIONS = 10;
 const LINE_EVERY_MS = 2_000;
@@ -88,8 +88,5 @@ test("one turn from offer to completion writes a fixed number of tenant rows", a
   const turn = await world.turn(offer.turnId);
   assert.equal(turn.state, "Completed");
   assert.equal(turn.lineCount, 11);
-  assert.ok(
-    rows <= TURN_ROWS_BUDGET,
-    `one turn wrote ${rows} tenant rows, including 5 for SessionStarted and one extra index charge each for TurnStarted, TurnCompleted and SessionIdle`,
-  );
+  assert.ok(rows <= TURN_ROWS_BUDGET, `one turn wrote ${rows} tenant rows`);
 });

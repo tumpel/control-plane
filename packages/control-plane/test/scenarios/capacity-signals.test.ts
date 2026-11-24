@@ -75,7 +75,25 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
   const secondWrites = world.tenantRowsWritten() - secondBefore;
   assert.equal(signals(), 1);
   assert.equal(host.holds("TurnOffer"), false);
+  const waits = () => world.tenantSql().exec("SELECT signal_event_id FROM subscription_room_waits").toArray();
+  assert.equal(waits().length, 1);
+  const claimBefore = world.tenantRowsWritten();
   await host.claims(first);
+  assert.equal(world.tenantRowsWritten() - claimBefore, 14);
+  assert.deepEqual(waits(), []);
+  await host.says({
+    type: "TurnFailed",
+    turnId: first.turnId,
+    reason: "NotClaimed",
+    detail: "The host lost the claim reply.",
+    failedAt: new Date(Date.now()).toISOString(),
+  });
+  const reoffered = host.takeOffer();
+  assert.equal(reoffered.turnId, first.turnId);
+  const reclaimBefore = world.tenantRowsWritten();
+  await host.claims(reoffered);
+  assert.equal(world.tenantRowsWritten() - reclaimBefore, 9);
+  assert.deepEqual(waits(), []);
   await host.finishes(first);
 
   host.report({ memoryHeldMib: 0 });
@@ -101,7 +119,7 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
   const noRefusalBefore = world.tenantRowsWritten();
   await host.dropsIdleBox(unmatched.offer);
   const stopBaseline = world.tenantRowsWritten() - noRefusalBefore;
-  assert.equal(stopBaseline, 7);
+  assert.equal(stopBaseline, 6);
   assert.equal(signals(), 1);
   assert.equal(host.holds("TurnOffer"), false);
   assert.equal(secondWrites - stopBaseline, 0);
@@ -110,8 +128,8 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
 
   const refusalBefore = world.tenantRowsWritten();
   await refuse();
-  assert.equal(world.tenantRowsWritten() - refusalBefore, 23);
-  assert.equal(world.tenantRowsWritten() - refusalBefore - 3, crewWakeWrites);
+  assert.equal(world.tenantRowsWritten() - refusalBefore, 24);
+  assert.equal(world.tenantRowsWritten() - refusalBefore - 4, crewWakeWrites);
   const newRefusal = host.takeOffer();
   await host.claims(newRefusal);
   await host.finishes(newRefusal);
@@ -135,7 +153,7 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
   const nextStop = world.tenantRowsWritten();
   await host.dropsIdleBox(nextCrew.offer);
   assert.equal(signals(), 3);
-  assert.equal(world.tenantRowsWritten() - nextStop, 30);
+  assert.equal(world.tenantRowsWritten() - nextStop, 29);
   takeCapacity();
 });
 
@@ -189,6 +207,14 @@ test("F2 reports a memory drop without a box change", async (t) => {
   assert.equal((await world.session(crew.session.sessionId)).state, "Running");
   assert.equal(world.tenantRowsWritten() - before, 24);
   takeCapacity();
+  for (const memoryHeldMib of [24_000, 23_000, 22_000]) {
+    const change = world.tenantRowsWritten();
+    host.report({ memoryHeldMib });
+    await world.settle();
+    assert.equal(world.tenantRowsWritten() - change, 1);
+    assert.equal(signals(), 1);
+    assert.equal(host.holds("TurnOffer"), false);
+  }
 });
 
 test("F2 commits a disk-only change on the heard-at refresh", async (t) => {
@@ -249,7 +275,7 @@ for (const presence of ["new host", "reconnect after grace"] as const) {
       FROM events WHERE json_extract(payload, '$.event') = 'CapacityAvailable'`)
       .one();
     assert.deepEqual({ ...signal }, { hostId: arrived.hostId, code: "NoHostAvailable" });
-    assert.equal(world.tenantRowsWritten() - before, 28);
+    assert.equal(world.tenantRowsWritten() - before, 27);
     await arrived.beats();
     assert.equal(signals(), 1);
   });

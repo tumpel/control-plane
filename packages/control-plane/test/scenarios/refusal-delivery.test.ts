@@ -41,7 +41,7 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
   const initialRows = events();
   const initialMeter = world.tenantRowsWritten();
   assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
-  assert.equal(world.tenantRowsWritten() - initialMeter, 11);
+  assert.equal(world.tenantRowsWritten() - initialMeter, 12);
   assert.equal(events() - initialRows, 1);
   assert.equal(deliveries(subscription.subscriptionId), 1);
   assert.equal(host.holds("TurnOffer"), false);
@@ -50,7 +50,7 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
     const before = world.tenantRowsWritten();
     const rows = events();
     assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
-    assert.equal(world.tenantRowsWritten() - before, 3);
+    assert.equal(world.tenantRowsWritten() - before, 2);
     assert.equal(events() - rows, 1);
     assert.equal(deliveries(subscription.subscriptionId), 1);
   }
@@ -64,27 +64,15 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
     }),
     { kind: "Recorded" },
   );
-  assert.equal(world.tenantRowsWritten() - beforePerson, 3);
+  assert.equal(world.tenantRowsWritten() - beforePerson, 2);
   assert.equal(events() - personRows, 1);
   assert.equal(deliveries(subscription.subscriptionId), 1);
   const refusalId = sql.exec("SELECT MAX(event_id) AS id FROM events").one().id;
 
   const ordinaryClaim = sql
-    .exec("SELECT starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
+    .exec("SELECT wakes_without_progress FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
     .one();
-  assert.equal(ordinaryClaim.starts_refused_in_a_row, 0);
-  const waiting = sql
-    .exec(
-      "SELECT t.* FROM turns AS t JOIN subscription_turns USING (turn_id) WHERE subscription_id = ?",
-      subscription.subscriptionId,
-    )
-    .one();
-  const composeBefore = world.tenantRowsWritten();
-  assert.deepEqual(world.tenantSteps().offeredPrompt("ClaudeCode", waiting), {
-    kind: "Composed",
-    prompt: sql.exec("SELECT prompt FROM turns WHERE turn_id = ?", waiting.turn_id).one().prompt,
-  });
-  assert.equal(world.tenantRowsWritten() - composeBefore, 2);
+  assert.equal(ordinaryClaim.wakes_without_progress, 0);
   await host.finishes(foremanTurn);
   const first = host.takeOffer();
   assert.equal(first.sessionId, foreman.sessionId);
@@ -108,14 +96,14 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
   const state = () =>
     sql
       .exec(
-        "SELECT cursor_event_id, starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?",
+        "SELECT cursor_event_id, wakes_without_progress FROM subscriptions WHERE subscription_id = ?",
         subscription.subscriptionId,
       )
       .one();
   const claimBefore = world.tenantRowsWritten();
   await host.claims(retried);
   const claimDelta = world.tenantRowsWritten() - claimBefore;
-  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, starts_refused_in_a_row: 1 });
+  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, wakes_without_progress: 1 });
 
   await host.says({
     type: "TurnFailed",
@@ -128,9 +116,9 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
   const repeatBefore = world.tenantRowsWritten();
   await host.claims(retried);
   const repeatDelta = world.tenantRowsWritten() - repeatBefore;
-  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, starts_refused_in_a_row: 1 });
-  assert.equal(claimDelta, 13);
-  assert.equal(repeatDelta, 10);
+  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, wakes_without_progress: 1 });
+  assert.equal(claimDelta, 12);
+  assert.equal(repeatDelta, 9);
 });
 
 test("Fixture tagged caller leaves refusal routing to refused tags and claims a crew delivery without a wake", async (t) => {
@@ -161,7 +149,7 @@ test("Fixture tagged caller leaves refusal routing to refused tags and claims a 
     }),
     { kind: "Recorded" },
   );
-  assert.equal(world.tenantRowsWritten() - before, 3);
+  assert.equal(world.tenantRowsWritten() - before, 2);
   assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_turns").one().count, 0);
   assert.equal(host.holds("TurnOffer"), false);
 
@@ -177,12 +165,12 @@ test("Fixture tagged caller leaves refusal routing to refused tags and claims a 
     .one().event_id;
   const claimBefore = world.tenantRowsWritten();
   await host.claims(ordinary);
-  assert.equal(world.tenantRowsWritten() - claimBefore, 11);
+  assert.equal(world.tenantRowsWritten() - claimBefore, 10);
   const state = sql
     .exec(
-      "SELECT cursor_event_id, starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?",
+      "SELECT cursor_event_id, wakes_without_progress FROM subscriptions WHERE subscription_id = ?",
       subscription.subscriptionId,
     )
     .one();
-  assert.deepEqual({ ...state }, { cursor_event_id: eventId, starts_refused_in_a_row: 0 });
+  assert.deepEqual({ ...state }, { cursor_event_id: eventId, wakes_without_progress: 0 });
 });

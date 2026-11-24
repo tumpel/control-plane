@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ProblemSchema } from "@tumpel/schemas";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
-import { PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
+import { World } from "./harness/world.ts";
 import { mcpPersona, startBox } from "./signal-fixtures.ts";
 
 for (const [n, refusalBudget] of [
-  [1, 23],
-  [10, 203],
-  [50, 1003],
+  [1, 24],
+  [10, 222],
+  [50, 1102],
 ] as const) {
-  test(`FN with ${n} idle Foremen meters enqueueing and compares offers to crew wakes`, async (t) => {
+  test(`FN with ${n} idle Foremen measures refusal and capacity deliveries against crew wakes`, async (t) => {
     const world = await World.open();
     t.after(() => world.close());
     const host = await world.online(world.owner, "host-1", {
@@ -31,23 +32,6 @@ for (const [n, refusalBudget] of [
     const stopBaselineBefore = world.tenantRowsWritten();
     if (spare !== null) await host.dropsIdleBox(spare.offer);
     const stopBaseline = world.tenantRowsWritten() - stopBaselineBefore;
-    const room = {
-      tenantId: TENANT_ID,
-      personaId,
-      model: "opus",
-      refusal: { code: "PoolExhausted", detail: "The host has no room." },
-      now: Date.now(),
-    };
-    for (const { session, offer } of foremen) {
-      assert.deepEqual(
-        await world.call("recordStartRefusal", {
-          ...room,
-          caller: { kind: "Turn", sessionId: session.sessionId, turnId: offer.turnId },
-          requestedTags: [],
-        }),
-        { kind: "Recorded" },
-      );
-    }
     for (const { session } of foremen) {
       await world.subscribe(session, {
         prompt: "Continue the work",
@@ -85,42 +69,27 @@ for (const [n, refusalBudget] of [
       events: Number(sql.exec("SELECT COUNT(*) AS count FROM events").one().count),
       deliveries: Number(sql.exec("SELECT COUNT(*) AS count FROM subscription_turns").one().count),
     });
-    const input = {
-      ...room,
-      now: Date.now(),
-      caller: { kind: "Person" as const, principalId: PRINCIPAL_ID },
-      requestedTags: ["crew:x"],
-    };
     const rows = counts();
-    const before = world.tenantRowsWritten();
-    assert.deepEqual(
-      world.tenantOperations().recordStartRefusal({
-        ...input,
-        refusal: { code: "ModelUnsupported", detail: "The model is unavailable." },
-      }),
-      { kind: "Recorded" },
-    );
-    assert.equal(world.tenantRowsWritten() - before, 3 + 8 * n);
-    assert.deepEqual(counts(), { events: rows.events + 1, deliveries: rows.deliveries + n });
-    assert.equal(host.holds("TurnOffer"), false);
-
-    await world.call("listEvents", {
-      tenantId: TENANT_ID,
-      afterEventId: null,
-      events: [],
-      sessionId: null,
-      triggerId: null,
-    });
-    for (let index = 0; index < n; index++) {
-      const offer = host.takeOffer();
-      await host.claims(offer);
-      await host.finishes(offer);
-    }
     const refusalBefore = world.tenantRowsWritten();
-    assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
+    const refused = await world.fetch(
+      world.owner,
+      "POST",
+      "/v1/sessions",
+      JSON.stringify({
+        personaId,
+        model: "opus",
+        prompt: "start crew work",
+        repository: "https://github.com/acme/app",
+        tags: ["crew:x"],
+      }),
+    );
+    assert.equal(refused.status, 409, await refused.clone().text());
+    assert.equal(ProblemSchema.parse(await refused.json()).code, "PoolExhausted");
+    assert.deepEqual(counts(), { events: rows.events + 1, deliveries: rows.deliveries + n });
+    assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_waits").one().count, n);
     const refusalWrites = world.tenantRowsWritten() - refusalBefore;
     assert.equal(refusalWrites, refusalBudget);
-    assert.equal(refusalWrites - 3, crewWakeWrites);
+    assert.equal(refusalWrites - 2 - 2 * n, crewWakeWrites);
     const offers = Array.from({ length: n }, () => host.takeOffer());
     assert.deepEqual(
       new Set(offers.map(({ sessionId }) => sessionId)),
@@ -144,8 +113,8 @@ for (const [n, refusalBudget] of [
         1,
       );
       const signalWrites = world.tenantRowsWritten() - stopBefore - stopBaseline;
-      assert.equal(signalWrites, 1003);
-      assert.equal(signalWrites - 3, crewWakeWrites);
+      assert.equal(signalWrites, 1052);
+      assert.equal(signalWrites - 2 - n, crewWakeWrites);
       const signaled = Array.from({ length: 50 }, () => host.takeOffer());
       assert.ok(signaled.every(({ prompt }) => prompt.includes('"event":"CapacityAvailable"')));
     }

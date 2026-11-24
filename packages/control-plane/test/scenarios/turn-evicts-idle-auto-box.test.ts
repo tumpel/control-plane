@@ -51,10 +51,7 @@ test("a turn to a session with no box, on a host whose memory idle Auto boxes of
   assert.deepEqual([resumed.turnId, resumed.sessionId], [sent.turnId, foreman.sessionId]);
   assert.notEqual(resumed.boxId, foremanTurn.boxId);
   const written = world.tenantRowsWritten() - before;
-  assert.ok(
-    written <= 22 + 1,
-    `the send, eviction and offer wrote ${written} tenant rows, including the events_start_signals index charge for SessionStopped`,
-  );
+  assert.ok(written <= 22, `the send, the eviction and the offer wrote ${written} tenant rows, over the bound of 22`);
 });
 
 test("a Stopping box the host drops without a BoxGone becomes Stopped on its next heartbeat, and the turn waiting for its room is offered", async (t) => {

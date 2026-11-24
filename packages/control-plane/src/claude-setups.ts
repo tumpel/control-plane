@@ -11,8 +11,9 @@ import { listHostRecords } from "./hosts";
 import { issues, json, parseBody, problem } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
-import { degradedOnly, placeableFix, placementRefusals, why } from "./placement";
+import { degradedOnly, placementRefusals } from "./placement";
 import { releaseUnreadable } from "./releases";
+import { placeableFix, why } from "./sessions.ts";
 import { tenantApi } from "./tenant-api.ts";
 
 type Authenticate = (request: Request, env: Env) => Promise<Caller | Response>;

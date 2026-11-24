@@ -82,7 +82,13 @@ test("a paused Foreman gets one capacity delivery on resume and none on a second
   const { world, host, foreman, crew, subscribe, pause, resume, latest, refuse, delivery } = await fixture(t);
   const path = await subscribe(["CapacityAvailable"]);
   await pause(path);
-  await refuse();
+  const refusedEvent = await refuse();
+  const wait = () =>
+    world.tenantSql().exec("SELECT refused_event_id, signal_event_id FROM subscription_room_waits").toArray();
+  assert.deepEqual(
+    wait().map((row) => ({ ...row })),
+    [{ refused_event_id: refusedEvent, signal_event_id: 0 }],
+  );
   await host.dropsIdleBox(crew.offer);
   await host.finishes(foreman.offer);
   assert.equal(host.holds("TurnOffer"), false);
@@ -98,6 +104,7 @@ test("a paused Foreman gets one capacity delivery on resume and none on a second
     [["CapacityAvailable", latest("CapacityAvailable")]],
   );
   await host.claims(offer);
+  assert.deepEqual(wait(), []);
   const replay = world.tenantRowsWritten();
   assert.equal((await resume(path)).status, 200);
   await host.claims(offer);
@@ -106,12 +113,16 @@ test("a paused Foreman gets one capacity delivery on resume and none on a second
 });
 
 test("resume presents the latest refusal of its code and the capacity signal by exact ID", async (t) => {
-  const { host, foreman, crew, subscribe, pause, resume, latest, refuse, delivery } = await fixture(t);
+  const { world, host, foreman, crew, subscribe, pause, resume, latest, refuse, delivery } = await fixture(t);
   const path = await subscribe(["StartRefused", "CapacityAvailable"]);
   const first = await refuse();
   await pause(path);
   const second = await refuse();
   assert.ok(second > first);
+  assert.equal(
+    world.tenantSql().exec("SELECT refused_event_id FROM subscription_room_waits").one().refused_event_id,
+    first,
+  );
   await host.dropsIdleBox(crew.offer);
   await host.finishes(foreman.offer);
   assert.equal(host.holds("TurnOffer"), false);
@@ -127,18 +138,31 @@ test("resume presents the latest refusal of its code and the capacity signal by 
   assert.equal(host.holds("TurnOffer"), false);
 });
 
-test("a subscription created after its Foreman's refusal still receives the capacity signal", async (t) => {
-  const { host, foreman, crew, subscribe, latest, refuse, delivery } = await fixture(t);
+test("a subscription created after its Foreman's refusal waits for a new refusal", async (t) => {
+  const { world, host, foreman, crew, subscribe, refuse } = await fixture(t);
   await refuse();
   await subscribe(["StartRefused", "CapacityAvailable"]);
   await host.dropsIdleBox(crew.offer);
   await host.finishes(foreman.offer);
+  assert.deepEqual(world.tenantSql().exec("SELECT subscription_id FROM subscription_room_waits").toArray(), []);
+  assert.equal(host.holds("TurnOffer"), false);
+});
+
+test("an active wait survives the event retention window", async (t) => {
+  const { world, host, foreman, crew, subscribe, latest, refuse, delivery } = await fixture(t);
+  await subscribe(["CapacityAvailable"]);
+  const refusalId = await refuse();
+  await host.finishes(foreman.offer);
+  host.quiet();
+  await world.tick(7 * day + 1);
+  await host.beats();
+  await host.dropsIdleBox(crew.offer);
+  assert.deepEqual(world.tenantSql().exec("SELECT event_id FROM events WHERE event_id = ?", refusalId).toArray(), []);
   const { events } = delivery();
   assert.deepEqual(
     events.map(({ event, eventId }) => [event, eventId]),
     [["CapacityAvailable", latest("CapacityAvailable")]],
   );
-  assert.equal(host.holds("TurnOffer"), false);
 });
 
 test("resuming with a cursor past retention returns SubscriptionCursorExpired and writes nothing", async (t) => {

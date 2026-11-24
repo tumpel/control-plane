@@ -22,7 +22,6 @@ export type MintedEnrolmentToken = z.infer<typeof MintedEnrolmentTokenSchema>;
 export type EnrolmentToken = z.infer<typeof EnrolmentTokenSchema>;
 export type HostEnrol = z.infer<typeof HostEnrolSchema>;
 
-export type { Refused } from "./http";
 export type Outcome<T> = { ok: true; value: T } | Refused;
 
 interface HostRow {

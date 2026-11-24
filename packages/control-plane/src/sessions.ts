@@ -7,7 +7,6 @@ import {
   SessionStopQuerySchema,
   SessionTagsPatchSchema,
   SessionTagsSchema,
-  StartRefusalCodeSchema,
   StartRefusalSchema,
   SteerCreateSchema,
   type SteerSchema,
@@ -29,13 +28,13 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
-import { issues, json, noContent, parseBody, problem, refuse } from "./http.ts";
+import { type HostRecord, hostOf, listHostRecords, type Outcome } from "./hosts.ts";
+import { issues, json, noContent, parseBody, problem, type Refused, refuse } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
-import { type placementRefusals, stranded, unplaced } from "./placement.ts";
-import { releaseUnreadable } from "./releases.ts";
+import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
+import { imageNotReleased, releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
 import type { SecretSetRead } from "./tenant.ts";
@@ -93,7 +92,9 @@ export interface CompactTranscriptTurn {
   endedAt: number;
 }
 
-const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
+type Accepted<T> = Extract<Outcome<T>, { ok: true }>;
+
+const ok = <T>(value: T): Accepted<T> => ({ ok: true, value });
 
 const sessionNotFound = (sessionId: string): Refused =>
   refuse(404, {
@@ -138,6 +139,115 @@ const turnNotFound = (turnId: string): Refused =>
 export const credentialRefused = (refusal: CredentialRefusal, owner: string, harness: string, retry: string): Refused =>
   refuse(422, credentialProblem(refusal, owner, harness, retry));
 
+export const why = (refused: Unplaceable): string => {
+  const named = refused.host.name;
+  if (refused.reason === "NotOnline" && refused.host.state === "Offline")
+    return `${named} has not reported to the control plane within its heartbeat grace and counts as Degraded until it sends a heartbeat`;
+  if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
+  if (refused.reason === "NotHealthy") return `${named} reports itself ${refused.host.reportedHealth}`;
+  if (refused.reason === "NoImage") {
+    const { harness, harnessVersion, architectures } = refused.image;
+    const carried =
+      architectures.length === 0
+        ? `no ${harness} ${harnessVersion} guest image`
+        : `${harness} ${harnessVersion} guest images for ${architectures.join(", ")} only`;
+    return `${named} is ${refused.host.architecture}, and the current release carries ${carried}`;
+  }
+  if (refused.reason === "NoConnectors") {
+    return `${named} runs a supervisor too old to serve connectors`;
+  }
+  if (refused.reason === "NoDisk") {
+    return `${named} gives box disks ${refused.usage.diskBudgetMib} MiB and its boxes hold ${refused.usage.diskHeldMib} MiB of it, and the persona's boxes need ${refused.boxDiskMib} MiB`;
+  }
+  return `${named} gives boxes ${refused.usage.memoryBudgetMib} MiB of memory and its boxes hold ${refused.usage.memoryHeldMib} MiB of it, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
+};
+
+export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
+  const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
+  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoConnectors")) {
+    return `Let a host update its supervisor to the current release, or use a persona without connectors, then ${retry}`;
+  }
+  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoDisk")) {
+    return `Lower the persona's boxDiskMib toward the 32768 MiB default, free disk on a host, or enrol a host with more disk, then ${retry}`;
+  }
+  if (lacking === undefined) {
+    return `Start the supervisor on a host, or enrol a new host, then ${retry}`;
+  }
+  const { harness, harnessVersion, architectures } = lacking;
+  if (architectures.length === 0) {
+    return `Pin a harness version the current release carries, or ask the operator, who publishes releases, for one that carries a ${harness} ${harnessVersion} guest image, then ${retry}`;
+  }
+  return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
+};
+
+type PlacementRefusalCode = "PoolExhausted" | "NoHostAvailable" | "HostDegraded" | "ImageNotReleased";
+
+const unplaced = (
+  tenantRefusals: Parameters<typeof placementRefusals>[0],
+  retry: string,
+): Refused<PlacementRefusalCode> => {
+  const hosts = placementRefusals(tenantRefusals);
+  if (hosts.length === 0) {
+    return refuse(409, {
+      code: "NoHostAvailable",
+      title: "No host online",
+      detail: "your tenant has no hosts",
+      fix: `Enrol a host and start the supervisor on it, then ${retry}`,
+    });
+  }
+  const [first] = hosts;
+  if (
+    first?.reason === "NoImage" &&
+    first.image.architectures.length === 0 &&
+    hosts.every((host) => host.reason === "NoImage")
+  ) {
+    return {
+      ok: false,
+      status: 422,
+      problem: imageNotReleased(first.image.harness, first.image.harnessVersion, retry),
+    };
+  }
+  const detail = hosts.map(why).join(", ");
+  if (degradedOnly(hosts)) {
+    return refuse(409, {
+      code: "HostDegraded",
+      title: "No healthy host",
+      detail: `no host of your tenant is healthy: ${detail}`,
+      fix: `Check that tumpel-supervisor runs on a host and reaches the control plane, then ${retry}`,
+    });
+  }
+  if (hosts.some(({ reason }) => reason === "MemoryFull")) {
+    return refuse(409, {
+      code: "PoolExhausted",
+      title: "Every host's box memory is in use",
+      detail: `no host of your tenant has memory for another box: ${detail}`,
+      fix: `Wait for a running turn to finish, lower the persona's boxMemoryMib, or enrol another host, then ${retry}`,
+    });
+  }
+  return refuse(409, {
+    code: "NoHostAvailable",
+    title: "No host can take the session",
+    detail: `no host of your tenant can take a session: ${detail}`,
+    fix: placeableFix(hosts, retry),
+  });
+};
+
+const stranded = (session: Session, hosts: HostRecord[], missingTurnIds: string[]): Refused => {
+  const host = hosts.find((listed) => listed.hostId === session.hostId);
+  if (host === undefined) {
+    throw new Error(`session ${session.sessionId} runs on host ${session.hostId}, which its tenant does not list`);
+  }
+  return refuse(409, {
+    code: "HostOffline",
+    title: "Host offline",
+    detail: `the session runs on host ${host.name}, which is ${host.state}, and its snapshots miss ${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn" : "turns"}, so it cannot move to another host`,
+    fix:
+      host.state === "Revoked"
+        ? "The host was revoked and cannot snapshot those turns; enrol a new host"
+        : "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
+  });
+};
+
 const tenantOf = (env: Env, caller: Caller) => tenantApi(env.TENANT, caller.tenantId);
 
 const personaNotFound = (personaId: string): Refused =>
@@ -158,32 +268,54 @@ export interface StartCheck {
   now: number;
 }
 
-export const checkStart = (check: StartCheck): Outcome<HarnessCatalogEntry> => {
+type CheckFailure =
+  | (Refused & { kind: "PersonaNotFound" | "Catalog" | "SecretSetUnreadable" })
+  | (Refused & { kind: "CredentialRefused"; credential: CredentialRefusal });
+
+type StartFailure =
+  | CheckFailure
+  | (Refused & {
+      kind: "RepositoryInvalid" | "ConnectorDisconnected" | "TagsOverLimit" | "Draining" | "ReleaseUnreadable";
+    })
+  | (Refused<PlacementRefusalCode> & { kind: "Unplaced" });
+
+type StartReply<T> = Accepted<T> | StartFailure;
+
+export const checkStart = (check: StartCheck): Accepted<HarnessCatalogEntry> | CheckFailure => {
   const { persona } = check;
-  if (persona === null) return personaNotFound(check.personaId);
+  if (persona === null) return { ...personaNotFound(check.personaId), kind: "PersonaNotFound" };
   const entry = pinnedEntry(check.pins, persona.harness);
   if (entry === undefined) {
-    return refuse(422, {
-      code: "HarnessNotInCatalog",
-      title: "Harness not in the catalog",
-      detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
-      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
-    });
+    return {
+      kind: "Catalog",
+      ...refuse(422, {
+        code: "HarnessNotInCatalog",
+        title: "Harness not in the catalog",
+        detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
+        fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
+      }),
+    };
   }
   const read = check.secretSet(persona);
   if (read.kind === "NotFound") {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
-  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet(check.operation, read));
+  if (read.kind === "Unreadable") {
+    return { kind: "SecretSetUnreadable", ...refuse(409, unreadableSecretSet(check.operation, read)) };
+  }
   const { secretSet } = read;
   const credential = checkModelCredential(entry, secretSet.keys, check.model, check.now);
   if (credential.kind !== "Usable") {
-    return credentialRefused(
+    return {
+      kind: "CredentialRefused",
       credential,
-      `secret set ${secretSet.name} of persona ${persona.name}`,
-      persona.harness,
-      "start again",
-    );
+      ...credentialRefused(
+        credential,
+        `secret set ${secretSet.name} of persona ${persona.name}`,
+        persona.harness,
+        "start again",
+      ),
+    };
   }
   return ok(entry);
 };
@@ -195,10 +327,10 @@ export const startable = async (
   model: string,
   operation: string,
   now: number,
-): Promise<Outcome<HarnessCatalogEntry>> => {
+): Promise<Accepted<HarnessCatalogEntry> | CheckFailure> => {
   const tenant = tenantApi(env.TENANT, tenantId);
   const { persona } = await tenant.call("getPersona", { tenantId, personaId });
-  if (persona === null) return personaNotFound(personaId);
+  if (persona === null) return { kind: "PersonaNotFound", ...personaNotFound(personaId) };
   const { pins } = await tenant.call("listPins", {});
   const { read } = await tenant.call("getSecretSet", { tenantId, secretSetId: persona.secretSetId });
   return checkStart({ personaId, persona, pins, secretSet: () => read, model, operation, now });
@@ -215,25 +347,11 @@ const prepareStart = async (
   start: SessionStart,
   endpoint: string,
   now: number,
-): Promise<Outcome<NewSession>> => {
+): Promise<StartReply<NewSession>> => {
   const repository = startTarget(start.repository);
-  if (!repository.ok) return repository;
+  if (!repository.ok) return { kind: "RepositoryInvalid", ...repository };
   const checked = await startable(env, caller.tenantId, start.personaId, start.model, "sessions.start", now);
-  if (!checked.ok) {
-    const { code, detail } = checked.problem;
-    const reason = StartRefusalCodeSchema.safeParse(code);
-    if (!reason.success) return checked;
-    const recorded = await tenantOf(env, caller).call("recordStartRefusal", {
-      tenantId: caller.tenantId,
-      refusal: { code: reason.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, detail) },
-      personaId: start.personaId,
-      model: start.model,
-      caller: caller.origin,
-      requestedTags: start.tags ?? [],
-      now,
-    });
-    return recorded.kind === "TagsOverLimit" ? placed<never>(recorded) : checked;
-  }
+  if (!checked.ok) return checked;
   const entry = checked.value;
   return ok({
     principalId: caller.principalId,
@@ -258,20 +376,81 @@ export const placed = <T>(
   started:
     | Exclude<SessionStarted<T>, { kind: "Unplaced" }>
     | { kind: "Unplaced"; hosts: Parameters<typeof placementRefusals>[0] },
-): Outcome<T> => {
-  if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
-  if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
+): StartReply<T> => {
+  if (started.kind === "Unplaced") return { kind: started.kind, ...unplaced(started.hosts, "start again") };
+  if (started.kind === "ConnectorDisconnected") {
+    return { kind: started.kind, ...connectorDisconnected(started.names) };
+  }
   if (started.kind === "TagsOverLimit") {
-    return refuse(422, {
-      code: "InvalidRequest",
-      title: "Too many tags",
-      detail: `The session would carry ${started.tagCount} tags, including inherited crew tags. A session carries at most ${SESSION_TAG_LIMIT} tags.`,
-      fix: `Reduce the total by ${started.tagCount - SESSION_TAG_LIMIT} tags and start the session again`,
+    return {
+      kind: started.kind,
+      ...refuse(422, {
+        code: "InvalidRequest",
+        title: "Too many tags",
+        detail: `The session would carry ${started.tagCount} tags, including inherited crew tags. A session carries at most ${SESSION_TAG_LIMIT} tags.`,
+        fix: `Reduce the total by ${started.tagCount - SESSION_TAG_LIMIT} tags and start the session again`,
+      }),
+    };
+  }
+  if (started.kind === "Draining") return { kind: started.kind, ...refuse(503, deployInProgress("start again")) };
+  if (started.kind === "ReleaseUnreadable") {
+    return { kind: started.kind, ...refuse(422, releaseUnreadable(started.detail, "start again")) };
+  }
+  return ok(started.started);
+};
+
+const refusalCode = (reply: StartFailure): z.infer<typeof StartRefusalSchema>["code"] | null => {
+  switch (reply.kind) {
+    case "Unplaced":
+      return reply.problem.code;
+    case "Catalog":
+      return "HarnessNotInCatalog";
+    case "ReleaseUnreadable":
+      return "ImageNotReleased";
+    case "CredentialRefused":
+      switch (reply.credential.kind) {
+        case "NoCredential":
+        case "NoModelCredential":
+          return "NoCredential";
+        case "Expired":
+          return "CredentialExpired";
+        case "ModelUnsupported":
+          return "ModelUnsupported";
+        case "Unsupported":
+          return null;
+      }
+      break;
+    case "PersonaNotFound":
+    case "SecretSetUnreadable":
+    case "RepositoryInvalid":
+    case "ConnectorDisconnected":
+    case "TagsOverLimit":
+    case "Draining":
+      return null;
+  }
+};
+
+const recordRefusal = async <T>(
+  env: Env,
+  caller: Caller,
+  start: Pick<SessionStart, "personaId" | "model" | "tags">,
+  reply: StartReply<T>,
+  now: number,
+): Promise<Outcome<T>> => {
+  if (reply.ok) return reply;
+  const code = refusalCode(reply);
+  if (code !== null) {
+    await tenantOf(env, caller).call("recordStartRefusal", {
+      tenantId: caller.tenantId,
+      refusal: { code, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, reply.problem.detail) },
+      personaId: start.personaId,
+      model: start.model,
+      caller: caller.origin,
+      requestedTags: start.tags ?? [],
+      now,
     });
   }
-  if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
-  if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
-  return ok(started.started);
+  return reply;
 };
 
 export const startSession = async (
@@ -282,11 +461,13 @@ export const startSession = async (
   now: number,
 ): Promise<Outcome<StartedSession>> => {
   const prepared = await prepareStart(env, caller, start, endpoint, now);
-  if (!prepared.ok) return prepared;
-  return placed(
-    (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
-      .started,
-  );
+  const reply = prepared.ok
+    ? placed(
+        (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
+          .started,
+      )
+    : prepared;
+  return recordRefusal(env, caller, start, reply, now);
 };
 
 export const startSessionFromIssue = async (
@@ -366,17 +547,19 @@ export const startSessionFromIssue = async (
     endpoint,
     now,
   );
-  if (!prepared.ok) return prepared;
-  return placed(
-    (
-      await tenant.call("startSessionFromIssue", {
-        tenantId: caller.tenantId,
-        input: prepared.value,
-        issue: { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
-        now,
-      })
-    ).started,
-  );
+  const reply = prepared.ok
+    ? placed(
+        (
+          await tenant.call("startSessionFromIssue", {
+            tenantId: caller.tenantId,
+            input: prepared.value,
+            issue: { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
+            now,
+          })
+        ).started,
+      )
+    : prepared;
+  return recordRefusal(env, caller, start, reply, now);
 };
 
 export const getSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Session>> => {

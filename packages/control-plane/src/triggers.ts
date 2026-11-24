@@ -7,7 +7,7 @@ import {
   TriggerTestSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
-import type { Refused } from "./hosts.ts";
+import type { Refused } from "./http.ts";
 import { json, noContent, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
 import type { Env } from "./index.ts";

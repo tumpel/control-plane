@@ -12,7 +12,8 @@ import {
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
-import type { Outcome, Refused } from "./hosts.ts";
+import type { Outcome } from "./hosts.ts";
+import type { Refused } from "./http.ts";
 import { placed } from "./sessions.ts";
 import { apiOriginOf } from "./settings.ts";
 import type { NewSession } from "./tenant-sessions.ts";
@@ -152,7 +153,7 @@ export abstract class TenantTriggers extends TenantWebhooks {
       endpoint: apiOriginOf(this.env),
       start: { personaId: trigger.personaId, repository: fired.repository, model: trigger.model, prompt: fired.prompt },
     };
-    const { outcome } = await this.begin(tenantId, session, now, (sessionId) => {
+    const begun = await this.begin(tenantId, session, now, (sessionId) => {
       this.ctx.storage.sql.exec(
         "INSERT INTO session_trigger_origins (session_id, trigger_id, delivery_id) VALUES (?, ?, ?)",
         sessionId,
@@ -160,7 +161,7 @@ export abstract class TenantTriggers extends TenantWebhooks {
         origin.deliveryId,
       );
     });
-    const started = placed(outcome);
+    const started = placed(begun);
     if (started.ok) return { kind: "Started", started: started.value };
     return this.refuseStart(origin, refusalOf(started), now);
   }
