@@ -13,13 +13,7 @@ import type { z } from "zod";
 import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import {
-  type HostHeadroom,
-  type OfferedPrompt,
-  type Session,
-  TenantSessions,
-  type TurnRow,
-} from "./tenant-sessions.ts";
+import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];
@@ -118,8 +112,8 @@ const refusalMatch = (subscription: string, event: string): string =>
 const eventMatch = (subscription: string, crew: string): string =>
   `CASE json_extract(e.payload, '$.event')
     WHEN 'StartRefused' THEN ${refusalMatch(subscription, "e")}
-    WHEN 'CapacityAvailable' THEN EXISTS (SELECT 1 FROM subscription_room_waits AS w
-      WHERE w.subscription_id = ${subscription} AND w.signal_event_id = e.event_id)
+    WHEN 'CapacityAvailable' THEN EXISTS (SELECT 1 FROM subscription_room_signals AS s
+      WHERE s.subscription_id = ${subscription} AND s.signal_event_id = e.event_id)
     ELSE ${crew} END`;
 
 const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e
@@ -128,8 +122,8 @@ const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events A
     AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = ?1)
     AND ${eventMatch("?1", `es.event_id IS NOT NULL AND (${crewMatch("?1", "es.session_id", "es.tags")})`)}`;
 
-const rose = (before: number | null, after: number | null): boolean =>
-  before !== null && after !== null && after > before;
+const UNSIGNALED_ROOM_WAITS = query`FROM subscription_room_waits AS w
+  WHERE NOT EXISTS (SELECT 1 FROM subscription_room_signals AS s WHERE s.subscription_id = w.subscription_id)`;
 
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
@@ -332,9 +326,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
     }
     if (event.event === "CapacityAvailable") {
       const waits = durableDb(this.ctx.storage, {}).all<{ subscription_id: string; active: number }>(
-        query`UPDATE subscription_room_waits SET signal_event_id = ${eventId} WHERE signal_event_id = 0
+        query`INSERT INTO subscription_room_signals (subscription_id, signal_event_id)
+          SELECT w.subscription_id, ${eventId} ${UNSIGNALED_ROOM_WAITS}
           RETURNING subscription_id, EXISTS (SELECT 1 FROM subscription_actives AS a
-            WHERE a.subscription_id = subscription_room_waits.subscription_id) AS active`,
+            WHERE a.subscription_id = subscription_room_signals.subscription_id) AS active`,
       );
       for (const wait of waits) {
         if (wait.active === 1) this.ensureDelivery(wait.subscription_id, now);
@@ -349,51 +344,11 @@ export abstract class TenantSubscriptions extends TenantSessions {
       for (const row of this.openSubscriptions(event.sessionId)) this.end(row, ended, now);
     }
     this.matchCrew(event, now);
-    if (
-      (event.event === "SessionStopped" ||
-        event.event === "SessionFailed" ||
-        event.event === "SessionArchived" ||
-        event.event === "SessionIdle") &&
-      this.hasUnsignaledRoomWait() &&
-      (event.event !== "SessionIdle" ||
-        this.heldBoxes().some((box) => box.sessionId === event.sessionId && box.evictable))
-    ) {
-      const host = durableDb(this.ctx.storage, {}).get<{ host_id: string }>(
-        query`SELECT host_id FROM sessions WHERE session_id = ${event.sessionId}`,
-      );
-      if (host === undefined) throw new Error(`session ${event.sessionId} has no host for its capacity signal`);
-      this.appendEvent({ event: "CapacityAvailable", hostId: host.host_id, code: "PoolExhausted" }, now);
-    }
     return eventId;
   }
 
   protected override hasUnsignaledRoomWait(): boolean {
-    return (
-      durableDb(this.ctx.storage, {}).get(
-        query`SELECT 1 FROM subscription_room_waits WHERE signal_event_id = 0 LIMIT 1`,
-      ) !== undefined
-    );
-  }
-
-  protected override reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void {
-    if (before === "BecamePresent") {
-      this.appendEvent({ event: "CapacityAvailable", hostId, code: "NoHostAvailable" }, now);
-      return;
-    }
-    const after = this.hostHeadroom(hostId);
-    if (after === undefined) throw new Error(`host ${hostId} has no committed report`);
-    if (before.reported_health !== "Healthy" && after.reported_health === "Healthy") {
-      this.appendEvent({ event: "CapacityAvailable", hostId, code: "HostDegraded" }, now);
-      return;
-    }
-    if (
-      rose(after.memory_held_mib, before.memory_held_mib) ||
-      rose(after.disk_held_mib, before.disk_held_mib) ||
-      rose(before.memory_budget_mib, after.memory_budget_mib) ||
-      rose(before.disk_budget_mib, after.disk_budget_mib)
-    ) {
-      this.appendEvent({ event: "CapacityAvailable", hostId, code: "PoolExhausted" }, now);
-    }
+    return durableDb(this.ctx.storage, {}).get(query`SELECT 1 ${UNSIGNALED_ROOM_WAITS} LIMIT 1`) !== undefined;
   }
 
   private routeRefusal(
@@ -417,8 +372,8 @@ export abstract class TenantSubscriptions extends TenantSessions {
     for (const { subscription_id: subscriptionId, wake, wait } of recipients) {
       if (wait === 1)
         db.run(query`
-        INSERT INTO subscription_room_waits (subscription_id, refused_event_id)
-        VALUES (${subscriptionId}, ${eventId}) ON CONFLICT (subscription_id) DO NOTHING`);
+        INSERT INTO subscription_room_waits (subscription_id)
+        VALUES (${subscriptionId}) ON CONFLICT (subscription_id) DO NOTHING`);
       if (wake === 1) this.ensureDelivery(subscriptionId, now);
     }
   }
@@ -438,7 +393,8 @@ export abstract class TenantSubscriptions extends TenantSessions {
       WHERE subscription_id = ${delivery.subscription_id}`);
     db.run(query`UPDATE subscription_turns SET wake = 0 WHERE turn_id = ${turnId}`);
     db.run(query`DELETE FROM subscription_room_waits WHERE subscription_id = ${delivery.subscription_id}
-      AND signal_event_id > 0 AND signal_event_id <= ${delivery.last_event_id}`);
+      AND EXISTS (SELECT 1 FROM subscription_room_signals AS s
+        WHERE s.subscription_id = ${delivery.subscription_id} AND s.signal_event_id <= ${delivery.last_event_id})`);
   }
 
   protected override offeredPrompt(harness: string, turn: TurnRow): OfferedPrompt {

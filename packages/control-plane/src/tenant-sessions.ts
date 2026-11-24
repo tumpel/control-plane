@@ -96,9 +96,11 @@ import {
   type BoxSize,
   degradedOnly,
   type HeldBox,
+  type HostHeadroom,
   type ImageAvailability,
   placeSession,
   type ReportedHostUsage,
+  roomFreed,
   shortOf,
   type Unplaceable,
 } from "./placement";
@@ -167,14 +169,6 @@ export interface NewSession {
   endpoint: string;
   start: SessionStart;
 }
-
-export type HostHeadroom = {
-  reported_health: HostReportedHealth;
-  memory_held_mib: number | null;
-  memory_budget_mib: number | null;
-  disk_held_mib: number | null;
-  disk_budget_mib: number | null;
-};
 
 export type SessionFilter = z.infer<typeof SessionFilterSchema>;
 type SessionStartedBy = Session["startedBy"];
@@ -988,10 +982,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (latest === null)
         throw new Error(`session ${sessionId} went Idle with no turn, though a start always offers one`);
       this.appendEvent({ event: "SessionIdle", sessionId, turnId: latest.turn_id }, now);
-    }
-    if (state === "Stopped") this.appendEvent({ event: "SessionStopped", sessionId }, now);
-    if (state === "Failed") this.appendEvent({ event: "SessionFailed", sessionId }, now);
-    if (state === "Archived") this.appendEvent({ event: "SessionArchived", sessionId }, now);
+    } else if (state === "Stopped") this.appendEvent({ event: "SessionStopped", sessionId }, now);
+    else if (state === "Failed") this.appendEvent({ event: "SessionFailed", sessionId }, now);
+    else if (state === "Archived") this.appendEvent({ event: "SessionArchived", sessionId }, now);
+    else return;
+    if (!this.hasUnsignaledRoomWait()) return;
+    const code = roomFreed(null, { state, heldBox: () => this.heldBoxes().find((box) => box.sessionId === sessionId) });
+    if (code === null) return;
+    const host = durableDb(this.ctx.storage, {}).get<{ host_id: string }>(
+      query`SELECT host_id FROM sessions WHERE session_id = ${sessionId}`,
+    );
+    if (host === undefined) throw new Error(`session ${sessionId} has no host for its capacity signal`);
+    this.appendEvent({ event: "CapacityAvailable", hostId: host.host_id, code }, now);
   }
 
   protected personaRow(personaId: string): PersonaRow | null {
@@ -1619,13 +1621,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected abstract hasUnsignaledRoomWait(): boolean;
 
-  protected hostHeadroom(hostId: string): HostHeadroom | undefined {
+  private hostHeadroom(hostId: string): HostHeadroom | undefined {
     return durableDb(this.ctx.storage, {}).get<HostHeadroom>(query`
       SELECT reported_health, memory_held_mib, memory_budget_mib, disk_held_mib, disk_budget_mib
       FROM host_reports WHERE host_id = ${hostId}`);
   }
 
-  protected abstract reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void;
+  protected reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void {
+    const code = roomFreed(before, () => {
+      const report = this.hostHeadroom(hostId);
+      if (report === undefined) throw new Error(`host ${hostId} has no committed report`);
+      return report;
+    });
+    if (code !== null) this.appendEvent({ event: "CapacityAvailable", hostId, code }, now);
+  }
 
   private reportHost(hostId: string, report: HostReport): void {
     this.ctx.storage.sql.exec(

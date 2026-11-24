@@ -153,15 +153,16 @@ export abstract class TenantTriggers extends TenantWebhooks {
       endpoint: apiOriginOf(this.env),
       start: { personaId: trigger.personaId, repository: fired.repository, model: trigger.model, prompt: fired.prompt },
     };
-    const begun = await this.begin(tenantId, session, now, (sessionId) => {
-      this.ctx.storage.sql.exec(
-        "INSERT INTO session_trigger_origins (session_id, trigger_id, delivery_id) VALUES (?, ?, ?)",
-        sessionId,
-        origin.triggerId,
-        origin.deliveryId,
-      );
-    });
-    const started = placed(begun);
+    const started = placed(
+      await this.begin(tenantId, session, now, (sessionId) => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO session_trigger_origins (session_id, trigger_id, delivery_id) VALUES (?, ?, ?)",
+          sessionId,
+          origin.triggerId,
+          origin.deliveryId,
+        );
+      }),
+    );
     if (started.ok) return { kind: "Started", started: started.value };
     return this.refuseStart(origin, refusalOf(started), now);
   }

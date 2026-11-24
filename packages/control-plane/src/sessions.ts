@@ -405,8 +405,6 @@ const refusalCode = (reply: StartFailure): z.infer<typeof StartRefusalSchema>["c
       return reply.problem.code;
     case "Catalog":
       return "HarnessNotInCatalog";
-    case "ReleaseUnreadable":
-      return "ImageNotReleased";
     case "CredentialRefused":
       switch (reply.credential.kind) {
         case "NoCredential":
@@ -426,6 +424,7 @@ const refusalCode = (reply: StartFailure): z.infer<typeof StartRefusalSchema>["c
     case "ConnectorDisconnected":
     case "TagsOverLimit":
     case "Draining":
+    case "ReleaseUnreadable":
       return null;
   }
 };

@@ -43,7 +43,7 @@ const claimForeman = async (
   return { offer, member: { ...world.owner, token: accessToken } };
 };
 
-test("F1 records session placement refusals and excludes a refused prebuild and tag overflow", async (t) => {
+test("a busy Foreman records a full-host refusal and skips prebuilds, unreadable releases and tag overflow", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -86,6 +86,17 @@ test("F1 records session placement refusals and excludes a refused prebuild and 
   assert.equal(world.tenantRowsWritten() - beforeStart, 12);
   const first = await listRefusals();
   assert.equal(first.length, 1);
+  assert.deepEqual(
+    first.map(({ operation, caller, crewTags, refusal }) => ({ operation, caller, crewTags, refusal })),
+    [
+      {
+        operation: "Start",
+        caller: { kind: "Turn", sessionId: foreman.sessionId, turnId: offer.turnId },
+        crewTags: ["crew:x", "crew:y"],
+        refusal: { code: pool.code, detail: pool.detail },
+      },
+    ],
+  );
 
   await installApp(world.db, TENANT_ID, "prebuilt");
   const beforePrebuild = world.tenantRowsWritten();
@@ -135,17 +146,9 @@ test("F1 records session placement refusals and excludes a refused prebuild and 
   assert.equal(unreadable.status, 422, await unreadable.clone().text());
   const image = ProblemSchema.parse(await unreadable.json());
   assert.equal(image.code, "ImageNotReleased");
-  assert.equal(world.tenantRowsWritten() - beforeUnreadable, 2);
-  const recorded = await listRefusals();
-  assert.deepEqual(
-    recorded.map(({ operation, caller, crewTags, refusal }) => ({ operation, caller, crewTags, refusal })),
-    [pool, image].map(({ code, detail }, index) => ({
-      operation: "Start",
-      caller: { kind: "Turn", sessionId: foreman.sessionId, turnId: offer.turnId },
-      crewTags: index === 0 ? ["crew:x", "crew:y"] : ["crew:x"],
-      refusal: { code, detail },
-    })),
-  );
+  assert.equal(image.title, "The published release is unreadable");
+  assert.equal(world.tenantRowsWritten() - beforeUnreadable, 0);
+  assert.deepEqual(await listRefusals(), first);
 
   const beforeOverflow = world.tenantRowsWritten();
   const overflow = await world.fetch(
@@ -160,11 +163,11 @@ test("F1 records session placement refusals and excludes a refused prebuild and 
   assert.equal(overflow.status, 422);
   assert.match(ProblemSchema.parse(await overflow.json()).detail, /would carry 17 tags/);
   assert.equal(world.tenantRowsWritten() - beforeOverflow, 0);
-  assert.deepEqual(await listRefusals(), recorded);
+  assert.deepEqual(await listRefusals(), first);
 });
 
 for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] as const) {
-  test(`F1 wakes after ${code}, resets on a successful retry and pauses on the eleventh new wake`, async (t) => {
+  test(`a Foreman wakes after ${code}, resets on a successful retry and pauses on the eleventh new wake`, async (t) => {
     const world = await World.open({ vars: { TUMPEL_SETTINGS: { ...SETTINGS, turnTotalBudgetSeconds: 7_200 } } });
     t.after(() => world.close());
     const host = await world.hostOnline("host-1");
@@ -265,7 +268,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       assert.equal(host.holds("TurnOffer"), false);
       const beforeStop = world.tenantRowsWritten();
       await host.dropsIdleBox(fullBox.offer);
-      assert.equal(world.tenantRowsWritten() - beforeStop, 29);
+      assert.equal(world.tenantRowsWritten() - beforeStop, 30);
       assert.equal((await world.session(fullBox.session.sessionId)).state, "Stopped");
       assert.equal(count("CapacityAvailable"), 1);
       assert.equal(deliveries(), 1);

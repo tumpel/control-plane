@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PersonaSchema, ProblemSchema } from "@tumpel/schemas";
+import { PersonaSchema, ProblemSchema, StartRefusedEventSchema } from "@tumpel/schemas";
+import { z } from "zod";
 import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
 import { CURRENT_RELEASE_KEY, RELEASE_CACHE_MS } from "../../src/releases.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
-import { World } from "./harness/world.ts";
+import { PRINCIPAL_ID, World } from "./harness/world.ts";
 
 test("a pinned start distinguishes a missing image from an image for another architecture", async (t) => {
   const world = await World.open();
@@ -36,12 +37,37 @@ test("a pinned start distinguishes a missing image from an image for another arc
     }),
   );
   await world.passes(RELEASE_CACHE_MS + 1);
+  const before = world.tenantRowsWritten();
   const missing = await world.fetch(world.owner, "POST", "/v1/sessions", start);
   assert.equal(missing.status, 422);
   const problem = ProblemSchema.parse(await missing.json());
   assert.equal(problem.code, "ImageNotReleased");
   assert.equal(problem.title, "No guest image for this harness version");
   assert.equal(problem.detail, `the published release carries no ClaudeCode ${CLAUDE_CODE_VERSION} guest image`);
+  assert.equal(world.tenantRowsWritten() - before, 2);
+  const listed = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(listed.status, 200);
+  const { events } = z.object({ events: StartRefusedEventSchema.array() }).parse(await listed.json());
+  assert.deepEqual(
+    events.map(({ operation, personaId, model, caller, crewTags, refusal }) => ({
+      operation,
+      personaId,
+      model,
+      caller,
+      crewTags,
+      refusal,
+    })),
+    [
+      {
+        operation: "Start",
+        personaId: persona.personaId,
+        model: "opus",
+        caller: { kind: "Person", principalId: PRINCIPAL_ID },
+        crewTags: [],
+        refusal: { code: problem.code, detail: problem.detail },
+      },
+    ],
+  );
 
   await world.releases.put(
     CURRENT_RELEASE_KEY,

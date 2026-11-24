@@ -11,7 +11,7 @@ import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
 
-test("Fixture Recorder records the refused start and rejects 17 inherited tags without writes", async (t) => {
+test("the recorder records the refused start and rejects 17 inherited tags without writes", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");

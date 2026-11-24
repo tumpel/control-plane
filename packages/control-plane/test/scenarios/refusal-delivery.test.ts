@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { type TestContext, test } from "node:test";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
 import { mcpPersona, startBox } from "./signal-fixtures.ts";
 
-test("F1 queues one delivery on a matching refusal and adds only the event on each repeat", async (t) => {
+const foremanBusyOnFullHost = async (t: TestContext) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -20,7 +20,11 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
   });
   host.report({ memoryHeldMib: DEFAULT_USAGE.memoryBudgetMib });
   await world.settle();
+  return { world, host, foreman, foremanTurn, subscription };
+};
 
+test("a busy Foreman queues one delivery on a refusal and writes only the event on repeats", async (t) => {
+  const { world, host, foreman, foremanTurn, subscription } = await foremanBusyOnFullHost(t);
   const sql = world.tenantSql();
   const deliveries = (subscriptionId: string): number =>
     Number(
@@ -121,7 +125,7 @@ test("F1 queues one delivery on a matching refusal and adds only the event on ea
   assert.equal(repeatDelta, 9);
 });
 
-test("Fixture tagged caller leaves refusal routing to refused tags and claims a crew delivery without a wake", async (t) => {
+test("refusal routing uses refused tags and an ordinary crew delivery does not count as a wake", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");

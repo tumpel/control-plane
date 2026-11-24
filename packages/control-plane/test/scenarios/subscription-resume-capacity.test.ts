@@ -82,14 +82,14 @@ test("a paused Foreman gets one capacity delivery on resume and none on a second
   const { world, host, foreman, crew, subscribe, pause, resume, latest, refuse, delivery } = await fixture(t);
   const path = await subscribe(["CapacityAvailable"]);
   await pause(path);
-  const refusedEvent = await refuse();
-  const wait = () =>
-    world.tenantSql().exec("SELECT refused_event_id, signal_event_id FROM subscription_room_waits").toArray();
-  assert.deepEqual(
-    wait().map((row) => ({ ...row })),
-    [{ refused_event_id: refusedEvent, signal_event_id: 0 }],
-  );
+  await refuse();
+  const sql = world.tenantSql();
+  const waits = () => sql.exec("SELECT subscription_id FROM subscription_room_waits").toArray();
+  const signals = () => sql.exec("SELECT signal_event_id FROM subscription_room_signals").toArray();
+  assert.equal(waits().length, 1);
+  assert.deepEqual(signals(), []);
   await host.dropsIdleBox(crew.offer);
+  assert.equal(signals()[0]?.signal_event_id, latest("CapacityAvailable"));
   await host.finishes(foreman.offer);
   assert.equal(host.holds("TurnOffer"), false);
 
@@ -104,9 +104,12 @@ test("a paused Foreman gets one capacity delivery on resume and none on a second
     [["CapacityAvailable", latest("CapacityAvailable")]],
   );
   await host.claims(offer);
-  assert.deepEqual(wait(), []);
-  const replay = world.tenantRowsWritten();
+  assert.deepEqual(waits(), []);
+  assert.deepEqual(signals(), []);
+  const resumeAgain = world.tenantRowsWritten();
   assert.equal((await resume(path)).status, 200);
+  assert.equal(world.tenantRowsWritten() - resumeAgain, 0);
+  const replay = world.tenantRowsWritten();
   await host.claims(offer);
   assert.equal(world.tenantRowsWritten() - replay, 0);
   assert.equal(host.holds("TurnOffer"), false);
@@ -115,14 +118,14 @@ test("a paused Foreman gets one capacity delivery on resume and none on a second
 test("resume presents the latest refusal of its code and the capacity signal by exact ID", async (t) => {
   const { world, host, foreman, crew, subscribe, pause, resume, latest, refuse, delivery } = await fixture(t);
   const path = await subscribe(["StartRefused", "CapacityAvailable"]);
+  const waits = () => world.tenantSql().exec("SELECT COUNT(*) AS count FROM subscription_room_waits").one().count;
   const first = await refuse();
+  assert.equal(waits(), 1);
   await pause(path);
+  assert.equal(waits(), 1);
   const second = await refuse();
   assert.ok(second > first);
-  assert.equal(
-    world.tenantSql().exec("SELECT refused_event_id FROM subscription_room_waits").one().refused_event_id,
-    first,
-  );
+  assert.equal(waits(), 1);
   await host.dropsIdleBox(crew.offer);
   await host.finishes(foreman.offer);
   assert.equal(host.holds("TurnOffer"), false);

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { GITHUB_TOKEN_PREFIX } from "./harness/github.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
-test("Fixture Person preflight records catalog and model refusals from the two start routes", async (t) => {
+test("person preflight records catalog and model refusals from the two start routes", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   await world.holdsAgentCredentials();
@@ -88,7 +88,7 @@ test("Fixture Person preflight records catalog and model refusals from the two s
   );
 });
 
-test("Fixture Foreman preflight keeps its model refusal when more than 16 tags would be inherited", async (t) => {
+test("Foreman preflight keeps its model refusal when more than 16 tags would be inherited", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   await world.holdsAgentCredentials();

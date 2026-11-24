@@ -4,7 +4,7 @@ import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { PRINCIPAL_ID, TENANT_ID, World } from "./harness/world.ts";
 import { mcpPersona, startBox } from "./signal-fixtures.ts";
 
-const f2 = async (t: TestContext, runningBox: boolean, auto: boolean, extraBox = false) => {
+const foremanIdleOnFullHost = async (t: TestContext, runningBox: boolean, auto: boolean, extraBox = false) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -61,26 +61,27 @@ const f2 = async (t: TestContext, runningBox: boolean, auto: boolean, extraBox =
   return { world, host, personaId, crew, extra, refuse, signals, takeCapacity };
 };
 
-test("F2 gets one capacity signal on stop, stays quiet on a second stop, then signals after a new refusal", async (t) => {
-  const { world, host, personaId, crew, extra, signals, refuse, takeCapacity } = await f2(t, false, false, true);
+test("a stop offers capacity once and a claim clears the wait and signal", async (t) => {
+  const { world, host, crew, extra, signals, takeCapacity } = await foremanIdleOnFullHost(t, false, false, true);
   assert.ok(extra);
   const before = world.tenantRowsWritten();
   await host.dropsIdleBox(crew.offer);
+  assert.equal(world.tenantRowsWritten() - before, 30);
   assert.equal(signals(), 1);
   const first = takeCapacity();
-  const signalDelta = world.tenantRowsWritten() - before;
 
   const secondBefore = world.tenantRowsWritten();
   await host.dropsIdleBox(extra.offer);
-  const secondWrites = world.tenantRowsWritten() - secondBefore;
+  assert.equal(world.tenantRowsWritten() - secondBefore, 6);
   assert.equal(signals(), 1);
   assert.equal(host.holds("TurnOffer"), false);
-  const waits = () => world.tenantSql().exec("SELECT signal_event_id FROM subscription_room_waits").toArray();
-  assert.equal(waits().length, 1);
+  const sql = world.tenantSql();
+  assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_signals").one().count, 1);
   const claimBefore = world.tenantRowsWritten();
   await host.claims(first);
-  assert.equal(world.tenantRowsWritten() - claimBefore, 14);
-  assert.deepEqual(waits(), []);
+  assert.equal(world.tenantRowsWritten() - claimBefore, 15);
+  assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_waits").one().count, 0);
+  assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_signals").one().count, 0);
   await host.says({
     type: "TurnFailed",
     turnId: first.turnId,
@@ -93,46 +94,52 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
   const reclaimBefore = world.tenantRowsWritten();
   await host.claims(reoffered);
   assert.equal(world.tenantRowsWritten() - reclaimBefore, 9);
-  assert.deepEqual(waits(), []);
+  assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_waits").one().count, 0);
+});
+
+test("a stop needs a wait and a new refusal allows a later stop to signal", async (t) => {
+  const { world, host, personaId, crew, extra, refuse, signals, takeCapacity } = await foremanIdleOnFullHost(
+    t,
+    false,
+    false,
+    true,
+  );
+  assert.ok(extra);
+  await host.dropsIdleBox(crew.offer);
+  const first = takeCapacity();
+  await host.claims(first);
   await host.finishes(first);
+
+  const withoutWait = world.tenantRowsWritten();
+  await host.dropsIdleBox(extra.offer);
+  assert.equal(world.tenantRowsWritten() - withoutWait, 6);
+  assert.equal(signals(), 1);
+  assert.equal(host.holds("TurnOffer"), false);
 
   host.report({ memoryHeldMib: 0 });
   await world.settle();
-  assert.equal(signals(), 1);
-  const unmatched = await startBox(world, host, personaId, "unmatched work", "Warm");
-  const ordinary = await startBox(world, host, personaId, "ordinary crew work", "Warm", ["crew:x"]);
-  const completionBefore = world.tenantRowsWritten();
-  await host.finishes(unmatched.offer);
-  const completionWrites = world.tenantRowsWritten() - completionBefore;
-  assert.equal(host.holds("TurnOffer"), false);
-  const crewBefore = world.tenantRowsWritten();
-  await host.finishes(ordinary.offer);
-  const crewFailureResetWrites = 1;
-  const crewWakeWrites = world.tenantRowsWritten() - crewBefore - completionWrites - crewFailureResetWrites;
-  assert.equal(crewWakeWrites, 20, "ordinary crew wake writes for the idle Foreman");
-  const crewWake = host.takeOffer();
-  assert.equal(crewWake.sessionId, first.sessionId);
-  assert.match(crewWake.prompt, /"event":"TurnCompleted"/);
-  await host.claims(crewWake);
-  await host.finishes(crewWake);
-
-  const noRefusalBefore = world.tenantRowsWritten();
-  await host.dropsIdleBox(unmatched.offer);
-  const stopBaseline = world.tenantRowsWritten() - noRefusalBefore;
-  assert.equal(stopBaseline, 6);
-  assert.equal(signals(), 1);
-  assert.equal(host.holds("TurnOffer"), false);
-  assert.equal(secondWrites - stopBaseline, 0);
-  assert.equal(signalDelta - stopBaseline, 23);
-  assert.equal(signalDelta - stopBaseline - 3, crewWakeWrites);
-
-  const refusalBefore = world.tenantRowsWritten();
+  const next = await startBox(world, host, personaId, "build another crew box", "Warm");
+  await host.finishes(next.offer);
   await refuse();
-  assert.equal(world.tenantRowsWritten() - refusalBefore, 24);
-  assert.equal(world.tenantRowsWritten() - refusalBefore - 4, crewWakeWrites);
-  const newRefusal = host.takeOffer();
-  await host.claims(newRefusal);
-  await host.finishes(newRefusal);
+  const refusal = host.takeOffer();
+  await host.claims(refusal);
+  await host.finishes(refusal);
+  await host.dropsIdleBox(next.offer);
+  assert.equal(signals(), 2);
+  takeCapacity();
+});
+
+test("BoxGone and a later disk report answer successive waits", async (t) => {
+  const { world, host, crew, refuse, signals, takeCapacity } = await foremanIdleOnFullHost(t, false, false);
+  await host.dropsIdleBox(crew.offer);
+  assert.equal(signals(), 1);
+  const first = takeCapacity();
+  await host.claims(first);
+  await host.finishes(first);
+  await refuse();
+  const refusal = host.takeOffer();
+  await host.claims(refusal);
+  await host.finishes(refusal);
   host.report({ diskHeldMib: 50_000 });
   await world.settle();
   assert.equal(signals(), 1);
@@ -140,20 +147,6 @@ test("F2 gets one capacity signal on stop, stays quiet on a second stop, then si
   host.report({ diskHeldMib: 50_000 });
   await world.settle();
   assert.equal(signals(), 2);
-  const diskSignal = takeCapacity();
-  await host.claims(diskSignal);
-  await host.finishes(diskSignal);
-
-  const nextCrew = await startBox(world, host, personaId, "build another crew box", "Warm");
-  await host.finishes(nextCrew.offer);
-  await refuse();
-  const nextRefusal = host.takeOffer();
-  await host.claims(nextRefusal);
-  await host.finishes(nextRefusal);
-  const nextStop = world.tenantRowsWritten();
-  await host.dropsIdleBox(nextCrew.offer);
-  assert.equal(signals(), 3);
-  assert.equal(world.tenantRowsWritten() - nextStop, 29);
   takeCapacity();
 });
 
@@ -165,8 +158,8 @@ for (const source of [
   "Auto Idle",
   "Warm Idle",
 ] as const) {
-  test(`F2 observes capacity from ${source}`, async (t) => {
-    const { world, host, crew, signals, takeCapacity } = await f2(
+  test(`an idle Foreman observes capacity from ${source}`, async (t) => {
+    const { world, host, crew, signals, takeCapacity } = await foremanIdleOnFullHost(
       t,
       source.endsWith("Idle") || source === "Running BoxGone",
       source === "Auto Idle",
@@ -198,14 +191,14 @@ for (const source of [
   });
 }
 
-test("F2 reports a memory drop without a box change", async (t) => {
-  const { world, host, crew, signals, takeCapacity } = await f2(t, true, false);
+test("a memory drop signals capacity without a box change", async (t) => {
+  const { world, host, crew, signals, takeCapacity } = await foremanIdleOnFullHost(t, true, false);
   const before = world.tenantRowsWritten();
   host.report({ memoryHeldMib: DEFAULT_USAGE.memoryBudgetMib - 2_048 });
   await world.settle();
   assert.equal(signals(), 1);
   assert.equal((await world.session(crew.session.sessionId)).state, "Running");
-  assert.equal(world.tenantRowsWritten() - before, 24);
+  assert.equal(world.tenantRowsWritten() - before, 25);
   takeCapacity();
   for (const memoryHeldMib of [24_000, 23_000, 22_000]) {
     const change = world.tenantRowsWritten();
@@ -217,8 +210,8 @@ test("F2 reports a memory drop without a box change", async (t) => {
   }
 });
 
-test("F2 commits a disk-only change on the heard-at refresh", async (t) => {
-  const { world, host, signals, takeCapacity } = await f2(t, true, false);
+test("a disk-only change signals when the heard-at refresh commits it", async (t) => {
+  const { world, host, signals, takeCapacity } = await foremanIdleOnFullHost(t, true, false);
   await world.passes(30_000);
   const before = world.tenantRowsWritten();
   host.report({ diskHeldMib: 50_000 });
@@ -229,13 +222,13 @@ test("F2 commits a disk-only change on the heard-at refresh", async (t) => {
   const commitBefore = world.tenantRowsWritten();
   host.report({ diskHeldMib: 50_000 });
   await world.settle();
-  assert.equal(world.tenantRowsWritten() - commitBefore, 24);
+  assert.equal(world.tenantRowsWritten() - commitBefore, 25);
   assert.equal(signals(), 1);
   takeCapacity();
 });
 
-test("F2 emits one HostDegraded signal when the host reports Healthy again", async (t) => {
-  const { world, host, signals, takeCapacity } = await f2(t, true, false);
+test("a host becoming Healthy emits one HostDegraded capacity signal", async (t) => {
+  const { world, host, signals, takeCapacity } = await foremanIdleOnFullHost(t, true, false);
   const heartbeat = () => ({
     type: "Heartbeat",
     sentAt: new Date(Date.now()).toISOString(),
@@ -251,15 +244,15 @@ test("F2 emits one HostDegraded signal when the host reports Healthy again", asy
   host.raw({ ...heartbeat(), health: "Healthy" });
   await world.settle();
   assert.equal(signals(), 1);
-  assert.equal(world.tenantRowsWritten() - before, 24);
+  assert.equal(world.tenantRowsWritten() - before, 25);
   assert.match(takeCapacity().prompt, /"code":"HostDegraded"/);
   await host.beats();
   assert.equal(signals(), 1);
 });
 
 for (const presence of ["new host", "reconnect after grace"] as const) {
-  test(`F2 emits one NoHostAvailable signal on ${presence}`, async (t) => {
-    const { world, host, signals } = await f2(t, false, false);
+  test(`an idle Foreman receives one NoHostAvailable capacity signal on ${presence}`, async (t) => {
+    const { world, host, signals } = await foremanIdleOnFullHost(t, false, false);
     if (presence === "reconnect after grace") {
       await host.closesSocket();
       await world.passes(world.settings.heartbeatDeadlineSeconds * 1000 + 1);
@@ -275,7 +268,7 @@ for (const presence of ["new host", "reconnect after grace"] as const) {
       FROM events WHERE json_extract(payload, '$.event') = 'CapacityAvailable'`)
       .one();
     assert.deepEqual({ ...signal }, { hostId: arrived.hostId, code: "NoHostAvailable" });
-    assert.equal(world.tenantRowsWritten() - before, 27);
+    assert.equal(world.tenantRowsWritten() - before, 28);
     await arrived.beats();
     assert.equal(signals(), 1);
   });
