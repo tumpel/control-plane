@@ -933,15 +933,15 @@ suite("sessions", () => {
     );
   });
 
-  test("a compact read stops after eight chunk reads of dropped lines, and the next read goes on from its cursor", async () => {
+  test("a compact read of a running turn fills one page from more than eight stored chunks up to maxBytes, and the next page goes on from its cursor", async () => {
     const { github, host, tool, sessionStart, createPersona, readAll } = await tenant();
-    await createPersona("Quiet", [
+    await createPersona("Busy", [
       { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
       { kind: "Variable", name: "GITHUB_TOKEN", value: github },
     ]);
     const started = await tool(
       "tumpel_session_start",
-      { ...(await sessionStart("Quiet")), prompt: "think quietly" },
+      { ...(await sessionStart("Busy")), prompt: "work in many steps" },
       StartedSessionSchema,
     );
     const { sessionId } = started.session;
@@ -953,42 +953,100 @@ suite("sessions", () => {
       () => tool("tumpel_turn_get", { turnId }, TurnSchema),
       (turn) => turn.state === "Running",
     );
-    const dropped = Array.from({ length: 18 }, () => JSON.stringify({ type: "system", subtype: "status" }));
-    const kept = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "done thinking" }] } });
-    const texts = [...dropped, kept];
-    for (let at = 0; at < texts.length; at += SETTINGS.transcriptChunkLines) {
+    const words = Array.from({ length: 20 }, (_, index) => `step ${index + 1} ${"x".repeat(400)}`);
+    words.forEach((text, index) => {
       host.send({
         type: "TurnLines",
         turnId,
-        firstLineSeq: at + 1,
-        lines: texts.slice(at, at + SETTINGS.transcriptChunkLines),
+        firstLineSeq: index + 1,
+        lines: [JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } })],
       });
-    }
+    });
     await until(
-      "nineteen lines in the transcript",
+      "twenty lines in the transcript",
       () => readAll(sessionId, turnId, 20),
-      (lines) => lines.length === 19,
+      (lines) => lines.length === 20,
     );
-    const capped = await tool(
+    const maxBytes = 8000;
+    const first = await tool(
       "tumpel_transcript_read",
-      { sessionId, compact: true, limit: 2 },
+      { sessionId, compact: true, maxBytes },
       CompactTranscriptPageSchema,
     );
-    assert.deepEqual(capped.turns, []);
-    assert.equal(capped.cursor, 16, "eight reads of two lines each, then the page answers");
-    assert.equal(capped.finished, false);
+    const firstSeqs = first.turns.flatMap((turn) => turn.lines.map((line) => line.lineSeq));
+    assert.ok(firstSeqs.length > 8, `one page holds ${firstSeqs.length} lines, more than eight chunks`);
+    assert.ok(firstSeqs.length < 20, `one page holds ${firstSeqs.length} lines, bounded by maxBytes`);
+    assert.deepEqual(
+      firstSeqs,
+      Array.from({ length: firstSeqs.length }, (_, index) => index + 1),
+    );
+    assert.equal(first.cursor, firstSeqs.length);
+    assert.equal(first.finished, false);
     const next = await tool(
       "tumpel_transcript_read",
-      { sessionId, compact: true, limit: 2, after: capped.cursor },
+      { sessionId, compact: true, maxBytes, after: first.cursor },
       CompactTranscriptPageSchema,
     );
-    assert.deepEqual(next.turns, [{ turnId, lines: [{ lineSeq: 19, text: "done thinking" }] }]);
-    assert.equal(next.cursor, 19);
+    const nextSeqs = next.turns.flatMap((turn) => turn.lines.map((line) => line.lineSeq));
+    assert.deepEqual(
+      [...firstSeqs, ...nextSeqs],
+      Array.from({ length: 20 }, (_, index) => index + 1),
+    );
+    assert.deepEqual(
+      next.turns.flatMap((turn) => turn.lines.map((line) => line.text)),
+      words.slice(first.cursor),
+    );
+    assert.equal(next.cursor, 20);
+    assert.equal(next.finished, false);
 
-    host.send({ type: "TurnComplete", turnId, lastLineSeq: 19, completedAt: new Date().toISOString() });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 20, completedAt: new Date().toISOString() });
     const request = await host.next("SnapshotRequest");
     assert.equal(request.sessionId, sessionId);
     await snapshotDone(host, request, 4096);
+  });
+
+  test("a running turn reports the lines stored so far as its lineCount, and the ended turn reports its final count", async () => {
+    const { github, host, tool, sessionStart, createPersona } = await tenant();
+    await createPersona("Counted", [
+      { kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: PROVIDER_KEY },
+      { kind: "Variable", name: "GITHUB_TOKEN", value: github },
+    ]);
+    const started = await tool(
+      "tumpel_session_start",
+      { ...(await sessionStart("Counted")), prompt: "count along" },
+      StartedSessionSchema,
+    );
+    const { sessionId } = started.session;
+    const offer = await host.next("TurnOffer");
+    const { turnId } = offer;
+    host.send({ type: "TurnClaim", turnId, boxId: offer.boxId });
+    await until(
+      "the turn reading Running",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Running",
+    );
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 1, lines: ['{"type":"system"}', '{"type":"assistant"}'] });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 3, lines: ['{"type":"assistant"}'] });
+    const running = await until(
+      "the running turn counting three lines",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.lineCount === 3,
+    );
+    assert.equal(running.state, "Running");
+    const [listed] = await tool("tumpel_turn_list", { sessionId }, TurnSchema.array());
+    assert.equal(listed?.lineCount, 3);
+
+    const result = JSON.stringify({ type: "result", subtype: "success", is_error: false });
+    host.send({ type: "TurnLines", turnId, firstLineSeq: 4, lines: [result] });
+    host.send({ type: "TurnComplete", turnId, lastLineSeq: 4, completedAt: new Date().toISOString() });
+    const request = await host.next("SnapshotRequest");
+    await snapshotDone(host, request, 4096);
+    const completed = await until(
+      "the turn reading Completed",
+      () => tool("tumpel_turn_get", { turnId }, TurnSchema),
+      (turn) => turn.state === "Completed",
+    );
+    assert.equal(completed.lineCount, 4);
   });
 
   test("a setup box token writes its own setup's member once, only while the setup is Minting, and a second start on a set supersedes its running setup", async () => {

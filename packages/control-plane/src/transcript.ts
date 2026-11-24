@@ -57,6 +57,30 @@ export const firstChunkAfter = async (store: R2Bucket, prefix: string, after: nu
   return first === undefined ? null : storedChunk(prefix, first);
 };
 
+export const chunksFrom = async (
+  store: R2Bucket,
+  prefix: string,
+  storageKey: string,
+  size: number,
+): Promise<StoredChunk[]> => {
+  const listed = await store.list({ prefix, startAfter: storageKey });
+  return [
+    storedChunk(prefix, { key: storageKey, size }),
+    ...listed.objects.map((object) => storedChunk(prefix, object)),
+  ];
+};
+
+export const chunksWithin = (chunks: readonly StoredChunk[], maxBytes: number): StoredChunk[] => {
+  const within: StoredChunk[] = [];
+  let bytes = 0;
+  for (const chunk of chunks) {
+    if (within.length > 0 && bytes + chunk.size > maxBytes) return within;
+    bytes += chunk.size;
+    within.push(chunk);
+  }
+  return within;
+};
+
 export const deleteTranscript = async (store: R2Bucket, prefix: string): Promise<void> => {
   for (;;) {
     const listed = await store.list({ prefix });

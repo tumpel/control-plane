@@ -55,7 +55,19 @@ import {
   type TurnSend,
 } from "./tenant-sessions.ts";
 import { ticketBranch, ticketPrompt } from "./ticket-prompt.ts";
-import { DEFAULT_PAGE_BYTES, decodeLines, emptyPage, type Page, pageOf, type TranscriptLine } from "./transcript.ts";
+import {
+  chunksFrom,
+  chunksWithin,
+  DEFAULT_PAGE_BYTES,
+  decodeLines,
+  emptyPage,
+  type Page,
+  pageOf,
+  type Range,
+  type StoredChunk,
+  type TranscriptLine,
+  transcriptPrefix,
+} from "./transcript.ts";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
@@ -720,11 +732,26 @@ export const getTurnFailure = async (env: Env, caller: Caller, turnId: string): 
   });
 };
 
-const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLine[]> => {
-  if (cursor.kind === "Lines") return [];
-  const object = await env.STORE.get(cursor.storageKey, { range: cursor.range });
-  if (object === null) throw new Error(`transcript chunk ${cursor.storageKey} is indexed but missing from the store`);
+const readChunk = async (env: Env, storageKey: string, range: Range): Promise<TranscriptLine[]> => {
+  const object = await env.STORE.get(storageKey, { range });
+  if (object === null) throw new Error(`transcript chunk ${storageKey} is indexed but missing from the store`);
   return decodeLines(await object.text());
+};
+
+const linesOf = async (env: Env, cursor: TranscriptCursor): Promise<TranscriptLine[]> =>
+  cursor.kind === "Lines" ? [] : readChunk(env, cursor.storageKey, cursor.range);
+
+const compactChunks = async (
+  env: Env,
+  prefix: string,
+  cursor: TranscriptCursor,
+  turnId: string | null,
+  maxBytes: number,
+): Promise<StoredChunk[]> => {
+  if (cursor.kind === "Lines") return [];
+  const listed = await chunksFrom(env.STORE, prefix, cursor.storageKey, cursor.range.length);
+  const other = turnId === null ? -1 : listed.findIndex((chunk) => chunk.turnId !== turnId);
+  return chunksWithin(other === -1 ? listed : listed.slice(0, other), maxBytes);
 };
 
 export const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[] => {
@@ -745,7 +772,6 @@ export const byTurn = (lines: readonly TranscriptLine[]): CompactTranscriptTurn[
   return turns;
 };
 
-const COMPACT_READ_PASSES = 8;
 const COMPACT_HARNESSES = [
   ...new Set(HARNESS_CATALOG.filter((entry) => entry.compactTranscript).map((entry) => entry.harness)),
 ];
@@ -781,36 +807,54 @@ export const readTranscript = async (
       fix: "Read the transcript without compact",
     });
   }
-  let read = cursor;
-  for (let pass = 1; ; pass += 1) {
-    const fetched = (await linesOf(env, read)).filter((line) => line.lineSeq > page.cursor);
-    const paged = pageOf(page, fetched, compactor, limit, maxBytes);
-    if (!paged.ok) {
-      return refuse(422, {
-        code: "TranscriptLineUnreadable",
-        title: "Transcript line is not JSON",
-        detail: `line ${paged.lineSeq} of session ${sessionId} is not JSON, so the transcript has no compact form from there`,
-        fix: "Read the transcript without compact",
-      });
+  const unreadable = (lineSeq: number) =>
+    refuse(422, {
+      code: "TranscriptLineUnreadable",
+      title: "Transcript line is not JSON",
+      detail: `line ${lineSeq} of session ${sessionId} is not JSON, so the transcript has no compact form from there`,
+      fix: "Read the transcript without compact",
+    });
+  if (compactor !== null) {
+    const prefix = transcriptPrefix(caller.tenantId, sessionId);
+    for (const chunk of await compactChunks(env, prefix, cursor, query.turnId ?? null, maxBytes)) {
+      const read = await readChunk(env, chunk.storageKey, { offset: 0, length: chunk.size });
+      const paged = pageOf(
+        page,
+        read.filter((line) => line.lineSeq > page.cursor),
+        compactor,
+        limit,
+        maxBytes,
+      );
+      if (!paged.ok) return unreadable(paged.lineSeq);
+      page = paged.page;
+      if (page.full) break;
     }
+    return ok({
+      form: "Compact" as const,
+      sessionId,
+      sessionState: cursor.sessionState,
+      turns: byTurn(page.lines),
+      cursor: page.cursor,
+      finished: !cursor.inFlight && page.cursor >= cursor.lastLineSeq,
+    });
+  }
+  let read = cursor;
+  for (;;) {
+    const fetched = (await linesOf(env, read)).filter((line) => line.lineSeq > page.cursor);
+    const paged = pageOf(page, fetched, null, limit, maxBytes);
+    if (!paged.ok) return unreadable(paged.lineSeq);
     page = paged.page;
-    const settled = page.full || fetched.length === 0 || page.cursor >= read.lastLineSeq;
-    if (settled || (compactor !== null && pass === COMPACT_READ_PASSES)) {
-      const { sessionState } = read;
+    if (page.full || fetched.length === 0 || page.cursor >= read.lastLineSeq) {
       const finished = !read.inFlight && page.cursor >= read.lastLineSeq;
-      if (compactor === null) {
-        return ok(
-          TranscriptPageSchema.parse({ form: "Raw", sessionState, lines: page.lines, cursor: page.cursor, finished }),
-        );
-      }
-      return ok({
-        form: "Compact" as const,
-        sessionId,
-        sessionState,
-        turns: byTurn(page.lines),
-        cursor: page.cursor,
-        finished,
-      });
+      return ok(
+        TranscriptPageSchema.parse({
+          form: "Raw",
+          sessionState: read.sessionState,
+          lines: page.lines,
+          cursor: page.cursor,
+          finished,
+        }),
+      );
     }
     const next = await readAfter(page);
     if (next === null) return sessionNotFound(sessionId);
