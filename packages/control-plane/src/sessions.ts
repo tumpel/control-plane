@@ -7,6 +7,8 @@ import {
   SessionStopQuerySchema,
   SessionTagsPatchSchema,
   SessionTagsSchema,
+  StartRefusalCodeSchema,
+  StartRefusalSchema,
   SteerCreateSchema,
   type SteerSchema,
   TranscriptPageSchema,
@@ -15,6 +17,7 @@ import {
   TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { boundedTo } from "./bounded-detail.ts";
 import { compactorOf } from "./compact.ts";
 import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
@@ -216,7 +219,21 @@ const prepareStart = async (
   const repository = startTarget(start.repository);
   if (!repository.ok) return repository;
   const checked = await startable(env, caller.tenantId, start.personaId, start.model, "sessions.start", now);
-  if (!checked.ok) return checked;
+  if (!checked.ok) {
+    const { code, detail } = checked.problem;
+    const reason = StartRefusalCodeSchema.safeParse(code);
+    if (!reason.success) return checked;
+    const recorded = await tenantOf(env, caller).call("recordStartRefusal", {
+      tenantId: caller.tenantId,
+      refusal: { code: reason.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, detail) },
+      personaId: start.personaId,
+      model: start.model,
+      caller: caller.origin,
+      requestedTags: start.tags ?? [],
+      now,
+    });
+    return recorded.kind === "TagsOverLimit" ? placed<never>(recorded) : checked;
+  }
   const entry = checked.value;
   return ok({
     principalId: caller.principalId,

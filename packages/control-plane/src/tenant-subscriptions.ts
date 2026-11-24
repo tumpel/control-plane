@@ -1,19 +1,27 @@
+import { credentialProblem } from "@tumpel/api/credentials";
 import {
   type CompleteSubscriptionResultSchema,
   type CreateSubscriptionInputSchema,
   type CreateSubscriptionResultSchema,
   type PauseSubscriptionResultSchema,
   type ResumeSubscriptionResultSchema,
+  StartRefusalCodeSchema,
+  StartRefusalSchema,
   type SubscriptionFilterSchema,
   type SubscriptionPauseReasonSchema,
   SubscriptionSchema,
 } from "@tumpel/schemas";
 import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
+import { boundedTo } from "./bounded-detail.ts";
 import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
+import type { Problem } from "./http.ts";
+import { stranded, unplaced } from "./placement.ts";
+import { releaseUnreadable } from "./releases.ts";
+import type { TenantInput } from "./tenant-api.ts";
 import { endOfLog, type NewTenantEvent, oldestKept } from "./tenant-events.ts";
-import { type OfferedPrompt, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
+import { type OfferedPrompt, type Sent, type Session, TenantSessions, type TurnRow } from "./tenant-sessions.ts";
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 type SubscriptionCreate = z.infer<typeof CreateSubscriptionInputSchema>["subscription"];
@@ -37,6 +45,7 @@ type SubscriptionRow = {
   cursor_event_id: number;
   crew_failures_in_a_row: number;
   delivery_failures_in_a_row: number;
+  starts_refused_in_a_row: number;
   state: Subscription["state"];
   variant: string;
   created_at: number;
@@ -53,6 +62,8 @@ const SUBSCRIPTION_STATES = `WITH states (subscription_id, state, variant) AS (
     'reason', json_object('kind', 'DeliveryFailed', 'turnId', turn_id), 'pausedAt', paused_at) FROM subscription_delivery_failed_pauses
   UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
     'reason', json_object('kind', 'CrewFailing'), 'pausedAt', paused_at) FROM subscription_crew_failing_pauses
+  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+    'reason', json_object('kind', 'StartsRefused'), 'pausedAt', paused_at) FROM subscription_starts_refused_pauses
   UNION ALL SELECT subscription_id, 'Ended', json_object('state', 'Ended', 'reason', reason, 'endedAt', ended_at) FROM subscription_ends
 )`;
 
@@ -64,7 +75,7 @@ const crewMatch = (subscription: string, session: string, tags: string): string 
     AND c.tag NOT IN (SELECT value FROM json_each(${tags})))`;
 
 const SUBSCRIPTION_SELECT = `${SUBSCRIPTION_STATES} SELECT s.subscription_id, s.session_id, s.prompt, s.goal, s.expires_at, s.cursor_event_id,
-  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
+  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, s.starts_refused_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
   (SELECT json_group_array(event) FROM (SELECT event FROM subscription_events WHERE subscription_id = s.subscription_id ORDER BY event)) AS events,
   (SELECT json_group_array(tag) FROM (SELECT tag FROM subscription_crew_tags WHERE subscription_id = s.subscription_id ORDER BY tag)) AS crew_tags
   FROM subscriptions AS s JOIN states AS st ON st.subscription_id = s.subscription_id`;
@@ -74,6 +85,7 @@ const STATE_TABLES = [
   "subscription_requested_pauses",
   "subscription_delivery_failed_pauses",
   "subscription_crew_failing_pauses",
+  "subscription_starts_refused_pauses",
 ];
 
 const LIVE_SUBSCRIPTIONS = STATE_TABLES.map((table) => `SELECT subscription_id FROM ${table}`).join(" UNION ALL ");
@@ -193,7 +205,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
         this.clearState(subscriptionId);
         sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
         sql.exec(
-          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
+          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, starts_refused_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
           now,
           subscriptionId,
         );
@@ -279,6 +291,59 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected override tumpelMcp(sessionId: string): boolean {
     return super.tumpelMcp(sessionId) || this.subscribed(sessionId);
+  }
+
+  protected override async sendTurn(input: TenantInput<"sendTurn">): Promise<Sent> {
+    const sent = await super.sendTurn(input);
+    if (
+      sent.kind !== "Unplaced" &&
+      sent.kind !== "Stranded" &&
+      sent.kind !== "CredentialRefused" &&
+      sent.kind !== "ReleaseUnreadable"
+    )
+      return sent;
+
+    const { tenantId, sessionId, caller, hosts, now } = input;
+    const session = this.getSession(tenantId, sessionId);
+    if (session === null) throw new Error(`refused send lost its session ${sessionId}`);
+    let problem: Problem;
+    switch (sent.kind) {
+      case "Unplaced":
+        problem = unplaced(sent.hosts, "send the turn again").problem;
+        break;
+      case "Stranded":
+        problem = stranded(session, hosts, sent.missingTurnIds).problem;
+        break;
+      case "CredentialRefused":
+        problem = credentialProblem(
+          sent.refusal,
+          `the secret set of persona ${sent.personaId}`,
+          session.harness,
+          "send again",
+        );
+        break;
+      case "ReleaseUnreadable":
+        problem = releaseUnreadable(sent.detail, "send the turn again");
+        break;
+    }
+    const reason = StartRefusalCodeSchema.safeParse(problem.code);
+    if (!reason.success) return sent;
+    const refusal = { code: reason.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, problem.detail) };
+    this.ctx.storage.transactionSync(() =>
+      this.appendEvent(
+        {
+          event: "StartRefused",
+          operation: "Send",
+          personaId: session.personaId,
+          model: session.model,
+          caller,
+          crewTags: session.tags,
+          refusal,
+        },
+        now,
+      ),
+    );
+    return sent;
   }
 
   protected async startDeliveries(tenantId: string): Promise<void> {
@@ -455,6 +520,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
     if (reason.kind === "CrewFailing") {
       sql.exec(
         "INSERT INTO subscription_crew_failing_pauses (subscription_id, paused_at) VALUES (?, ?)",
+        row.subscription_id,
+        iso(now),
+      );
+    }
+    if (reason.kind === "StartsRefused") {
+      sql.exec(
+        "INSERT INTO subscription_starts_refused_pauses (subscription_id, paused_at) VALUES (?, ?)",
         row.subscription_id,
         iso(now),
       );

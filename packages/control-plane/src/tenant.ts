@@ -502,9 +502,7 @@ export class Tenant extends TenantConnectors {
     startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
       started: await this.startSessionFromIssue(tenantId, input, issue, now),
     }),
-    sendTurn: async ({ tenantId, sessionId, send, hosts, now }) => ({
-      sent: await this.sendTurn(tenantId, sessionId, send, hosts, now),
-    }),
+    sendTurn: async (input) => ({ sent: await this.sendTurn(input) }),
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),

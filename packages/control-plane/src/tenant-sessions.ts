@@ -122,6 +122,7 @@ import {
 } from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
+import type { TenantInput } from "./tenant-api.ts";
 import { appendEvent, type NewTenantEvent } from "./tenant-events.ts";
 import {
   chunkKey,
@@ -2128,13 +2129,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
   }
 
-  protected async sendTurn(
-    tenantId: string,
-    sessionId: string,
-    send: TurnSend,
-    hosts: HostRecord[],
-    now: number,
-  ): Promise<Sent> {
+  protected async sendTurn({ tenantId, sessionId, send, hosts, now }: TenantInput<"sendTurn">): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -2697,7 +2692,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.getSession(tenantId, sessionId, this.staleHosts(Date.now()));
   }
 
-  private getSession(tenantId: string, sessionId: string, stale: StaleHosts = NONE_STALE): Session | null {
+  protected getSession(tenantId: string, sessionId: string, stale: StaleHosts = NONE_STALE): Session | null {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
