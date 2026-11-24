@@ -19,6 +19,7 @@ import {
 } from "@tumpel/schemas";
 import { Agent, setGlobalDispatcher } from "undici";
 import { z } from "zod";
+import type { StoredControlMessage } from "../../../src/channel/protocol.ts";
 import { CLAUDE_CODE_VERSION } from "../../../src/harness-catalog.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../../release-fixture.ts";
 import { TEST_SETTINGS } from "../../timing.ts";
@@ -49,6 +50,7 @@ const MIGRATIONS = new URL("../../../migrations/", import.meta.url);
 type DurableObjectClass = new (ctx: never, env: never) => object;
 type TenantApi = { call(operation: string, input: unknown): Promise<unknown> };
 type HostRecord = { hostId: string };
+type HostChannel = { send(message: StoredControlMessage): Promise<unknown> };
 type Worker = { fetch(request: Request, env: unknown): Promise<Response> };
 type Tier = "Free" | "Configured";
 type Limit = { measure: string; window: string; limit: number };
@@ -139,7 +141,7 @@ export class World {
   readonly dataPoints: { blobs?: string[]; doubles?: number[]; indexes?: string[] }[] = [];
   private api!: TenantApi;
   private tenants!: Namespace<object>;
-  private hostChannels!: Namespace<object>;
+  private hostChannels!: Namespace<HostChannel>;
   private server!: ScenarioServer;
   github!: GitHubStub;
   access!: AccessStub;
@@ -229,7 +231,7 @@ export class World {
       ...options.vars,
     };
     this.tenants = this.runtime.namespace(Tenant, () => env);
-    this.hostChannels = env.HOST as Namespace<object>;
+    this.hostChannels = env.HOST as Namespace<HostChannel>;
     env.TENANT = this.tenants;
     this.env = env;
     this.server = await ScenarioServer.listen((incoming) => this.worker.fetch(incoming, this.env));
@@ -378,6 +380,12 @@ export class World {
 
   hostRows(hostId: string): number {
     return this.hostStorage(hostId).sql.rowsWritten;
+  }
+
+  hostChannel(hostId: string): HostChannel {
+    const held = this.hostChannels.instances.get(hostId);
+    if (held === undefined) throw new Error(`host ${hostId} has no channel Durable Object yet`);
+    return held.object;
   }
 
   hibernateHostChannel(hostId: string): void {
