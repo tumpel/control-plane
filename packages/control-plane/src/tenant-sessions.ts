@@ -2413,18 +2413,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
         )
         .toArray();
       const expired = pending.filter((request) => this.uploadSecondsLeft(request.created_at, now) < 1);
-      for (const { created_at: _, ...request } of expired) {
+      const notAnswered = (request: SnapshotRequestRow): void => {
         const detail = `the host had not answered snapshot ${request.snapshot_id} when its upload URLs expired, so stopping the session again asked the host again`;
         this.recordSnapshotFailure(request, "NotAnswered", detail, iso(now));
-      }
+      };
       if (expired.length === pending.length) {
+        for (const { created_at: _, ...request } of expired) notAnswered(request);
         await this.snapshotOrTeardown(tenantId, session, latest);
         return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
       }
-      for (const request of expired) {
+      for (const { created_at: _, ...request } of expired) {
         const turn = this.turnRow(request.turn_id);
         if (turn === null)
           throw new Error(`snapshot ${request.snapshot_id} was asked for turn ${request.turn_id}, which has no row`);
+        notAnswered(request);
         await this.requestSnapshot(tenantId, session, turn);
       }
       return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
