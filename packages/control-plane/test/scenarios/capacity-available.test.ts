@@ -541,6 +541,51 @@ test("a healthy heartbeat on the same connection wakes a room refusal once", asy
   assert.equal(host.holds("TurnOffer"), false);
 });
 
+test("a disk-only report after BoxGone releases the pending wake", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await host.finishes(initial);
+  await world.subscribe(foreman, {
+    prompt: "wait for disk",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  await world.startSession({ prompt: "hold disk", tags: [], boxRetention: "Warm" });
+  const filler = host.takeOffer();
+  await host.claims(filler);
+  await host.finishes(filler);
+  host.report({ memoryBudgetMib: 30001, diskBudgetMib: 65536, diskHeldMib: 65536 });
+  await world.settle();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(refused.status, 409);
+  await host.dropsIdleBox(filler);
+  assert.equal(host.holds("TurnOffer"), false);
+  host.report({ diskHeldMib: 32768 });
+  await world.settle();
+  const wake = host.takeOffer();
+  assert.equal(wake.sessionId, foreman.sessionId);
+  assert.equal((wake.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(wake);
+  await host.finishes(wake);
+  await host.beats();
+  assert.equal(host.holds("TurnOffer"), false);
+});
+
 test("a refusal queues one idle recipient and its delivery transition queues the next", async (t) => {
   const world = await World.open();
   t.after(() => world.close());

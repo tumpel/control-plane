@@ -216,6 +216,47 @@ test("StartRefused records send refusals and delivers the answered problem once"
   assert.equal(host.holds("TurnOffer"), false);
 });
 
+test("a stopping subscriber leaves the refusal delivery slot available for a runnable subscriber", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const first = await world.startSession({ prompt: "first foreman", tags: [], boxRetention: "Warm" });
+  const firstTurn = host.takeOffer();
+  await host.claims(firstTurn);
+  await host.finishes(firstTurn);
+  const second = await world.startSession({ prompt: "second foreman", tags: [], boxRetention: "Warm" });
+  const secondTurn = host.takeOffer();
+  await host.claims(secondTurn);
+  await host.finishes(secondTurn);
+  const events = { prompt: "handle refusals", goal: "finish", events: ["StartRefused"], crewTags: [] };
+  const left = await world.subscribe(first, events);
+  const right = await world.subscribe(second, events);
+  const [stopping, runnable] = left.subscriptionId < right.subscriptionId ? [left, right] : [right, left];
+  await world.call("stopSession", {
+    tenantId: TENANT_ID,
+    sessionId: stopping.sessionId,
+    cancelledBy: null,
+    now: Date.now(),
+  });
+  assert.equal((await world.session(stopping.sessionId)).state, "Stopping");
+  const response = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: first.personaId,
+      repository: "https://github.com/acme/app",
+      model: "unsupported-model",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(response.status, 422);
+  const offer = host.takeOffer();
+  assert.equal(offer.sessionId, runnable.sessionId);
+  assert.match(offer.prompt, /StartRefused/);
+  assert.equal((await world.subscription(stopping.subscriptionId)).cursorEventId, stopping.cursorEventId);
+});
+
 test("one refusal writes one event for 101 subscriptions and preserves a paused cursor", async (t) => {
   const world = await World.open();
   t.after(() => world.close());

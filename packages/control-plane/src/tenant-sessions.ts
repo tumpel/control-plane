@@ -1716,32 +1716,44 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const { heldTurnIds, heldSessionIds } = held;
     const dropped = this.ctx.storage.transactionSync(() => {
       const fresh = report.now - presenceGraceMs(settingsOf(this.env));
-      const recovered =
+      const memoryBudget = report.usage.memoryBudgetMib ?? null;
+      const memoryHeld = report.usage.memoryHeldMib ?? null;
+      const diskBudget = report.usage.diskBudgetMib ?? null;
+      const diskHeld = report.usage.diskHeldMib ?? null;
+      const openedRoom =
         reportedHealth === "Healthy" &&
         this.ctx.storage.sql
           .exec(
-            "SELECT 1 FROM host_reports WHERE host_id = ? AND (reported_health != 'Healthy' OR heard_at < ?)",
+            `SELECT 1 FROM host_reports WHERE host_id = ?1 AND (reported_health != 'Healthy' OR heard_at < ?2
+              OR COALESCE(?3 - ?4, 0) > COALESCE(memory_budget_mib - memory_held_mib, 0)
+              OR COALESCE(?5 - ?6, 0) > COALESCE(disk_budget_mib - disk_held_mib, 0)
+              OR (?6 = 0 AND disk_held_mib > 0))`,
             hostId,
             fresh,
+            memoryBudget,
+            memoryHeld,
+            diskBudget,
+            diskHeld,
           )
           .toArray().length > 0;
       this.ctx.storage.sql.exec(
         `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
           disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, reported_health = ?8, heard_at = ?9
-        WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR reported_health != ?8 OR heard_at < ?9 - ?10 OR ?11 = 1)`,
+        WHERE host_id = ?1 AND (memory_budget_mib IS NOT ?2 OR memory_held_mib IS NOT ?3
+          OR disk_budget_mib IS NOT ?5 OR disk_held_mib IS NOT ?6 OR reported_health != ?8 OR heard_at < ?9 - ?10 OR ?11 = 1)`,
         hostId,
-        report.usage.memoryBudgetMib ?? null,
-        report.usage.memoryHeldMib ?? null,
+        memoryBudget,
+        memoryHeld,
         report.usage.memoryAvailableMib,
-        report.usage.diskBudgetMib ?? null,
-        report.usage.diskHeldMib ?? null,
+        diskBudget,
+        diskHeld,
         report.usage.loadAverage,
         reportedHealth,
         report.now,
         HEARD_REFRESH_MS,
-        Number(recovered),
+        Number(openedRoom),
       );
-      if (recovered) this.capacityMayHaveChanged();
+      if (openedRoom) this.capacityMayHaveChanged();
       return this.judgeHeldTurns(hostId, heldTurnIds);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);

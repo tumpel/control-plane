@@ -336,6 +336,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const row = durableDb(this.ctx.storage, {}).get<{ subscriptionId: string }>(query`
       SELECT recipient.subscription_id AS subscriptionId FROM subscriptions AS recipient
       JOIN subscription_actives AS a ON a.subscription_id = recipient.subscription_id
+      JOIN sessions AS target ON target.session_id = recipient.session_id AND target.state NOT IN ('Stopping', 'Archived', 'Failed')
       WHERE NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.session_id = recipient.session_id AND t.state IN ('Offered', 'Running'))
         AND NOT EXISTS (SELECT 1 FROM subscription_turns AS st WHERE st.subscription_id = recipient.subscription_id)
         ${session} AND EXISTS (${matchedEvents(now, false)})
