@@ -2741,8 +2741,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async listTurns(tenantId: string, sessionId: string): Promise<Turn[] | null> {
     if (this.sessionRow(sessionId) === null) return null;
+    const rows = await Promise.all(
+      this.turnRows(sessionId).map(async (row) => ({ ...row, line_count: await this.lineCount(tenantId, row) })),
+    );
     const stale = this.staleHosts(Date.now());
-    return this.turnRows(sessionId).map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id), stale));
+    return rows.map((row) => toTurn(tenantId, row, this.turnImage(row.turn_id), stale));
   }
 
   private turnRows(sessionId: string): TurnRow[] {
@@ -2752,7 +2755,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected async readTurn(tenantId: string, turnId: string): Promise<Turn | null> {
-    return this.getTurn(tenantId, turnId, this.staleHosts(Date.now()));
+    const row = this.turnRow(turnId);
+    if (row === null) return null;
+    const read = { ...row, line_count: await this.lineCount(tenantId, row) };
+    return toTurn(tenantId, read, this.turnImage(turnId), this.staleHosts(Date.now()));
   }
 
   private getTurn(tenantId: string, turnId: string, stale: StaleHosts = NONE_STALE): Turn | null {
