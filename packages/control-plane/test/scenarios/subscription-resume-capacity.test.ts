@@ -14,6 +14,7 @@ const fixture = async (t: TestContext) => {
   const foreman = await startBox(world, host, personaId, "plan the work", "Warm");
   const crew = await startBox(world, host, personaId, "build the work", "Warm");
   await host.finishes(crew.offer);
+  await world.tick(1);
   const subscribe = async (events: string[]) => {
     const created = await world.fetch(
       world.owner,

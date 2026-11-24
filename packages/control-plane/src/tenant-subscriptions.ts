@@ -28,7 +28,7 @@ import {
   type OfferedPrompt,
   type Sent,
   type Session,
-  type SessionStarted,
+  type SessionStartDecision,
   type StartedSession,
   type StartedSessionFromIssue,
   TenantSessions,
@@ -341,10 +341,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
     tenantId: string,
     input: NewSession,
     now: number,
-  ): Promise<SessionStarted<StartedSession>> {
-    const started = await super.startSession(tenantId, input, now);
-    this.recordSuccessfulStart(started, input.startedBy, now);
-    return started;
+  ): Promise<SessionStartDecision<StartedSession>> {
+    const decision = await super.startSession(tenantId, input, now);
+    this.recordSessionStart(decision, input, now);
+    return decision;
   }
 
   protected override async startSessionFromIssue(
@@ -352,20 +352,37 @@ export abstract class TenantSubscriptions extends TenantSessions {
     input: NewSession,
     issue: IssueOfSession,
     now: number,
-  ): Promise<SessionStarted<StartedSessionFromIssue>> {
-    const started = await super.startSessionFromIssue(tenantId, input, issue, now);
-    this.recordSuccessfulStart(started, input.startedBy, now);
-    return started;
+  ): Promise<SessionStartDecision<StartedSessionFromIssue>> {
+    const decision = await super.startSessionFromIssue(tenantId, input, issue, now);
+    this.recordSessionStart(decision, input, now);
+    return decision;
   }
 
-  private recordSuccessfulStart(
-    started: SessionStarted<StartedSession>,
-    caller: Session["startedBy"],
+  private recordSessionStart(
+    { outcome, crewTags }: SessionStartDecision<StartedSession>,
+    { startedBy: caller, start: { personaId, model } }: NewSession,
     now: number,
   ): void {
-    if (started.kind !== "Started") return;
-    const { sessionId } = started.started.session;
-    this.ctx.storage.transactionSync(() => this.appendEvent({ event: "SessionStarted", sessionId, caller }, now));
+    if (outcome.kind === "Started") {
+      const { sessionId } = outcome.started.session;
+      this.ctx.storage.transactionSync(() => this.appendEvent({ event: "SessionStarted", sessionId, caller }, now));
+      return;
+    }
+    if (caller.kind === "Trigger") return;
+    if (outcome.kind === "Unplaced") {
+      this.appendStartRefusal(
+        { operation: "Start", personaId, model, caller, crewTags },
+        unplaced(outcome.hosts, "start again").problem,
+        now,
+      );
+    }
+    if (outcome.kind === "ReleaseUnreadable") {
+      this.appendStartRefusal(
+        { operation: "Start", personaId, model, caller, crewTags },
+        releaseUnreadable(outcome.detail, "start again"),
+        now,
+      );
+    }
   }
 
   protected override async sendTurn(input: TenantInput<"sendTurn">): Promise<Sent> {
@@ -401,24 +418,23 @@ export abstract class TenantSubscriptions extends TenantSessions {
         problem = releaseUnreadable(sent.detail, "send the turn again");
         break;
     }
-    const reason = StartRefusalCodeSchema.safeParse(problem.code);
-    if (!reason.success) return sent;
-    const refusal = { code: reason.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, problem.detail) };
-    this.ctx.storage.transactionSync(() =>
-      this.appendEvent(
-        {
-          event: "StartRefused",
-          operation: "Send",
-          personaId: session.personaId,
-          model: session.model,
-          caller,
-          crewTags: session.tags,
-          refusal,
-        },
-        now,
-      ),
+    this.appendStartRefusal(
+      { operation: "Send", personaId: session.personaId, model: session.model, caller, crewTags: session.tags },
+      problem,
+      now,
     );
     return sent;
+  }
+
+  private appendStartRefusal(
+    context: Omit<Extract<NewTenantEvent, { event: "StartRefused" }>, "event" | "refusal">,
+    problem: Problem,
+    now: number,
+  ): void {
+    const reason = StartRefusalCodeSchema.safeParse(problem.code);
+    if (!reason.success) return;
+    const refusal = { code: reason.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, problem.detail) };
+    this.ctx.storage.transactionSync(() => this.appendEvent({ event: "StartRefused", ...context, refusal }, now));
   }
 
   protected async startDeliveries(tenantId: string): Promise<void> {
