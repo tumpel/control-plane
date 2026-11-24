@@ -41,7 +41,7 @@ test("Fixture Person preflight records catalog and model refusals from the two s
   await world.call("setSecretMember", {
     tenantId: TENANT_ID,
     secretSetId: persona.secretSetId,
-    member: { kind: "Variable", name: "GITHUB_TOKEN", value: GITHUB_TOKEN_PREFIX + "refusal" },
+    member: { kind: "Variable", name: "GITHUB_TOKEN", value: `${GITHUB_TOKEN_PREFIX}refusal` },
     githubUser: { githubUserId: 1, login: "scenario" },
     now: Date.now(),
   });

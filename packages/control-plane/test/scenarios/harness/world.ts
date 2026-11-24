@@ -7,6 +7,7 @@ import {
   DeviceTokenSchema,
   HostRecordSchema,
   MintedEnrolmentTokenSchema,
+  type RecordStartRefusalInputSchema,
   SessionSchema,
   StartedSessionSchema,
   type SubscriptionPauseReasonSchema,
@@ -92,7 +93,9 @@ const VAPID_PUBLIC_KEY = Buffer.concat([
   Buffer.from(VAPID_JWK.y ?? "", "base64url"),
 ]).toString("base64url");
 
-type TenantOperations = Record<string, (input: never) => unknown>;
+type TenantOperations = Record<string, (input: never) => unknown> & {
+  recordStartRefusal(input: z.infer<typeof RecordStartRefusalInputSchema>): unknown;
+};
 const REPOSITORY = "https://github.com/acme/app";
 
 export const SETTINGS = TEST_SETTINGS;
@@ -123,6 +126,7 @@ export type Host = Supervisor;
 type TenantSteps = {
   expireSubscriptions(now: number): void;
   subscriptionRow(subscriptionId: string): object | null;
+  offeredPrompt(harness: string, turn: object): unknown;
   pause(row: object, reason: z.infer<typeof SubscriptionPauseReasonSchema>, now: number): void;
 };
 

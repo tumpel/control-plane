@@ -35,6 +35,7 @@ import {
   TurnSchema,
   type TurnSendSchema,
 } from "@tumpel/schemas";
+import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
@@ -60,6 +61,7 @@ import {
   sessionConnectorUses,
 } from "./connector-rows.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
+import { durableDb } from "./db/client.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
@@ -165,6 +167,13 @@ export interface NewSession {
   endpoint: string;
   start: SessionStart;
 }
+
+export type HostHeadroom = {
+  memory_held_mib: number | null;
+  memory_budget_mib: number | null;
+  disk_held_mib: number | null;
+  disk_budget_mib: number | null;
+};
 
 export type SessionFilter = z.infer<typeof SessionFilterSchema>;
 type SessionStartedBy = Session["startedBy"];
@@ -1607,6 +1616,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return turn;
   }
 
+  protected abstract roomRefusalPending(): boolean;
+
+  protected hostHeadroom(hostId: string): HostHeadroom | undefined {
+    return durableDb(this.ctx.storage, {}).get<HostHeadroom>(query`
+      SELECT memory_held_mib, memory_budget_mib, disk_held_mib, disk_budget_mib
+      FROM host_reports WHERE host_id = ${hostId}`);
+  }
+
+  protected abstract reportCommitted(hostId: string, before: HostHeadroom, now: number): void;
+
   private reportHost(hostId: string, report: HostReport): void {
     this.ctx.storage.sql.exec(
       `INSERT INTO host_reports (host_id, box_capacity, channel_protocol, memory_budget_mib, memory_held_mib,
@@ -1697,7 +1716,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         .toArray();
       if (heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env)))
         this.appendEvent({ event: "HostOnline", hostId }, report.now);
+      const before = this.roomRefusalPending() ? this.hostHeadroom(hostId) : undefined;
       this.reportHost(hostId, report);
+      if (before !== undefined) this.reportCommitted(hostId, before, report.now);
       clearSupersededFailure(this.ctx.storage.sql, hostId);
       return this.unheldRunningTurns(hostId, heldTurnIds);
     });
@@ -1713,6 +1734,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const { heldTurnIds, heldSessionIds } = held;
     const dropped = this.ctx.storage.transactionSync(() => {
+      const before = this.roomRefusalPending() ? this.hostHeadroom(hostId) : undefined;
       this.ctx.storage.sql.exec(
         `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
           disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, reported_health = ?8, heard_at = ?9
@@ -1728,6 +1750,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         report.now,
         HEARD_REFRESH_MS,
       );
+      if (before !== undefined) this.reportCommitted(hostId, before, report.now);
       return this.judgeHeldTurns(hostId, heldTurnIds);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);

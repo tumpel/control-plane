@@ -29,7 +29,7 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { type HostRecord, hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
+import { hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem, refuse } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
