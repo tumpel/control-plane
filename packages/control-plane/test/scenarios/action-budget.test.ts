@@ -155,6 +155,7 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
         part: at + 1,
         packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
         chunks: part,
+        reusedPackDigests: [],
       }),
     );
     for (const upload of answer.reply.uploads) await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
@@ -175,15 +176,22 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
     ],
   });
   const digest = sha256(manifest);
+  const root = { digest, packDigest: digest, offset: 0, length: manifest.length };
   await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
-  await world.store.put(
-    request.storageKey,
-    JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
-  );
+  await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: request.snapshotId,
+    part: Math.ceil(chunks.length / DIGESTS_PER_PART) + 1,
+    packs: [{ packDigest: digest, sizeBytes: manifest.length }],
+    chunks: [root],
+    reusedPackDigests: [],
+  });
   await host.says({
     type: "SnapshotDone",
     snapshotId: request.snapshotId,
     uploadedBytes: chunks.length * CHUNK_BYTES,
+    chunkCount: chunks.length,
   });
 };
 

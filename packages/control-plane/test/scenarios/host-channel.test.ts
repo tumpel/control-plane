@@ -43,7 +43,7 @@ test("a tenant that restarts mid-turn keeps the host channel open, and the turn 
   );
 });
 
-test("a 37 host has each frame acked once stored, so a hibernation between heartbeats loses nothing and the next frame lands", async (t) => {
+test("a 39 host has each frame acked once stored, so a hibernation between heartbeats loses nothing and the next frame lands", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.online(world.owner, "host-1", { protocolVersion: ChannelProtocol.Oldest });
