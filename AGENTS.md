@@ -4,6 +4,7 @@ Read `doc/adr/000-tenets.md` first. Its tenets bind every change. Tenet 1, fail 
 
 Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architecture.md`.
 
+- When changing a client or release workflow, follow `rules/client-compatibility.md`.
 - When writing TypeScript, follow `rules/typescript.md`.
 - When a change needs a new or changed type, follow `rules/typespec.md`.
 - When changing a table, a migration or a stored record, follow `rules/data-modeling.md`.
@@ -18,3 +19,9 @@ Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architec
 - `npm install` installs dependencies.
 - `npm run check` runs every check. `npm run fix` formats.
 - `npm test` runs the TypeScript tests.
+
+## Releases
+
+Dashboard publishers must dispatch only after the checks workflow for the exact released main SHA completes successfully. The control plane queries that run once as provenance and refuses a missing, pending or unsuccessful run.
+
+Dashboard dependency updates must use one bot pull request. Required checks, review and branch protection govern squash auto-merge; dependency updates must never commit directly to main.
