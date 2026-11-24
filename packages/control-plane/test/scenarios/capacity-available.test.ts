@@ -843,12 +843,12 @@ test("ten failed refusal offers pause only the subscription whose host cannot de
     const progress = world
       .tenantSql()
       .exec(
-        "SELECT refusal_delivery_attempts, refusal_delivery_retry_at, cursor_event_id FROM subscriptions WHERE subscription_id = ?",
+        "SELECT refusal_delivery_attempts, refusal_delivery_retry_at, start_refusal_event_id FROM subscriptions WHERE subscription_id = ?",
         subscription.subscriptionId,
       )
       .one();
     assert.equal(progress.refusal_delivery_attempts, attempt);
-    assert.equal(progress.cursor_event_id, subscription.cursorEventId);
+    assert.equal(progress.start_refusal_event_id, 0);
     if (attempt === 10) {
       assert.equal(progress.refusal_delivery_retry_at, 0);
       break;

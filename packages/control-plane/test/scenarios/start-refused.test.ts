@@ -309,11 +309,10 @@ test("one refusal writes one event for 101 subscriptions and preserves a paused 
   );
   assert.equal(response.status, 422);
   assert.equal(ProblemSchema.parse(await response.json()).code, "ModelUnsupported");
-  assert.equal(
-    world.tenantSql().exec("SELECT * FROM events WHERE json_extract(payload, '$.event') = 'StartRefused'").toArray()
-      .length,
-    1,
-  );
+  const refusal = world
+    .tenantSql()
+    .exec("SELECT event_id FROM events WHERE json_extract(payload, '$.event') = 'StartRefused'")
+    .one();
   assert.equal(world.tenantSql().exec("SELECT * FROM subscription_turns").toArray().length, 0);
   assert.equal(world.tenantRowsWritten() - written, 2);
   await host.finishes(turn);
@@ -335,9 +334,9 @@ test("one refusal writes one event for 101 subscriptions and preserves a paused 
   await host.claims(delivery);
   await host.finishes(delivery);
   assert.equal(host.holds("TurnOffer"), false);
-  const delivered = world.tenantSql().exec("SELECT subscription_id, cursor_event_id FROM subscriptions").toArray();
+  const delivered = world.tenantSql().exec("SELECT start_refusal_event_id FROM subscriptions").toArray();
   assert.equal(delivered.length, 101);
-  assert.equal(new Set(delivered.map((row) => row.cursor_event_id)).size, 1);
+  assert.deepEqual([...new Set(delivered.map((row) => row.start_refusal_event_id))], [refusal.event_id]);
 });
 
 test("a catalog preflight refusal records the code and detail the caller received", async (t) => {
