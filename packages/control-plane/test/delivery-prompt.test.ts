@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { OfferedTurnSchema } from "@tumpel/schemas";
 import { DELIVERY_PROMPT_LIMIT, deliveryPrompt } from "../src/delivery-prompt.ts";
 
 const idle = (eventId: number) => ({
@@ -34,7 +35,7 @@ test("a delivery prompt holds the plan, then one JSON line per event in order", 
   });
 });
 
-test("a delivery prompt drops the latest events until the message fits the limit", () => {
+test("a delivery prompt drops the latest events until the message fits 100,000 characters", () => {
   const events = [idle(1), idle(2), idle(3)];
   const two = deliveryPrompt("Plan.", "t1", events.slice(0, 2));
   assert.ok(two?.kind === "Batch");
@@ -42,14 +43,16 @@ test("a delivery prompt drops the latest events until the message fits the limit
   const batch = deliveryPrompt(plan, "t1", events);
   assert.ok(batch?.kind === "Batch");
   assert.equal(batch.lastEventId, 2);
-  assert.equal(batch.prompt.length, DELIVERY_PROMPT_LIMIT);
+  assert.equal(batch.prompt.length, 100000);
+  assert.ok(OfferedTurnSchema.shape.prompt.safeParse(batch.prompt).success);
 });
 
 test("a delivery prompt delivers by reference an event too long to fit on its own", () => {
-  const batch = deliveryPrompt("Plan.", "t1", [failed(41, "x".repeat(5000)), idle(42)]);
+  const plan = "p".repeat(90000);
+  const batch = deliveryPrompt(plan, "t1", [failed(41, "x".repeat(100000)), idle(42)]);
   assert.deepEqual(batch, {
     kind: "Batch",
-    prompt: `Plan.\n\n${JSON.stringify({
+    prompt: `${plan}\n\n${JSON.stringify({
       eventId: 41,
       event: "TurnFailed",
       sessionId: "crew-1",

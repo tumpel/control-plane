@@ -26,7 +26,7 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   );
   assert.equal(enabled.status, 200);
   const subscription = await world.subscribe(foreman, {
-    prompt: "hand out the next step of the epic",
+    prompt: "p".repeat(90000),
     goal: "the epic is merged",
     events: ["TurnFailed"],
     crewTags: ["crew:epic"],
