@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ServeConnectorTokenResultSchema } from "@tumpel/schemas";
+import {
+  EventCursorExpiredProblemSchema,
+  EventPageSchema,
+  ProblemSchema,
+  ServeConnectorTokenResultSchema,
+  SubscriptionSchema,
+} from "@tumpel/schemas";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
@@ -253,47 +259,77 @@ test("a smaller pending refusal wakes only matching subscriptions before a large
   );
 });
 
-test("capacity contract excludes expired refusals from delivery and public readback even while old rows remain", async (t) => {
+test("expired room refusals stop appearing in event readback and subscription deliveries", async (t) => {
+  const retentionMs = 7 * 24 * 60 * 60 * 1000;
   const world = await World.open();
   t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
+  });
   const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
   const initial = host.takeOffer();
   await host.claims(initial);
-  await world.subscribe(foreman, {
-    prompt: "retained work",
-    goal: "finish",
-    events: ["StartRefused", "CapacityAvailable"],
-    crewTags: [],
-  });
-  const payload = JSON.stringify({
-    event: "StartRefused",
-    operation: "Start",
-    personaId: foreman.personaId,
-    model: "opus",
-    caller: { kind: "Person", principalId: "principal-scenario" },
-    crewTags: [],
-    refusal: { code: "PoolExhausted", detail: "an expired attempt" },
-  });
-  const expired = Date.now() - 8 * 24 * 60 * 60 * 1000;
-  world.tenantSql().exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", payload, expired);
-  world.tenantSql().exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", payload, expired);
-  world
-    .tenantSql()
-    .exec(
-      "INSERT INTO room_refusals (event_id, box_memory_mib, box_disk_mib, amd64, arm64) SELECT event_id, 2048, 32768, 1, 0 FROM events WHERE created_at = ?",
-      expired,
-    );
-  await world.hostOnline("host-2");
-  assert.equal(world.tenantSql().exec("SELECT event_id FROM events WHERE created_at = ?", expired).toArray().length, 2);
-  const response = await world.fetch(
+  const created = await world.fetch(
     world.owner,
-    "GET",
-    "/v1/events?afterEventId=0&event=StartRefused&event=CapacityAvailable",
+    "POST",
+    "/v1/subscriptions",
+    JSON.stringify({
+      sessionId: foreman.sessionId,
+      prompt: "retained work",
+      goal: "finish",
+      events: ["StartRefused", "CapacityAvailable"],
+      crewTags: [],
+      expiresAt: new Date(Date.now() + 2 * retentionMs).toISOString(),
+    }),
   );
-  assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).events, []);
-  await host.finishes(initial);
+  assert.equal(created.status, 200);
+  const subscription = SubscriptionSchema.parse(await created.json());
+  const written = world.tenantRowsWritten();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(refused.status, 409);
+  const problem = ProblemSchema.parse(await refused.json());
+  assert.equal(problem.code, "PoolExhausted");
+  assert.equal(world.tenantRowsWritten() - written, 3);
+
+  const eventTypes = "event=StartRefused&event=CapacityAvailable";
+  const history = `/v1/events?afterEventId=0&${eventTypes}`;
+  const initialRead = await world.fetch(world.owner, "GET", history);
+  assert.equal(initialRead.status, 200);
+  const { events } = EventPageSchema.parse(await initialRead.json());
+  assert.equal(events.length, 1);
+  const [event] = events;
+  assert.equal(event?.event, "StartRefused");
+  assert.deepEqual(event.refusal, { code: problem.code, detail: problem.detail });
   assert.equal(host.holds("TurnOffer"), false);
-  assert.equal(world.tenantSql().exec("SELECT turn_id FROM subscription_turns").toArray().length, 0);
+
+  host.quiet();
+  await world.tick(retentionMs + 1);
+  const expired = await world.fetch(world.owner, "GET", history);
+  assert.equal(expired.status, 410);
+  const { oldestEventId } = EventCursorExpiredProblemSchema.parse(await expired.json());
+  assert.ok(oldestEventId > event.eventId);
+
+  await host.beats();
+  const spare = await world.hostOnline("host-2");
+  await host.finishes(initial);
+  const retained = await world.fetch(world.owner, "GET", `/v1/events?afterEventId=${oldestEventId - 1}&${eventTypes}`);
+  assert.equal(retained.status, 200);
+  assert.deepEqual(EventPageSchema.parse(await retained.json()).events, []);
+  const read = await world.fetch(world.owner, "GET", `/v1/subscriptions/${subscription.subscriptionId}`);
+  assert.equal(read.status, 200);
+  const current = SubscriptionSchema.parse(await read.json());
+  assert.equal(current.state, "Active");
+  assert.equal(current.cursorEventId, subscription.cursorEventId);
+  assert.equal(host.holds("TurnOffer"), false);
+  assert.equal(spare.holds("TurnOffer"), false);
 });

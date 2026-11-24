@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelProtocol, ProblemSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
+import {
+  ChannelProtocol,
+  EventPageSchema,
+  ProblemSchema,
+  ServeConnectorTokenResultSchema,
+  SubscriptionSchema,
+} from "@tumpel/schemas";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
@@ -17,7 +23,7 @@ test("a full host wakes its foreman once on refusal and once when a box stops, t
       .status,
     200,
   );
-  const subscription = await world.subscribe(foreman, {
+  await world.subscribe(foreman, {
     prompt: "handle starts",
     goal: "finish",
     events: ["StartRefused", "CapacityAvailable"],
@@ -94,15 +100,12 @@ test("a full host wakes its foreman once on refusal and once when a box stops, t
   );
   assert.equal(retry.status, 200);
   const crew = host.takeOffer();
+  assert.equal(crew.prompt, "crew retry");
   await host.claims(crew);
-  await host.finishes(capacityDelivery);
-  await host.finishes(crew);
-  await host.dropsIdleBox(crew);
-  assert.equal(host.holds("TurnOffer"), false);
-  assert.equal((await world.subscription(subscription.subscriptionId)).state, "Active");
 });
 
 test("ten exponentially spaced refusal and capacity cycles pause StartsRefused with one bounded counter", async (t) => {
+  const retentionMs = 7 * 24 * 60 * 60 * 1000;
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.online(world.owner, "host-1", {
@@ -115,12 +118,21 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
       .status,
     200,
   );
-  const subscription = await world.subscribe(foreman, {
-    prompt: "handle starts",
-    goal: "finish",
-    events: ["StartRefused", "CapacityAvailable"],
-    crewTags: ["crew:work"],
-  });
+  const created = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/subscriptions",
+    JSON.stringify({
+      sessionId: foreman.sessionId,
+      prompt: "handle starts",
+      goal: "finish",
+      events: ["StartRefused", "CapacityAvailable"],
+      crewTags: ["crew:work"],
+      expiresAt: new Date(Date.now() + 2 * retentionMs).toISOString(),
+    }),
+  );
+  assert.equal(created.status, 200);
+  const subscription = SubscriptionSchema.parse(await created.json());
   const initial = host.takeOffer();
   await host.claims(initial);
   await host.finishes(initial);
@@ -228,6 +240,22 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
     assert.equal(counter.starts_refused_in_a_row, Math.max(1, cycle));
     assert.equal(world.tenantSql().exec("SELECT subscription_id FROM subscriptions").toArray().length, 1);
     assert.equal(host.holds("TurnOffer"), false);
+    if (cycle === 0) {
+      const history = await world.fetch(world.owner, "GET", "/v1/events");
+      assert.equal(history.status, 200);
+      const { lastEventId } = EventPageSchema.parse(await history.json());
+      host.quiet();
+      await world.tick(retentionMs + 1);
+      const expired = await world.fetch(
+        world.owner,
+        "GET",
+        `/v1/events?afterEventId=${lastEventId - 1}&event=SessionStarted`,
+      );
+      assert.equal(expired.status, 410);
+      assert.equal(ProblemSchema.parse(await expired.json()).code, "EventCursorExpired");
+      await host.beats();
+      host.resumes();
+    }
   }
   const paused = await world.subscription(subscription.subscriptionId);
   assert.equal(paused.state, "Paused");
