@@ -55,6 +55,7 @@ export const uploadsChunks = async (
         part: at + 1,
         packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
         chunks: part,
+        reusedPackDigests: [],
       }),
     );
     for (const upload of answer.reply.uploads) {

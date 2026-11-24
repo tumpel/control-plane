@@ -500,13 +500,19 @@ export class Supervisor {
       part: 1,
       packs: [{ packDigest: digest, sizeBytes: manifest.length }],
       chunks: [{ digest, packDigest: digest, offset: 0, length: manifest.length }],
+      reusedPackDigests: [],
     });
     await store.put(`${request.storageKey.split("/")[0]}/packs/${digest}`, manifest);
     await store.put(
       request.storageKey,
       JSON.stringify({ manifest: [{ digest, packDigest: digest, offset: 0, length: manifest.length }] }),
     );
-    await this.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: manifest.length });
+    await this.says({
+      type: "SnapshotDone",
+      snapshotId: request.snapshotId,
+      uploadedBytes: manifest.length,
+      chunkCount: 0,
+    });
   }
 
   async dropsIdleBox(offer: TurnOffer): Promise<void> {

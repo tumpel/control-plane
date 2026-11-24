@@ -168,6 +168,13 @@ const one = async (
     return changed(completed, subscriptionId);
   }
   const { resumed } = await tenant.call("resumeSubscription", { tenantId, subscriptionId, now });
+  if (resumed.kind === "PersonaLacksTumpelMcp") {
+    return invalid(
+      "Persona lacks tumpelMcp",
+      `persona ${resumed.personaName} (${resumed.personaId}) has tumpelMcp disabled, and a crew subscription delivers its events through it`,
+      `Enable tumpelMcp on persona ${resumed.personaName}, then try again`,
+    );
+  }
   if (resumed.kind !== "CursorExpired") return changed(resumed, subscriptionId);
   return refused(410, {
     code: "SubscriptionCursorExpired",

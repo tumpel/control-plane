@@ -105,16 +105,19 @@ import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
 import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
-  indexBytesOf,
+  draftKey,
+  indexBytesFor,
   LivePacks,
   MAX_INDEX_BYTES,
-  MAX_PACKS_PER_MANIFEST,
   type ManifestRead,
+  mergedDraft,
   packKey,
   packListKey,
   type SnapshotIndex,
   SnapshotManifests,
   STORE_DELETE_BATCH,
+  snapshotDraft,
+  snapshotPackSet,
 } from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
@@ -2436,21 +2439,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     if (restoring !== undefined) return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
-    const keys = sql
+    const unstored = sql
       .exec<{ storage_key: string }>(
         "SELECT storage_key FROM snapshot_requests WHERE session_id = ?1 UNION SELECT storage_key FROM snapshot_failures WHERE session_id = ?1 AND storage_key != ''",
         sessionId,
       )
-      .toArray()
-      .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
+      .toArray();
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
-    await this.live.release(
-      this.env.STORE,
-      tenantId,
-      sessionId,
-      stored.map((snapshot) => snapshot.storage_key),
-    );
-    await this.deleteObjects([...keys, ...this.objectKeys(stored)]);
+    await this.live.release(this.env.STORE, tenantId, sessionId, [
+      ...stored.map((snapshot) => snapshot.storage_key),
+      ...unstored.map((row) => row.storage_key),
+    ]);
+    await this.deleteObjects([...this.objectKeys(unstored), ...this.objectKeys(stored)]);
     this.ctx.storage.transactionSync(() => {
       this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
@@ -2478,20 +2478,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
         stored.session_id,
         stored.snapshot_seq,
       )
-      .toArray()
-      .flatMap((row) => [row.storage_key, packListKey(row.storage_key)]);
+      .toArray();
     const older = this.storedSnapshots(
       "WHERE session_id = ? AND snapshot_seq < ?",
       stored.session_id,
       stored.snapshot_seq,
     );
-    await this.live.release(
-      this.env.STORE,
-      tenantId,
-      stored.session_id,
-      older.map((snapshot) => snapshot.storage_key),
-    );
-    await this.deleteObjects([...this.objectKeys(older), ...failed]);
+    await this.live.release(this.env.STORE, tenantId, stored.session_id, [
+      ...older.map((snapshot) => snapshot.storage_key),
+      ...failed.map((row) => row.storage_key),
+    ]);
+    await this.deleteObjects([...this.objectKeys(older), ...this.objectKeys(failed)]);
     this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
     await this.archiveSupersededPrebuilds(tenantId, now);
   }
@@ -2504,7 +2501,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private objectKeys(snapshots: { storage_key: string }[]): string[] {
-    return snapshots.flatMap((snapshot) => [snapshot.storage_key, packListKey(snapshot.storage_key)]);
+    return snapshots.flatMap((snapshot) => [
+      snapshot.storage_key,
+      packListKey(snapshot.storage_key),
+      draftKey(snapshot.storage_key),
+    ]);
   }
 
   private async deleteObjects(keys: string[]): Promise<void> {
@@ -3333,14 +3334,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} placed chunk ${unlisted.digest} of snapshot ${message.snapshotId} in pack ${unlisted.packDigest}, which part ${message.part} does not list`,
       );
     }
-    const uploading = new Set(
-      await this.live.hold(
-        this.env.STORE,
-        tenantId,
-        window.request.session_id,
-        message.packs.map((pack) => pack.packDigest),
-      ),
-    );
+    const twice = message.reusedPackDigests.find((packDigest) => listed.has(packDigest));
+    if (twice !== undefined) {
+      return refused(
+        `host ${hostId} listed pack ${twice} of snapshot ${message.snapshotId} in part ${message.part} as both written and reused`,
+      );
+    }
+    const merged = mergedDraft(await snapshotDraft(this.env.STORE, window.request.storage_key), message.part, [
+      ...listed,
+      ...message.reusedPackDigests,
+    ]);
+    if (merged.kind === "Refused") {
+      return refused(
+        `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, ${merged.detail}`,
+      );
+    }
+    const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
+    await this.env.STORE.put(draftKey(window.request.storage_key), JSON.stringify(merged.draft));
     const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
     const signer = signerOf(
       this.env,
@@ -3776,10 +3786,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     request: SnapshotRequestRow,
-  ): Promise<
-    | { kind: "Rejected"; detail: string }
-    | { kind: "Checked"; packs: ReadonlySet<string>; rootPacks: ReadonlySet<string> }
-  > {
+    chunkCount: number,
+  ): Promise<{ kind: "Rejected"; detail: string } | { kind: "Checked"; packs: ReadonlySet<string> }> {
     const rejected = async (detail: string) => ({
       kind: "Rejected" as const,
       detail: `host ${await this.hostName(tenantId, hostId)} ${detail}`,
@@ -3796,35 +3804,32 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
       );
     }
-    const indexBytes = indexBytesOf(parsed.data.manifest);
+    const indexBytes = indexBytesFor(chunkCount + parsed.data.manifest.length);
     if (indexBytes > MAX_INDEX_BYTES) {
       return rejected(
         `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,
       );
     }
-    const named = await this.manifests.packs(this.env.STORE, tenantId, request.storage_key);
-    if (named.kind !== "Read") {
+    const packs = await snapshotPackSet(this.env.STORE, request.storage_key);
+    if (packs === null) {
       return rejected(
-        `stored snapshot ${request.snapshot_id} with a manifest the control plane cannot read, so it could never restore it and the session keeps its previous snapshot: ${named.detail}`,
+        `answered SnapshotDone for snapshot ${request.snapshot_id} without sending SnapshotPacks part 1, so the control plane cannot name its packs and the session keeps its previous snapshot; update the supervisor`,
       );
     }
-    if (named.value.size > MAX_PACKS_PER_MANIFEST) {
+    const unnamed = parsed.data.manifest.find((placement) => !packs.has(placement.packDigest));
+    if (unnamed !== undefined) {
       return rejected(
-        `stored snapshot ${request.snapshot_id} with chunks in ${named.value.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the session keeps its previous snapshot`,
+        `stored snapshot ${request.snapshot_id} whose root places its manifest in pack ${unnamed.packDigest}, which no SnapshotPacks part named, so the control plane cannot keep it and the session keeps its previous snapshot; update the supervisor`,
       );
     }
-    return {
-      kind: "Checked",
-      packs: named.value,
-      rootPacks: new Set(parsed.data.manifest.map((placement) => placement.packDigest)),
-    };
+    return { kind: "Checked", packs };
   }
 
   private async snapshotOutcome(
     tenantId: string,
     hostId: string,
     request: SnapshotRequestRow,
-    uploadedBytes: number,
+    message: Extract<HostMessage, { type: "SnapshotDone" }>,
   ): Promise<
     | { kind: "Rejected"; detail: string }
     | { kind: "Answered" }
@@ -3832,14 +3837,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
   > {
     const storageFailed = (error: unknown): string =>
       `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`;
-    const checked = await this.snapshotChecked(tenantId, hostId, request).catch(
+    const checked = await this.snapshotChecked(tenantId, hostId, request, message.chunkCount).catch(
       (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
     );
     if (checked.kind === "Rejected") return checked;
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
-    const reused = new Set([...checked.packs].filter((packDigest) => !checked.rootPacks.has(packDigest)));
-    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs, reused).then(
+    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs).then(
       (gone) => ({ gone }),
       (error: unknown) => ({ failed: storageFailed(error) }),
     );
@@ -3857,7 +3861,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
       return { kind: "Answered" };
     }
-    return { kind: "Stored", ...this.storeSnapshot(request, uploadedBytes, ended) };
+    return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended) };
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -3911,7 +3915,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
-    const outcome = await this.snapshotOutcome(tenantId, hostId, request, message.uploadedBytes);
+    const outcome = await this.snapshotOutcome(tenantId, hostId, request, message);
     if (outcome.kind === "Answered") return null;
     if (outcome.kind === "Rejected") {
       this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
