@@ -29,8 +29,8 @@ test("a stop held by snapshots whose upload URLs expired unanswered asks the hos
   assert.equal((await world.session(sessionId)).state, "Stopping");
   assert.equal((await world.turn(queued.turnId)).state, "Failed");
 
-  const expired = Date.now() + (world.settings.snapshotDeadlineSeconds + 1) * 1000;
-  await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: expired });
+  await world.tick((world.settings.snapshotDeadlineSeconds + 1) * 1000);
+  await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: Date.now() });
   await world.settle();
   const failures = z.array(z.object({ reason: z.string() })).parse(
     world
@@ -89,7 +89,7 @@ test("a stop held by a snapshot still inside its upload window leaves it alone w
   assert.equal((await world.session(sessionId)).state, "Stopped");
 });
 
-test("a stop held by an expired turn snapshot and a live stop snapshot re-asks only the expired one when stopped again, and the live upload still completes the stop", async (t) => {
+test("a stop held by an expired turn snapshot and a live stop snapshot gives up the expired one when stopped again, and the live upload completes the stop", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -111,7 +111,7 @@ test("a stop held by an expired turn snapshot and a live stop snapshot re-asks o
   await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: Date.now() });
   await world.settle();
 
-  assert.equal(host.received("SnapshotRequest").length, asked + 1);
+  assert.equal(host.received("SnapshotRequest").length, asked);
   assert.deepEqual(
     z
       .array(z.object({ snapshot_id: z.string(), reason: z.string() }))
@@ -123,7 +123,7 @@ test("a stop held by an expired turn snapshot and a live stop snapshot re-asks o
       ),
     [{ snapshot_id: lost.snapshotId, reason: "NotAnswered" }],
   );
-  for (let answered = 0; answered < asked + 1; answered += 1) await host.answersSnapshot(sessionId);
+  for (let answered = 0; answered < asked; answered += 1) await host.answersSnapshot(sessionId);
   const teardown = z.object({ boxId: z.string() }).parse(host.take("BoxTeardown"));
   await host.says({ type: "BoxGone", sessionId, boxId: teardown.boxId });
 
