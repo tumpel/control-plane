@@ -12,6 +12,8 @@ type Listed = z.infer<typeof ListEventsResultSchema>["listed"];
 export const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 100;
 
+export const retentionCutoff = (now: number): number => now - EVENT_RETENTION_MS;
+
 export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number): number => {
   const [row] = sql
     .exec<{ event_id: number }>(
@@ -31,7 +33,7 @@ export const appendEvent = (sql: SqlStorage, event: NewTenantEvent, now: number)
   }
   sql.exec(
     "DELETE FROM events WHERE event_id IN (SELECT event_id FROM events WHERE created_at < ? ORDER BY event_id LIMIT 1)",
-    now - EVENT_RETENTION_MS,
+    retentionCutoff(now),
   );
   return row.event_id;
 };
@@ -43,7 +45,7 @@ export const oldestKept = (sql: SqlStorage, end: number): number =>
   sql
     .exec<{ oldest: number | null }>(
       "SELECT MIN(event_id) AS oldest FROM events WHERE created_at >= ?",
-      Date.now() - EVENT_RETENTION_MS,
+      retentionCutoff(Date.now()),
     )
     .one().oldest ?? end + 1;
 
@@ -70,7 +72,7 @@ export const listEvents = (sql: SqlStorage, input: ListEventsInput): Listed => {
       input.sessionId,
       PAGE_SIZE,
       input.triggerId,
-      Date.now() - EVENT_RETENTION_MS,
+      retentionCutoff(Date.now()),
     )
     .toArray();
   const events = rows.map((row) =>

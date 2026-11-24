@@ -1,0 +1,313 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { ServeConnectorTokenResultSchema, TenantEventSchema } from "@tumpel/schemas";
+import { DEFAULT_USAGE } from "./harness/supervisor.ts";
+import { TENANT_ID, World } from "./harness/world.ts";
+
+test("capacity contract keeps the first refusal and signal paired across a later refusal", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 4096, memoryAvailableMib: 4096 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await world.fetch(world.owner, "PATCH", `/v1/personas/${foreman.personaId}`, JSON.stringify({ tumpelMcp: true }));
+  const interested = await world.subscribe(foreman, {
+    prompt: "wait for room",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: ["crew:a"],
+  });
+  const unrelated = await world.subscribe(foreman, {
+    prompt: "other crew",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: ["crew:b"],
+  });
+  const filler = await world.startSession({ prompt: "hold a box", tags: [], boxRetention: "Warm" });
+  const busy = host.takeOffer();
+  assert.equal(busy.sessionId, filler.sessionId);
+  await host.claims(busy);
+  await host.finishes(busy);
+  const event = {
+    event: "StartRefused",
+    operation: "Start",
+    personaId: foreman.personaId,
+    model: "opus",
+    caller: { kind: "Person", principalId: "principal-scenario" },
+    crewTags: ["crew:a"],
+    refusal: { code: "PoolExhausted", detail: "the crew needs room" },
+  };
+  const written = world.tenantRowsWritten();
+  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
+  assert.equal(world.tenantRowsWritten() - written, 3);
+  await host.dropsIdleBox(busy);
+  await world.passes(1000);
+  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
+  await host.finishes(initial);
+  const delivery = host.takeOffer();
+  assert.equal((delivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(delivery);
+  await host.finishes(delivery);
+  assert.equal(host.holds("TurnOffer"), false);
+  assert.ok((await world.subscription(interested.subscriptionId)).cursorEventId > interested.cursorEventId);
+  assert.equal((await world.subscription(unrelated.subscriptionId)).cursorEventId, unrelated.cursorEventId);
+});
+
+test("capacity contract event readback and delivery preserve the stored refusal detail", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await world.subscribe(foreman, { prompt: "read refusals", goal: "finish", events: ["StartRefused"], crewTags: [] });
+  const detail = "no room: ".repeat(400);
+  const event = {
+    event: "StartRefused",
+    operation: "Start",
+    personaId: foreman.personaId,
+    model: "opus",
+    caller: { kind: "Person", principalId: "principal-scenario" },
+    crewTags: [],
+    refusal: { code: "PoolExhausted", detail },
+  };
+  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
+  const stored = world
+    .tenantSql()
+    .exec("SELECT event_id, payload, created_at FROM events WHERE json_extract(payload, '$.event') = 'StartRefused'")
+    .one();
+  const expected = TenantEventSchema.parse({
+    ...JSON.parse(String(stored.payload)),
+    eventId: stored.event_id,
+    tenantId: TENANT_ID,
+    createdAt: stored.created_at,
+  });
+  const response = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(response.status, 200);
+  const page = await response.json();
+  assert.deepEqual(page.events, [expected]);
+  await host.finishes(initial);
+  const delivery = host.takeOffer();
+  const delivered = delivery.prompt
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line));
+  if (delivered[0]?.tooLongToInline !== undefined) {
+    const read = await world.fetch(
+      world.owner,
+      "GET",
+      `/v1/events?afterEventId=${Number(stored.event_id) - 1}&event=StartRefused`,
+    );
+    assert.deepEqual((await read.json()).events, [expected]);
+  } else assert.deepEqual(delivered, [expected]);
+  await host.claims(delivery);
+  await host.finishes(delivery);
+});
+
+test("capacity contract rejects inherited tag overflow before recording a malformed preflight event", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  await world.fetch(world.owner, "PATCH", `/v1/personas/${foreman.personaId}`, JSON.stringify({ tumpelMcp: true }));
+  await world.subscribe(foreman, {
+    prompt: "refused work",
+    goal: "finish",
+    events: ["StartRefused"],
+    crewTags: ["crew:inherited"],
+  });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  const { served } = ServeConnectorTokenResultSchema.parse(
+    await world.call("serveConnectorToken", {
+      turnId: initial.turnId,
+      connectorId: "tumpel",
+      now: Date.now(),
+    }),
+  );
+  assert.equal(served.kind, "Served");
+  const written = world.tenantRowsWritten();
+  const response = await world.fetch(
+    { tenantId: TENANT_ID, token: served.token.accessToken },
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "unsupported-model",
+      prompt: "crew work",
+      tags: Array.from({ length: 16 }, (_, index) => `tag:${index}`),
+    }),
+  );
+  assert.equal(response.status, 422);
+  const events = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(events.status, 200);
+  assert.deepEqual((await events.json()).events, []);
+  assert.equal((await response.json()).code, "InvalidRequest");
+  assert.equal(world.tenantRowsWritten() - written, 0);
+});
+
+test("capacity contract catches up a refusal registered after room became available and reads both events unchanged", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await world.subscribe(foreman, {
+    prompt: "room returned",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  const event = {
+    event: "StartRefused",
+    operation: "Start",
+    personaId: foreman.personaId,
+    model: "opus",
+    caller: { kind: "Person", principalId: "principal-scenario" },
+    crewTags: [],
+    refusal: { code: "PoolExhausted", detail: "placement refused before a box stopped" },
+  };
+  const written = world.tenantRowsWritten();
+  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
+  assert.equal(world.tenantRowsWritten() - written, 6);
+  const stored = world
+    .tenantSql()
+    .exec(
+      "SELECT event_id, payload, created_at FROM events WHERE json_extract(payload, '$.event') IN ('StartRefused', 'CapacityAvailable') ORDER BY event_id",
+    )
+    .toArray();
+  assert.equal(stored.length, 2);
+  const expected = stored.map((row) =>
+    TenantEventSchema.parse({
+      ...JSON.parse(String(row.payload)),
+      eventId: row.event_id,
+      tenantId: TENANT_ID,
+      createdAt: row.created_at,
+    }),
+  );
+  const read = await world.fetch(
+    world.owner,
+    "GET",
+    "/v1/events?afterEventId=0&event=StartRefused&event=CapacityAvailable",
+  );
+  assert.equal(read.status, 200);
+  assert.deepEqual((await read.json()).events, expected);
+  await host.finishes(initial);
+  const delivery = host.takeOffer();
+  const delivered = delivery.prompt
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    delivered,
+    expected.filter((entry) => entry.event === "CapacityAvailable"),
+  );
+  await host.claims(delivery);
+  await host.finishes(delivery);
+  assert.equal(host.holds("TurnOffer"), false);
+});
+
+test("capacity contract keeps a large box pending after a small release and wakes when an Auto box becomes evictable", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 6144, memoryAvailableMib: 6144 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await world.fetch(world.owner, "PATCH", `/v1/personas/${foreman.personaId}`, JSON.stringify({ tumpelMcp: true }));
+  await world.subscribe(foreman, {
+    prompt: "large crew",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: ["crew:large"],
+  });
+  await world.startSession({ prompt: "Auto work", tags: [], boxRetention: "Auto" });
+  const auto = host.takeOffer();
+  await host.claims(auto);
+  await world.startSession({ prompt: "small warm box", tags: [], boxRetention: "Warm" });
+  const small = host.takeOffer();
+  await host.claims(small);
+  await host.finishes(small);
+  const resized = await world.fetch(
+    world.owner,
+    "PATCH",
+    `/v1/personas/${foreman.personaId}`,
+    JSON.stringify({ boxMemoryMib: 4096 }),
+  );
+  assert.equal(resized.status, 200);
+  const written = world.tenantRowsWritten();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "large crew",
+      tags: ["crew:large"],
+    }),
+  );
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json()).code, "PoolExhausted");
+  assert.equal(world.tenantRowsWritten() - written, 3);
+  const stopped = world.tenantRowsWritten();
+  await host.dropsIdleBox(small);
+  assert.equal(world.tenantRowsWritten() - stopped, 6);
+  assert.equal(world.tenantSql().exec("SELECT event_id FROM capacity_rooms").toArray().length, 0);
+  await host.finishes(auto);
+  assert.equal(world.tenantSql().exec("SELECT event_id FROM capacity_rooms").toArray().length, 1);
+  await host.finishes(initial);
+  const delivery = host.takeOffer();
+  assert.equal(delivery.sessionId, foreman.sessionId);
+  assert.equal((delivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(delivery);
+  await host.finishes(delivery);
+  assert.equal(host.holds("TurnOffer"), false);
+});
+
+test("capacity contract excludes expired refusals from delivery and public readback even while old rows remain", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await world.subscribe(foreman, {
+    prompt: "retained work",
+    goal: "finish",
+    events: ["StartRefused", "CapacityAvailable"],
+    crewTags: [],
+  });
+  const payload = JSON.stringify({
+    event: "StartRefused",
+    operation: "Start",
+    personaId: foreman.personaId,
+    model: "opus",
+    caller: { kind: "Person", principalId: "principal-scenario" },
+    crewTags: [],
+    refusal: { code: "PoolExhausted", detail: "an expired attempt" },
+  });
+  const expired = Date.now() - 8 * 24 * 60 * 60 * 1000;
+  world.tenantSql().exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", payload, expired);
+  world.tenantSql().exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", payload, expired);
+  await world.hostOnline("host-2");
+  assert.equal(world.tenantSql().exec("SELECT event_id FROM events WHERE created_at = ?", expired).toArray().length, 1);
+  const response = await world.fetch(
+    world.owner,
+    "GET",
+    "/v1/events?afterEventId=0&event=StartRefused&event=CapacityAvailable",
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).events, []);
+  await host.finishes(initial);
+  assert.equal(host.holds("TurnOffer"), false);
+  assert.equal(world.tenantSql().exec("SELECT turn_id FROM subscription_turns").toArray().length, 0);
+});

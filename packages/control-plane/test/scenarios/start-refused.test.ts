@@ -47,12 +47,12 @@ test("StartRefused records start refusals and delivers the answered problem once
   assert.equal(response.status, 409);
   const problem = ProblemSchema.parse(await response.json());
   assert.equal(problem.code, "PoolExhausted");
-  assert.equal(world.tenantRowsWritten() - before, 2);
+  assert.equal(world.tenantRowsWritten() - before, 3);
   const afterFirst = world.tenantRowsWritten();
   const repeated = await world.fetch(member, "POST", "/v1/sessions", JSON.stringify(body));
   assert.equal(repeated.status, 409);
   assert.deepEqual(ProblemSchema.parse(await repeated.json()), problem);
-  assert.equal(world.tenantRowsWritten() - afterFirst, 2);
+  assert.equal(world.tenantRowsWritten() - afterFirst, 3);
   const { listed } = ListEventsResultSchema.parse(
     await world.call("listEvents", {
       tenantId: TENANT_ID,
@@ -77,7 +77,7 @@ test("StartRefused records start refusals and delivers the answered problem once
   const delivery = host.takeOffer();
   assert.equal(delivery.sessionId, foreman.sessionId);
   assert.match(delivery.prompt, /PoolExhausted/);
-  assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 2);
+  assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
   await host.claims(delivery);
   await host.finishes(delivery);
   assert.equal(host.holds("TurnOffer"), false);
@@ -129,7 +129,7 @@ test("StartRefused records start-from-issue refusals and delivers the answered p
   assert.equal(response.status, 409);
   const problem = ProblemSchema.parse(await response.json());
   assert.equal(problem.code, "PoolExhausted");
-  assert.equal(world.tenantRowsWritten() - before, 2);
+  assert.equal(world.tenantRowsWritten() - before, 3);
   const { listed } = ListEventsResultSchema.parse(
     await world.call("listEvents", {
       tenantId: TENANT_ID,
@@ -203,7 +203,7 @@ test("StartRefused records send refusals and delivers the answered problem once"
   assert.equal(response.status, 409);
   const problem = ProblemSchema.parse(await response.json());
   assert.equal(problem.code, "PoolExhausted");
-  assert.equal(world.tenantRowsWritten() - before, 2);
+  assert.equal(world.tenantRowsWritten() - before, 3);
   const { listed } = ListEventsResultSchema.parse(
     await world.call("listEvents", {
       tenantId: TENANT_ID,

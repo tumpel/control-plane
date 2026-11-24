@@ -33,7 +33,11 @@ import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
-import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
+import type { placementRefusals } from "./placement.ts";
+import { unplaced } from "./placement-problem.ts";
+
+export { placeableFix, why } from "./placement-problem.ts";
+
 import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
@@ -143,82 +147,6 @@ const turnNotFound = (turnId: string): Refused =>
 export const credentialRefused = (refusal: CredentialRefusal, owner: string, harness: string, retry: string): Refused =>
   refuse(422, credentialProblem(refusal, owner, harness, retry));
 
-export const why = (refused: Unplaceable): string => {
-  const named = refused.host.name;
-  if (refused.reason === "NotOnline" && refused.host.state === "Offline")
-    return `${named} has not reported to the control plane within its heartbeat grace and counts as Degraded until it sends a heartbeat`;
-  if (refused.reason === "NotOnline") return `${named} is ${refused.host.state}`;
-  if (refused.reason === "NotHealthy") return `${named} reports itself ${refused.host.reportedHealth}`;
-  if (refused.reason === "NoImage") {
-    const { harness, harnessVersion, architectures } = refused.image;
-    const carried =
-      architectures.length === 0
-        ? `no ${harness} ${harnessVersion} guest image`
-        : `${harness} ${harnessVersion} guest images for ${architectures.join(", ")} only`;
-    return `${named} is ${refused.host.architecture}, and the current release carries ${carried}`;
-  }
-  if (refused.reason === "NoConnectors") {
-    return `${named} runs a supervisor too old to serve connectors`;
-  }
-  if (refused.reason === "NoDisk") {
-    return `${named} gives box disks ${refused.usage.diskBudgetMib} MiB and its boxes hold ${refused.usage.diskHeldMib} MiB of it, and the persona's boxes need ${refused.boxDiskMib} MiB`;
-  }
-  return `${named} gives boxes ${refused.usage.memoryBudgetMib} MiB of memory and its boxes hold ${refused.usage.memoryHeldMib} MiB of it, and the persona's boxes need ${refused.boxMemoryMib} MiB`;
-};
-
-export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
-  const [lacking] = hosts.flatMap((each) => (each.reason === "NoImage" ? [each.image] : []));
-  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoConnectors")) {
-    return `Let a host update its supervisor to the current release, or use a persona without connectors, then ${retry}`;
-  }
-  if (lacking === undefined && hosts.some(({ reason }) => reason === "NoDisk")) {
-    return `Lower the persona's boxDiskMib toward the 32768 MiB default, free disk on a host, or enrol a host with more disk, then ${retry}`;
-  }
-  if (lacking === undefined) {
-    return `Start the supervisor on a host, or enrol a new host, then ${retry}`;
-  }
-  const { harness, harnessVersion, architectures } = lacking;
-  if (architectures.length === 0) {
-    return `Pin a harness version the current release carries, or ask the operator, who publishes releases, for one that carries a ${harness} ${harnessVersion} guest image, then ${retry}`;
-  }
-  return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
-};
-
-const unplaced = (tenantRefusals: Parameters<typeof placementRefusals>[0], retry: string): Refused => {
-  const hosts = placementRefusals(tenantRefusals);
-  if (hosts.length === 0) {
-    return refuse(409, {
-      code: "NoHostAvailable",
-      title: "No host online",
-      detail: "your tenant has no hosts",
-      fix: `Enrol a host and start the supervisor on it, then ${retry}`,
-    });
-  }
-  const detail = hosts.map(why).join(", ");
-  if (degradedOnly(hosts)) {
-    return refuse(409, {
-      code: "HostDegraded",
-      title: "No healthy host",
-      detail: `no host of your tenant is healthy: ${detail}`,
-      fix: `Check that tumpel-supervisor runs on a host and reaches the control plane, then ${retry}`,
-    });
-  }
-  if (hosts.some(({ reason }) => reason === "MemoryFull")) {
-    return refuse(409, {
-      code: "PoolExhausted",
-      title: "Every host's box memory is in use",
-      detail: `no host of your tenant has memory for another box: ${detail}`,
-      fix: `Wait for a running turn to finish, lower the persona's boxMemoryMib, or enrol another host, then ${retry}`,
-    });
-  }
-  return refuse(409, {
-    code: "NoHostAvailable",
-    title: "No host can take the session",
-    detail: `no host of your tenant can take a session: ${detail}`,
-    fix: placeableFix(hosts, retry),
-  });
-};
-
 const stranded = (session: Session, hosts: HostRecord[], missingTurnIds: string[]): Refused => {
   const host = hosts.find((listed) => listed.hostId === session.hostId);
   if (host === undefined) {
@@ -306,6 +234,15 @@ export const startTarget = (repository: string): Outcome<string> => {
   return target === null ? refuse(422, notARepository(repository)) : ok(repositoryUrl(target));
 };
 
+const inheritedTags = async (env: Env, caller: Caller, tags: string[]): Promise<string[]> => {
+  if (caller.origin.kind !== "Turn") return tags;
+  const { subscriptions } = await tenantOf(env, caller).call("listSubscriptions", {
+    tenantId: caller.tenantId,
+    filter: { sessionId: caller.origin.sessionId, state: "Active" },
+  });
+  return [...new Set([...tags, ...subscriptions.flatMap((subscription) => subscription.crewTags)])].sort();
+};
+
 const prepareStart = async (
   env: Env,
   caller: Caller,
@@ -366,7 +303,10 @@ const recordRefusal = async <T>(
 ): Promise<Outcome<T>> => {
   if (outcome.ok) return outcome;
   const code = StartRefusalCodeSchema.safeParse(outcome.problem.code);
-  if (code.success) {
+  if (
+    code.success &&
+    (attempt.operation !== "Start" || !["PoolExhausted", "NoHostAvailable", "HostDegraded"].includes(code.data))
+  ) {
     await tenantOf(env, caller).call("recordStartRefusal", {
       tenantId: caller.tenantId,
       event: {
@@ -387,19 +327,22 @@ export const startSession = async (
   start: SessionStart,
   endpoint: string,
   now: number,
-): Promise<Outcome<StartedSession>> =>
-  recordRefusal(
+): Promise<Outcome<StartedSession>> => {
+  const tags = await inheritedTags(env, caller, start.tags ?? []);
+  if (tags.length > SESSION_TAG_LIMIT) return placed({ kind: "TagsOverLimit", tags });
+  return recordRefusal(
     env,
     caller,
     {
       operation: "Start",
       personaId: start.personaId,
       model: start.model,
-      crewTags: start.tags ?? [],
+      crewTags: tags,
     },
-    await startSessionResult(env, caller, start, endpoint, now),
+    await startSessionResult(env, caller, { ...start, tags }, endpoint, now),
     now,
   );
+};
 
 export const startSessionFromIssue = async (
   env: Env,
@@ -407,19 +350,22 @@ export const startSessionFromIssue = async (
   start: SessionStartFromIssue,
   endpoint: string,
   now: number,
-): Promise<Outcome<StartedSessionFromIssue>> =>
-  recordRefusal(
+): Promise<Outcome<StartedSessionFromIssue>> => {
+  const tags = await inheritedTags(env, caller, start.tags ?? []);
+  if (tags.length > SESSION_TAG_LIMIT) return placed({ kind: "TagsOverLimit", tags });
+  return recordRefusal(
     env,
     caller,
     {
       operation: "Start",
       personaId: start.personaId,
       model: start.model,
-      crewTags: start.tags ?? [],
+      crewTags: tags,
     },
-    await startSessionFromIssueResult(env, caller, start, endpoint, now),
+    await startSessionFromIssueResult(env, caller, { ...start, tags }, endpoint, now),
     now,
   );
+};
 
 const startSessionResult = async (
   env: Env,

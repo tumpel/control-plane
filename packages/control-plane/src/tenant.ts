@@ -368,8 +368,8 @@ export class Tenant extends TenantConnectors {
   }
 
   private readonly operations: TenantHandlers = {
-    recordStartRefusal: ({ event, now }) => {
-      this.appendStartRefusal(
+    recordStartRefusal: async ({ event, now }) => {
+      await this.recordRefusalRequest(
         {
           ...event,
           refusal: {
@@ -614,6 +614,7 @@ export class Tenant extends TenantConnectors {
     hostHeartbeat: async (input) => {
       const { tenantId, hostId, boxCapacity, usage, reportedHealth, now, channelProtocol } = input;
       await this.hostHeartbeat(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, reportedHealth, input);
+      this.queueDueCapacity(now);
       await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },

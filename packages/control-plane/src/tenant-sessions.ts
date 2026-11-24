@@ -94,15 +94,16 @@ import {
   degradedOnly,
   type HeldBox,
   type ImageAvailability,
+  type Placement,
   placeSession,
   type ReportedHostUsage,
   shortOf,
   type Unplaceable,
 } from "./placement";
+import { why } from "./placement-problem.ts";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
-import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
@@ -1034,7 +1035,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Served", token: { accessToken, expiresAt: iso(expiresAt) } };
   }
 
-  private boxSize(personaId: string): PersonaRow {
+  protected boxSize(personaId: string): PersonaRow {
     const persona = this.personaRow(personaId);
     if (persona === null) throw new Error(`persona ${personaId} is gone, so its box size is unknown`);
     return persona;
@@ -1940,7 +1941,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
   }
 
-  private async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
+  protected async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
     const release = await readRelease(this.env.RELEASES, now);
     if (release.kind === "Unreadable") return { kind: "ReleaseUnreadable", detail: release.detail };
     return {
@@ -2020,6 +2021,17 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
+  protected placeStart(tenantId: string, input: NewSession, image: ImageAvailability, now: number): Placement {
+    return placeSession(
+      input.hosts,
+      this.listHostUsage(tenantId),
+      image,
+      this.boxSize(input.start.personaId),
+      this.heldBoxes(),
+      now - presenceGraceMs(settingsOf(this.env)),
+    );
+  }
+
   protected async begin(
     tenantId: string,
     input: NewSession,
@@ -2035,18 +2047,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     const persona = this.boxSize(start.personaId);
     const { boxMemoryMib, boxDiskMib } = persona;
-    const placed = placeSession(
-      input.hosts,
-      this.listHostUsage(tenantId),
-      image.image,
-      { boxMemoryMib, boxDiskMib },
-      this.heldBoxes(),
-      now - presenceGraceMs(settingsOf(this.env)),
-    );
-    const placement = placed;
-    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const tags = this.startTags(input.startedBy, start.tags ?? []);
     if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
+    const placement = this.placeStart(tenantId, input, image.image, now);
+    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
