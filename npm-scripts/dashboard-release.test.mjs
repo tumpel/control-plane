@@ -143,14 +143,21 @@ test("empty secrets skip both entry points despite other token variables", async
   }
 });
 
-test("deploy dispatch carries the exact checked main SHA and rejects other events", async () => {
+test("deploy dispatch requires a completed successful checks run and carries its main push SHA", async () => {
   const sha = "2".repeat(40);
+  const run = {
+    name: "checks",
+    event: "push",
+    head_branch: "main",
+    head_sha: sha,
+    status: "completed",
+    conclusion: "success",
+  };
   const writes = [];
   const github = async (path, options) => writes.push({ path, ...options });
-  assert.deepEqual(
-    await dispatchDeploy({ token: "test-dispatch", sha, event: "push", ref: "refs/heads/main", github }),
-    { status: "dispatched" },
-  );
+  assert.deepEqual(await dispatchDeploy({ token: "test-dispatch", event: "workflow_run", run, github }), {
+    status: "dispatched",
+  });
   assert.deepEqual(writes, [
     {
       path: "/repos/tumpel/deploy/dispatches",
@@ -161,14 +168,23 @@ test("deploy dispatch carries the exact checked main SHA and rejects other event
       },
     },
   ]);
-  for (const [event, ref] of [
-    ["pull_request", "refs/heads/main"],
-    ["push", "refs/heads/feature"],
+  for (const change of [
+    { name: "other" },
+    { event: "pull_request" },
+    { head_branch: "feature" },
+    { head_sha: "short" },
+    { status: "in_progress", conclusion: null },
+    { conclusion: "failure" },
+    { conclusion: "cancelled" },
   ])
     await assert.rejects(
-      dispatchDeploy({ token: "test-dispatch", sha, event, ref, github }),
-      /requires the checked main push SHA/,
+      dispatchDeploy({ token: "test-dispatch", event: "workflow_run", run: { ...run, ...change }, github }),
+      /requires completed successful checks/,
     );
+  await assert.rejects(
+    dispatchDeploy({ token: "test-dispatch", event: "push", run, github }),
+    /requires completed successful checks/,
+  );
   assert.equal(writes.length, 1);
 });
 

@@ -24,9 +24,3 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - id: dispatch-deploy
-        name: Dispatch component-released to deploy
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          DEPLOY_DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
-        run: npm run release:dispatch-deploy
