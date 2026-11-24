@@ -6,6 +6,14 @@ export { MAX_BODY_BYTES, MAX_CONFIG_BODY_BYTES } from "./limits.ts";
 
 export type Problem = z.infer<typeof ProblemSchema>;
 export type ProblemStatus = z.infer<typeof ProblemResponseSchema>["statusCode"];
+export type Refused = { ok: false; status: ProblemStatus; problem: Problem };
+
+export const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused => ({
+  ok: false,
+  status,
+  problem: refused,
+});
+
 export type OAuthError = z.infer<typeof OAuthErrorSchema>;
 export type OAuthErrorCode = OAuthError["error"];
 

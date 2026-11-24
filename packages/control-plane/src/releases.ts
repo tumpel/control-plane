@@ -102,6 +102,13 @@ export const releaseUnreadable = (detail: string, retry: string): Problem => ({
   fix: `Ask the operator to publish a release with the release workflow, then ${retry}`,
 });
 
+export const imageNotReleased = (harness: string, harnessVersion: string, retry: string): Problem => ({
+  code: "ImageNotReleased",
+  title: "No guest image for this harness version",
+  detail: `the published release carries no ${harness} ${harnessVersion} guest image`,
+  fix: `Pin a harness version the current release carries, or ask the operator to publish the guest image, then ${retry}`,
+});
+
 export const imagesFor = (release: ReleaseRead, harness: string, harnessVersion: string): ReleaseImage[] =>
   release.kind === "Published"
     ? release.manifest.images.filter((image) => image.harness === harness && image.harnessVersion === harnessVersion)
