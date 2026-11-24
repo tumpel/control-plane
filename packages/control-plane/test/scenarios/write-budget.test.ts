@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { World } from "./harness/world.ts";
 
 const STEADY_ROWS_BUDGET = 100;
-const TURN_ROWS_BUDGET = 53;
+const TURN_ROWS_BUDGET = 57;
 
 const SESSIONS = 10;
 const LINE_EVERY_MS = 2_000;

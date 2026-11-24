@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "test": "node --test --test-timeout=90000 test/*.test.ts test/scenarios/*.test.ts",
     "test:subscriptions": "node --test --test-timeout=90000 test/delivery-prompt.test.ts test/tenant-api.test.ts test/scenarios/start-refused.test.ts test/scenarios/capacity-available.test.ts test/scenarios/subscription-*.test.ts",
-    "test:sessions": "node --test --test-timeout=90000 test/scenarios/sessions.test.ts"
+    "test:sessions": "node --test --test-timeout=90000 test/scenarios/sessions.test.ts",
+    "test:subscription-budgets": "node --test --test-timeout=90000 test/scenarios/box-gone-running.test.ts test/scenarios/turn-evicts-idle-auto-box.test.ts test/scenarios/write-budget.test.ts test/scenarios/stored-frames.test.ts test/scenarios/snapshot-rows-written.test.ts test/webhook-sender.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.0",

@@ -195,7 +195,7 @@ test("the sender signs ordered events, sends a failed event once and stops on de
       url: `${receiverOrigin}/hooks/events`,
       events: ["SubscriptionPaused", "SubscriptionEnded"],
     },
-    now: 1,
+    now: Date.now(),
   });
   const endpoint = EndpointResultSchema.parse(await created.json()).result.endpoint;
   if (endpoint === null) throw new Error("the created webhook endpoint read back null");
@@ -210,7 +210,7 @@ test("the sender signs ordered events, sends a failed event once and stops on de
       sessionId: "session-1",
       reason: { kind: "ByRequest", message: "Which release should I use?" },
     },
-    now: 2,
+    now: Date.now(),
   });
   await until(
     "the blocked webhook event",
@@ -225,7 +225,7 @@ test("the sender signs ordered events, sends a failed event once and stops on de
       sessionId: "session-1",
       reason: "GoalMet",
     },
-    now: 3,
+    now: Date.now(),
   });
   releaseReceiver();
   await Promise.all([firstEmit, secondEmit]);
@@ -267,7 +267,7 @@ test("the sender signs ordered events, sends a failed event once and stops on de
       sessionId: "session-2",
       reason: "GoalMet",
     },
-    now: 4,
+    now: Date.now(),
   });
   await until(
     "the failed webhook attempt",
@@ -302,7 +302,7 @@ test("the sender signs ordered events, sends a failed event once and stops on de
       sessionId: "session-3",
       reason: "GoalMet",
     },
-    now: 5,
+    now: Date.now(),
   });
   await wait(100);
   assert.equal(received.length, 3);

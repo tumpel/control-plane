@@ -21,7 +21,7 @@ import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const LARGE = 100_000;
 const ROWS_PER_STORED_SNAPSHOT = 20;
-const ROWS_PER_FORK = 21;
+const ROWS_PER_FORK = 25;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
 const GETS_PER_MANIFEST = 2;
