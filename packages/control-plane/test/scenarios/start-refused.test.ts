@@ -453,8 +453,9 @@ test("refusal appends stay bounded while maintenance drains expired events in ba
         Date.now() - 8 * 24 * 60 * 60 * 1000,
       );
   }
-  for (let each = 0; each < 3; each++) {
-    const written = world.tenantRowsWritten();
+  await host.closesSocket();
+  for (const remaining of [101, 69, 37, 5, 0]) {
+    const before = world.tenantRowsWritten();
     const refused = await world.fetch(
       world.owner,
       "POST",
@@ -467,25 +468,12 @@ test("refusal appends stay bounded while maintenance drains expired events in ba
       }),
     );
     assert.equal(refused.status, 422);
-    assert.equal(world.tenantRowsWritten() - written, 2);
-    assert.equal(
-      world
-        .tenantSql()
-        .exec("SELECT event_id FROM events WHERE created_at < ?", Date.now() - 7 * 24 * 60 * 60 * 1000)
-        .toArray().length,
-      101,
-    );
-  }
-  host.quiet();
-  for (const remaining of [69, 37, 5, 0]) {
-    const before = world.tenantRowsWritten();
-    await host.beats();
     const expired = world
       .tenantSql()
       .exec("SELECT COUNT(*) AS count FROM events WHERE created_at < ?", Date.now() - 7 * 24 * 60 * 60 * 1000)
       .one();
     assert.equal(expired.count, remaining);
-    assert.ok(world.tenantRowsWritten() - before <= 64);
+    assert.ok(world.tenantRowsWritten() - before <= 36);
   }
 });
 

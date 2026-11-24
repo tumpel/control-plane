@@ -34,6 +34,7 @@ export interface HeldBox extends BoxSize {
 }
 
 type Candidate = { kind: "Candidate"; host: Host; usage: ReportedHostUsage };
+type HostCapacity = { hostId: string; architecture: HostArchitecture; memory: number; disk: number; diskEmpty: number };
 
 export type Placement = { kind: "Placed"; host: Host; evict: HeldBox[] } | { kind: "Refused"; hosts: Unplaceable[] };
 
@@ -70,6 +71,42 @@ const busyness = ({ host, usage }: Candidate): number =>
 const lacksDisk = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage, boxDiskMib: number): boolean =>
   diskHeldMib > 0 && diskHeldMib + boxDiskMib > diskBudgetMib;
 
+const onlineReport = (
+  host: Host,
+  usage: ReportedHostUsage | undefined,
+  heardSince: number,
+): usage is ReportedHostUsage => host.state === "Online" && usage !== undefined && usage.updatedAt >= heardSince;
+
+export const effectiveHostCapacity = (
+  hosts: readonly Host[],
+  usages: readonly ReportedHostUsage[],
+  held: readonly HeldBox[],
+  heardSince: number,
+): HostCapacity[] => {
+  const byHost = new Map(usages.map((usage) => [usage.hostId, usage]));
+  const evictable = new Map<string, HeldBox[]>();
+  for (const box of held) {
+    if (!box.evictable) continue;
+    const boxes = evictable.get(box.hostId);
+    if (boxes === undefined) evictable.set(box.hostId, [box]);
+    else boxes.push(box);
+  }
+  return hosts.flatMap((host) => {
+    const usage = byHost.get(host.hostId);
+    if (!onlineReport(host, usage, heardSince) || usage.reportedHealth !== "Healthy") return [];
+    const room = freeing(usage, evictable.get(host.hostId) ?? []);
+    return [
+      {
+        hostId: host.hostId,
+        architecture: host.architecture,
+        memory: freeMemoryMib(room),
+        disk: room.diskBudgetMib - room.diskHeldMib,
+        diskEmpty: Number(room.diskHeldMib <= 0),
+      },
+    ];
+  });
+};
+
 export const shortOf = (usage: ReportedHostUsage, { boxMemoryMib, boxDiskMib }: BoxSize): "Memory" | "Disk" | null => {
   if (boxMemoryMib > freeMemoryMib(usage)) return "Memory";
   if (lacksDisk(usage, boxDiskMib)) return "Disk";
@@ -85,8 +122,7 @@ const assess = (
 ): Candidate | Unplaceable => {
   const { boxMemoryMib, boxDiskMib } = box;
   const usage = usages.get(host.hostId);
-  if (host.state !== "Online" || usage === undefined || usage.updatedAt < heardSince)
-    return { kind: "Unplaceable", host, reason: "NotOnline" };
+  if (!onlineReport(host, usage, heardSince)) return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (usage.reportedHealth !== "Healthy")
     return { kind: "Unplaceable", host: { ...host, reportedHealth: usage.reportedHealth }, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };

@@ -242,7 +242,6 @@ export class Tenant extends TenantConnectors {
       await this.sealPlaintext();
       await this.openMeter();
       this.retentionAt = eventRetentionDeadline(this.ctx.storage.sql);
-      this.restoreCapacityDeadline();
     });
   }
 
@@ -336,17 +335,18 @@ export class Tenant extends TenantConnectors {
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
     await this.meterUsage(operation);
-    await this.startDeliveries(this.tenantName());
-    this.wakeEvents();
-    this.wakeWebhooks();
-    this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
+    await this.wakeSubscriptionDeliveries();
     return response;
   }
 
-  private pruneExpiredEvents(now: number): void {
-    if (this.retentionAt === null || this.retentionAt > now) return;
-    pruneEvents(this.ctx.storage.sql, now);
-    this.retentionAt = eventRetentionDeadline(this.ctx.storage.sql);
+  async wakeSubscriptionDeliveries(): Promise<void> {
+    await this.opened;
+    const tenantId = this.tenantName();
+    const more = await this.startDeliveries(tenantId);
+    this.wakeEvents();
+    this.wakeWebhooks();
+    this.ctx.waitUntil(this.deliverPushes(tenantId));
+    if (more) this.ctx.waitUntil(this.env.TENANT.getByName(tenantId).wakeSubscriptionDeliveries());
   }
 
   private tenantName(): string {
@@ -357,6 +357,8 @@ export class Tenant extends TenantConnectors {
 
   private wakeEvents(): void {
     if (!this.eventsAppended) return;
+    const now = Date.now();
+    if (this.retentionAt !== null && this.retentionAt <= now) pruneEvents(this.ctx.storage.sql, now);
     this.eventsAppended = false;
     this.retentionAt = eventRetentionDeadline(this.ctx.storage.sql);
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
@@ -604,13 +606,11 @@ export class Tenant extends TenantConnectors {
     }),
     hostHello: async ({ tenantId, hostId, boxCapacity, usage, now, channelProtocol, heldTurnIds }) => {
       await this.hostHello(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, heldTurnIds);
-      this.pruneExpiredEvents(now);
       return {};
     },
     hostHeartbeat: async (input) => {
       const { tenantId, hostId, boxCapacity, usage, reportedHealth, now, channelProtocol } = input;
       await this.hostHeartbeat(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, reportedHealth, input);
-      this.pruneExpiredEvents(now);
       await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },

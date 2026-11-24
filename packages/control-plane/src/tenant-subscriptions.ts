@@ -13,7 +13,8 @@ import { sql as query, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import { durableDb } from "./db/client.ts";
 import { DELIVERY_BATCH, type DeliveryEvent, deliveryPrompt, subscriptionPrompt } from "./delivery-prompt.ts";
-import { type ImageAvailability, placeSession } from "./placement.ts";
+import { listHosts, withReportedHealth } from "./hosts";
+import { effectiveHostCapacity } from "./placement.ts";
 import { presenceGraceMs, settingsOf } from "./settings.ts";
 import { endOfLog, type NewTenantEvent, oldestKept, retentionCutoff } from "./tenant-events.ts";
 import {
@@ -36,6 +37,8 @@ type Resumed = z.infer<typeof ResumeSubscriptionResultSchema>["resumed"];
 type Completed = z.infer<typeof CompleteSubscriptionResultSchema>["completed"];
 
 const DELIVERY_FAILURE_LIMIT = 3;
+const REFUSAL_ATTEMPT_LIMIT = 10;
+const REFUSAL_RECIPIENT_BATCH = 8;
 const CREW_FAILURE_LIMIT = 10;
 
 type SubscriptionRow = {
@@ -128,7 +131,7 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
 };
 
 const startRefusals = (retained: number, recipient: SQL): SQL => query`
-  SELECT e.event_id, e.payload, e.created_at, NULL AS refusal_event_id FROM events AS e ${recipient}
+  SELECT e.event_id, e.payload, e.created_at, NULL AS refusal_event_id, 1 AS refusal_delivery FROM events AS e ${recipient}
   WHERE e.event_id > recipient.cursor_event_id AND e.created_at >= ${retained}
     AND json_extract(e.payload, '$.event') = 'StartRefused'
     AND EXISTS (SELECT 1 FROM subscription_events WHERE subscription_id = recipient.subscription_id AND event = 'StartRefused')
@@ -161,7 +164,7 @@ const nextCapacity = (retained: number, recipient: SQL, dueAt?: number): SQL => 
       ? query``
       : query`AND (recipient.capacity_retry_at <= ${dueAt} OR ${query.raw(refusalCount("recipient"))} = 0)`;
   return query`
-    SELECT e.event_id, e.payload, e.created_at, needed.event_id AS refusal_event_id FROM ${roomRefusals} ${recipient}
+    SELECT e.event_id, e.payload, e.created_at, needed.event_id AS refusal_event_id, 1 AS refusal_delivery FROM ${roomRefusals} ${recipient}
     JOIN events AS e ON e.event_id = (${firstCapacitySignal(retained)})
     WHERE refusal.created_at >= ${retained} AND e.event_id > recipient.capacity_event_id AND ${matchedRoom} ${due}
     ORDER BY e.event_id, needed.event_id LIMIT 1`;
@@ -175,53 +178,59 @@ const matchedEvents = (now: number, crew: boolean, subscriptionId?: string): SQL
       : query`JOIN subscriptions AS recipient ON recipient.subscription_id = ${subscriptionId}`;
   const crewEvents = crew
     ? query`
-    SELECT e.event_id, e.payload, e.created_at, NULL AS refusal_event_id FROM events AS e ${recipient}
+    SELECT e.event_id, e.payload, e.created_at, NULL AS refusal_event_id, 0 AS refusal_delivery FROM events AS e ${recipient}
     JOIN event_sessions AS es ON es.event_id = e.event_id
     WHERE e.event_id > recipient.cursor_event_id AND e.created_at >= ${retained}
       AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = recipient.subscription_id)
       AND ${query.raw(crewMatch("recipient.subscription_id", "es.session_id", "es.tags"))}
     UNION ALL`
     : query``;
-  return query`${crewEvents} ${startRefusals(retained, recipient)}
-    UNION ALL SELECT * FROM (${nextCapacity(retained, recipient, now)})`;
+  return query`${crewEvents} SELECT * FROM (
+    ${startRefusals(retained, recipient)}
+    UNION ALL SELECT * FROM (${nextCapacity(retained, recipient, now)})
+  ) WHERE EXISTS (
+    SELECT 1 FROM subscriptions AS due WHERE due.subscription_id = ${subscriptionId === undefined ? query.raw("recipient.subscription_id") : query`${subscriptionId}`}
+      AND due.refusal_delivery_retry_at <= ${now}
+  )`;
 };
 
-type MatchedEvent = DeliveryEvent & { refusal_event_id: number | null };
-type PendingRoom = {
-  eventId: number;
-  memory: number;
-  disk: number;
-  amd64: number;
-  arm64: number;
-  harness: string;
-  harnessVersion: string;
-  code: string;
-  hostId: string | null;
-};
+const runnableRecipient = query`
+  EXISTS (SELECT 1 FROM subscription_actives AS active WHERE active.subscription_id = recipient.subscription_id)
+  AND EXISTS (SELECT 1 FROM sessions AS target WHERE target.session_id = recipient.session_id AND target.state IN ('Idle', 'Stopped'))
+  AND NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.session_id = recipient.session_id AND t.state IN ('Offered', 'Running'))`;
+
+type MatchedEvent = DeliveryEvent & { refusal_event_id: number | null; refusal_delivery: number };
+type CapacityCause = "PoolExhausted" | "NoHostAvailable";
 
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
 export abstract class TenantSubscriptions extends TenantSessions {
   private capacityChanged = false;
+  private readonly capacityCauses = new Map<string, CapacityCause>();
   private capacityScheduleChanged = false;
   private capacityRetryAt: number | null = null;
+  private refusalScanPending = true;
 
-  protected override capacityMayHaveChanged(): void {
+  protected override capacityMayHaveChanged(hostId?: string, cause: CapacityCause = "PoolExhausted"): void {
     this.capacityChanged = true;
+    if (hostId !== undefined && (cause === "NoHostAvailable" || !this.capacityCauses.has(hostId)))
+      this.capacityCauses.set(hostId, cause);
   }
 
-  private capacityDeadline(after: number): number | null {
+  private capacityDeadline(now: number): number | null {
+    const retained = retentionCutoff(now);
     return (
       durableDb(this.ctx.storage, {}).get<{ retryAt: number | null }>(query`
-      SELECT MIN(recipient.capacity_retry_at) AS retryAt FROM subscriptions AS recipient
-      JOIN subscription_actives AS active ON active.subscription_id = recipient.subscription_id
-      WHERE recipient.capacity_retry_at > ${after} AND ${query.raw(refusalCount("recipient"))} > 0
-        AND EXISTS (${nextCapacity(retentionCutoff(Date.now()), query``)})`)?.retryAt ?? null
+      SELECT MIN(retry_at) AS retryAt FROM (
+        SELECT recipient.refusal_delivery_retry_at AS retry_at FROM subscriptions AS recipient
+        WHERE ${runnableRecipient} AND EXISTS (${startRefusals(retained, query``)})
+        UNION ALL
+        SELECT MAX(recipient.refusal_delivery_retry_at,
+          CASE WHEN ${query.raw(refusalCount("recipient"))} = 0 THEN 0 ELSE recipient.capacity_retry_at END)
+        FROM subscriptions AS recipient
+        WHERE ${runnableRecipient} AND EXISTS (${nextCapacity(retained, query``)})
+      )`)?.retryAt ?? null
     );
-  }
-
-  protected restoreCapacityDeadline(): void {
-    this.capacityRetryAt = this.capacityDeadline(0);
   }
 
   protected recordRefusalRequest(event: Extract<NewTenantEvent, { event: "StartRefused" }>, now: number): void {
@@ -254,95 +263,73 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   private pendingRoom(retained: number): SQL {
     return query`
-      SELECT needed.event_id AS eventId, needed.box_memory_mib AS memory, needed.box_disk_mib AS disk,
-        needed.amd64, needed.arm64, needed.harness, needed.harness_version AS harnessVersion,
-        json_extract(refusal.payload, '$.refusal.code') AS code, stranded.host_id AS hostId
       FROM ${roomRefusals}
       WHERE refusal.created_at >= ${retained} AND (${firstCapacitySignal(retained)}) IS NULL
         AND EXISTS (SELECT 1 FROM subscriptions AS recipient WHERE ${matchedRoom}
-          AND NOT EXISTS (SELECT 1 FROM subscription_ends WHERE subscription_id = recipient.subscription_id)
-          AND NOT EXISTS (${nextCapacity(retained, query``)}))
-      ORDER BY needed.event_id`;
+          AND NOT EXISTS (SELECT 1 FROM subscription_ends WHERE subscription_id = recipient.subscription_id))`;
+  }
+
+  protected override roomRefusalPending(now: number): boolean {
+    return (
+      durableDb(this.ctx.storage, {}).get(query`SELECT 1 ${this.pendingRoom(retentionCutoff(now))} LIMIT 1`) !==
+      undefined
+    );
   }
 
   private async availableCapacity(tenantId: string): Promise<void> {
     if (!this.capacityChanged) return;
     this.capacityChanged = false;
+    const causes = new Map(this.capacityCauses);
+    this.capacityCauses.clear();
+    if (!this.roomRefusalPending(Date.now())) return;
+    const hosts = await listHosts(this.env, tenantId);
     const now = Date.now();
-    const retained = retentionCutoff(now);
-    const db = durableDb(this.ctx.storage, {});
-    const pending = this.pendingRoom(retained);
-    if (db.get(query`${pending} LIMIT 1`) === undefined) return;
-    const hosts = await this.hostRecords(tenantId);
     const usage = this.listHostUsage(tenantId);
-    const held = this.heldBoxes();
     const fresh = now - presenceGraceMs(settingsOf(this.env));
-    for (const needed of db.all<PendingRoom>(pending)) {
-      const architectures: ImageAvailability["architectures"] = [];
-      if (needed.amd64 === 1) architectures.push("Amd64");
-      if (needed.arm64 === 1) architectures.push("Arm64");
-      const placed =
-        needed.hostId === null
-          ? placeSession(
-              hosts,
-              usage,
-              { harness: needed.harness, harnessVersion: needed.harnessVersion, architectures },
-              { boxMemoryMib: needed.memory, boxDiskMib: needed.disk },
-              held,
-              fresh,
-            )
-          : null;
-      const host =
-        needed.hostId === null
-          ? placed?.kind === "Placed"
-            ? placed.host
-            : undefined
-          : hosts.find(
-              (each) =>
-                each.hostId === needed.hostId &&
-                each.state === "Online" &&
-                usage.some(
-                  (report) =>
-                    report.hostId === each.hostId && report.updatedAt >= fresh && report.reportedHealth === "Healthy",
-                ),
-            );
-      if (host === undefined) continue;
-      const report = usage.find((each) => each.hostId === host.hostId);
-      if (report === undefined) throw new Error(`placed host ${host.hostId} has no report`);
-      const evictable = held.filter((each) => each.hostId === host.hostId && each.evictable);
-      const memory =
-        report.memoryBudgetMib - report.memoryHeldMib + evictable.reduce((sum, each) => sum + each.boxMemoryMib, 0);
-      const diskHeld = Math.max(0, report.diskHeldMib - evictable.reduce((sum, each) => sum + each.boxDiskMib, 0));
-      this.ctx.storage.transactionSync(() => {
-        const eventId = this.appendEvent(
-          { event: "CapacityAvailable", hostId: host.hostId, code: CapacityRefusalCodeSchema.parse(needed.code) },
-          now,
-        );
-        durableDb(
-          this.ctx.storage,
-          {},
-        ).run(query`INSERT INTO capacity_rooms (event_id, memory_mib, disk_mib, disk_empty, architecture, host_id)
-          VALUES (${eventId}, ${memory}, ${report.diskBudgetMib - diskHeld}, ${Number(diskHeld === 0)}, ${host.architecture}, ${host.hostId})`);
-      });
-      this.queueRefusalDelivery(now, null);
-      if (db.get(query`${pending} LIMIT 1`) !== undefined) this.capacityMayHaveChanged();
-      return;
+    const room = effectiveHostCapacity(withReportedHealth(hosts, usage, fresh), usage, this.heldBoxes(), fresh);
+    const db = durableDb(this.ctx.storage, {});
+    const host = db.get<(typeof room)[number]>(query`
+      WITH host_room AS (
+        SELECT json_extract(value, '$.hostId') AS hostId, json_extract(value, '$.architecture') AS architecture,
+          json_extract(value, '$.memory') AS memory, json_extract(value, '$.disk') AS disk,
+          json_extract(value, '$.diskEmpty') AS diskEmpty FROM json_each(${JSON.stringify(room)})
+      )
+      SELECT host.* FROM host_room AS host
+      WHERE EXISTS (SELECT 1 ${this.pendingRoom(retentionCutoff(now))}
+        AND ((stranded.host_id IS NOT NULL AND stranded.host_id = host.hostId)
+          OR (stranded.host_id IS NULL AND needed.box_memory_mib <= host.memory
+            AND (host.diskEmpty = 1 OR needed.box_disk_mib <= host.disk)
+            AND CASE host.architecture WHEN 'Amd64' THEN needed.amd64 ELSE needed.arm64 END = 1)))
+      ORDER BY host.hostId LIMIT 1`);
+    if (host === undefined) return;
+    this.ctx.storage.transactionSync(() => {
+      const eventId = this.appendEvent(
+        {
+          event: "CapacityAvailable",
+          hostId: host.hostId,
+          code: this.capacityCauses.get(host.hostId) ?? causes.get(host.hostId) ?? "PoolExhausted",
+        },
+        now,
+      );
+      db.run(query`INSERT INTO capacity_rooms (event_id, memory_mib, disk_mib, disk_empty, architecture, host_id)
+        VALUES (${eventId}, ${host.memory}, ${host.disk}, ${host.diskEmpty}, ${host.architecture}, ${host.hostId})`);
+    });
+    this.refusalScanPending = true;
+    if (room.length > 1 && this.roomRefusalPending(now)) {
+      this.capacityChanged = true;
+      for (const [hostId, cause] of causes)
+        if (!this.capacityCauses.has(hostId)) this.capacityCauses.set(hostId, cause);
     }
   }
 
-  private queueRefusalDelivery(now: number, sessionId: string | null): void {
+  private queueRefusalDeliveries(now: number): void {
+    const recipients = durableDb(this.ctx.storage, {}).all<{ subscriptionId: string }>(query`
+      SELECT MIN(recipient.subscription_id) AS subscriptionId FROM subscriptions AS recipient
+      WHERE ${runnableRecipient} AND EXISTS (${matchedEvents(now, false)})
+      GROUP BY recipient.session_id ORDER BY subscriptionId LIMIT ${REFUSAL_RECIPIENT_BATCH}`);
+    this.refusalScanPending = recipients.length === REFUSAL_RECIPIENT_BATCH;
     this.capacityScheduleChanged = true;
-    const session = sessionId === null ? query`` : query`AND recipient.session_id = ${sessionId}`;
-    const row = durableDb(this.ctx.storage, {}).get<{ subscriptionId: string }>(query`
-      SELECT recipient.subscription_id AS subscriptionId FROM subscriptions AS recipient
-      JOIN subscription_actives AS a ON a.subscription_id = recipient.subscription_id
-      JOIN sessions AS target ON target.session_id = recipient.session_id AND target.state NOT IN ('Stopping', 'Archived', 'Failed')
-      WHERE NOT EXISTS (SELECT 1 FROM turns AS t WHERE t.session_id = recipient.session_id AND t.state IN ('Offered', 'Running'))
-        AND NOT EXISTS (SELECT 1 FROM subscription_turns AS st WHERE st.subscription_id = recipient.subscription_id)
-        ${session} AND EXISTS (${matchedEvents(now, false)})
-      ORDER BY recipient.subscription_id LIMIT 1`);
-    if (row === undefined) return;
-    this.ensureDelivery(row.subscriptionId, now);
+    for (const { subscriptionId } of recipients) this.ensureDelivery(subscriptionId, now, true);
   }
 
   protected getSubscription(tenantId: string, subscriptionId: string): Subscription | null {
@@ -434,12 +421,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
         this.clearState(subscriptionId);
         sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
         sql.exec(
-          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, starts_refused_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
+          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, starts_refused_in_a_row = 0, refusal_delivery_attempts = 0, refusal_delivery_retry_at = 0, updated_at = ? WHERE subscription_id = ?",
           now,
           subscriptionId,
         );
         if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
       });
+      this.refusalScanPending = true;
       this.capacityScheduleChanged = true;
     }
     return { kind: "Changed", subscription: this.presentSubscription(tenantId, subscriptionId) };
@@ -523,25 +511,31 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return super.tumpelMcp(sessionId) || this.subscribed(sessionId);
   }
 
-  protected async startDeliveries(tenantId: string): Promise<void> {
-    const now = Date.now();
-    if (this.capacityRetryAt !== null && this.capacityRetryAt <= now) this.queueRefusalDelivery(now, null);
+  protected async startDeliveries(tenantId: string): Promise<boolean> {
     await this.availableCapacity(tenantId);
-    const sessions = this.ctx.storage.sql
-      .exec<{ session_id: string }>(
-        `SELECT DISTINCT t.session_id FROM subscription_turns AS st JOIN turns AS t ON t.turn_id = st.turn_id
-        WHERE t.state = 'Offered' ORDER BY t.session_id`,
-      )
-      .toArray();
-    for (const { session_id: sessionId } of sessions) {
-      const now = Date.now();
-      const next = this.ctx.storage.transactionSync(() => this.takeNextWaiting(sessionId, now));
-      if (next !== null) await this.startWaiting(tenantId, sessionId, next);
-    }
+    const now = Date.now();
+    if (this.refusalScanPending || (this.capacityRetryAt !== null && this.capacityRetryAt <= now))
+      this.queueRefusalDeliveries(now);
+    const sessions = durableDb(this.ctx.storage, {}).all<{ sessionId: string }>(query`
+      SELECT DISTINCT t.session_id AS sessionId FROM subscription_turns AS st JOIN turns AS t ON t.turn_id = st.turn_id
+      JOIN sessions AS session ON session.session_id = t.session_id
+      WHERE t.state = 'Offered' AND t.offer_sent = 0 AND session.state IN ('Idle', 'Stopped')
+      ORDER BY t.session_id LIMIT ${REFUSAL_RECIPIENT_BATCH}`);
+    await Promise.all(
+      sessions.map(async ({ sessionId }) => {
+        const next = this.ctx.storage.transactionSync(() => this.takeNextWaiting(sessionId, now));
+        if (next !== null) await this.startWaiting(tenantId, sessionId, next);
+      }),
+    );
     if (this.capacityScheduleChanged) {
       this.capacityScheduleChanged = false;
       this.capacityRetryAt = this.capacityDeadline(Date.now());
     }
+    return (
+      sessions.length === REFUSAL_RECIPIENT_BATCH ||
+      this.capacityChanged ||
+      (this.capacityRetryAt !== null && this.capacityRetryAt <= Date.now())
+    );
   }
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
@@ -550,26 +544,20 @@ export abstract class TenantSubscriptions extends TenantSessions {
       durableDb(this.ctx.storage, {}).run(query`INSERT INTO session_crew_starts (session_id, event_id)
         VALUES (${event.caller.sessionId}, ${eventId}) ON CONFLICT (session_id) DO UPDATE SET event_id = excluded.event_id`);
     }
-    if (event.event === "HostOnline" || event.event === "SessionStopped" || event.event === "SessionIdle")
-      this.capacityMayHaveChanged();
-    if (event.event === "StartRefused") this.queueRefusalDelivery(now, null);
+    if (event.event === "HostOnline") this.capacityMayHaveChanged(event.hostId, "NoHostAvailable");
+    if (event.event === "StartRefused") this.refusalScanPending = true;
     if (!("sessionId" in event)) return eventId;
-    if ((event.event === "TurnCompleted" || event.event === "TurnFailed") && this.deliveryEnded(event, now))
-      this.queueRefusalDelivery(now, null);
-    if (
-      event.event === "TurnStarted" &&
-      durableDb(this.ctx.storage, {}).get(
-        query`SELECT turn_id FROM subscription_turns WHERE turn_id = ${event.turnId}`,
-      ) !== undefined
-    )
-      this.queueRefusalDelivery(now, null);
+    if (event.event === "TurnCompleted" || event.event === "TurnFailed") this.deliveryEnded(event, now);
+    if (event.event === "TurnStarted") this.acknowledgeDelivery(event.turnId, now);
     if (event.event === "SessionArchived" || event.event === "SessionFailed") {
       const ended = event.event;
       for (const row of this.openSubscriptions(event.sessionId)) this.end(row, ended, now);
     }
     this.matchCrew(event, now);
-    if (event.event === "SessionIdle" || event.event === "SessionStopped")
-      this.queueRefusalDelivery(now, event.sessionId);
+    if (event.event === "SessionIdle" || event.event === "SessionStopped") {
+      this.refusalScanPending = true;
+      this.capacityScheduleChanged = true;
+    }
     return eventId;
   }
 
@@ -604,26 +592,39 @@ export abstract class TenantSubscriptions extends TenantSessions {
     }
     const prompt = batch?.prompt ?? plan;
     const lastEventId = batch?.lastEventId ?? row.cursor_event_id;
-    const capacity = events.find((event) => event.event_id <= lastEventId && event.refusal_event_id !== null);
-    sql.exec("UPDATE turns SET prompt = ? WHERE turn_id = ?", prompt, turn.turn_id);
-    sql.exec("UPDATE subscription_turns SET composed = 1 WHERE turn_id = ?", turn.turn_id);
-    sql.exec(
-      `UPDATE subscriptions SET cursor_event_id = MAX(cursor_event_id, ?1), starts_refused_in_a_row = ?2,
-        capacity_retry_at = ?3, capacity_event_id = COALESCE(?4, capacity_event_id) WHERE subscription_id = ?5`,
-      lastEventId,
-      capacity === undefined ? row.starts_refused_in_a_row : row.starts_refused_in_a_row + 1,
-      capacity === undefined ? row.capacity_retry_at : Date.now() + 1000 * 2 ** row.starts_refused_in_a_row,
-      capacity?.event_id ?? null,
-      subscriptionId,
-    );
-    if (capacity !== undefined) {
-      this.capacityScheduleChanged = true;
-      this.capacityMayHaveChanged();
-    }
-    if (row.state === "Active" && this.undelivered(subscriptionId)) {
-      this.ensureDelivery(subscriptionId, Date.now());
-    }
+    const included = events.filter((event) => event.event_id <= lastEventId);
+    const capacity = included.find((event) => event.refusal_event_id !== null);
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("UPDATE turns SET prompt = ? WHERE turn_id = ?", prompt, turn.turn_id);
+      sql.exec(
+        `UPDATE subscription_turns SET composed = 1, cursor_event_id = ?, capacity_event_id = ?, refusal_delivery = ?
+          WHERE turn_id = ?`,
+        lastEventId,
+        capacity?.event_id ?? 0,
+        Number(included.some((event) => event.refusal_delivery === 1)),
+        turn.turn_id,
+      );
+    });
     return { kind: "Composed", prompt };
+  }
+
+  private acknowledgeDelivery(turnId: string, now: number): void {
+    const db = durableDb(this.ctx.storage, {});
+    const delivery = db.get<{ subscriptionId: string; cursor: number; capacity: number; refusal: number }>(query`
+      SELECT subscription_id AS subscriptionId, cursor_event_id AS cursor, capacity_event_id AS capacity,
+        refusal_delivery AS refusal FROM subscription_turns WHERE turn_id = ${turnId} AND composed = 1`);
+    if (delivery === undefined) return;
+    const row = this.subscriptionRow(delivery.subscriptionId);
+    if (row === null) throw new Error(`delivery turn ${turnId} lost its subscription`);
+    db.run(query`UPDATE subscriptions SET cursor_event_id = MAX(cursor_event_id, ${delivery.cursor}),
+      capacity_event_id = MAX(capacity_event_id, ${delivery.capacity}),
+      starts_refused_in_a_row = ${row.starts_refused_in_a_row + Number(delivery.capacity !== 0)},
+      capacity_retry_at = ${delivery.capacity === 0 ? row.capacity_retry_at : now + 1000 * 2 ** row.starts_refused_in_a_row},
+      refusal_delivery_attempts = CASE WHEN ${delivery.refusal} = 1 THEN 0 ELSE refusal_delivery_attempts END,
+      refusal_delivery_retry_at = CASE WHEN ${delivery.refusal} = 1 THEN 0 ELSE refusal_delivery_retry_at END
+      WHERE subscription_id = ${delivery.subscriptionId}`);
+    if (row.state === "Active" && this.undelivered(delivery.subscriptionId))
+      this.ensureDelivery(delivery.subscriptionId, now);
   }
 
   private subscriptionRow(subscriptionId: string): SubscriptionRow | null {
@@ -664,7 +665,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     return row?.turn_id ?? null;
   }
 
-  private ensureDelivery(subscriptionId: string, now: number): void {
+  private ensureDelivery(subscriptionId: string, now: number, refusal = false): void {
     if (this.waitingDelivery(subscriptionId) !== null) return;
     const sql = this.ctx.storage.sql;
     const [row] = sql
@@ -676,7 +677,12 @@ export abstract class TenantSubscriptions extends TenantSessions {
       .toArray();
     if (row === undefined) throw new Error(`subscription ${subscriptionId} lost its session while it queued a turn`);
     const turn = this.newTurn(row.session_id, row.host_id, row.box_id, { prompt: row.prompt }, now);
-    sql.exec("INSERT INTO subscription_turns (turn_id, subscription_id) VALUES (?, ?)", turn.turn_id, subscriptionId);
+    sql.exec(
+      "INSERT INTO subscription_turns (turn_id, subscription_id, refusal_delivery) VALUES (?, ?, ?)",
+      turn.turn_id,
+      subscriptionId,
+      Number(refusal),
+    );
   }
 
   private cancelDelivery(row: SubscriptionRow, now: number): void {
@@ -765,17 +771,36 @@ export abstract class TenantSubscriptions extends TenantSessions {
     );
   }
 
-  private deliveryEnded(event: { event: "TurnCompleted" | "TurnFailed"; turnId: string }, now: number): boolean {
+  private deliveryEnded(event: { event: "TurnCompleted" | "TurnFailed"; turnId: string }, now: number): void {
     const sql = this.ctx.storage.sql;
     const [delivery] = sql
-      .exec<{ subscription_id: string }>(
-        "SELECT subscription_id FROM subscription_turns WHERE turn_id = ?",
+      .exec<{ subscription_id: string; refusal_delivery: number; attempts: number }>(
+        `SELECT st.subscription_id, st.refusal_delivery AND (st.composed = 0
+          OR st.cursor_event_id > s.cursor_event_id OR st.capacity_event_id > s.capacity_event_id) AS refusal_delivery,
+          s.refusal_delivery_attempts AS attempts
+          FROM subscription_turns AS st JOIN subscriptions AS s USING (subscription_id) WHERE st.turn_id = ?`,
         event.turnId,
       )
       .toArray();
-    if (delivery === undefined) return false;
+    if (delivery === undefined) return;
     const { subscription_id: subscriptionId } = delivery;
     sql.exec("DELETE FROM subscription_turns WHERE turn_id = ?", event.turnId);
+    this.refusalScanPending = true;
+    this.capacityScheduleChanged = true;
+    if (delivery.refusal_delivery === 1 && event.event === "TurnFailed") {
+      const attempts = delivery.attempts + 1;
+      sql.exec(
+        "UPDATE subscriptions SET refusal_delivery_attempts = ?, refusal_delivery_retry_at = ?, updated_at = ? WHERE subscription_id = ?",
+        attempts,
+        now + 1000 * 2 ** (attempts - 1),
+        now,
+        subscriptionId,
+      );
+      const row = this.subscriptionRow(subscriptionId);
+      if (attempts >= REFUSAL_ATTEMPT_LIMIT && row?.state === "Active")
+        this.pause(row, { kind: "DeliveryFailed", turnId: event.turnId }, now);
+      return;
+    }
     sql.exec(
       `UPDATE subscriptions SET delivery_failures_in_a_row = CASE WHEN ?1 THEN delivery_failures_in_a_row + 1 ELSE 0 END,
         updated_at = ?2 WHERE subscription_id = ?3`,
@@ -784,17 +809,16 @@ export abstract class TenantSubscriptions extends TenantSessions {
       subscriptionId,
     );
     const row = this.subscriptionRow(subscriptionId);
-    if (row === null || row.state !== "Active") return true;
+    if (row === null || row.state !== "Active") return;
     if (row.starts_refused_in_a_row >= 10) {
       this.pause(row, { kind: "StartsRefused" }, now);
-      return true;
+      return;
     }
     if (row.delivery_failures_in_a_row >= DELIVERY_FAILURE_LIMIT) {
       this.pause(row, { kind: "DeliveryFailed", turnId: event.turnId }, now);
-      return true;
+      return;
     }
     if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
-    return true;
   }
 
   private matchCrew(event: NewTenantEvent & { sessionId: string }, now: number): void {

@@ -35,6 +35,7 @@ import {
   TurnSchema,
   type TurnSendSchema,
 } from "@tumpel/schemas";
+import { sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
@@ -60,6 +61,7 @@ import {
   sessionConnectorUses,
 } from "./connector-rows.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
+import { durableDb } from "./db/client.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
@@ -975,6 +977,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private sessionEntered(sessionId: string, state: SessionState, now: number): void {
+    if (state === "Idle" || state === "Stopped" || state === "Failed" || state === "Archived") {
+      const session = durableDb(this.ctx.storage, {}).get<{ hostId: string }>(
+        query`SELECT host_id AS hostId FROM sessions WHERE session_id = ${sessionId}`,
+      );
+      this.capacityMayHaveChanged(session?.hostId);
+    }
     if (state === "Idle") {
       const latest = this.latestTurn(sessionId, null);
       if (latest === null)
@@ -1610,6 +1618,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private reportHost(hostId: string, report: HostReport): void {
+    const diskBudget = report.usage.diskBudgetMib ?? null;
+    const diskHeld = report.usage.diskHeldMib ?? null;
+    const diskChanged = durableDb(this.ctx.storage, {}).get(query`
+      SELECT 1 FROM host_reports WHERE host_id = ${hostId}
+      AND (disk_budget_mib IS NOT ${diskBudget} OR disk_held_mib IS NOT ${diskHeld})`);
     this.ctx.storage.sql.exec(
       `INSERT INTO host_reports (host_id, box_capacity, channel_protocol, memory_budget_mib, memory_held_mib,
         memory_available_mib, disk_budget_mib, disk_held_mib, load_average, heard_at, created_at)
@@ -1623,18 +1636,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
         OR host_reports.channel_protocol != excluded.channel_protocol
         OR host_reports.memory_budget_mib != excluded.memory_budget_mib
         OR host_reports.memory_held_mib != excluded.memory_held_mib
-        OR host_reports.heard_at < excluded.heard_at - ?11`,
+        OR host_reports.heard_at < excluded.heard_at - ?11 OR ?12 = 1`,
       hostId,
       report.boxCapacity,
       report.channelProtocol,
       report.usage.memoryBudgetMib ?? null,
       report.usage.memoryHeldMib ?? null,
       report.usage.memoryAvailableMib,
-      report.usage.diskBudgetMib ?? null,
-      report.usage.diskHeldMib ?? null,
+      diskBudget,
+      diskHeld,
       report.usage.loadAverage,
       report.now,
       HEARD_REFRESH_MS,
+      Number(diskChanged !== undefined && this.roomRefusalPending(report.now)),
     );
   }
 
@@ -1700,6 +1714,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env)))
         this.appendEvent({ event: "HostOnline", hostId }, report.now);
       this.reportHost(hostId, report);
+      this.capacityMayHaveChanged(hostId);
       clearSupersededFailure(this.ctx.storage.sql, hostId);
       return this.unheldRunningTurns(hostId, heldTurnIds);
     });
@@ -1720,27 +1735,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const memoryHeld = report.usage.memoryHeldMib ?? null;
       const diskBudget = report.usage.diskBudgetMib ?? null;
       const diskHeld = report.usage.diskHeldMib ?? null;
+      const change = durableDb(this.ctx.storage, {}).get<{
+        recovered: number;
+        memoryOpened: number;
+        diskChanged: number;
+        diskOpened: number;
+      }>(query`
+        SELECT (reported_health != 'Healthy' OR heard_at < ${fresh}) AS recovered,
+          COALESCE(${memoryBudget} - ${memoryHeld}, 0) > COALESCE(memory_budget_mib - memory_held_mib, 0) AS memoryOpened,
+          (disk_budget_mib IS NOT ${diskBudget} OR disk_held_mib IS NOT ${diskHeld}) AS diskChanged,
+          (COALESCE(${diskBudget} - ${diskHeld}, 0) > COALESCE(disk_budget_mib - disk_held_mib, 0)
+            OR (${diskHeld} = 0 AND disk_held_mib > 0)) AS diskOpened
+        FROM host_reports WHERE host_id = ${hostId}`);
+      const trackDisk = change?.diskChanged === 1 && this.roomRefusalPending(report.now);
+      const recovered = reportedHealth === "Healthy" && change?.recovered === 1;
       const openedRoom =
-        reportedHealth === "Healthy" &&
-        this.ctx.storage.sql
-          .exec(
-            `SELECT 1 FROM host_reports WHERE host_id = ?1 AND (reported_health != 'Healthy' OR heard_at < ?2
-              OR COALESCE(?3 - ?4, 0) > COALESCE(memory_budget_mib - memory_held_mib, 0)
-              OR COALESCE(?5 - ?6, 0) > COALESCE(disk_budget_mib - disk_held_mib, 0)
-              OR (?6 = 0 AND disk_held_mib > 0))`,
-            hostId,
-            fresh,
-            memoryBudget,
-            memoryHeld,
-            diskBudget,
-            diskHeld,
-          )
-          .toArray().length > 0;
+        reportedHealth === "Healthy" && (change?.memoryOpened === 1 || (trackDisk && change?.diskOpened === 1));
       this.ctx.storage.sql.exec(
         `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
           disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, reported_health = ?8, heard_at = ?9
         WHERE host_id = ?1 AND (memory_budget_mib IS NOT ?2 OR memory_held_mib IS NOT ?3
-          OR disk_budget_mib IS NOT ?5 OR disk_held_mib IS NOT ?6 OR reported_health != ?8 OR heard_at < ?9 - ?10 OR ?11 = 1)`,
+          OR reported_health != ?8 OR heard_at < ?9 - ?10 OR ?11 = 1)`,
         hostId,
         memoryBudget,
         memoryHeld,
@@ -1751,9 +1766,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         reportedHealth,
         report.now,
         HEARD_REFRESH_MS,
-        Number(openedRoom),
+        Number(recovered || trackDisk),
       );
-      if (openedRoom) this.capacityMayHaveChanged();
+      if (recovered || openedRoom) this.capacityMayHaveChanged(hostId, recovered ? "NoHostAvailable" : "PoolExhausted");
       return this.judgeHeldTurns(hostId, heldTurnIds);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);
@@ -2062,7 +2077,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     room?: RoomRequirement,
   ): void;
 
-  protected abstract capacityMayHaveChanged(): void;
+  protected abstract capacityMayHaveChanged(hostId?: string, cause?: "PoolExhausted" | "NoHostAvailable"): void;
+
+  protected abstract roomRefusalPending(now: number): boolean;
 
   protected async begin(
     tenantId: string,
@@ -2715,6 +2732,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} answered the teardown of box ${message.boxId} of session ${message.sessionId} of tenant ${tenantId}, which it was not asked for`,
       );
     }
+    if (message.type === "BoxGone") this.capacityMayHaveChanged(hostId);
     if (session.box_id !== message.boxId) return null;
     if (message.type === "BoxGone" && session.state === "Running") {
       await this.boxGoneUnderTurn(tenantId, hostId, session);

@@ -105,6 +105,7 @@ import tenant0098 from "../migrations/tenant/0098_subscription_failures.sql";
 import tenant0099 from "../migrations/tenant/0099_sessions_host_state.sql";
 import tenant0100 from "../migrations/tenant/0100_subscription_capacity.sql";
 import tenant0101 from "../migrations/tenant/0101_subscription_progress.sql";
+import tenant0102 from "../migrations/tenant/0102_subscription_offer_progress.sql";
 import type { Migration } from "./durable-migrate";
 
 export const TENANT_MIGRATIONS: readonly Migration[] = [
@@ -215,4 +216,5 @@ export const TENANT_MIGRATIONS: readonly Migration[] = [
   { name: "0099_sessions_host_state", sql: tenant0099 },
   { name: "0100_subscription_capacity", sql: tenant0100 },
   { name: "0101_subscription_progress", sql: tenant0101 },
+  { name: "0102_subscription_offer_progress", sql: tenant0102 },
 ];

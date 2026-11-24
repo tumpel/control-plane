@@ -61,7 +61,7 @@ test("a full host wakes its foreman once on refusal and once when a box stops, t
     .toArray().length;
   const capacityWritten = world.tenantRowsWritten();
   await host.dropsIdleBox(busy);
-  assert.equal(world.tenantRowsWritten() - capacityWritten, 30);
+  assert.equal(world.tenantRowsWritten() - capacityWritten, 29);
   assert.equal(
     world
       .tenantSql()
@@ -230,7 +230,7 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
     await host.finishes(busy);
     const written = world.tenantRowsWritten();
     await host.dropsIdleBox(busy);
-    assert.equal(world.tenantRowsWritten() - written, cycle === 0 ? 30 : 9);
+    assert.equal(world.tenantRowsWritten() - written, cycle === 0 ? 29 : 9);
     if (cycle > 0) {
       if (cycle === 1) {
         const intervening = await world.fetch(
@@ -452,6 +452,7 @@ test("a host coming online wakes a pending room refusal once", async (t) => {
   await host.finishes(turn);
   const delivery = host.takeOffer();
   assert.equal((delivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  assert.match(delivery.prompt, /"code":"NoHostAvailable"/);
   await host.claims(delivery);
   await world.hostOnline("host-3");
   assert.equal(
@@ -463,6 +464,101 @@ test("a host coming online wakes a pending room refusal once", async (t) => {
   );
   await host.finishes(delivery);
   assert.equal(host.holds("TurnOffer"), false);
+});
+
+test("a fresh hello reports newly freed room before any heartbeat", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 4096, memoryAvailableMib: 4096 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await host.finishes(initial);
+  await world.subscribe(foreman, {
+    prompt: "wait for room",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  host.report({ memoryHeldMib: 4096 });
+  await world.settle();
+  const denied = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(denied.status, 409);
+  assert.equal(host.holds("TurnOffer"), false);
+  const before = world.tenantRowsWritten();
+  const back = await world.reconnect(host, {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 4096, memoryHeldMib: 2048, memoryAvailableMib: 2048 },
+  });
+  assert.match(back.takeOffer().prompt, /"event":"CapacityAvailable"/);
+  assert.ok(world.tenantRowsWritten() - before <= 32);
+});
+
+test("archiving a box and failing a session each release room before a heartbeat", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 4096, memoryAvailableMib: 4096 },
+  });
+  host.quiet();
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await host.finishes(initial);
+  await world.subscribe(foreman, {
+    prompt: "wait for room",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  const body = JSON.stringify({
+    personaId: foreman.personaId,
+    repository: "https://github.com/acme/app",
+    model: "opus",
+    prompt: "crew work",
+  });
+  const archived = await world.startSession({ prompt: "box to archive", tags: [], boxRetention: "Warm" });
+  const old = host.takeOffer();
+  await host.claims(old);
+  await host.finishes(old);
+  assert.equal((await world.fetch(world.owner, "POST", "/v1/sessions", body)).status, 409);
+  const archiveWrites = world.tenantRowsWritten();
+  assert.equal((await world.fetch(world.owner, "POST", `/v1/sessions/${archived.sessionId}/archive`)).status, 200);
+  const afterArchive = host.takeOffer();
+  assert.match(afterArchive.prompt, /"event":"CapacityAvailable".*"code":"PoolExhausted"/);
+  assert.ok(world.tenantRowsWritten() - archiveWrites <= 40);
+  await host.claims(afterArchive);
+  await host.finishes(afterArchive);
+
+  const failed = await world.startSession({ prompt: "box that cannot clone", tags: [], boxRetention: "Warm" });
+  const clone = host.takeOffer();
+  assert.equal(clone.sessionId, failed.sessionId);
+  await host.claims(clone);
+  assert.equal((await world.fetch(world.owner, "POST", "/v1/sessions", body)).status, 409);
+  await world.tick(1000);
+  const failureWrites = world.tenantRowsWritten();
+  await host.says({
+    type: "TurnRepositoryCloneFailed",
+    turnId: clone.turnId,
+    cause: "Refused",
+    detail: "The repository refused the clone.",
+    failedAt: new Date().toISOString(),
+  });
+  assert.equal((await world.session(failed.sessionId)).state, "Failed");
+  const afterFailure = host.takeOffer();
+  assert.match(afterFailure.prompt, /"event":"CapacityAvailable".*"code":"PoolExhausted"/);
+  assert.ok(world.tenantRowsWritten() - failureWrites <= 45);
 });
 
 test("ordinary host-online and box-stop transitions append no capacity signal", async (t) => {
@@ -586,7 +682,7 @@ test("a disk-only report after BoxGone releases the pending wake", async (t) => 
   assert.equal(host.holds("TurnOffer"), false);
 });
 
-test("a refusal queues one idle recipient and its delivery transition queues the next", async (t) => {
+test("an unclaimed refusal offer leaves another recipient free to claim its delivery", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -610,6 +706,7 @@ test("a refusal queues one idle recipient and its delivery transition queues the
     events: ["StartRefused"],
     crewTags: [],
   });
+  const before = world.tenantRowsWritten();
   const refused = await world.fetch(
     world.owner,
     "POST",
@@ -622,16 +719,158 @@ test("a refusal queues one idle recipient and its delivery transition queues the
     }),
   );
   assert.equal(refused.status, 422);
-  assert.equal(world.tenantSql().exec("SELECT turn_id FROM subscription_turns").toArray().length, 1);
+  assert.ok(world.tenantRowsWritten() - before <= 44);
   const delivery = host.takeOffer();
-  assert.equal(host.holds("TurnOffer"), false);
-  await host.claims(delivery);
   const next = host.takeOffer();
   assert.deepEqual(new Set([delivery.sessionId, next.sessionId]), new Set([first.sessionId, second.sessionId]));
   assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
   assert.equal((next.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
   await host.claims(next);
+  await host.claims(delivery);
   await host.finishes(delivery);
   await host.finishes(next);
   assert.equal(host.holds("TurnOffer"), false);
+});
+
+test("a failed capacity offer keeps its signal and retries after backoff on the foreman's host", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await host.finishes(initial);
+  const subscription = await world.subscribe(foreman, {
+    prompt: "wait for room",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(refused.status, 409);
+  await host.closesSocket();
+  const spare = await world.hostOnline("host-2");
+  spare.quiet();
+  const state = world
+    .tenantSql()
+    .exec(
+      "SELECT cursor_event_id, capacity_event_id, refusal_delivery_attempts, refusal_delivery_retry_at FROM subscriptions WHERE subscription_id = ?",
+      subscription.subscriptionId,
+    )
+    .one();
+  assert.equal(state.cursor_event_id, subscription.cursorEventId);
+  assert.equal(state.capacity_event_id, 0);
+  assert.equal(state.refusal_delivery_attempts, 1);
+
+  const back = await world.reconnect(host);
+  back.quiet();
+  const remaining = Number(state.refusal_delivery_retry_at) - Date.now();
+  assert.ok(remaining > 0);
+  await world.tick(remaining - 1);
+  await spare.beats();
+  assert.equal(back.holds("TurnOffer"), false);
+  await world.tick(1);
+  const before = world.tenantRowsWritten();
+  await spare.beats();
+  const retry = back.takeOffer();
+  assert.match(retry.prompt, /"event":"CapacityAvailable"/);
+  assert.equal((await world.subscription(subscription.subscriptionId)).cursorEventId, subscription.cursorEventId);
+  assert.ok(world.tenantRowsWritten() - before <= 22);
+  await back.claims(retry);
+  await back.finishes(retry);
+  assert.ok((await world.subscription(subscription.subscriptionId)).cursorEventId > subscription.cursorEventId);
+  assert.equal(world.tenantSql().exec("SELECT event_id FROM capacity_rooms").toArray().length, 1);
+});
+
+test("ten failed refusal offers pause only the subscription whose host cannot deliver", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await host.finishes(initial);
+  const subscription = await world.subscribe(foreman, {
+    prompt: "handle refusal",
+    goal: "finish",
+    events: ["StartRefused"],
+    crewTags: [],
+  });
+  const spare = await world.hostOnline("host-2");
+  spare.quiet();
+  const other = await world.startSession({ prompt: "lead other work", tags: [], boxRetention: "Warm" });
+  const otherTurn = spare.takeOffer();
+  await spare.claims(otherTurn);
+  await spare.finishes(otherTurn);
+  const healthy = await world.subscribe(other, {
+    prompt: "handle refusal too",
+    goal: "finish",
+    events: ["StartRefused"],
+    crewTags: [],
+  });
+  await host.closesSocket();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "unsupported-model",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(refused.status, 422);
+  const delivered = spare.takeOffer();
+  assert.match(delivered.prompt, /"event":"StartRefused"/);
+  await spare.claims(delivered);
+  await spare.finishes(delivered);
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    const progress = world
+      .tenantSql()
+      .exec(
+        "SELECT refusal_delivery_attempts, refusal_delivery_retry_at, cursor_event_id FROM subscriptions WHERE subscription_id = ?",
+        subscription.subscriptionId,
+      )
+      .one();
+    assert.equal(progress.refusal_delivery_attempts, attempt);
+    assert.equal(progress.cursor_event_id, subscription.cursorEventId);
+    const wait = Number(progress.refusal_delivery_retry_at) - Date.now();
+    assert.ok(wait > 0 && wait <= 1000 * 2 ** (attempt - 1));
+    await world.tick(wait - 1);
+    const before = world.tenantRowsWritten();
+    await spare.beats();
+    assert.ok(world.tenantRowsWritten() - before <= 1);
+    await world.tick(1);
+    await spare.beats();
+    assert.ok(world.tenantRowsWritten() - before <= 50);
+  }
+  const paused = await world.subscription(subscription.subscriptionId);
+  assert.equal(paused.state, "Paused");
+  assert.equal(paused.reason.kind, "DeliveryFailed");
+  assert.equal((await world.subscription(healthy.subscriptionId)).state, "Active");
+  assert.equal(
+    world
+      .tenantSql()
+      .exec(
+        "SELECT refusal_delivery_attempts FROM subscriptions WHERE subscription_id = ?",
+        subscription.subscriptionId,
+      )
+      .one().refusal_delivery_attempts,
+    10,
+  );
 });
