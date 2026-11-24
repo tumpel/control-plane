@@ -18,6 +18,13 @@ test("a subscription resumes over a backlog that holds a TurnFailed event stored
   const host = await world.hostOnline("host-1");
 
   const foreman = await world.startSession({ prompt: "plan the epic", tags: ["role:foreman"] });
+  const enabled = await world.fetch(
+    world.owner,
+    "PATCH",
+    `/v1/personas/${foreman.personaId}`,
+    JSON.stringify({ tumpelMcp: true }),
+  );
+  assert.equal(enabled.status, 200);
   const subscription = await world.subscribe(foreman, {
     prompt: "hand out the next step of the epic",
     goal: "the epic is merged",

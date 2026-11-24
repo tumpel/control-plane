@@ -72,10 +72,39 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
     part: 1,
     packs: [{ packDigest: digest, sizeBytes: manifest.length }],
     chunks: [chunk],
+    reusedPackDigests: [],
   });
+  const draft = async () => (await world.store.get(`${request.storageKey}.draft`))?.text();
+  assert.deepEqual(
+    await world.call("hostMessage", {
+      tenantId: TENANT_ID,
+      hostId: host.hostId,
+      message: {
+        type: "SnapshotPacks",
+        snapshotId: request.snapshotId,
+        part: 3,
+        packs: [],
+        chunks: [],
+        reusedPackDigests: [digest],
+      },
+    }),
+    {
+      reply: {
+        type: "Refused",
+        reason: `host ${host.hostId} sent SnapshotPacks part 3 of snapshot ${request.snapshotId}, but the control plane expects part 2, so the snapshot cannot name its packs`,
+      },
+    },
+  );
   await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [chunk] }));
-  await once(world, host.hostId, { type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 14 });
+  await once(world, host.hostId, {
+    type: "SnapshotDone",
+    snapshotId: request.snapshotId,
+    uploadedBytes: 14,
+    chunkCount: 1,
+  });
+  assert.equal(await (await world.store.get(`${request.storageKey}.packs`))?.text(), JSON.stringify([digest]));
+  assert.equal(await draft(), undefined);
   assert.equal((await world.turn(turnId)).state, "Completed");
   assert.equal((await world.session(session.sessionId)).state, "Idle");
 
@@ -105,6 +134,40 @@ test("every turn, snapshot, restore and teardown frame applied twice has one eff
   assert.equal((await world.session(sessionId)).state, "Idle");
   await once(world, host.hostId, { type: "BoxGone", sessionId, boxId });
   assert.equal((await world.session(sessionId)).state, "Stopped");
+});
+
+test("a SnapshotPacks part that brings the snapshot past the pack limit is refused and leaves its draft as it was", async (t) => {
+  const { world, host } = await opened(t);
+  await world.startSession({ prompt: "too many packs", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const request = await host.next("SnapshotRequest");
+  const digestsOf = (part: number): string[] =>
+    Array.from({ length: 500 }, (_, at) => createHash("sha256").update(`${part}/${at}`).digest("hex"));
+  const part = (number: number) =>
+    world.call("hostMessage", {
+      tenantId: TENANT_ID,
+      hostId: host.hostId,
+      message: {
+        type: "SnapshotPacks",
+        snapshotId: request.snapshotId,
+        part: number,
+        packs: [],
+        chunks: [],
+        reusedPackDigests: digestsOf(number),
+      },
+    });
+  for (let number = 1; number <= 32; number++) await part(number);
+  const draft = async () => (await world.store.get(`${request.storageKey}.draft`))?.text();
+  const before = await draft();
+  assert.deepEqual(await part(33), {
+    reply: {
+      type: "Refused",
+      reason: `host ${host.hostId} sent SnapshotPacks part 33 of snapshot ${request.snapshotId}, which brings it to 16500 packs, above the 16384 the control plane indexes, so the snapshot cannot name its packs`,
+    },
+  });
+  assert.equal(await draft(), before);
 });
 
 test("a clone failure, a snapshot failure, a box gone under a turn and a Claude setup's frames applied twice have one effect and the same reply", async (t) => {

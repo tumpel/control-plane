@@ -3,7 +3,9 @@ import {
   SubscriptionListQuerySchema,
   SubscriptionPathSchema,
   SubscriptionPauseSchema,
+  type SubscriptionPersonaLacksTumpelMcpSchema,
 } from "@tumpel/schemas";
+import type { z } from "zod";
 import { DELIVERY_PROMPT_LIMIT, subscriptionPrompt, widestReference } from "./delivery-prompt.ts";
 import { issues, json, type Problem, type ProblemStatus, parseBody, problem } from "./http.ts";
 import type { Caller } from "./identity.ts";
@@ -60,6 +62,13 @@ const notOwnSession = (subscription: Subscription): Response =>
 const invalid = (title: string, detail: string, fix: string): Response =>
   refused(400, { code: "InvalidRequest", title, detail, fix });
 
+const personaLacksTumpelMcp = (outcome: z.infer<typeof SubscriptionPersonaLacksTumpelMcpSchema>): Response =>
+  invalid(
+    "Persona lacks tumpelMcp",
+    `persona ${outcome.personaName} has no tumpelMcp, so it cannot start the crew that crewTags names`,
+    `Set tumpelMcp: true on persona ${outcome.personaName}, or create the subscription without crewTags`,
+  );
+
 const create = async (request: Request, env: Env, caller: Caller): Promise<Response> => {
   if (caller.origin.kind === "Turn") return personOnly("subscriptions.create");
   const body = await parseBody(request, SubscriptionCreateSchema, "subscriptions.create");
@@ -85,6 +94,7 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   }
   const { created } = await tenant.call("createSubscription", { tenantId: caller.tenantId, subscription, now });
   if (created.kind === "Created") return json(created.subscription);
+  if (created.kind === "PersonaLacksTumpelMcp") return personaLacksTumpelMcp(created);
   if (created.kind === "NotFound") return sessionNotFound(subscription.sessionId);
   if (created.kind === "Archived") {
     return refused(409, {
@@ -168,6 +178,7 @@ const one = async (
     return changed(completed, subscriptionId);
   }
   const { resumed } = await tenant.call("resumeSubscription", { tenantId, subscriptionId, now });
+  if (resumed.kind === "PersonaLacksTumpelMcp") return personaLacksTumpelMcp(resumed);
   if (resumed.kind !== "CursorExpired") return changed(resumed, subscriptionId);
   return refused(410, {
     code: "SubscriptionCursorExpired",
