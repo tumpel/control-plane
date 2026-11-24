@@ -1539,7 +1539,10 @@ suite("sessions", () => {
     const hostAfter = await hostRows();
 
     const spent = { tenantWritten: tenantAfter - tenantBefore, hostWritten: hostAfter - hostBefore };
-    assert.ok(spent.tenantWritten <= 53, `the turn wrote ${spent.tenantWritten} tenant rows`);
+    assert.ok(
+      spent.tenantWritten <= 53 + 3,
+      `the turn wrote ${spent.tenantWritten} tenant rows, including the events_start_signals index charge for TurnStarted, TurnCompleted and SessionIdle`,
+    );
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
   });
 
@@ -1732,7 +1735,7 @@ suite("sessions", () => {
       prompt: "too many tags",
       tags: Array.from({ length: 16 }, (_, index) => `own-${index}`),
     });
-    assert.match(overLimit.text, /would carry 17 tags, its own and the crew tags it inherits/);
+    assert.match(overLimit.text, /would carry 17 tags, including inherited crew tags/);
     const crewStart = await asTurn(foremanToken, "tumpel_session_start", {
       ...start,
       prompt: "fix issue 12",

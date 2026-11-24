@@ -484,3 +484,43 @@ test("archiving or failing a session ends its subscription and sends the ended e
     });
   }
 });
+
+test("a StartsRefused pause tells the browser that crew starts repeatedly failed", async () => {
+  const tenantId = crypto.randomUUID();
+  const sessionId = "session-starts-refused";
+  const now = Date.now();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint: `${receiverOrigin}/push/starts-refused`,
+      keys: { p256dh, auth },
+      events: ["SubscriptionPaused"],
+    },
+    now,
+  });
+  const receivedBefore = received.length;
+  const response = await post("/__fixture/emit", {
+    tenantId,
+    event: {
+      event: "SubscriptionPaused",
+      subscriptionId: "subscription-starts-refused",
+      sessionId,
+      reason: { kind: "StartsRefused" },
+    },
+    now,
+  });
+  assert.equal(response.status, 204);
+  await until(
+    "the StartsRefused subscription push",
+    async () => received.length,
+    (length) => length >= receivedBefore + 1,
+  );
+  assert.deepEqual(await decryptPush(received.at(-1)?.body ?? "", pair, auth), {
+    title: "Subscription paused in control-plane",
+    body: "Crew sessions repeatedly failed to start. Open the session to decide what to do next.",
+    path: `/t/${tenantId}/sessions/${sessionId}`,
+  });
+});

@@ -4,6 +4,7 @@ import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
   type PersonaPatchChangeSchema,
+  type RecordStartRefusalResultSchema,
   type SecretSetCreateSchema,
   type SecretSetPatchSchema,
   SecretSetSchema,
@@ -57,7 +58,7 @@ import {
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
-import { memberRows, sealContext } from "./tenant-sessions";
+import { memberRows, SESSION_TAG_LIMIT, sealContext } from "./tenant-sessions";
 import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
@@ -282,6 +283,22 @@ export class Tenant extends TenantConnectors {
     }
     this.writeWindow.writes += writes;
     return null;
+  }
+
+  private recordStartRefusal({
+    caller,
+    requestedTags,
+    refusal,
+    personaId,
+    model,
+    now,
+  }: TenantInput<"recordStartRefusal">): z.infer<typeof RecordStartRefusalResultSchema> {
+    const crewTags = this.startTags(caller, requestedTags);
+    if (crewTags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tagCount: crewTags.length };
+    this.ctx.storage.transactionSync(() =>
+      this.appendEvent({ event: "StartRefused", operation: "Start", refusal, personaId, model, caller, crewTags }, now),
+    );
+    return { kind: "Recorded" };
   }
 
   private async setLimits({ tenantId }: TenantInput<"setLimits">): Promise<TenantLimitsView> {
@@ -555,6 +572,7 @@ export class Tenant extends TenantConnectors {
     listTurns: async ({ tenantId, sessionId }) => ({ turns: await this.listTurns(tenantId, sessionId) }),
     getTurn: async ({ tenantId, turnId }) => ({ turn: await this.readTurn(tenantId, turnId) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
+    recordStartRefusal: (input) => this.recordStartRefusal(input),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),
     }),

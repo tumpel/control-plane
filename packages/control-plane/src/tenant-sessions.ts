@@ -19,6 +19,7 @@ import {
   SessionSchema,
   type SessionStartSchema,
   SessionStateSchema,
+  type SessionTagsOverLimitSchema,
   type SessionTagsPatchSchema,
   type SetSessionTagsResultSchema,
   SnapshotRootSchema,
@@ -189,7 +190,7 @@ export type Started<T> =
   | { kind: "ConnectorDisconnected"; names: string[] }
   | ReleaseUnreadable;
 
-export type SessionStarted<T> = Started<T> | { kind: "TagsOverLimit"; tags: string[] };
+export type SessionStarted<T> = Started<T> | z.infer<typeof SessionTagsOverLimitSchema>;
 
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
 
@@ -2046,7 +2047,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const placement = placed;
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
     const tags = this.startTags(input.startedBy, start.tags ?? []);
-    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tagCount: tags.length };
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
@@ -2763,7 +2764,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => row.tag)
       .filter((tag) => !removed.has(tag));
     const tags = [...new Set([...kept, ...(patch.add ?? [])])].sort();
-    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tagCount: tags.length };
     return { kind: "Tagged", session: this.tagSession(tenantId, sessionId, tags, now) };
   }
 

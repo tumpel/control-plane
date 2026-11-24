@@ -73,6 +73,20 @@ test("an input that fails its schema is refused as invalid", async () => {
   assert.equal(resets, 0);
 });
 
+test("v34 rejects a send without a caller before invoking its handler", async () => {
+  const { response, resets } = await serve({
+    tenantApiVersion: 34,
+    operation: "sendTurn",
+    input: { tenantId: "t1", sessionId: "s1", send: { prompt: "continue" }, hosts: [], now: 1 },
+  });
+  assert.equal("refusal" in response && response.refusal, "TenantRequestInvalid");
+  assert.equal("operation" in response && response.operation, "sendTurn");
+  assert.deepEqual("issues" in response && response.issues, [
+    "caller: Invalid input: expected object, received undefined",
+  ]);
+  assert.equal(resets, 0);
+});
+
 test("the client turns a refusal from a stale instance into a retryable skew", async () => {
   const stale = tenantApi(
     { getByName: () => ({ handle: async () => ({ refusal: "TenantOperationUnknown", operation: "getPersona" }) }) },

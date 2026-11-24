@@ -612,6 +612,7 @@ export class World {
         tenantId: TENANT_ID,
         sessionId,
         send: { prompt },
+        caller: { kind: "Person", principalId: PRINCIPAL_ID },
         hosts: await listHosts(this.env, TENANT_ID),
         now: Date.now(),
       }),

@@ -346,8 +346,8 @@ export const placed = <T>(
     return refuse(422, {
       code: "InvalidRequest",
       title: "Too many tags",
-      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that starts it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
-      fix: `Start the session with ${started.tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+      detail: `The session would carry ${started.tagCount} tags, including inherited crew tags. A session carries at most ${SESSION_TAG_LIMIT} tags.`,
+      fix: `Reduce the total by ${started.tagCount - SESSION_TAG_LIMIT} tags and start the session again`,
     });
   }
   if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
@@ -510,7 +510,14 @@ export const sendTurn = async (
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
   const hosts = await listHostRecords(env, caller.tenantId);
-  const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
+  const { sent } = await tenant.call("sendTurn", {
+    tenantId: caller.tenantId,
+    sessionId,
+    send,
+    hosts,
+    now,
+    caller: caller.origin,
+  });
   if (sent.kind === "Sent") return ok(sent.turn);
   if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
   if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
@@ -622,8 +629,8 @@ export const patchSessionTags = async (
   return refuse(422, {
     code: "InvalidRequest",
     title: "Too many tags",
-    detail: `session ${sessionId} would carry ${tagged.tags.length} tags, and a session carries at most ${SESSION_TAG_LIMIT}`,
-    fix: `Add fewer tags or remove ${tagged.tags.length - SESSION_TAG_LIMIT} more in the same patch, then send it again`,
+    detail: `session ${sessionId} would carry ${tagged.tagCount} tags, and a session carries at most ${SESSION_TAG_LIMIT}`,
+    fix: `Add fewer tags or remove ${tagged.tagCount - SESSION_TAG_LIMIT} more in the same patch, then send it again`,
   });
 };
 

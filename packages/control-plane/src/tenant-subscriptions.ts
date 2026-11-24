@@ -273,7 +273,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
   }
 
   protected override startTags(startedBy: Session["startedBy"], tags: string[]): string[] {
-    if (startedBy.kind !== "Turn") return tags;
+    if (startedBy.kind !== "Turn") return [...new Set(tags)].sort();
     return [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
   }
 
