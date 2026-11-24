@@ -172,22 +172,21 @@ const nextCapacity = (retained: number, recipient: SQL, dueAt?: number): SQL => 
     ORDER BY e.event_id, needed.event_id LIMIT 1`;
 };
 
-const matchedEvents = (now: number, crew: boolean, subscriptionId?: string): SQL => {
+const crewEvents = (retained: number, recipient: SQL): SQL => query`
+  SELECT e.event_id, e.payload, e.created_at, NULL AS refusal_event_id, 0 AS refusal_delivery FROM events AS e ${recipient}
+  JOIN event_sessions AS es ON es.event_id = e.event_id
+  WHERE e.event_id > recipient.cursor_event_id AND e.created_at >= ${retained}
+    AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = recipient.subscription_id)
+    AND ${query.raw(crewMatch("recipient.subscription_id", "es.session_id", "es.tags"))}`;
+
+const matchedEvents = (now: number, subscriptionId?: string): SQL => {
   const retained = retentionCutoff(now);
   const recipient =
     subscriptionId === undefined
       ? query``
       : query`JOIN subscriptions AS recipient ON recipient.subscription_id = ${subscriptionId}`;
-  const crewEvents = crew
-    ? query`
-    SELECT e.event_id, e.payload, e.created_at, NULL AS refusal_event_id, 0 AS refusal_delivery FROM events AS e ${recipient}
-    JOIN event_sessions AS es ON es.event_id = e.event_id
-    WHERE e.event_id > recipient.cursor_event_id AND e.created_at >= ${retained}
-      AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = recipient.subscription_id)
-      AND ${query.raw(crewMatch("recipient.subscription_id", "es.session_id", "es.tags"))}
-    UNION ALL`
-    : query``;
-  return query`${crewEvents} SELECT * FROM (
+  const crew = subscriptionId === undefined ? query`` : query`${crewEvents(retained, recipient)} UNION ALL`;
+  return query`${crew} SELECT * FROM (
     ${startRefusals(retained, recipient)}
     UNION ALL SELECT * FROM (${nextCapacity(retained, recipient, now)})
   ) WHERE EXISTS (
@@ -325,7 +324,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const recipients = durableDb(this.ctx.storage, {}).all<{ subscriptionId: string }>(query`
       SELECT MIN(recipient.subscription_id) AS subscriptionId FROM subscriptions AS recipient
       WHERE recipient.refusal_delivery_retry_at <= ${now} AND ${runnableRecipient}
-        AND EXISTS (${matchedEvents(now, false)})
+        AND EXISTS (${matchedEvents(now)})
       GROUP BY recipient.session_id ORDER BY subscriptionId LIMIT ${REFUSAL_RECIPIENT_BATCH}`);
     this.refusalScanPending = recipients.length === REFUSAL_RECIPIENT_BATCH;
     this.capacityScheduleChanged = true;
@@ -425,7 +424,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
           now,
           subscriptionId,
         );
-        if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
+        if (this.undeliveredCrew(subscriptionId, now)) this.ensureDelivery(subscriptionId, now);
       });
       this.refusalScanPending = true;
       this.capacityScheduleChanged = true;
@@ -581,7 +580,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
     const now = Date.now();
     const events = durableDb(this.ctx.storage, {}).all<MatchedEvent>(query`
-      ${matchedEvents(now, true, subscriptionId)} ORDER BY event_id LIMIT ${DELIVERY_BATCH}`);
+      ${matchedEvents(now, subscriptionId)} ORDER BY event_id LIMIT ${DELIVERY_BATCH}`);
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) throw new Error("the tenant Durable Object composes a delivery turn but has no name");
     const plan = subscriptionPrompt(row.prompt, row.goal);
@@ -633,7 +632,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
       refusal_delivery_attempts = CASE WHEN ${delivery.refusal} = 1 THEN 0 ELSE refusal_delivery_attempts END,
       refusal_delivery_retry_at = CASE WHEN ${delivery.refusal} = 1 THEN 0 ELSE refusal_delivery_retry_at END
       WHERE subscription_id = ${delivery.subscriptionId}`);
-    if (row.state === "Active" && this.undelivered(delivery.subscriptionId))
+    if (row.state === "Active" && this.undeliveredCrew(delivery.subscriptionId, now))
       this.ensureDelivery(delivery.subscriptionId, now);
   }
 
@@ -656,11 +655,11 @@ export abstract class TenantSubscriptions extends TenantSessions {
       .toArray();
   }
 
-  private undelivered(subscriptionId: string): boolean {
+  private undeliveredCrew(subscriptionId: string, now: number): boolean {
     return (
       durableDb(this.ctx.storage, {}).get(query`
       SELECT 1 FROM subscriptions AS recipient WHERE recipient.subscription_id = ${subscriptionId}
-        AND EXISTS (${matchedEvents(Date.now(), true)})`) !== undefined
+        AND EXISTS (${crewEvents(retentionCutoff(now), query``)})`) !== undefined
     );
   }
 
@@ -830,7 +829,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
       this.pause(row, { kind: "DeliveryFailed", turnId: event.turnId }, now);
       return;
     }
-    if (this.undelivered(subscriptionId)) this.ensureDelivery(subscriptionId, now);
+    if (this.undeliveredCrew(subscriptionId, now)) this.ensureDelivery(subscriptionId, now);
   }
 
   private matchCrew(event: NewTenantEvent & { sessionId: string }, now: number): void {

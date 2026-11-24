@@ -945,3 +945,56 @@ test("a crew turn can be delivered while an earlier start refusal waits to retry
   await back.finishes(retry);
   assert.equal(back.holds("TurnOffer"), false);
 });
+
+test("a resumed refusal backs off when the stopped subscriber cannot place a delivery", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const lead = host.takeOffer();
+  await host.claims(lead);
+  await host.finishes(lead);
+  const subscription = await world.subscribe(foreman, {
+    prompt: "handle refusals",
+    goal: "finish",
+    events: ["StartRefused"],
+    crewTags: [],
+  });
+  const path = `/v1/subscriptions/${subscription.subscriptionId}`;
+  const paused = await world.fetch(world.owner, "POST", `${path}/pause`, JSON.stringify({ message: "hold" }));
+  assert.equal(paused.status, 200);
+  await host.dropsIdleBox(lead);
+  await world.startSession({ prompt: "fill the only host", tags: [], boxRetention: "Warm" });
+  await host.claims(host.takeOffer());
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "unsupported-model",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(refused.status, 422);
+  const before = world.tenantRowsWritten();
+  assert.equal((await world.fetch(world.owner, "POST", `${path}/resume`)).status, 200);
+  const progress = world
+    .tenantSql()
+    .exec(
+      "SELECT refusal_delivery_attempts, refusal_delivery_retry_at, delivery_failures_in_a_row FROM subscriptions WHERE subscription_id = ?",
+      subscription.subscriptionId,
+    )
+    .one();
+  assert.equal(progress.refusal_delivery_attempts, 1);
+  assert.equal(progress.delivery_failures_in_a_row, 0);
+  assert.ok(Number(progress.refusal_delivery_retry_at) > Date.now());
+  assert.ok(world.tenantRowsWritten() - before <= 35);
+  const current = await world.subscription(subscription.subscriptionId);
+  assert.equal(current.state, "Active");
+  assert.equal(current.cursorEventId, subscription.cursorEventId);
+  assert.equal(host.holds("TurnOffer"), false);
+});
