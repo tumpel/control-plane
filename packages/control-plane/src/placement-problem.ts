@@ -1,6 +1,12 @@
-import type { Refused } from "./hosts.ts";
+import { ProblemSchema } from "@tumpel/schemas";
+import type { z } from "zod";
+import { boundedTo } from "./bounded-detail.ts";
 
-const refuse = (status: Refused["status"], problem: Refused["problem"]): Refused => ({ ok: false, status, problem });
+const refuse = (status: 409, problem: z.infer<typeof ProblemSchema>) => ({
+  ok: false as const,
+  status,
+  problem: { ...problem, detail: boundedTo(ProblemSchema.shape.detail.maxLength, problem.detail) },
+});
 
 import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
 
@@ -45,7 +51,10 @@ export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
 };
 
-export const unplaced = (tenantRefusals: Parameters<typeof placementRefusals>[0], retry: string): Refused => {
+export const unplaced = (
+  tenantRefusals: Parameters<typeof placementRefusals>[0],
+  retry: string,
+): ReturnType<typeof refuse> => {
   const hosts = placementRefusals(tenantRefusals);
   if (hosts.length === 0) {
     return refuse(409, {

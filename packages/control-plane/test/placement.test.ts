@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BoxDiskLimit, BoxMemoryLimit } from "@tumpel/schemas";
+import { BoxDiskLimit, BoxMemoryLimit, ProblemSchema, StartRefusalSchema } from "@tumpel/schemas";
 import type { HostRecord as Host } from "../src/host-record.ts";
 import { type ImageAvailability, type Placement, placeSession, type ReportedHostUsage } from "../src/placement.ts";
+
+import { unplaced } from "../src/placement-problem.ts";
 
 const HOST: Host = {
   hostId: "host-base",
@@ -270,4 +272,19 @@ test("a host out of reserved memory evicts its oldest Auto box, never a Warm one
   ];
   const placement = placeSession([host], [usage], AMD64_IMAGES, box, held, 0);
   assert.deepEqual(placement.kind === "Placed" && placement.evict.map((each) => each.sessionId), ["auto-old"]);
+});
+
+test("a placement refusal from a thousand hosts fits the event and public problem contracts", () => {
+  const hosts = Array.from({ length: 1000 }, (_, index) => ({
+    kind: "Unplaceable" as const,
+    reason: "NotOnline" as const,
+    host: { ...HOST, hostId: `host-${index}`, name: "h".repeat(120) },
+  }));
+  const refused = unplaced(hosts, "start again");
+  assert.equal(refused.problem.detail.length, ProblemSchema.shape.detail.maxLength);
+  assert.equal(ProblemSchema.safeParse(refused.problem).success, true);
+  assert.equal(
+    StartRefusalSchema.safeParse({ code: refused.problem.code, detail: refused.problem.detail }).success,
+    true,
+  );
 });
