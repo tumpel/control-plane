@@ -2392,7 +2392,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
-    if (session.state === "Stopping" || session.state === "Stopped" || session.state === "Failed") {
+    if (session.state === "Stopping") return this.stopAgain(tenantId, session, now);
+    if (session.state === "Stopped" || session.state === "Failed") {
       return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
     }
     const running = this.inFlightTurns(sessionId)[0]?.turn_id ?? null;
@@ -2414,6 +2415,24 @@ export abstract class TenantSessions extends DurableObject<Env> {
     this.setSessionState(sessionId, "Stopping", now);
     const stopping = { ...session, state: "Stopping", updated_at: now };
     await this.snapshotOrTeardown(tenantId, stopping, latest);
+    return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
+  }
+
+  private async stopAgain(tenantId: string, session: SessionRow, now: number): Promise<Stop> {
+    const sessionId = session.session_id;
+    const latest = this.latestTurn(sessionId, null);
+    if (latest === null) throw new Error(`session ${sessionId} has no turn, though a start always offers one`);
+    const unanswered = this.ctx.storage.sql
+      .exec<SnapshotRequestRow>(
+        "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ?",
+        sessionId,
+      )
+      .toArray();
+    for (const request of unanswered) {
+      const detail = `the host had not answered snapshot ${request.snapshot_id} when the session was stopped again, so the stop asked the host again`;
+      this.recordSnapshotFailure(request, "NotAnswered", detail, iso(now));
+    }
+    await this.snapshotOrTeardown(tenantId, session, latest);
     return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -3589,7 +3608,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     request: SnapshotRequestRow,
     detail: string,
-    sessionState: "Idle" | "Stopped" = "Idle",
+    sessionState: "Idle" | "Stopping" | "Stopped" = "Idle",
   ): Promise<void> {
     await this.failTurn(
       tenantId,
@@ -3913,10 +3932,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
       await this.prebuildUnstored(session, detail);
-      await this.snapshotNotStored(tenantId, request, detail);
-      if (session.state === "Stopping" && message.reason === "BoxNotFound") {
-        if (this.sessionRow(session.session_id)?.state === "Stopping") await this.teardown(session);
-      }
+      const boxless = session.state === "Stopping" && message.reason === "BoxNotFound";
+      await this.snapshotNotStored(tenantId, request, detail, boxless ? "Stopping" : "Idle");
+      if (boxless && this.sessionRow(session.session_id)?.state === "Stopping") await this.teardown(session);
       if (session.state === "Stopping" && message.reason !== "BoxNotFound")
         await this.returnToIdle(tenantId, session.session_id);
       return null;
