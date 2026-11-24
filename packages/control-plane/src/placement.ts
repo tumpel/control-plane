@@ -70,25 +70,29 @@ const busyness = ({ host, usage }: Candidate): number =>
 const lacksDisk = ({ diskBudgetMib, diskHeldMib }: ReportedHostUsage, boxDiskMib: number): boolean =>
   diskHeldMib > 0 && diskHeldMib + boxDiskMib > diskBudgetMib;
 
-export const holdsWithinBudget = (usage: ReportedHostUsage): boolean =>
-  freeMemoryMib(usage) >= 0 && !lacksDisk(usage, 0);
+export const shortOf = (usage: ReportedHostUsage, { boxMemoryMib, boxDiskMib }: BoxSize): "Memory" | "Disk" | null => {
+  if (boxMemoryMib > freeMemoryMib(usage)) return "Memory";
+  if (lacksDisk(usage, boxDiskMib)) return "Disk";
+  return null;
+};
 
 const assess = (
   host: Host,
   usages: ReadonlyMap<string, ReportedHostUsage>,
   image: ImageAvailability,
-  { boxMemoryMib, boxDiskMib }: BoxSize,
+  box: BoxSize,
   heardSince: number,
 ): Candidate | Unplaceable => {
+  const { boxMemoryMib, boxDiskMib } = box;
   const usage = usages.get(host.hostId);
   if (host.state !== "Online" || usage === undefined || usage.updatedAt < heardSince)
     return { kind: "Unplaceable", host, reason: "NotOnline" };
   if (usage.reportedHealth !== "Healthy")
     return { kind: "Unplaceable", host: { ...host, reportedHealth: usage.reportedHealth }, reason: "NotHealthy" };
   if (!image.architectures.includes(host.architecture)) return { kind: "Unplaceable", host, reason: "NoImage", image };
-  if (boxMemoryMib > freeMemoryMib(usage))
-    return { kind: "Unplaceable", host, reason: "MemoryFull", usage, boxMemoryMib };
-  if (lacksDisk(usage, boxDiskMib)) return { kind: "Unplaceable", host, reason: "NoDisk", usage, boxDiskMib };
+  const short = shortOf(usage, box);
+  if (short === "Memory") return { kind: "Unplaceable", host, reason: "MemoryFull", usage, boxMemoryMib };
+  if (short === "Disk") return { kind: "Unplaceable", host, reason: "NoDisk", usage, boxDiskMib };
   return { kind: "Candidate", host, usage };
 };
 

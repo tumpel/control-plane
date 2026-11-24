@@ -93,10 +93,10 @@ import {
   type BoxSize,
   degradedOnly,
   type HeldBox,
-  holdsWithinBudget,
   type ImageAvailability,
   placeSession,
   type ReportedHostUsage,
+  shortOf,
   type Unplaceable,
 } from "./placement";
 import { signerOf } from "./presign";
@@ -1461,10 +1461,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (settled?.state === "Stopping") return;
     const next = this.nextQueued(sessionId);
     if (next !== null) await this.runQueued(tenantId, next);
-    if (settled !== null) await this.offerRoomed(tenantId, settled.host_id);
+    if (settled !== null) await this.offerRoomed(tenantId, settled.host_id, "Wait");
   }
 
-  private async offerRoomed(tenantId: string, hostId: string): Promise<void> {
+  private async offerRoomed(tenantId: string, hostId: string, onShort: "Wait" | "Fail"): Promise<void> {
     for (;;) {
       const [waiting] = this.ctx.storage.sql
         .exec<{ turn_id: string }>(
@@ -1480,19 +1480,25 @@ export abstract class TenantSessions extends DurableObject<Env> {
         )
         .toArray();
       if (waiting === undefined) return;
-      const usage = this.listHostUsage(tenantId).find((each) => each.hostId === hostId);
-      if (usage === undefined) return;
       const turn = this.turnRow(waiting.turn_id);
       const session = turn === null ? null : this.sessionRow(turn.session_id);
       if (turn === null || session === null)
         throw new Error(`turn ${waiting.turn_id} vanished while it waited for room`);
-      if (holdsWithinBudget(usage)) {
+      const usage = this.hostUsageWithout(tenantId, session.session_id).find((each) => each.hostId === hostId);
+      if (usage === undefined) return;
+      const box = boxSizeOf(session);
+      const short = shortOf(usage, box);
+      if (short === null) {
         await this.offer(tenantId, session, turn);
         continue;
       }
-      if (this.stoppingOn(hostId)) return;
+      if (onShort === "Wait" || this.stoppingOn(hostId)) return;
       const host = await this.hostName(tenantId, hostId);
-      const detail = `the idle boxes stopped to make room for this turn stayed on host ${host}, so its box memory is still in use: it gives boxes ${usage.memoryBudgetMib} MiB and its boxes hold ${usage.memoryHeldMib} MiB; send the turn again`;
+      const held =
+        short === "Memory"
+          ? `${usage.memoryBudgetMib} MiB of memory and its other boxes hold ${usage.memoryHeldMib} MiB of it, so this turn's box of ${box.boxMemoryMib} MiB`
+          : `${usage.diskBudgetMib} MiB of disk and its other boxes hold ${usage.diskHeldMib} MiB of it, so this turn's box disk of ${box.boxDiskMib} MiB`;
+      const detail = `the idle boxes stopped to make room for this turn left host ${host} short of ${short.toLowerCase()}: it gives boxes ${held} does not fit; send the turn again`;
       await this.failTurn(tenantId, turn.turn_id, "PoolExhausted", detail, iso(Date.now()));
     }
   }
@@ -1761,7 +1767,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const detail = `host ${host} reported the boxes it holds and the box of this snapshot was not among them, so the snapshot is gone`;
       await this.snapshotsGone(tenantId, requests, detail, "Idle", now);
     }
-    await this.offerRoomed(tenantId, hostId);
+    await this.offerRoomed(tenantId, hostId, "Fail");
   }
 
   private async releaseUnneededBoxes(
@@ -1861,6 +1867,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected listHostUsage(tenantId: string): ReportedHostUsage[] {
+    return this.hostUsageWithout(tenantId, null);
+  }
+
+  private hostUsageWithout(tenantId: string, sessionId: string | null): ReportedHostUsage[] {
     return this.ctx.storage.sql
       .exec<HostReportRow>(
         `SELECT r.host_id, r.box_capacity, r.channel_protocol, r.memory_budget_mib, r.memory_held_mib,
@@ -1872,9 +1882,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
             SUM(s.state IN ('Idle', 'Stopping')) AS warm,
             SUM(COALESCE(m.box_memory_mib, s.box_memory_mib)) AS memory_mib, SUM(s.box_disk_mib) AS disk_mib
           FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
-          WHERE s.state IN ('Starting', 'Running', 'Idle', 'Stopping') GROUP BY s.host_id
+          WHERE s.state IN ('Starting', 'Running', 'Idle', 'Stopping') AND s.session_id IS NOT ?1 GROUP BY s.host_id
         ) b ON b.host_id = r.host_id
         ORDER BY r.created_at, r.host_id`,
+        sessionId,
       )
       .toArray()
       .map((row) => ({
