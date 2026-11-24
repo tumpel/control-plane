@@ -51,8 +51,6 @@ type SubscriptionRow = {
   crew_failures_in_a_row: number;
   delivery_failures_in_a_row: number;
   starts_refused_in_a_row: number;
-  capacity_event_id: number;
-  capacity_retry_at: number;
   state: Subscription["state"];
   variant: string;
   created_at: number;
@@ -97,7 +95,7 @@ const refusalCount = (subscription: string): string =>
 
 const SUBSCRIPTION_SELECT = `${SUBSCRIPTION_STATES} SELECT s.subscription_id, s.session_id, s.prompt, s.goal, s.expires_at,
   MAX(s.cursor_event_id, s.start_refusal_event_id, s.capacity_event_id) AS cursor_event_id,
-  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, ${refusalCount("s")} AS starts_refused_in_a_row, s.capacity_event_id, s.capacity_retry_at, st.state, st.variant, s.created_at, s.updated_at,
+  s.crew_failures_in_a_row, s.delivery_failures_in_a_row, ${refusalCount("s")} AS starts_refused_in_a_row, st.state, st.variant, s.created_at, s.updated_at,
   (SELECT json_group_array(event) FROM (SELECT event FROM subscription_events WHERE subscription_id = s.subscription_id ORDER BY event)) AS events,
   (SELECT json_group_array(tag) FROM (SELECT tag FROM subscription_crew_tags WHERE subscription_id = s.subscription_id ORDER BY tag)) AS crew_tags
   FROM subscriptions AS s JOIN states AS st ON st.subscription_id = s.subscription_id`;
@@ -615,22 +613,24 @@ export abstract class TenantSubscriptions extends TenantSessions {
       cursor: number;
       startRefusal: number;
       capacity: number;
-      refusal: number;
     }>(query`
       SELECT subscription_id AS subscriptionId, cursor_event_id AS cursor, capacity_event_id AS capacity,
-        start_refusal_event_id AS startRefusal, refusal_delivery AS refusal
+        start_refusal_event_id AS startRefusal
       FROM subscription_turns WHERE turn_id = ${turnId} AND composed = 1`);
     if (delivery === undefined) return;
     const row = this.subscriptionRow(delivery.subscriptionId);
     if (row === null) throw new Error(`delivery turn ${turnId} lost its subscription`);
+    const advancesCapacity = query`${delivery.capacity} > capacity_event_id`;
+    const advancesRefusal = query`(${delivery.startRefusal} > start_refusal_event_id OR ${advancesCapacity})`;
     db.run(query`UPDATE subscriptions SET cursor_event_id = MAX(cursor_event_id, ${delivery.cursor}),
       start_refusal_event_id = MAX(start_refusal_event_id, ${delivery.startRefusal}),
       capacity_event_id = MAX(capacity_event_id, ${delivery.capacity}),
-      starts_refused_in_a_row = ${row.starts_refused_in_a_row + Number(delivery.capacity !== 0)},
-      capacity_retry_at = ${delivery.capacity === 0 ? row.capacity_retry_at : now + 1000 * 2 ** row.starts_refused_in_a_row},
-      refusal_delivery_attempts = CASE WHEN ${delivery.refusal} = 1 THEN 0 ELSE refusal_delivery_attempts END,
-      refusal_delivery_retry_at = CASE WHEN ${delivery.refusal} = 1 THEN 0 ELSE refusal_delivery_retry_at END
-      WHERE subscription_id = ${delivery.subscriptionId}`);
+      starts_refused_in_a_row = ${row.starts_refused_in_a_row} + (${advancesCapacity}),
+      capacity_retry_at = CASE WHEN ${advancesCapacity}
+        THEN ${now + 1000 * 2 ** row.starts_refused_in_a_row} ELSE capacity_retry_at END,
+      refusal_delivery_attempts = CASE WHEN ${advancesRefusal} THEN 0 ELSE refusal_delivery_attempts END,
+      refusal_delivery_retry_at = CASE WHEN ${advancesRefusal} THEN 0 ELSE refusal_delivery_retry_at END
+      WHERE subscription_id = ${delivery.subscriptionId} AND (${delivery.cursor} > cursor_event_id OR ${advancesRefusal})`);
     if (row.state === "Active" && this.undeliveredCrew(delivery.subscriptionId, now))
       this.ensureDelivery(delivery.subscriptionId, now);
   }

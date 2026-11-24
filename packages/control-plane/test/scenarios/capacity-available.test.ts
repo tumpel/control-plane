@@ -209,7 +209,9 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
     }
     const capacity = host.takeOffer();
     assert.equal((capacity.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+    const beforeClaim = world.tenantRowsWritten();
     await host.claims(capacity);
+    const claimWrites = world.tenantRowsWritten() - beforeClaim;
     if (cycle === 0) {
       const { served } = ServeConnectorTokenResultSchema.parse(
         await world.call("serveConnectorToken", { turnId: capacity.turnId, connectorId: "tumpel", now: Date.now() }),
@@ -232,7 +234,31 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
       await host.finishes(crew);
       await host.dropsIdleBox(crew);
     }
-    await host.finishes(capacity);
+    if (cycle === 10) {
+      await t.test("the tenth capacity delivery can claim again and run after NotClaimed", async () => {
+        await host.says({
+          type: "TurnFailed",
+          turnId: capacity.turnId,
+          reason: "NotClaimed",
+          detail: "the control plane did not answer the claim in time",
+          failedAt: new Date().toISOString(),
+        });
+        const again = host.takeOffer();
+        assert.equal(again.turnId, capacity.turnId);
+        assert.equal(again.prompt, capacity.prompt);
+        assert.equal((await world.turn(again.turnId)).state, "Offered");
+
+        const before = world.tenantRowsWritten();
+        const { reply } = await host.says({ type: "TurnClaim", turnId: again.turnId, boxId: again.boxId });
+        assert.deepEqual(reply, { type: "TurnClaimed", turnId: again.turnId });
+        assert.equal(world.tenantRowsWritten() - before, claimWrites - 1);
+        assert.equal((await world.turn(again.turnId)).state, "Running");
+        await host.finishes(again);
+        assert.equal((await world.turn(again.turnId)).state, "Completed");
+      });
+    } else {
+      await host.finishes(capacity);
+    }
     const counter = world
       .tenantSql()
       .exec("SELECT starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)

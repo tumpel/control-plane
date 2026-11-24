@@ -21,6 +21,7 @@ import { generateDataKey, seal } from "../src/envelope.ts";
 import { linkInstallation } from "../src/github-store.ts";
 import { workersSecretKeyStore } from "../src/key-store.ts";
 import { projectRoute } from "../src/trigger-routes.ts";
+import { CLAUDE_CODE_AMD64_RELEASE } from "./release-fixture.ts";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const ACCESS_AUD = "tumpel-github-installations-e2e";
@@ -219,6 +220,10 @@ test("connecting another account from Tumpel adds its installation and keeps the
 });
 
 test("a trigger drops a delivery it does not match and records why a matched one started no session", async () => {
+  const { RELEASES } = await server
+    .getWorker<{ RELEASES: { put(key: string, value: string): Promise<unknown> } }>()
+    .getEnv();
+  await RELEASES.put("current.json", JSON.stringify(CLAUDE_CODE_AMD64_RELEASE));
   const secrets = [{ kind: "ApiKey", name: "ANTHROPIC", provider: "Anthropic", value: "sk-ant-api03-trigger-test" }];
   const secretSet = await send("POST", "/v1/secret-sets", { name: "reviewer secrets", secrets }, bearer);
   assert.equal(secretSet.status, 200, await secretSet.clone().text());
