@@ -8,12 +8,10 @@ import {
   type SecretSetPatchSchema,
   SecretSetSchema,
   type SecretSetUpdateSchema,
-  StartRefusedEventSchema,
   TenantTierSchema,
 } from "@tumpel/schemas";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
-import { boundedTo } from "./bounded-detail.ts";
 import type { ConfigWrite } from "./configs.ts";
 import { tenantLimits, tenants } from "./db/central-schema.ts";
 import { centralDb } from "./db/client.ts";
@@ -57,7 +55,7 @@ import {
   type TenantResponse,
 } from "./tenant-api.ts";
 import { TenantConnectors } from "./tenant-connectors.ts";
-import { appendEvent, listEvents } from "./tenant-events.ts";
+import { appendEvent, eventRetentionDeadline, listEvents, pruneEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
 import { memberRows, sealContext } from "./tenant-sessions";
 import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
@@ -229,6 +227,7 @@ export class Tenant extends TenantConnectors {
   private writeWindow: WriteWindow = { start: 0, writes: 0 };
   private tierRead: Promise<void> | null = null;
   private readonly opened: Promise<void>;
+  private retentionAt: number | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     const cursors: { readonly rowsRead: number; readonly rowsWritten: number }[] = [];
@@ -242,6 +241,8 @@ export class Tenant extends TenantConnectors {
       await this.holdDataKey();
       await this.sealPlaintext();
       await this.openMeter();
+      this.retentionAt = eventRetentionDeadline(this.ctx.storage.sql);
+      this.restoreCapacityDeadline();
     });
   }
 
@@ -334,16 +335,18 @@ export class Tenant extends TenantConnectors {
     const response = await serveTenantRequest(request, this.operations, () =>
       this.ctx.abort("Tenant API reset onto the deployed code"),
     );
-    await this.afterOperation(operation);
-    return response;
-  }
-
-  private async afterOperation(operation: string | null): Promise<void> {
     await this.meterUsage(operation);
     await this.startDeliveries(this.tenantName());
     this.wakeEvents();
     this.wakeWebhooks();
     this.ctx.waitUntil(this.deliverPushes(this.tenantName()));
+    return response;
+  }
+
+  private pruneExpiredEvents(now: number): void {
+    if (this.retentionAt === null || this.retentionAt > now) return;
+    pruneEvents(this.ctx.storage.sql, now);
+    this.retentionAt = eventRetentionDeadline(this.ctx.storage.sql);
   }
 
   private tenantName(): string {
@@ -355,6 +358,7 @@ export class Tenant extends TenantConnectors {
   private wakeEvents(): void {
     if (!this.eventsAppended) return;
     this.eventsAppended = false;
+    this.retentionAt = eventRetentionDeadline(this.ctx.storage.sql);
     this.ctx.waitUntil(this.env.EVENTS.getByName(this.tenantName()).wake());
   }
 
@@ -368,17 +372,8 @@ export class Tenant extends TenantConnectors {
   }
 
   private readonly operations: TenantHandlers = {
-    recordStartRefusal: async ({ event, now }) => {
-      await this.recordRefusalRequest(
-        {
-          ...event,
-          refusal: {
-            ...event.refusal,
-            detail: boundedTo(StartRefusedEventSchema.shape.refusal.shape.detail.maxLength, event.refusal.detail),
-          },
-        },
-        now,
-      );
+    recordStartRefusal: ({ event, now }) => {
+      this.recordRefusalRequest(event, now);
       return {};
     },
     listPersonas: ({ tenantId }) => ({ personas: this.listPersonas(tenantId) }),
@@ -504,8 +499,8 @@ export class Tenant extends TenantConnectors {
     startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
       started: await this.startSessionFromIssue(tenantId, input, issue, now),
     }),
-    sendTurn: async ({ tenantId, sessionId, send, hosts, now }) => ({
-      sent: await this.sendTurn(tenantId, sessionId, send, hosts, now),
+    sendTurn: async ({ tenantId, sessionId, send, hosts, now }, caller) => ({
+      sent: await this.sendTurn(tenantId, sessionId, send, hosts, now, caller),
     }),
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
@@ -609,12 +604,13 @@ export class Tenant extends TenantConnectors {
     }),
     hostHello: async ({ tenantId, hostId, boxCapacity, usage, now, channelProtocol, heldTurnIds }) => {
       await this.hostHello(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, heldTurnIds);
+      this.pruneExpiredEvents(now);
       return {};
     },
     hostHeartbeat: async (input) => {
       const { tenantId, hostId, boxCapacity, usage, reportedHealth, now, channelProtocol } = input;
       await this.hostHeartbeat(tenantId, hostId, { boxCapacity, channelProtocol, usage, now }, reportedHealth, input);
-      this.queueDueCapacity(now);
+      this.pruneExpiredEvents(now);
       await this.failUnheldClaudeSetups(hostId, input.heldClaudeSetupIds, now);
       return {};
     },

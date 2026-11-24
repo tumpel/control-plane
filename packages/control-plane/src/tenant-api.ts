@@ -131,6 +131,7 @@ import {
   PatchSessionTagsResultSchema,
   PauseSubscriptionInputSchema,
   PauseSubscriptionResultSchema,
+  PersonOriginSchema,
   PinInputSchema,
   PinResultSchema,
   PrepareClaudeSetupInputSchema,
@@ -197,6 +198,7 @@ import {
   TranscriptCursorResultSchema,
   TriggerFiredInputSchema,
   TriggerFiredResultSchema,
+  TurnOriginSchema,
   UnknownConnectorsInputSchema,
   UnknownConnectorsResultSchema,
   UnpinInputSchema,
@@ -340,13 +342,20 @@ export type TenantOperation = keyof Operations;
 export type TenantInput<O extends TenantOperation> = z.infer<Operations[O]["input"]>;
 export type TenantResult<O extends TenantOperation> = z.infer<Operations[O]["result"]>;
 export type TenantRefusal = z.infer<typeof TenantRefusalSchema>;
-export type TenantRequest = { tenantApiVersion: number; operation: string; input: unknown };
+const CallerOriginSchema = z.union([PersonOriginSchema, TurnOriginSchema]);
+type CallerOrigin = z.infer<typeof CallerOriginSchema>;
+export type TenantRequest = { tenantApiVersion: number; operation: string; input: unknown; caller?: CallerOrigin };
 export type TenantResponse = { result: unknown } | TenantRefusal;
 export type TenantHandlers = {
-  [O in TenantOperation]: (input: TenantInput<O>) => TenantResult<O> | Promise<TenantResult<O>>;
+  [O in TenantOperation]: (input: TenantInput<O>, caller?: CallerOrigin) => TenantResult<O> | Promise<TenantResult<O>>;
 };
 
-const EnvelopeSchema = z.object({ tenantApiVersion: z.int(), operation: z.string(), input: z.unknown() });
+const EnvelopeSchema = z.object({
+  tenantApiVersion: z.int(),
+  operation: z.string(),
+  input: z.unknown(),
+  caller: CallerOriginSchema.optional(),
+});
 
 const known = (operation: string): operation is TenantOperation => Object.hasOwn(TENANT_OPERATIONS, operation);
 
@@ -356,11 +365,19 @@ const invalid = (operation: string, error: z.ZodError): TenantRefusal => ({
   issues: error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`),
 });
 
-const run = <O extends TenantOperation>(handlers: TenantHandlers, operation: O, input: unknown) => {
+const run = <O extends TenantOperation>(
+  handlers: TenantHandlers,
+  operation: O,
+  input: unknown,
+  caller?: CallerOrigin,
+) => {
   const parsed = TENANT_OPERATIONS[operation].input.safeParse(input);
   if (!parsed.success) return invalid(operation, parsed.error);
-  const handler = handlers[operation] as (input: TenantInput<O>) => TenantResult<O> | Promise<TenantResult<O>>;
-  return Promise.resolve(handler(parsed.data as TenantInput<O>)).then((result) => ({ result }));
+  const handler = handlers[operation] as (
+    input: TenantInput<O>,
+    caller?: CallerOrigin,
+  ) => TenantResult<O> | Promise<TenantResult<O>>;
+  return Promise.resolve(handler(parsed.data as TenantInput<O>, caller)).then((result) => ({ result }));
 };
 
 export const serveTenantRequest = async (
@@ -381,7 +398,7 @@ export const serveTenantRequest = async (
     };
   }
   if (!known(operation)) return { refusal: "TenantOperationUnknown", operation };
-  return run(handlers, operation, input);
+  return run(handlers, operation, input, envelope.data.caller);
 };
 
 type TenantStub = { handle(request: TenantRequest): Promise<TenantResponse> };
@@ -397,11 +414,18 @@ const refused = (tenantId: string, operation: string, refusal: TenantRefusal): E
   );
 };
 
-export const tenantApi = (namespace: { getByName(name: string): TenantStub }, tenantId: string) => ({
+export const tenantApi = (
+  namespace: { getByName(name: string): TenantStub },
+  tenantId: string,
+  caller?: CallerOrigin,
+) => ({
   call: async <O extends TenantOperation>(operation: O, input: TenantInput<O>): Promise<TenantResult<O>> => {
-    const response = await namespace
-      .getByName(tenantId)
-      .handle({ tenantApiVersion: TenantApiProtocol.Version, operation, input });
+    const response = await namespace.getByName(tenantId).handle({
+      tenantApiVersion: TenantApiProtocol.Version,
+      operation,
+      input,
+      ...(caller === undefined ? {} : { caller }),
+    });
     if ("refusal" in response) throw refused(tenantId, operation, TenantRefusalSchema.parse(response));
     const result = TENANT_OPERATIONS[operation].result.safeParse(response.result);
     if (!result.success) {

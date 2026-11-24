@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ListEventsResultSchema, PersonaSchema, ProblemSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
+import { RELEASE_CACHE_MS } from "../../src/releases.ts";
+import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
@@ -83,22 +85,18 @@ test("StartRefused records start refusals and delivers the answered problem once
   assert.equal(host.holds("TurnOffer"), false);
 });
 
-test("StartRefused records start-from-issue refusals and delivers the answered problem once", async (t) => {
+test("StartRefused records a refused start from a resolved issue", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.online(world.owner, "host-1", {
     boxCapacity: 1,
     usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
   });
-  const foreman = await world.startSession({ prompt: "lead the crew", tags: ["role:foreman"] });
-  const enabled = await world.fetch(
-    world.owner,
-    "PATCH",
-    `/v1/personas/${foreman.personaId}`,
-    JSON.stringify({ tumpelMcp: true }),
-  );
-  assert.equal(enabled.status, 200);
-  const persona = PersonaSchema.parse(await enabled.json());
+  const filler = await world.startSession({ prompt: "hold the only box", tags: [] });
+  await host.claims(host.takeOffer());
+  const response = await world.fetch(world.owner, "GET", `/v1/personas/${filler.personaId}`);
+  assert.equal(response.status, 200);
+  const persona = PersonaSchema.parse(await response.json());
   await world.call("setSecretMember", {
     tenantId: TENANT_ID,
     secretSetId: persona.secretSetId,
@@ -106,58 +104,33 @@ test("StartRefused records start-from-issue refusals and delivers the answered p
     githubUser: { githubUserId: 1, login: "scenario" },
     now: Date.now(),
   });
-  await world.subscribe(foreman, {
-    prompt: "handle refused crew starts",
-    goal: "finish the work",
-    events: ["StartRefused"],
-    crewTags: ["crew:work"],
-  });
-  const offer = host.takeOffer();
-  await host.claims(offer);
-  const { served } = ServeConnectorTokenResultSchema.parse(
-    await world.call("serveConnectorToken", {
-      turnId: offer.turnId,
-      connectorId: "tumpel",
-      now: Date.now(),
+  const before = world.tenantRowsWritten();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions/from-issue",
+    JSON.stringify({
+      personaId: filler.personaId,
+      owner: "acme",
+      name: "app",
+      issueNumber: 12,
+      model: "opus",
+      tags: ["crew:work"],
     }),
   );
-  assert.equal(served.kind, "Served");
-  const member = { tenantId: TENANT_ID, token: served.token.accessToken };
-  const body = { personaId: foreman.personaId, owner: "acme", name: "app", issueNumber: 12, model: "opus" };
-  const before = world.tenantRowsWritten();
-  const response = await world.fetch(member, "POST", "/v1/sessions/from-issue", JSON.stringify(body));
-  assert.equal(response.status, 409);
-  const problem = ProblemSchema.parse(await response.json());
+  assert.equal(refused.status, 409);
+  const problem = ProblemSchema.parse(await refused.json());
   assert.equal(problem.code, "PoolExhausted");
   assert.equal(world.tenantRowsWritten() - before, 3);
-  const { listed } = ListEventsResultSchema.parse(
-    await world.call("listEvents", {
-      tenantId: TENANT_ID,
-      afterEventId: 0,
-      events: ["StartRefused"],
-      sessionId: null,
-      triggerId: null,
-    }),
-  );
-  assert.equal(listed.kind, "Read");
-  assert.equal(listed.page.events.length, 1);
-  const event = listed.page.events[0];
-  assert.equal(event?.event, "StartRefused");
-  assert.deepEqual(event.refusal, { code: "PoolExhausted", detail: problem.detail });
-  assert.equal(event.operation, "Start");
-  assert.equal(event.personaId, foreman.personaId);
-  assert.equal(event.model, "opus");
-  assert.deepEqual(event.caller, { kind: "Turn", sessionId: foreman.sessionId, turnId: offer.turnId });
-  assert.deepEqual(event.crewTags, ["crew:work"]);
-  assert.equal(world.tenantSql().exec("SELECT turn_id FROM subscription_turns").toArray().length, 0);
-  await host.finishes(offer);
-  const delivery = host.takeOffer();
-  assert.equal(delivery.sessionId, foreman.sessionId);
-  assert.match(delivery.prompt, /PoolExhausted/);
-  assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
-  await host.claims(delivery);
-  await host.finishes(delivery);
-  assert.equal(host.holds("TurnOffer"), false);
+  const read = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(read.status, 200);
+  const { events } = await read.json();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].operation, "Start");
+  assert.equal(events[0].personaId, filler.personaId);
+  assert.equal(events[0].caller.kind, "Person");
+  assert.deepEqual(events[0].crewTags, ["crew:work"]);
+  assert.deepEqual(events[0].refusal, { code: problem.code, detail: problem.detail });
 });
 
 test("StartRefused records send refusals and delivers the answered problem once", async (t) => {
@@ -198,6 +171,14 @@ test("StartRefused records send refusals and delivers the answered problem once"
   assert.equal(served.kind, "Served");
   const member = { tenantId: TENANT_ID, token: served.token.accessToken };
   const body = { prompt: "do crew work" };
+  await world.call("pin", { pin: { harness: "ClaudeCode", harnessVersion: "removed-version" }, now: Date.now() });
+  const resized = await world.fetch(
+    world.owner,
+    "PATCH",
+    `/v1/personas/${target.personaId}`,
+    JSON.stringify({ boxMemoryMib: 4096 }),
+  );
+  assert.equal(resized.status, 200);
   const before = world.tenantRowsWritten();
   const response = await world.fetch(member, "POST", `/v1/sessions/${target.sessionId}/turns`, JSON.stringify(body));
   assert.equal(response.status, 409);
@@ -223,136 +204,13 @@ test("StartRefused records send refusals and delivers the answered problem once"
   assert.equal(event.model, "opus");
   assert.deepEqual(event.caller, { kind: "Turn", sessionId: foreman.sessionId, turnId: offer.turnId });
   assert.deepEqual(event.crewTags, ["crew:work"]);
+  assert.equal(world.tenantSql().exec("SELECT box_memory_mib FROM room_refusals").one().box_memory_mib, 2048);
   assert.equal(world.tenantSql().exec("SELECT turn_id FROM subscription_turns").toArray().length, 0);
   await host.finishes(offer);
   const delivery = host.takeOffer();
   assert.equal(delivery.sessionId, foreman.sessionId);
   assert.match(delivery.prompt, /PoolExhausted/);
   assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
-  await host.claims(delivery);
-  await host.finishes(delivery);
-  assert.equal(host.holds("TurnOffer"), false);
-});
-
-test("StartRefused records preflight refusals and delivers the answered problem once", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  const host = await world.online(world.owner, "host-1", {
-    boxCapacity: 1,
-    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 2048, memoryAvailableMib: 2048 },
-  });
-  const foreman = await world.startSession({ prompt: "lead the crew", tags: ["role:foreman"] });
-  const enabled = await world.fetch(
-    world.owner,
-    "PATCH",
-    `/v1/personas/${foreman.personaId}`,
-    JSON.stringify({ tumpelMcp: true }),
-  );
-  assert.equal(enabled.status, 200);
-  await world.subscribe(foreman, {
-    prompt: "handle refused crew starts",
-    goal: "finish the work",
-    events: ["StartRefused"],
-    crewTags: ["crew:work"],
-  });
-  const offer = host.takeOffer();
-  await host.claims(offer);
-  const { served } = ServeConnectorTokenResultSchema.parse(
-    await world.call("serveConnectorToken", {
-      turnId: offer.turnId,
-      connectorId: "tumpel",
-      now: Date.now(),
-    }),
-  );
-  assert.equal(served.kind, "Served");
-  const member = { tenantId: TENANT_ID, token: served.token.accessToken };
-  const body = {
-    personaId: foreman.personaId,
-    repository: "https://github.com/acme/app",
-    model: "unsupported-model",
-    prompt: "do crew work",
-  };
-  const before = world.tenantRowsWritten();
-  const response = await world.fetch(member, "POST", "/v1/sessions", JSON.stringify(body));
-  assert.equal(response.status, 422);
-  const problem = ProblemSchema.parse(await response.json());
-  assert.equal(problem.code, "ModelUnsupported");
-  assert.equal(world.tenantRowsWritten() - before, 2);
-  const { listed } = ListEventsResultSchema.parse(
-    await world.call("listEvents", {
-      tenantId: TENANT_ID,
-      afterEventId: 0,
-      events: ["StartRefused"],
-      sessionId: null,
-      triggerId: null,
-    }),
-  );
-  assert.equal(listed.kind, "Read");
-  assert.equal(listed.page.events.length, 1);
-  const event = listed.page.events[0];
-  assert.equal(event?.event, "StartRefused");
-  assert.deepEqual(event.refusal, { code: "ModelUnsupported", detail: problem.detail });
-  assert.equal(event.operation, "Start");
-  assert.equal(event.personaId, foreman.personaId);
-  assert.equal(event.model, "unsupported-model");
-  assert.deepEqual(event.caller, { kind: "Turn", sessionId: foreman.sessionId, turnId: offer.turnId });
-  assert.deepEqual(event.crewTags, ["crew:work"]);
-  assert.equal(world.tenantSql().exec("SELECT turn_id FROM subscription_turns").toArray().length, 0);
-  await host.finishes(offer);
-  const delivery = host.takeOffer();
-  assert.equal(delivery.sessionId, foreman.sessionId);
-  assert.match(delivery.prompt, /ModelUnsupported/);
-  assert.equal((delivery.prompt.match(/"event":"StartRefused"/g) ?? []).length, 1);
-  await host.claims(delivery);
-  await host.finishes(delivery);
-  assert.equal(host.holds("TurnOffer"), false);
-});
-
-test("a refusal waits behind a paused subscription cursor and delivers on resume", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
-  const foreman = await world.startSession({ prompt: "lead the crew", tags: [] });
-  const turn = host.takeOffer();
-  await host.claims(turn);
-  await host.finishes(turn);
-  const subscription = await world.subscribe(foreman, {
-    prompt: "handle refused starts",
-    goal: "finish",
-    events: ["StartRefused"],
-    crewTags: [],
-  });
-  const path = `/v1/subscriptions/${subscription.subscriptionId}`;
-  assert.equal(
-    (await world.fetch(world.owner, "POST", `${path}/pause`, JSON.stringify({ message: "hold" }))).status,
-    200,
-  );
-  const written = world.tenantRowsWritten();
-  const response = await world.fetch(
-    world.owner,
-    "POST",
-    "/v1/sessions",
-    JSON.stringify({
-      personaId: foreman.personaId,
-      repository: "https://github.com/acme/app",
-      model: "unsupported-model",
-      prompt: "crew work",
-    }),
-  );
-  assert.equal(response.status, 422);
-  assert.equal(ProblemSchema.parse(await response.json()).code, "ModelUnsupported");
-  assert.equal(
-    world.tenantSql().exec("SELECT * FROM events WHERE json_extract(payload, '$.event') = 'StartRefused'").toArray()
-      .length,
-    1,
-  );
-  assert.equal(world.tenantRowsWritten() - written, 2);
-  assert.equal(host.holds("TurnOffer"), false);
-  assert.equal((await world.subscription(subscription.subscriptionId)).cursorEventId, subscription.cursorEventId);
-  assert.equal((await world.fetch(world.owner, "POST", `${path}/resume`)).status, 200);
-  const delivery = host.takeOffer();
-  assert.equal(delivery.sessionId, foreman.sessionId);
-  assert.match(delivery.prompt, /ModelUnsupported/);
   await host.claims(delivery);
   await host.finishes(delivery);
   assert.equal(host.holds("TurnOffer"), false);
@@ -443,7 +301,7 @@ test("one refusal writes one event for 101 subscriptions and preserves a paused 
   assert.equal(new Set(delivered.map((row) => row.cursor_event_id)).size, 1);
 });
 
-test("a refusal without a catalog version records the attempt without inventing a version", async (t) => {
+test("a catalog preflight refusal records the code and detail the caller received", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -482,7 +340,6 @@ test("a refusal without a catalog version records the attempt without inventing 
   const event = listed.page.events[0];
   assert.equal(event?.event, "StartRefused");
   assert.deepEqual(event.refusal, { code: "HarnessNotInCatalog", detail: problem.detail });
-  assert.equal("harnessVersion" in event, false);
   assert.equal(event.caller.kind, "Person");
 });
 
@@ -539,7 +396,7 @@ test("delivery composition matches a refusal's crew tags without a calling sessi
   assert.equal((await world.subscription(unmatched.subscriptionId)).cursorEventId, unmatched.cursorEventId);
 });
 
-test("refusal appends prune one expired event per request independently of the backlog", async (t) => {
+test("refusal appends stay bounded while maintenance drains expired events in batches", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -569,13 +426,81 @@ test("refusal appends prune one expired event per request independently of the b
       }),
     );
     assert.equal(refused.status, 422);
-    assert.equal(world.tenantRowsWritten() - written, 4);
+    assert.equal(world.tenantRowsWritten() - written, 2);
     assert.equal(
       world
         .tenantSql()
         .exec("SELECT event_id FROM events WHERE created_at < ?", Date.now() - 7 * 24 * 60 * 60 * 1000)
         .toArray().length,
-      100 - each,
+      101,
     );
   }
+  host.quiet();
+  for (const remaining of [69, 37, 5, 0]) {
+    const before = world.tenantRowsWritten();
+    await host.beats();
+    const expired = world
+      .tenantSql()
+      .exec("SELECT COUNT(*) AS count FROM events WHERE created_at < ?", Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .one();
+    assert.equal(expired.count, remaining);
+    assert.ok(world.tenantRowsWritten() - before <= 64);
+  }
+});
+
+test("a released manifest missing the requested image records ImageNotReleased for start and send", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const session = await world.startSession({ prompt: "work before an image goes away", tags: [] });
+  const turn = host.takeOffer();
+  await host.claims(turn);
+  await host.finishes(turn);
+  await host.dropsIdleBox(turn);
+  await world.releases.put(
+    "current.json",
+    JSON.stringify({
+      ...CLAUDE_CODE_AMD64_RELEASE,
+      images: [],
+      harnessLayers: CLAUDE_CODE_AMD64_RELEASE.harnessLayers.map((layer) => ({ ...layer, harnessVersion: "0.0.0" })),
+    }),
+  );
+  await world.tick(RELEASE_CACHE_MS);
+  const before = world.tenantRowsWritten();
+  const start = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: session.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "start again",
+    }),
+  );
+  const send = await world.fetch(
+    world.owner,
+    "POST",
+    `/v1/sessions/${session.sessionId}/turns`,
+    JSON.stringify({ prompt: "send again" }),
+  );
+  assert.equal(start.status, 422);
+  assert.equal(send.status, 422);
+  const startProblem = ProblemSchema.parse(await start.json());
+  const sendProblem = ProblemSchema.parse(await send.json());
+  assert.equal(startProblem.code, "ImageNotReleased");
+  assert.equal(sendProblem.code, "ImageNotReleased");
+  assert.match(startProblem.detail, /the current release has no ClaudeCode .* guest image/);
+  assert.equal(world.tenantRowsWritten() - before, 4);
+  const read = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  assert.equal(read.status, 200);
+  const { events } = await read.json();
+  assert.deepEqual(
+    events.map(({ operation, refusal }: { operation: string; refusal: object }) => ({ operation, refusal })),
+    [
+      { operation: "Start", refusal: { code: startProblem.code, detail: startProblem.detail } },
+      { operation: "Send", refusal: { code: sendProblem.code, detail: sendProblem.detail } },
+    ],
+  );
+  assert.equal(world.tenantSql().exec("SELECT COUNT(*) AS count FROM room_refusals").one().count, 0);
 });

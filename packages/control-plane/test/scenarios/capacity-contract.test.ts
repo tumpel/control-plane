@@ -4,7 +4,7 @@ import { ServeConnectorTokenResultSchema, TenantEventSchema } from "@tumpel/sche
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
-test("capacity contract keeps the first refusal and signal paired across a later refusal", async (t) => {
+test("capacity keeps a signal paired with the refusal it followed while the recipient is busy", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.online(world.owner, "host-1", {
@@ -14,46 +14,42 @@ test("capacity contract keeps the first refusal and signal paired across a later
   const initial = host.takeOffer();
   await host.claims(initial);
   await world.fetch(world.owner, "PATCH", `/v1/personas/${foreman.personaId}`, JSON.stringify({ tumpelMcp: true }));
-  const interested = await world.subscribe(foreman, {
+  await world.subscribe(foreman, {
     prompt: "wait for room",
     goal: "finish",
     events: ["CapacityAvailable"],
-    crewTags: ["crew:a"],
+    crewTags: ["crew:work"],
   });
-  const unrelated = await world.subscribe(foreman, {
-    prompt: "other crew",
-    goal: "finish",
-    events: ["CapacityAvailable"],
-    crewTags: ["crew:b"],
-  });
-  const filler = await world.startSession({ prompt: "hold a box", tags: [], boxRetention: "Warm" });
+  await world.startSession({ prompt: "hold a box", tags: [], boxRetention: "Warm" });
   const busy = host.takeOffer();
-  assert.equal(busy.sessionId, filler.sessionId);
   await host.claims(busy);
   await host.finishes(busy);
-  const event = {
-    event: "StartRefused",
-    operation: "Start",
+  const body = JSON.stringify({
     personaId: foreman.personaId,
+    repository: "https://github.com/acme/app",
     model: "opus",
-    caller: { kind: "Person", principalId: "principal-scenario" },
-    crewTags: ["crew:a"],
-    refusal: { code: "PoolExhausted", detail: "the crew needs room" },
-  };
-  const written = world.tenantRowsWritten();
-  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
-  assert.equal(world.tenantRowsWritten() - written, 3);
+    prompt: "crew work",
+    tags: ["crew:work"],
+  });
+  let before = world.tenantRowsWritten();
+  const first = await world.fetch(world.owner, "POST", "/v1/sessions", body);
+  assert.equal(first.status, 409);
+  assert.equal(world.tenantRowsWritten() - before, 3);
   await host.dropsIdleBox(busy);
-  await world.passes(1000);
-  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
+
+  await world.startSession({ prompt: "fill the host again", tags: [], boxRetention: "Warm" });
+  const refill = host.takeOffer();
+  await host.claims(refill);
+  before = world.tenantRowsWritten();
+  const second = await world.fetch(world.owner, "POST", "/v1/sessions", body);
+  assert.equal(second.status, 409);
+  assert.equal(world.tenantRowsWritten() - before, 3);
   await host.finishes(initial);
   const delivery = host.takeOffer();
   assert.equal((delivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
   await host.claims(delivery);
   await host.finishes(delivery);
   assert.equal(host.holds("TurnOffer"), false);
-  assert.ok((await world.subscription(interested.subscriptionId)).cursorEventId > interested.cursorEventId);
-  assert.equal((await world.subscription(unrelated.subscriptionId)).cursorEventId, unrelated.cursorEventId);
 });
 
 test("capacity contract event readback and delivery preserve the stored refusal detail", async (t) => {
@@ -150,66 +146,93 @@ test("capacity contract rejects inherited tag overflow before recording a malfor
   assert.equal(world.tenantRowsWritten() - written, 0);
 });
 
-test("capacity contract catches up a refusal registered after room became available and reads both events unchanged", async (t) => {
+test("a smaller pending refusal wakes only matching subscriptions before a larger refusal fits", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 6144, memoryAvailableMib: 6144 },
+  });
   const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
   const initial = host.takeOffer();
   await host.claims(initial);
-  await world.subscribe(foreman, {
-    prompt: "room returned",
+  await world.fetch(world.owner, "PATCH", `/v1/personas/${foreman.personaId}`, JSON.stringify({ tumpelMcp: true }));
+  const matching = await world.subscribe(foreman, {
+    prompt: "crew needs room",
     goal: "finish",
     events: ["CapacityAvailable"],
-    crewTags: [],
+    crewTags: ["crew:work"],
   });
-  const event = {
-    event: "StartRefused",
-    operation: "Start",
-    personaId: foreman.personaId,
-    model: "opus",
-    caller: { kind: "Person", principalId: "principal-scenario" },
-    crewTags: [],
-    refusal: { code: "PoolExhausted", detail: "placement refused before a box stopped" },
-  };
-  const written = world.tenantRowsWritten();
-  await world.call("recordStartRefusal", { tenantId: TENANT_ID, event, now: Date.now() });
-  assert.equal(world.tenantRowsWritten() - written, 6);
-  const stored = world
-    .tenantSql()
-    .exec(
-      "SELECT event_id, payload, created_at FROM events WHERE json_extract(payload, '$.event') IN ('StartRefused', 'CapacityAvailable') ORDER BY event_id",
-    )
-    .toArray();
-  assert.equal(stored.length, 2);
-  const expected = stored.map((row) =>
-    TenantEventSchema.parse({
-      ...JSON.parse(String(row.payload)),
-      eventId: row.event_id,
-      tenantId: TENANT_ID,
-      createdAt: row.created_at,
-    }),
-  );
-  const read = await world.fetch(
-    world.owner,
-    "GET",
-    "/v1/events?afterEventId=0&event=StartRefused&event=CapacityAvailable",
-  );
-  assert.equal(read.status, 200);
-  assert.deepEqual((await read.json()).events, expected);
+  const unrelated = await world.subscribe(foreman, {
+    prompt: "unrelated crew",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: ["crew:other"],
+  });
+  await world.startSession({ prompt: "Auto work", tags: [], boxRetention: "Auto" });
+  const auto = host.takeOffer();
+  await host.claims(auto);
+  await world.startSession({ prompt: "small warm box", tags: [], boxRetention: "Warm" });
+  const small = host.takeOffer();
+  await host.claims(small);
+  await host.finishes(small);
+
+  for (const boxMemoryMib of [4096, 2048]) {
+    const resized = await world.fetch(
+      world.owner,
+      "PATCH",
+      `/v1/personas/${foreman.personaId}`,
+      JSON.stringify({ boxMemoryMib }),
+    );
+    assert.equal(resized.status, 200);
+    const before = world.tenantRowsWritten();
+    const refused = await world.fetch(
+      world.owner,
+      "POST",
+      "/v1/sessions",
+      JSON.stringify({
+        personaId: foreman.personaId,
+        repository: "https://github.com/acme/app",
+        model: "opus",
+        prompt: `crew needs ${boxMemoryMib} MiB`,
+        tags: ["crew:work"],
+      }),
+    );
+    assert.equal(refused.status, 409);
+    assert.equal((await refused.json()).code, "PoolExhausted");
+    assert.equal(world.tenantRowsWritten() - before, 3);
+  }
+
+  const beforeSmall = world.tenantRowsWritten();
+  await host.dropsIdleBox(small);
+  const signalWrites = world.tenantRowsWritten() - beforeSmall;
   await host.finishes(initial);
-  const delivery = host.takeOffer();
-  const delivered = delivery.prompt
-    .split("\n")
-    .filter((line) => line.startsWith("{"))
-    .map((line) => JSON.parse(line));
-  assert.deepEqual(
-    delivered,
-    expected.filter((entry) => entry.event === "CapacityAvailable"),
-  );
-  await host.claims(delivery);
-  await host.finishes(delivery);
+  const smallWake = host.takeOffer();
+  assert.equal(smallWake.sessionId, foreman.sessionId);
+  assert.equal((smallWake.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  assert.equal(signalWrites, 9);
+  await host.claims(smallWake);
+  await host.finishes(smallWake);
   assert.equal(host.holds("TurnOffer"), false);
+
+  await host.finishes(auto);
+  await world.passes(1000);
+  const largeWake = host.takeOffer();
+  assert.equal(largeWake.sessionId, foreman.sessionId);
+  assert.equal((largeWake.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(largeWake);
+  await host.finishes(largeWake);
+  assert.equal(host.holds("TurnOffer"), false);
+  assert.ok((await world.subscription(matching.subscriptionId)).cursorEventId > matching.cursorEventId);
+  assert.equal((await world.subscription(unrelated.subscriptionId)).cursorEventId, unrelated.cursorEventId);
+
+  const response = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=CapacityAvailable");
+  assert.equal(response.status, 200);
+  const { events } = await response.json();
+  assert.equal(events.length, 2);
+  assert.deepEqual(
+    events.map((event: { hostId: string }) => event.hostId),
+    [host.hostId, host.hostId],
+  );
 });
 
 test("capacity contract keeps a large box pending after a small release and wakes when an Auto box becomes evictable", async (t) => {
@@ -298,8 +321,16 @@ test("capacity contract excludes expired refusals from delivery and public readb
   const expired = Date.now() - 8 * 24 * 60 * 60 * 1000;
   world.tenantSql().exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", payload, expired);
   world.tenantSql().exec("INSERT INTO events (payload, created_at) VALUES (?, ?)", payload, expired);
+  world
+    .tenantSql()
+    .exec(
+      "INSERT INTO room_refusals (event_id, box_memory_mib, box_disk_mib, amd64, arm64, harness, harness_version) SELECT event_id, 2048, 32768, 1, 0, ?, ? FROM events WHERE created_at = ?",
+      "ClaudeCode",
+      "2.1.153",
+      expired,
+    );
   await world.hostOnline("host-2");
-  assert.equal(world.tenantSql().exec("SELECT event_id FROM events WHERE created_at = ?", expired).toArray().length, 1);
+  assert.equal(world.tenantSql().exec("SELECT event_id FROM events WHERE created_at = ?", expired).toArray().length, 2);
   const response = await world.fetch(
     world.owner,
     "GET",

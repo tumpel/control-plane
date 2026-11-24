@@ -8,7 +8,6 @@ import {
   SessionTagsPatchSchema,
   SessionTagsSchema,
   StartRefusalCodeSchema,
-  type StartRefusedEventSchema,
   SteerCreateSchema,
   type SteerSchema,
   TranscriptPageSchema,
@@ -28,17 +27,14 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { type HostRecord, hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
+import { hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
 import { issues, json, noContent, parseBody, problem } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
 import type { placementRefusals } from "./placement.ts";
-import { unplaced } from "./placement-problem.ts";
+import { boundedProblem, stranded, unavailableImage, unplaced } from "./placement-problem.ts";
 
-export { placeableFix, why } from "./placement-problem.ts";
-
-import { releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
 import type { SecretSetRead } from "./tenant.ts";
@@ -145,23 +141,7 @@ const turnNotFound = (turnId: string): Refused =>
   });
 
 export const credentialRefused = (refusal: CredentialRefusal, owner: string, harness: string, retry: string): Refused =>
-  refuse(422, credentialProblem(refusal, owner, harness, retry));
-
-const stranded = (session: Session, hosts: HostRecord[], missingTurnIds: string[]): Refused => {
-  const host = hosts.find((listed) => listed.hostId === session.hostId);
-  if (host === undefined) {
-    throw new Error(`session ${session.sessionId} runs on host ${session.hostId}, which its tenant does not list`);
-  }
-  return refuse(409, {
-    code: "HostOffline",
-    title: "Host offline",
-    detail: `the session runs on host ${host.name}, which is ${host.state}, and its snapshots miss ${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn" : "turns"}, so it cannot move to another host`,
-    fix:
-      host.state === "Revoked"
-        ? "The host was revoked and cannot snapshot those turns; enrol a new host"
-        : "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
-  });
-};
+  refuse(422, boundedProblem(credentialProblem(refusal, owner, harness, retry)));
 
 const tenantOf = (env: Env, caller: Caller) => tenantApi(env.TENANT, caller.tenantId);
 
@@ -274,6 +254,14 @@ const connectorDisconnected = (names: string[]): Refused =>
     fix: DISCONNECTED_FIX,
   });
 
+const tooManyTags = (tags: string[]): Refused =>
+  refuse(422, {
+    code: "InvalidRequest",
+    title: "Too many tags",
+    detail: `the session would carry ${tags.length} tags, its own and the crew tags it inherits from the session that starts it: ${tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
+    fix: `Start the session with ${tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+  });
+
 export const placed = <T>(
   started:
     | Exclude<SessionStarted<T>, { kind: "Unplaced" }>
@@ -281,43 +269,37 @@ export const placed = <T>(
 ): Outcome<T> => {
   if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
   if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
-  if (started.kind === "TagsOverLimit") {
-    return refuse(422, {
-      code: "InvalidRequest",
-      title: "Too many tags",
-      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that starts it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
-      fix: `Start the session with ${started.tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
-    });
-  }
+  if (started.kind === "TagsOverLimit") return tooManyTags(started.tags);
   if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
-  if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
+  if (started.kind === "ReleaseUnreadable") return refuse(422, unavailableImage(started.detail, "start again"));
   return ok(started.started);
 };
 
-const recordRefusal = async <T>(
+const recordPreflightRefusal = async (
   env: Env,
   caller: Caller,
-  attempt: Pick<z.infer<typeof StartRefusedEventSchema>, "operation" | "personaId" | "model" | "crewTags">,
-  outcome: Outcome<T>,
+  start: Pick<SessionStart, "personaId" | "model" | "tags">,
+  outcome: Refused,
   now: number,
-): Promise<Outcome<T>> => {
-  if (outcome.ok) return outcome;
+): Promise<Refused> => {
   const code = StartRefusalCodeSchema.safeParse(outcome.problem.code);
-  if (
-    code.success &&
-    (attempt.operation !== "Start" || !["PoolExhausted", "NoHostAvailable", "HostDegraded"].includes(code.data))
-  ) {
-    await tenantOf(env, caller).call("recordStartRefusal", {
-      tenantId: caller.tenantId,
-      event: {
-        ...attempt,
-        event: "StartRefused",
-        refusal: { code: code.data, detail: outcome.problem.detail },
-        caller: caller.origin,
-      },
-      now,
-    });
-  }
+  if (!code.success) return outcome;
+  const crewTags = start.tags ?? [];
+  const combined = await inheritedTags(env, caller, crewTags);
+  if (combined.length > SESSION_TAG_LIMIT) return tooManyTags(combined);
+  await tenantOf(env, caller).call("recordStartRefusal", {
+    tenantId: caller.tenantId,
+    event: {
+      event: "StartRefused",
+      operation: "Start",
+      personaId: start.personaId,
+      model: start.model,
+      crewTags,
+      refusal: { code: code.data, detail: outcome.problem.detail },
+      caller: caller.origin,
+    },
+    now,
+  });
   return outcome;
 };
 
@@ -328,61 +310,15 @@ export const startSession = async (
   endpoint: string,
   now: number,
 ): Promise<Outcome<StartedSession>> => {
-  const tags = await inheritedTags(env, caller, start.tags ?? []);
-  if (tags.length > SESSION_TAG_LIMIT) return placed({ kind: "TagsOverLimit", tags });
-  return recordRefusal(
-    env,
-    caller,
-    {
-      operation: "Start",
-      personaId: start.personaId,
-      model: start.model,
-      crewTags: tags,
-    },
-    await startSessionResult(env, caller, { ...start, tags }, endpoint, now),
-    now,
-  );
-};
-
-export const startSessionFromIssue = async (
-  env: Env,
-  caller: Caller,
-  start: SessionStartFromIssue,
-  endpoint: string,
-  now: number,
-): Promise<Outcome<StartedSessionFromIssue>> => {
-  const tags = await inheritedTags(env, caller, start.tags ?? []);
-  if (tags.length > SESSION_TAG_LIMIT) return placed({ kind: "TagsOverLimit", tags });
-  return recordRefusal(
-    env,
-    caller,
-    {
-      operation: "Start",
-      personaId: start.personaId,
-      model: start.model,
-      crewTags: tags,
-    },
-    await startSessionFromIssueResult(env, caller, { ...start, tags }, endpoint, now),
-    now,
-  );
-};
-
-const startSessionResult = async (
-  env: Env,
-  caller: Caller,
-  start: SessionStart,
-  endpoint: string,
-  now: number,
-): Promise<Outcome<StartedSession>> => {
   const prepared = await prepareStart(env, caller, start, endpoint, now);
-  if (!prepared.ok) return prepared;
+  if (!prepared.ok) return recordPreflightRefusal(env, caller, start, prepared, now);
   return placed(
     (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
       .started,
   );
 };
 
-const startSessionFromIssueResult = async (
+export const startSessionFromIssue = async (
   env: Env,
   caller: Caller,
   start: SessionStartFromIssue,
@@ -459,7 +395,7 @@ const startSessionFromIssueResult = async (
     endpoint,
     now,
   );
-  if (!prepared.ok) return prepared;
+  if (!prepared.ok) return recordPreflightRefusal(env, caller, start, prepared, now);
   return placed(
     (
       await tenant.call("startSessionFromIssue", {
@@ -517,39 +453,17 @@ export const sendTurn = async (
 ): Promise<Outcome<Turn>> => {
   const { session } = await tenantOf(env, caller).call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
-  return recordRefusal(
-    env,
-    caller,
-    {
-      operation: "Send",
-      personaId: session.personaId,
-      model: session.model,
-      crewTags: session.tags,
-    },
-    await sendTurnResult(env, caller, session, send, now),
-    now,
-  );
-};
-
-const sendTurnResult = async (
-  env: Env,
-  caller: Caller,
-  session: Session,
-  send: TurnSend,
-  now: number,
-): Promise<Outcome<Turn>> => {
-  const tenant = tenantOf(env, caller);
-  const sessionId = session.sessionId;
+  const tenant = tenantApi(env.TENANT, caller.tenantId, caller.origin);
   if (session.state === "Archived") return sessionArchived(sessionId, "turns");
   const goal = refusedGoal(session, send);
   if (goal !== null) return goal;
   const hosts = await listHostRecords(env, caller.tenantId);
   const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
   if (sent.kind === "Sent") return ok(sent.turn);
-  if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
+  if (sent.kind === "Stranded") return stranded(session.sessionId, session.hostId, hosts, sent.missingTurnIds);
   if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
   if (sent.kind === "Draining") return refuse(503, deployInProgress("send the turn again"));
-  if (sent.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(sent.detail, "send the turn again"));
+  if (sent.kind === "ReleaseUnreadable") return refuse(422, unavailableImage(sent.detail, "send the turn again"));
   if (sent.kind === "NotFound") return sessionNotFound(sessionId);
   if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");
   if (sent.kind === "Stopping") {

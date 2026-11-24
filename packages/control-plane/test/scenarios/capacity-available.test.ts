@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ProblemSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
+import { ChannelProtocol, ProblemSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { TENANT_ID, World } from "./harness/world.ts";
 
@@ -139,7 +139,6 @@ test("a full host wakes its foreman once on refusal and once when a box stops, t
   const afterSuccess = host.takeOffer();
   assert.equal((afterSuccess.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
   await host.claims(afterSuccess);
-  await host.finishes(afterSuccess);
   assert.equal(
     world
       .tenantSql()
@@ -150,6 +149,37 @@ test("a full host wakes its foreman once on refusal and once when a box stops, t
   const duplicateWritten = world.tenantRowsWritten();
   await host.dropsIdleBox(busy);
   assert.equal(world.tenantRowsWritten() - duplicateWritten, 0);
+
+  const block = await world.startSession({ prompt: "hold capacity again", tags: [], boxRetention: "Warm" });
+  const blocker = host.takeOffer();
+  assert.equal(blocker.sessionId, block.sessionId);
+  await host.claims(blocker);
+  const { served: latestToken } = ServeConnectorTokenResultSchema.parse(
+    await world.call("serveConnectorToken", { turnId: afterSuccess.turnId, connectorId: "tumpel", now: Date.now() }),
+  );
+  assert.equal(latestToken.kind, "Served");
+  const caller = { tenantId: TENANT_ID, token: latestToken.token.accessToken };
+  const attempt = JSON.stringify({
+    personaId: foreman.personaId,
+    repository: "https://github.com/acme/app",
+    model: "opus",
+    prompt: "try crew work",
+  });
+  assert.equal((await world.fetch(caller, "POST", "/v1/sessions", attempt)).status, 409);
+  await host.finishes(blocker);
+  await host.dropsIdleBox(blocker);
+  assert.equal((await world.fetch(caller, "POST", "/v1/sessions", attempt)).status, 200);
+  const started = host.takeOffer();
+  await host.claims(started);
+  await host.finishes(afterSuccess);
+  const recordedRefusal = host.takeOffer();
+  assert.match(recordedRefusal.prompt, /StartRefused/);
+  assert.doesNotMatch(recordedRefusal.prompt, /CapacityAvailable/);
+  await host.claims(recordedRefusal);
+  await host.finishes(recordedRefusal);
+  await host.finishes(started);
+  await host.dropsIdleBox(started);
+  assert.equal(host.holds("TurnOffer"), false, "a successful start clears the earlier pending room refusal");
 });
 
 test("ten exponentially spaced refusal and capacity cycles pause StartsRefused with one bounded counter", async (t) => {
@@ -202,6 +232,26 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
     await host.dropsIdleBox(busy);
     assert.equal(world.tenantRowsWritten() - written, cycle === 0 ? 30 : 9);
     if (cycle > 0) {
+      if (cycle === 1) {
+        const intervening = await world.fetch(
+          world.owner,
+          "POST",
+          "/v1/sessions",
+          JSON.stringify({
+            personaId: foreman.personaId,
+            repository: "https://github.com/acme/app",
+            model: "unsupported-model",
+            prompt: "ordinary refusal during capacity backoff",
+            tags: ["crew:work"],
+          }),
+        );
+        assert.equal(ProblemSchema.parse(await intervening.json()).code, "ModelUnsupported");
+        const ordinary = host.takeOffer();
+        assert.match(ordinary.prompt, /ModelUnsupported/);
+        assert.doesNotMatch(ordinary.prompt, /CapacityAvailable/);
+        await host.claims(ordinary);
+        await host.finishes(ordinary);
+      }
       const due = world
         .tenantSql()
         .exec("SELECT capacity_retry_at FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
@@ -211,7 +261,19 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
       assert.equal(host.holds("TurnOffer"), false);
       await world.passes(remaining - 1);
       assert.equal(host.holds("TurnOffer"), false);
-      await world.passes(1001);
+      if (cycle === 1) {
+        host.quiet();
+        await world.tick(1);
+        await host.beats();
+        assert.equal(
+          host.holds("TurnOffer"),
+          true,
+          "the earlier capacity signal survives the ordinary refusal and backoff",
+        );
+        host.resumes();
+      } else {
+        await world.passes(1001);
+      }
     }
     const capacity = host.takeOffer();
     assert.equal((capacity.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
@@ -428,6 +490,55 @@ test("ordinary host-online and box-stop transitions append no capacity signal", 
       .toArray().length,
     0,
   );
+});
+
+test("a healthy heartbeat on the same connection wakes a room refusal once", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const initial = host.takeOffer();
+  await host.claims(initial);
+  await host.finishes(initial);
+  await world.subscribe(foreman, {
+    prompt: "wait for a healthy host",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  await world.call("hostHeartbeat", {
+    tenantId: TENANT_ID,
+    hostId: host.hostId,
+    channelProtocol: ChannelProtocol.Version,
+    boxCapacity: 2,
+    usage: DEFAULT_USAGE,
+    reportedHealth: "RateLimited",
+    now: Date.now(),
+    ...host.holding(),
+  });
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "crew work",
+    }),
+  );
+  assert.equal(refused.status, 409);
+  assert.equal(host.holds("TurnOffer"), false);
+  await host.beats();
+  const ready = host.takeOffer();
+  assert.equal(ready.sessionId, foreman.sessionId);
+  assert.equal((ready.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(ready);
+  await host.finishes(ready);
+  const written = world.tenantRowsWritten();
+  await host.beats();
+  assert.equal(world.tenantRowsWritten() - written, 0);
+  assert.equal(host.holds("TurnOffer"), false);
 });
 
 test("a refusal queues one idle recipient and its delivery transition queues the next", async (t) => {

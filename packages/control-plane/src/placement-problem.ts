@@ -1,14 +1,48 @@
 import { ProblemSchema } from "@tumpel/schemas";
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
+import type { HostRecord } from "./host-record.ts";
+import type { Problem } from "./http.ts";
+import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
+
+export const boundedProblem = (problem: Problem): Problem => ({
+  ...problem,
+  detail: boundedTo(ProblemSchema.shape.detail.maxLength, problem.detail),
+});
+
+export const unavailableImage = (detail: string, retry: string): Problem =>
+  boundedProblem({
+    code: "ImageNotReleased",
+    title: "Guest image unavailable",
+    detail,
+    fix: `Ask the operator to publish a release with the release workflow, then ${retry}`,
+  });
 
 const refuse = (status: 409, problem: z.infer<typeof ProblemSchema>) => ({
   ok: false as const,
   status,
-  problem: { ...problem, detail: boundedTo(ProblemSchema.shape.detail.maxLength, problem.detail) },
+  problem: boundedProblem(problem),
 });
 
-import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
+export const stranded = (
+  sessionId: string,
+  hostId: string,
+  hosts: HostRecord[],
+  missingTurnIds: string[],
+): ReturnType<typeof refuse> => {
+  const host = hosts.find((listed) => listed.hostId === hostId);
+  if (host === undefined)
+    throw new Error(`session ${sessionId} runs on host ${hostId}, which its tenant does not list`);
+  return refuse(409, {
+    code: "HostOffline",
+    title: "Host offline",
+    detail: `the session runs on host ${host.name}, which is ${host.state}, and its snapshots miss ${missingTurnIds.length} completed ${missingTurnIds.length === 1 ? "turn" : "turns"}, so it cannot move to another host`,
+    fix:
+      host.state === "Revoked"
+        ? "The host was revoked and cannot snapshot those turns; enrol a new host"
+        : "Start tumpel-supervisor run on that host so it snapshots those turns, then send the turn again",
+  });
+};
 
 export const why = (refused: Unplaceable): string => {
   const named = refused.host.name;

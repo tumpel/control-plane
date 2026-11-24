@@ -18,5 +18,10 @@ CREATE TABLE capacity_rooms (
   memory_mib INTEGER NOT NULL,
   disk_mib INTEGER NOT NULL,
   disk_empty INTEGER NOT NULL CHECK (disk_empty IN (0, 1)),
-  architecture TEXT NOT NULL CHECK (architecture IN ('Amd64', 'Arm64'))
+  architecture TEXT NOT NULL CHECK (architecture IN ('Amd64', 'Arm64')),
+  host_id TEXT NOT NULL
+);
+CREATE TABLE stranded_room_refusals (
+  event_id INTEGER PRIMARY KEY REFERENCES room_refusals (event_id) ON DELETE CASCADE,
+  host_id TEXT NOT NULL
 );

@@ -9,6 +9,7 @@ import {
 } from "@tumpel/api/credentials";
 import type { BoxRetentionSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
 import {
+  CapacityRefusalCodeSchema,
   CredentialHandoverSchema,
   HarnessSchema,
   type PatchSessionTagsResultSchema,
@@ -25,6 +26,7 @@ import {
   SnapshotSchema,
   type StartedSessionFromIssueSchema,
   type StartedSessionSchema,
+  StartRefusalCodeSchema,
   type SteerSchema,
   StopFailureSchema,
   TranscriptLineSchema,
@@ -86,6 +88,8 @@ import {
 import { appKey, installationOn, installationsOf, storeBotUserId, storedApp } from "./github-store.ts";
 import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
 import { type HostEntry, type HostRecord, hostOf, listHosts, type OfferSent, withReportedHealth } from "./hosts";
+import type { Problem } from "./http.ts";
+import type { Origin } from "./identity.ts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
@@ -94,13 +98,12 @@ import {
   degradedOnly,
   type HeldBox,
   type ImageAvailability,
-  type Placement,
   placeSession,
   type ReportedHostUsage,
   shortOf,
   type Unplaceable,
 } from "./placement";
-import { why } from "./placement-problem.ts";
+import { boundedProblem, stranded, unavailableImage, unplaced, why } from "./placement-problem.ts";
 import { signerOf } from "./presign";
 import { bootArchitectures, bootFor, bootImage, type ReleaseRead, readRelease } from "./releases";
 import { type MemberRow, storedKeys, toMember } from "./secret-members.ts";
@@ -193,6 +196,7 @@ export type Started<T> =
 export type SessionStarted<T> = Started<T> | { kind: "TagsOverLimit"; tags: string[] };
 
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
+export type RoomRequirement = { image: ImageAvailability; box: BoxSize; hostId?: string };
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
@@ -1712,10 +1716,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<void> {
     const { heldTurnIds, heldSessionIds } = held;
     const dropped = this.ctx.storage.transactionSync(() => {
+      const fresh = report.now - presenceGraceMs(settingsOf(this.env));
+      const recovered =
+        reportedHealth === "Healthy" &&
+        this.ctx.storage.sql
+          .exec(
+            "SELECT 1 FROM host_reports WHERE host_id = ? AND (reported_health != 'Healthy' OR heard_at < ?)",
+            hostId,
+            fresh,
+          )
+          .toArray().length > 0;
       this.ctx.storage.sql.exec(
         `UPDATE host_reports SET memory_budget_mib = ?2, memory_held_mib = ?3, memory_available_mib = ?4,
           disk_budget_mib = ?5, disk_held_mib = ?6, load_average = ?7, reported_health = ?8, heard_at = ?9
-        WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR reported_health != ?8 OR heard_at < ?9 - ?10)`,
+        WHERE host_id = ?1 AND (memory_budget_mib != ?2 OR memory_held_mib != ?3 OR reported_health != ?8 OR heard_at < ?9 - ?10 OR ?11 = 1)`,
         hostId,
         report.usage.memoryBudgetMib ?? null,
         report.usage.memoryHeldMib ?? null,
@@ -1726,7 +1740,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
         reportedHealth,
         report.now,
         HEARD_REFRESH_MS,
+        Number(recovered),
       );
+      if (recovered) this.capacityMayHaveChanged();
       return this.judgeHeldTurns(hostId, heldTurnIds);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);
@@ -1943,10 +1959,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   protected async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
     const release = await readRelease(this.env.RELEASES, now);
-    if (release.kind === "Unreadable") return { kind: "ReleaseUnreadable", detail: release.detail };
+    if (release.kind === "Unreadable")
+      return { kind: "ReleaseUnreadable", detail: `the published release is unreadable: ${release.detail}` };
+    const architectures = bootArchitectures(release, harness, harnessVersion);
+    if (architectures.length === 0) {
+      return {
+        kind: "ReleaseUnreadable",
+        detail: `the current release has no ${harness} ${harnessVersion} guest image`,
+      };
+    }
     return {
       kind: "Read",
-      image: { harness, harnessVersion, architectures: bootArchitectures(release, harness, harnessVersion) },
+      image: { harness, harnessVersion, architectures },
     };
   }
 
@@ -2021,16 +2045,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  protected placeStart(tenantId: string, input: NewSession, image: ImageAvailability, now: number): Placement {
-    return placeSession(
-      input.hosts,
-      this.listHostUsage(tenantId),
-      image,
-      this.boxSize(input.start.personaId),
-      this.heldBoxes(),
-      now - presenceGraceMs(settingsOf(this.env)),
-    );
-  }
+  protected abstract appendStartRefusal(
+    event: Extract<NewTenantEvent, { event: "StartRefused" }>,
+    now: number,
+    room?: RoomRequirement,
+  ): void;
+
+  protected abstract capacityMayHaveChanged(): void;
 
   protected async begin(
     tenantId: string,
@@ -2040,17 +2061,51 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<SessionStarted<StartedSession>> {
     const { start } = input;
     const image = await this.imageAvailability(input.harness, input.harnessVersion, now);
-    if (image.kind === "ReleaseUnreadable") return image;
-    if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
+    const draining = image.kind === "Read" && (await deployDraining(this.env.RELEASES));
+    const tags = this.startTags(input.startedBy, start.tags ?? []);
+    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
+    const recordRefusal = (problem: Problem, room?: RoomRequirement): void => {
+      if (input.startedBy.kind === "Trigger") return;
+      this.appendStartRefusal(
+        {
+          event: "StartRefused",
+          operation: "Start",
+          personaId: start.personaId,
+          model: start.model,
+          caller: input.startedBy,
+          crewTags: tags,
+          refusal: { code: StartRefusalCodeSchema.parse(problem.code), detail: problem.detail },
+        },
+        now,
+        room,
+      );
+    };
+    if (image.kind === "ReleaseUnreadable") {
+      recordRefusal(unavailableImage(image.detail, "start again"));
+      return image;
+    }
+    if (draining) return { kind: "Draining" };
     const uses = personaConnectorUses(this.ctx.storage.sql, start.personaId);
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     const persona = this.boxSize(start.personaId);
     const { boxMemoryMib, boxDiskMib } = persona;
-    const tags = this.startTags(input.startedBy, start.tags ?? []);
-    if (tags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tags };
-    const placement = this.placeStart(tenantId, input, image.image, now);
-    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    const placement = placeSession(
+      input.hosts,
+      this.listHostUsage(tenantId),
+      image.image,
+      persona,
+      this.heldBoxes(),
+      now - presenceGraceMs(settingsOf(this.env)),
+    );
+    if (placement.kind === "Refused") {
+      const { problem } = unplaced(placement.hosts, "start again");
+      recordRefusal(
+        problem,
+        CapacityRefusalCodeSchema.safeParse(problem.code).success ? { image: image.image, box: persona } : undefined,
+      );
+      return { kind: "Unplaced", hosts: placement.hosts };
+    }
     const session: SessionRow = {
       session_id: crypto.randomUUID(),
       principal_id: input.principalId,
@@ -2138,14 +2193,41 @@ export abstract class TenantSessions extends DurableObject<Env> {
     send: TurnSend,
     hosts: HostRecord[],
     now: number,
+    caller?: Origin,
   ): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
     if (session.state === "Stopping") return { kind: "Stopping" };
     if (session.state === "Failed") return { kind: "Failed" };
+    const recordRefusal = (problem: Problem, room?: RoomRequirement): void => {
+      if (caller === undefined) return;
+      const crewTags = this.ctx.storage.sql
+        .exec<{ tag: string }>("SELECT tag FROM session_tags WHERE session_id = ? ORDER BY tag", sessionId)
+        .toArray()
+        .map(({ tag }) => tag);
+      this.appendStartRefusal(
+        {
+          event: "StartRefused",
+          operation: "Send",
+          personaId: session.persona_id,
+          model: session.model,
+          caller,
+          crewTags,
+          refusal: { code: StartRefusalCodeSchema.parse(problem.code), detail: problem.detail },
+        },
+        now,
+        room,
+      );
+    };
     const refusal = this.refusedCredential(session, now);
-    if (refusal !== null) return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
+    if (refusal !== null) {
+      const problem = boundedProblem(
+        credentialProblem(refusal, `the secret set of persona ${session.persona_id}`, session.harness, "send again"),
+      );
+      if (StartRefusalCodeSchema.safeParse(problem.code).success) recordRefusal(problem);
+      return { kind: "CredentialRefused", personaId: session.persona_id, refusal };
+    }
     const uses = sessionConnectorUses(this.ctx.storage.sql, sessionId);
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
@@ -2161,9 +2243,30 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
     }
     const missingTurnIds = session.state === "Stopped" ? [] : this.unsnapshottedTurns(sessionId);
-    if (missingTurnIds.length > 0) return { kind: "Stranded", missingTurnIds };
+    if (missingTurnIds.length > 0) {
+      const { problem } = stranded(sessionId, session.host_id, hosts, missingTurnIds);
+      const host = hosts.find(({ hostId }) => hostId === session.host_id);
+      recordRefusal(
+        problem,
+        host === undefined || host.state === "Revoked"
+          ? undefined
+          : {
+              hostId: host.hostId,
+              box: boxSizeOf(session),
+              image: {
+                harness: session.harness,
+                harnessVersion: session.harness_version,
+                architectures: [host.architecture],
+              },
+            },
+      );
+      return { kind: "Stranded", missingTurnIds };
+    }
     const image = await this.imageAvailability(session.harness, session.harness_version, now);
-    if (image.kind === "ReleaseUnreadable") return image;
+    if (image.kind === "ReleaseUnreadable") {
+      recordRefusal(unavailableImage(image.detail, "send the turn again"));
+      return image;
+    }
     const from = await this.hostName(tenantId, session.host_id);
     const place = (candidates: HostRecord[]) =>
       placeSession(
@@ -2176,7 +2279,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
     const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
-    if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
+    if (placement.kind === "Refused") {
+      const { problem } = unplaced(placement.hosts, "send the turn again");
+      recordRefusal(
+        problem,
+        CapacityRefusalCodeSchema.safeParse(problem.code).success
+          ? { image: image.image, box: boxSizeOf(session) }
+          : undefined,
+      );
+      return { kind: "Unplaced", hosts: placement.hosts };
+    }
     if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
