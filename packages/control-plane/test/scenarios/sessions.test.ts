@@ -2230,8 +2230,6 @@ suite("sessions", () => {
       detail: "this host runs no box of the session",
       failedAt: new Date().toISOString(),
     });
-    const teardown = await host.next("BoxTeardown");
-    host.send({ type: "BoxGone", sessionId: first.session.sessionId, boxId: teardown.boxId });
     await until(
       "the session reading Stopped",
       () => tool("tumpel_session_get", { sessionId: first.session.sessionId }, SessionSchema),

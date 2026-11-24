@@ -8,50 +8,28 @@ test("a stop held by snapshots the host never answered asks the host again when 
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
-  const foreman = await world.startSession({ prompt: "plan the epic", tags: ["role:foreman"] });
-  const stop = (cancelledBy: string | null) =>
-    world.call("stopSession", { tenantId: TENANT_ID, sessionId: foreman.sessionId, cancelledBy, now: Date.now() });
-  const asked = () =>
-    host
-      .received("SnapshotRequest")
-      .map((frame) => SnapshotRequestSchema.parse(frame))
-      .filter((request) => request.sessionId === foreman.sessionId);
-  const dropped = (): string[] => {
-    const requests = asked();
-    for (const _ of requests) host.take("SnapshotRequest");
-    return requests.map((request) => request.snapshotId);
-  };
-  await world.subscribe(foreman, {
-    prompt: "hand out the next step of the epic",
-    goal: "the epic is merged",
-    events: ["TurnCompleted"],
-    crewTags: ["crew:epic"],
+  const { sessionId } = await world.startSession({ prompt: "lose the snapshot answer", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const lost = [SnapshotRequestSchema.parse(host.take("SnapshotRequest")).snapshotId];
+  const queued = await world.sendTurn(sessionId, "run after the lost snapshot");
+
+  await world.call("stopSession", {
+    tenantId: TENANT_ID,
+    sessionId,
+    cancelledBy: "owner@scenario.test",
+    now: Date.now(),
   });
-  const foremanTurn = host.takeOffer();
-  await host.claims(foremanTurn);
-  await host.completes(foremanTurn);
-  const lost = dropped();
-
-  await world.startSession({ prompt: "build part one", tags: ["crew:epic"] });
-  const crewTurn = host.takeOffer();
-  await host.claims(crewTurn);
-  await host.finishes(crewTurn);
-
-  await stop("owner@scenario.test");
   await world.settle();
-  lost.push(...dropped());
-  assert.equal((await world.session(foreman.sessionId)).state, "Stopping");
-  const queued = z
-    .array(z.object({ turn_id: z.string() }))
-    .parse(
-      world
-        .tenantSql()
-        .exec("SELECT turn_id FROM turns WHERE session_id = ? AND state = 'Offered'", foreman.sessionId)
-        .toArray(),
-    );
-  assert.equal(queued.length, 1, "a delivery turn waits on the stopping foreman");
+  for (const request of host.received("SnapshotRequest")) {
+    lost.push(SnapshotRequestSchema.parse(request).snapshotId);
+    host.take("SnapshotRequest");
+  }
+  assert.equal((await world.session(sessionId)).state, "Stopping");
+  assert.equal((await world.turn(queued.turnId)).state, "Failed");
 
-  await stop(null);
+  await world.call("stopSession", { tenantId: TENANT_ID, sessionId, cancelledBy: null, now: Date.now() });
   await world.settle();
   const failures = z.array(z.object({ reason: z.string() })).parse(
     world
@@ -63,9 +41,8 @@ test("a stop held by snapshots the host never answered asks the host again when 
     failures.map((failure) => failure.reason),
     lost.map(() => "NotAnswered"),
   );
-  const [again] = asked();
-  assert.ok(again !== undefined, "the second stop asks the host for a snapshot again");
-  host.take("SnapshotRequest");
+  const again = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
+  assert.equal(again.sessionId, sessionId);
   await host.says({
     type: "SnapshotFailed",
     snapshotId: again.snapshotId,
@@ -73,11 +50,7 @@ test("a stop held by snapshots the host never answered asks the host again when 
     detail: "this host runs no box of the session",
     failedAt: new Date(Date.now()).toISOString(),
   });
-  const teardown = z.object({ sessionId: z.string(), boxId: z.string() }).parse(host.take("BoxTeardown"));
-  assert.equal(teardown.boxId, foremanTurn.boxId);
-  await host.says({ type: "BoxGone", sessionId: foreman.sessionId, boxId: teardown.boxId });
 
-  const delivery = host.takeOffer();
-  assert.equal(delivery.sessionId, foreman.sessionId);
-  assert.notEqual(delivery.boxId, foremanTurn.boxId, "the queued delivery runs on a fresh box");
+  assert.equal((await world.session(sessionId)).state, "Stopped");
+  assert.equal(host.received("BoxTeardown").length, 0);
 });
