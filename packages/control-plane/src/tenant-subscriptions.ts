@@ -236,7 +236,12 @@ export abstract class TenantSubscriptions extends TenantSessions {
   ): void {
     this.ctx.storage.transactionSync(() => {
       const eventId = this.appendEvent(event, now);
-      if (room === undefined) return;
+      if (
+        room === undefined ||
+        room.image.architectures.length === 0 ||
+        !CapacityRefusalCodeSchema.safeParse(event.refusal.code).success
+      )
+        return;
       const { image, box, hostId } = room;
       const db = durableDb(this.ctx.storage, {});
       db.run(query`INSERT INTO room_refusals (event_id, box_memory_mib, box_disk_mib, amd64, arm64, harness, harness_version)
@@ -610,7 +615,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
       capacity?.event_id ?? null,
       subscriptionId,
     );
-    if (capacity !== undefined) this.capacityScheduleChanged = true;
+    if (capacity !== undefined) {
+      this.capacityScheduleChanged = true;
+      this.capacityMayHaveChanged();
+    }
     if (row.state === "Active" && this.undelivered(subscriptionId)) {
       this.ensureDelivery(subscriptionId, Date.now());
     }

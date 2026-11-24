@@ -9,7 +9,6 @@ import {
 } from "@tumpel/api/credentials";
 import type { BoxRetentionSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
 import {
-  CapacityRefusalCodeSchema,
   CredentialHandoverSchema,
   HarnessSchema,
   type PatchSessionTagsResultSchema,
@@ -1962,7 +1961,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (release.kind === "Unreadable")
       return { kind: "ReleaseUnreadable", detail: `the published release is unreadable: ${release.detail}` };
     const architectures = bootArchitectures(release, harness, harnessVersion);
-    if (architectures.length === 0) {
+    if (release.kind === "Published" && architectures.length === 0) {
       return {
         kind: "ReleaseUnreadable",
         detail: `the current release has no ${harness} ${harnessVersion} guest image`,
@@ -2100,10 +2099,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     );
     if (placement.kind === "Refused") {
       const { problem } = unplaced(placement.hosts, "start again");
-      recordRefusal(
-        problem,
-        CapacityRefusalCodeSchema.safeParse(problem.code).success ? { image: image.image, box: persona } : undefined,
-      );
+      recordRefusal(problem, { image: image.image, box: persona });
       return { kind: "Unplaced", hosts: placement.hosts };
     }
     const session: SessionRow = {
@@ -2281,12 +2277,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") {
       const { problem } = unplaced(placement.hosts, "send the turn again");
-      recordRefusal(
-        problem,
-        CapacityRefusalCodeSchema.safeParse(problem.code).success
-          ? { image: image.image, box: boxSizeOf(session) }
-          : undefined,
-      );
+      recordRefusal(problem, { image: image.image, box: boxSizeOf(session) });
       return { kind: "Unplaced", hosts: placement.hosts };
     }
     if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
