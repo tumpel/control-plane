@@ -127,10 +127,10 @@ const START_REFUSAL_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM ev
 const PENDING_ROOM = `SELECT pending.subscription_id, r.event_id AS refusal_event_id FROM subscriptions AS pending
   JOIN events AS r ON r.event_id = (SELECT MAX(refused.event_id) FROM events AS refused
     WHERE json_extract(refused.payload, '$.event') = 'StartRefused'
+      AND json_extract(refused.payload, '$.refusal.code') IN ('PoolExhausted', 'NoHostAvailable', 'HostDegraded', 'HostOffline')
       AND refused.event_id > pending.capacity_refusal_event_id AND ${refusalMatch("refused", "pending.subscription_id")})
   WHERE NOT EXISTS (SELECT 1 FROM subscription_ends WHERE subscription_id = pending.subscription_id)
     AND EXISTS (SELECT 1 FROM subscription_events WHERE subscription_id = pending.subscription_id AND event = 'CapacityAvailable')
-    AND json_extract(r.payload, '$.refusal.code') IN ('PoolExhausted', 'NoHostAvailable', 'HostDegraded', 'HostOffline')
     AND NOT ${successAfter("pending.subscription_id", "r.event_id")}`;
 
 const CAPACITY_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e
@@ -371,7 +371,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const eventId = super.appendEvent(event, now);
     if (
       (event.event === "HostOnline" || event.event === "SessionStopped") &&
-      durableDb(this.ctx.storage, {}).get(query.raw(`${PENDING_ROOM} LIMIT 1`)) !== undefined
+      durableDb(this.ctx.storage, {}).get(
+        query.raw(`${PENDING_ROOM} AND NOT EXISTS (SELECT 1 FROM events AS signaled
+        WHERE signaled.event_id > r.event_id AND json_extract(signaled.payload, '$.event') = 'CapacityAvailable') LIMIT 1`),
+      ) !== undefined
     ) {
       if (event.event === "HostOnline")
         this.appendEvent({ event: "CapacityAvailable", hostId: event.hostId, code: "NoHostAvailable" }, now);

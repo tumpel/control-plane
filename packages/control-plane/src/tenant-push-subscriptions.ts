@@ -3,10 +3,12 @@ import {
   type CreatePushSubscriptionInputSchema,
   PushNotificationSchema,
   PushSubscriptionSchema,
-  TenantEventSchema,
+  SubscriptionEndedEventSchema,
+  SubscriptionPausedEventSchema,
+  SubscriptionPauseReasonSchema,
 } from "@tumpel/schemas";
 import { v5 as uuidV5 } from "uuid";
-import type { z } from "zod";
+import { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { fromBase64, seal, unseal } from "./envelope.ts";
 import { githubRepository } from "./github.ts";
@@ -41,6 +43,29 @@ const PUSH_SUBSCRIPTION_SELECT = `SELECT p.push_subscription_id, p.principal_id,
   FROM push_subscriptions AS p`;
 const PUSH_SUBSCRIPTION_NAMESPACE = uuidV5("tumpel:push-subscription", uuidV5.URL);
 const PUSH_TTL_SECONDS = 86_400;
+
+const PushEventSchema = z.discriminatedUnion("event", [
+  SubscriptionPausedEventSchema.extend({ reason: z.unknown() }),
+  SubscriptionEndedEventSchema,
+]);
+
+const pauseMessage = (reason: unknown): string => {
+  const parsed = SubscriptionPauseReasonSchema.safeParse(reason);
+  if (!parsed.success)
+    return "The service sent a pause reason this version does not recognise. Update the client and open the session.";
+  switch (parsed.data.kind) {
+    case "ByRequest":
+      return parsed.data.message;
+    case "DeliveryFailed":
+      return "A delivery turn failed. Open the session to decide what to do next.";
+    case "CrewFailing":
+      return "Several crew turns failed. Open the session to decide what to do next.";
+    case "CreditExhausted":
+      return "The account has no credit left. Add credit before resuming the subscription.";
+    case "StartsRefused":
+      return "Crew starts were repeatedly refused. Open the session to address the refusals before resuming.";
+  }
+};
 
 const authContext = (pushSubscriptionId: string): string => `push-subscription/${pushSubscriptionId}/auth`;
 
@@ -166,15 +191,12 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
     const dataKey = await this.dataKey();
     const privateKey = await vapidPrivateKey(this.env.VAPID_PRIVATE_KEY);
     for (const row of rows) {
-      const event = TenantEventSchema.parse({
+      const event = PushEventSchema.parse({
         ...JSON.parse(row.payload),
         eventId: row.event_id,
         tenantId,
         createdAt: row.event_created_at,
       });
-      if (event.event !== "SubscriptionPaused" && event.event !== "SubscriptionEnded") {
-        throw new Error(`push wake ${row.event_id} holds unsupported event ${event.event}`);
-      }
       const repository = githubRepository(row.repository);
       if (repository === null) throw new Error(`session repository ${row.repository} is not a GitHub repository`);
       const validKey = await importP256dh(row.p256dh).then(
@@ -194,12 +216,7 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
         event.event === "SubscriptionPaused"
           ? {
               title: `Subscription paused in ${repository.name}`,
-              body:
-                event.reason.kind === "ByRequest"
-                  ? event.reason.message
-                  : event.reason.kind === "DeliveryFailed"
-                    ? "A delivery turn failed. Open the session to decide what to do next."
-                    : "Several crew turns failed. Open the session to decide what to do next.",
+              body: pauseMessage(event.reason),
               path,
             }
           : {

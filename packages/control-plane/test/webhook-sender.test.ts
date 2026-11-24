@@ -484,3 +484,62 @@ test("archiving or failing a session ends its subscription and sends the ended e
     });
   }
 });
+
+test("push notifications name refused starts and credit pauses, tolerate a future reason and continue known work", async () => {
+  const tenantId = crypto.randomUUID();
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const p256dh = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+  const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+  const created = await post("/__fixture/push/create", {
+    tenantId,
+    subscription: {
+      endpoint: `${receiverOrigin}/push/pause-reasons`,
+      keys: { p256dh, auth },
+      events: ["SubscriptionPaused"],
+    },
+    now: Date.now(),
+  });
+  assert.equal(created.status, 200);
+  for (const { reason, body } of [
+    {
+      reason: { kind: "StartsRefused" },
+      body: "Crew starts were repeatedly refused. Open the session to address the refusals before resuming.",
+    },
+    {
+      reason: { kind: "CreditExhausted", turnId: "turn-credit" },
+      body: "The account has no credit left. Add credit before resuming the subscription.",
+    },
+    {
+      reason: { kind: "FuturePause", extra: true },
+      body: "The service sent a pause reason this version does not recognise. Update the client and open the session.",
+    },
+    {
+      reason: { kind: "ByRequest", message: "Choose a release." },
+      body: "Choose a release.",
+    },
+  ]) {
+    const receivedBefore = received.length;
+    const emitted = await post("/__fixture/emit", {
+      tenantId,
+      event: {
+        event: "SubscriptionPaused",
+        subscriptionId: "subscription-pause",
+        sessionId: "session-pause",
+        reason,
+        extra: true,
+      },
+      now: Date.now(),
+    });
+    assert.equal(emitted.status, 204);
+    await until(
+      "the pause notification",
+      async () => received.length,
+      (length) => length === receivedBefore + 1,
+    );
+    assert.deepEqual(await decryptPush(received.at(-1)?.body ?? "", pair, auth), {
+      title: "Subscription paused in control-plane",
+      body,
+      path: `/t/${tenantId}/sessions/session-pause`,
+    });
+  }
+});

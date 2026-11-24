@@ -212,7 +212,7 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
   assert.deepEqual(paused.reason, { kind: "StartsRefused" });
 });
 
-test("one capacity signal serves 101 subscriptions by cursor and excludes a non-room refusal", async (t) => {
+test("a room refusal survives a later catalog refusal and one capacity signal waits for active and paused recipients", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.online(world.owner, "host-1", {
@@ -222,18 +222,18 @@ test("one capacity signal serves 101 subscriptions by cursor and excludes a non-
   const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
   const initial = host.takeOffer();
   await host.claims(initial);
-  const subscriptions = [];
-  for (let each = 0; each < 101; each++)
-    subscriptions.push(
-      await world.subscribe(foreman, {
-        prompt: "wait for room",
-        goal: "finish",
-        events: ["CapacityAvailable"],
-        crewTags: [],
-      }),
-    );
-  const paused = subscriptions[100];
-  assert.ok(paused);
+  await world.subscribe(foreman, {
+    prompt: "wait for room",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  const paused = await world.subscribe(foreman, {
+    prompt: "wait until resumed",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
   assert.equal(
     (
       await world.fetch(
@@ -250,46 +250,8 @@ test("one capacity signal serves 101 subscriptions by cursor and excludes a non-
   assert.equal(busy.sessionId, filler.sessionId);
   await host.claims(busy);
   await host.finishes(busy);
-  const olderRoom = await world.fetch(
-    world.owner,
-    "POST",
-    "/v1/sessions",
-    JSON.stringify({
-      personaId: foreman.personaId,
-      repository: "https://github.com/acme/app",
-      model: "opus",
-      prompt: "older crew attempt",
-    }),
-  );
-  assert.equal(olderRoom.status, 409);
-  assert.equal(ProblemSchema.parse(await olderRoom.json()).code, "PoolExhausted");
-  const invalid = await world.fetch(
-    world.owner,
-    "POST",
-    "/v1/sessions",
-    JSON.stringify({
-      personaId: foreman.personaId,
-      repository: "https://github.com/acme/app",
-      model: "unsupported-model",
-      prompt: "invalid work",
-    }),
-  );
-  assert.equal(invalid.status, 422);
-  const nonRoomWritten = world.tenantRowsWritten();
-  await host.dropsIdleBox(busy);
-  assert.equal(world.tenantRowsWritten() - nonRoomWritten, 6);
-  await host.finishes(initial);
-  assert.equal(host.holds("TurnOffer"), false);
-  const nextFiller = await world.startSession({ prompt: "fill again", tags: [], boxRetention: "Warm" });
-  const nextBusy = host.takeOffer();
-  assert.equal(nextBusy.sessionId, nextFiller.sessionId);
-  await host.claims(nextBusy);
-  await host.finishes(nextBusy);
-  await world.sendTurn(foreman.sessionId, "check the crew");
-  const caller = host.takeOffer();
-  await host.claims(caller);
   const refusedWritten = world.tenantRowsWritten();
-  const refused = await world.fetch(
+  const room = await world.fetch(
     world.owner,
     "POST",
     "/v1/sessions",
@@ -297,48 +259,71 @@ test("one capacity signal serves 101 subscriptions by cursor and excludes a non-
       personaId: foreman.personaId,
       repository: "https://github.com/acme/app",
       model: "opus",
-      prompt: "crew work",
+      prompt: "crew attempt",
     }),
   );
-  assert.equal(refused.status, 409);
-  assert.equal(ProblemSchema.parse(await refused.json()).code, "PoolExhausted");
+  assert.equal(room.status, 409);
+  assert.equal(ProblemSchema.parse(await room.json()).code, "PoolExhausted");
   assert.equal(world.tenantRowsWritten() - refusedWritten, 2);
-  const beforeCapacity = world
-    .tenantSql()
-    .exec("SELECT event_id FROM events WHERE json_extract(payload, '$.event') = 'CapacityAvailable'")
-    .toArray().length;
+  await world.passes(1000);
+  await world.call("pin", { pin: { harness: "ClaudeCode", harnessVersion: "removed-version" }, now: Date.now() });
+  const catalogWritten = world.tenantRowsWritten();
+  const catalog = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({
+      personaId: foreman.personaId,
+      repository: "https://github.com/acme/app",
+      model: "opus",
+      prompt: "another crew attempt",
+    }),
+  );
+  assert.equal(catalog.status, 422);
+  assert.equal(ProblemSchema.parse(await catalog.json()).code, "HarnessNotInCatalog");
+  assert.equal(world.tenantRowsWritten() - catalogWritten, 2);
+  await world.call("unpin", { harness: "ClaudeCode" });
+  await world.passes(1000);
   const written = world.tenantRowsWritten();
-  await host.dropsIdleBox(nextBusy);
+  await host.dropsIdleBox(busy);
   assert.equal(world.tenantRowsWritten() - written, 8);
+  await world.hostOnline("host-2");
+  await world.hostOnline("host-3");
   assert.equal(
     world
       .tenantSql()
       .exec("SELECT event_id FROM events WHERE json_extract(payload, '$.event') = 'CapacityAvailable'")
-      .toArray().length - beforeCapacity,
+      .toArray().length,
     1,
   );
-  await host.finishes(caller);
-  for (let each = 0; each < 100; each++) {
-    const delivery = host.takeOffer();
-    assert.equal((delivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
-    await host.claims(delivery);
-    await host.finishes(delivery);
-  }
+  await host.finishes(initial);
+  const activeDelivery = host.takeOffer();
+  assert.equal((activeDelivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(activeDelivery);
+  await host.finishes(activeDelivery);
   assert.equal(host.holds("TurnOffer"), false);
   assert.equal((await world.subscription(paused.subscriptionId)).cursorEventId, paused.cursorEventId);
+  await world.hostOnline("host-4");
+  assert.equal(
+    world
+      .tenantSql()
+      .exec("SELECT event_id FROM events WHERE json_extract(payload, '$.event') = 'CapacityAvailable'")
+      .toArray().length,
+    1,
+  );
   assert.equal(
     (await world.fetch(world.owner, "POST", `/v1/subscriptions/${paused.subscriptionId}/resume`)).status,
     200,
   );
-  const delivery = host.takeOffer();
-  assert.equal((delivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
-  await host.claims(delivery);
-  await host.finishes(delivery);
+  const pausedDelivery = host.takeOffer();
+  assert.equal((pausedDelivery.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
+  await host.claims(pausedDelivery);
+  await host.finishes(pausedDelivery);
   assert.equal(host.holds("TurnOffer"), false);
   assert.equal(
     world.tenantSql().exec("SELECT subscription_id FROM subscriptions WHERE starts_refused_in_a_row = 1").toArray()
       .length,
-    101,
+    2,
   );
 });
 
