@@ -152,8 +152,7 @@ const firstCapacitySignal = (retained: number): SQL => query`
   SELECT MIN(room.event_id) FROM capacity_rooms AS room JOIN events AS signal ON signal.event_id = room.event_id
   WHERE room.event_id > needed.event_id AND signal.created_at >= ${retained} AND ${roomFits}`;
 
-const matchedRoom = query.raw(`needed.event_id > MAX(recipient.capacity_from_event_id, COALESCE(
-  (SELECT event_id FROM session_crew_starts WHERE session_id = recipient.session_id), 0))
+const matchedRoom = query.raw(`needed.event_id > recipient.capacity_from_event_id
   AND ${refusalMatch("refusal", "recipient.subscription_id")}
   AND EXISTS (SELECT 1 FROM subscription_events WHERE subscription_id = recipient.subscription_id AND event = 'CapacityAvailable')`);
 

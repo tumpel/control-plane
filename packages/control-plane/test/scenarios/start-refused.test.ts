@@ -474,59 +474,71 @@ test("refusal appends stay bounded while maintenance drains expired events in ba
   }
 });
 
-test("a released manifest missing the requested image records ImageNotReleased for start and send", async (t) => {
-  const world = await World.open();
-  t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
-  const session = await world.startSession({ prompt: "work before an image goes away", tags: [] });
-  const turn = host.takeOffer();
-  await host.claims(turn);
-  await host.finishes(turn);
-  await host.dropsIdleBox(turn);
-  await world.releases.put(
-    "current.json",
-    JSON.stringify({
-      ...CLAUDE_CODE_AMD64_RELEASE,
-      images: [],
-      harnessLayers: CLAUDE_CODE_AMD64_RELEASE.harnessLayers.map((layer) => ({ ...layer, harnessVersion: "0.0.0" })),
-    }),
-  );
-  await world.tick(RELEASE_CACHE_MS);
-  const before = world.tenantRowsWritten();
-  const start = await world.fetch(
-    world.owner,
-    "POST",
-    "/v1/sessions",
-    JSON.stringify({
-      personaId: session.personaId,
-      repository: "https://github.com/acme/app",
-      model: "opus",
-      prompt: "start again",
-    }),
-  );
-  const send = await world.fetch(
-    world.owner,
-    "POST",
-    `/v1/sessions/${session.sessionId}/turns`,
-    JSON.stringify({ prompt: "send again" }),
-  );
-  assert.equal(start.status, 422);
-  assert.equal(send.status, 422);
-  const startProblem = ProblemSchema.parse(await start.json());
-  const sendProblem = ProblemSchema.parse(await send.json());
-  assert.equal(startProblem.code, "ImageNotReleased");
-  assert.equal(sendProblem.code, "ImageNotReleased");
-  assert.match(startProblem.detail, /the current release has no ClaudeCode .* guest image/);
-  assert.equal(world.tenantRowsWritten() - before, 4);
-  const read = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
-  assert.equal(read.status, 200);
-  const { events } = await read.json();
-  assert.deepEqual(
-    events.map(({ operation, refusal }: { operation: string; refusal: object }) => ({ operation, refusal })),
-    [
-      { operation: "Start", refusal: { code: startProblem.code, detail: startProblem.detail } },
-      { operation: "Send", refusal: { code: sendProblem.code, detail: sendProblem.detail } },
-    ],
-  );
-  assert.equal(world.tenantSql().exec("SELECT COUNT(*) AS count FROM room_refusals").one().count, 0);
-});
+for (const [index, release] of ["missing-image", "unpublished"].entries()) {
+  test(`start and send record ImageNotReleased when the release is ${release}`, async (t) => {
+    const world = await World.open({ start: Date.parse("2026-11-21T12:00:00Z") + index * 2 * RELEASE_CACHE_MS });
+    t.after(() => world.close());
+    const host = await world.hostOnline("host-1");
+    const session = await world.startSession({ prompt: "work before an image goes away", tags: [] });
+    const turn = host.takeOffer();
+    await host.claims(turn);
+    await host.finishes(turn);
+    await host.dropsIdleBox(turn);
+    if (release === "unpublished") await world.releases.delete("current.json");
+    else
+      await world.releases.put(
+        "current.json",
+        JSON.stringify({
+          ...CLAUDE_CODE_AMD64_RELEASE,
+          images: [],
+          harnessLayers: CLAUDE_CODE_AMD64_RELEASE.harnessLayers.map((layer) => ({
+            ...layer,
+            harnessVersion: "0.0.0",
+          })),
+        }),
+      );
+    await world.tick(RELEASE_CACHE_MS);
+    const before = world.tenantRowsWritten();
+    const start = await world.fetch(
+      world.owner,
+      "POST",
+      "/v1/sessions",
+      JSON.stringify({
+        personaId: session.personaId,
+        repository: "https://github.com/acme/app",
+        model: "opus",
+        prompt: "start again",
+      }),
+    );
+    const send = await world.fetch(
+      world.owner,
+      "POST",
+      `/v1/sessions/${session.sessionId}/turns`,
+      JSON.stringify({ prompt: "send again" }),
+    );
+    assert.equal(start.status, 422);
+    assert.equal(send.status, 422);
+    const startProblem = ProblemSchema.parse(await start.json());
+    const sendProblem = ProblemSchema.parse(await send.json());
+    assert.equal(startProblem.code, "ImageNotReleased");
+    assert.equal(sendProblem.code, "ImageNotReleased");
+    const detail =
+      release === "unpublished"
+        ? /no guest image release has been published/
+        : /the current release has no ClaudeCode .* guest image/;
+    assert.match(startProblem.detail, detail);
+    assert.match(sendProblem.detail, detail);
+    assert.equal(world.tenantRowsWritten() - before, 4);
+    const read = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+    assert.equal(read.status, 200);
+    const { events } = await read.json();
+    assert.deepEqual(
+      events.map(({ operation, refusal }: { operation: string; refusal: object }) => ({ operation, refusal })),
+      [
+        { operation: "Start", refusal: { code: startProblem.code, detail: startProblem.detail } },
+        { operation: "Send", refusal: { code: sendProblem.code, detail: sendProblem.detail } },
+      ],
+    );
+    assert.equal(world.tenantSql().exec("SELECT COUNT(*) AS count FROM room_refusals").one().count, 0);
+  });
+}

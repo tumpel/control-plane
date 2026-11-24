@@ -1987,8 +1987,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const release = await readRelease(this.env.RELEASES, now);
     if (release.kind === "Unreadable")
       return { kind: "ReleaseUnreadable", detail: `the published release is unreadable: ${release.detail}` };
+    if (release.kind === "Unpublished")
+      return { kind: "ReleaseUnreadable", detail: "no guest image release has been published" };
     const architectures = bootArchitectures(release, harness, harnessVersion);
-    if (release.kind === "Published" && architectures.length === 0) {
+    if (architectures.length === 0) {
       return {
         kind: "ReleaseUnreadable",
         detail: `the current release has no ${harness} ${harnessVersion} guest image`,

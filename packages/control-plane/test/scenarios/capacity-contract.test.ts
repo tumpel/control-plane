@@ -52,6 +52,63 @@ test("capacity keeps a signal paired with the refusal it followed while the reci
   assert.equal(host.holds("TurnOffer"), false);
 });
 
+test("a smaller crew start leaves the larger room refusal pending", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", {
+    usage: { ...DEFAULT_USAGE, memoryBudgetMib: 4096, memoryAvailableMib: 4096 },
+  });
+  const foreman = await world.startSession({ prompt: "lead work", tags: [], boxRetention: "Warm" });
+  const lead = host.takeOffer();
+  await host.claims(lead);
+  await world.subscribe(foreman, {
+    prompt: "wait for room",
+    goal: "finish",
+    events: ["CapacityAvailable"],
+    crewTags: [],
+  });
+  const { served } = ServeConnectorTokenResultSchema.parse(
+    await world.call("serveConnectorToken", { turnId: lead.turnId, connectorId: "tumpel", now: Date.now() }),
+  );
+  assert.equal(served.kind, "Served");
+  const caller = { tenantId: TENANT_ID, token: served.token.accessToken };
+  const persona = `/v1/personas/${foreman.personaId}`;
+  const request = {
+    personaId: foreman.personaId,
+    repository: "https://github.com/acme/app",
+    model: "opus",
+  };
+  assert.equal((await world.fetch(world.owner, "PATCH", persona, JSON.stringify({ boxMemoryMib: 4096 }))).status, 200);
+  const before = world.tenantRowsWritten();
+  const refusal = await world.fetch(
+    caller,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({ ...request, prompt: "large work" }),
+  );
+  assert.equal(refusal.status, 409);
+  assert.equal((await refusal.json()).code, "PoolExhausted");
+  assert.equal(world.tenantRowsWritten() - before, 3);
+
+  assert.equal((await world.fetch(world.owner, "PATCH", persona, JSON.stringify({ boxMemoryMib: 2048 }))).status, 200);
+  const started = await world.fetch(
+    caller,
+    "POST",
+    "/v1/sessions",
+    JSON.stringify({ ...request, prompt: "small work" }),
+  );
+  assert.equal(started.status, 200);
+  await host.claims(host.takeOffer());
+  const spare = await world.hostOnline("host-2");
+  await host.finishes(lead);
+  const delivery = host.takeOffer();
+  assert.match(delivery.prompt, /"event":"CapacityAvailable"/);
+  assert.ok(delivery.prompt.includes(spare.hostId));
+  await host.claims(delivery);
+  await host.finishes(delivery);
+  assert.equal(host.holds("TurnOffer"), false);
+});
+
 test("capacity contract rejects inherited tag overflow before recording a malformed preflight event", async (t) => {
   const world = await World.open();
   t.after(() => world.close());

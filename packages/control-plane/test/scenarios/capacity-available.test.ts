@@ -100,86 +100,6 @@ test("a full host wakes its foreman once on refusal and once when a box stops, t
   await host.dropsIdleBox(crew);
   assert.equal(host.holds("TurnOffer"), false);
   assert.equal((await world.subscription(subscription.subscriptionId)).state, "Active");
-  world
-    .tenantSql()
-    .exec(
-      "DELETE FROM events WHERE json_extract(payload, '$.event') = 'SessionStarted' AND json_extract(payload, '$.sessionId') = ?",
-      crew.sessionId,
-    );
-  await world.restartTenant();
-  const again = await world.startSession({ prompt: "fill after success", tags: [], boxRetention: "Warm" });
-  const againBusy = host.takeOffer();
-  assert.equal(againBusy.sessionId, again.sessionId);
-  await host.claims(againBusy);
-  const refusedAgain = await world.fetch(
-    world.owner,
-    "POST",
-    "/v1/sessions",
-    JSON.stringify({
-      personaId: foreman.personaId,
-      repository: "https://github.com/acme/app",
-      model: "opus",
-      prompt: "more crew work",
-      tags: ["crew:work"],
-    }),
-  );
-  assert.equal(refusedAgain.status, 409);
-  const refusedAgainDelivery = host.takeOffer();
-  await host.claims(refusedAgainDelivery);
-  await host.finishes(refusedAgainDelivery);
-  assert.equal(
-    world
-      .tenantSql()
-      .exec("SELECT starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
-      .one().starts_refused_in_a_row,
-    0,
-  );
-  await host.finishes(againBusy);
-  await host.dropsIdleBox(againBusy);
-  const afterSuccess = host.takeOffer();
-  assert.equal((afterSuccess.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
-  await host.claims(afterSuccess);
-  assert.equal(
-    world
-      .tenantSql()
-      .exec("SELECT starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
-      .one().starts_refused_in_a_row,
-    1,
-  );
-  const duplicateWritten = world.tenantRowsWritten();
-  await host.dropsIdleBox(busy);
-  assert.equal(world.tenantRowsWritten() - duplicateWritten, 0);
-
-  const block = await world.startSession({ prompt: "hold capacity again", tags: [], boxRetention: "Warm" });
-  const blocker = host.takeOffer();
-  assert.equal(blocker.sessionId, block.sessionId);
-  await host.claims(blocker);
-  const { served: latestToken } = ServeConnectorTokenResultSchema.parse(
-    await world.call("serveConnectorToken", { turnId: afterSuccess.turnId, connectorId: "tumpel", now: Date.now() }),
-  );
-  assert.equal(latestToken.kind, "Served");
-  const caller = { tenantId: TENANT_ID, token: latestToken.token.accessToken };
-  const attempt = JSON.stringify({
-    personaId: foreman.personaId,
-    repository: "https://github.com/acme/app",
-    model: "opus",
-    prompt: "try crew work",
-  });
-  assert.equal((await world.fetch(caller, "POST", "/v1/sessions", attempt)).status, 409);
-  await host.finishes(blocker);
-  await host.dropsIdleBox(blocker);
-  assert.equal((await world.fetch(caller, "POST", "/v1/sessions", attempt)).status, 200);
-  const started = host.takeOffer();
-  await host.claims(started);
-  await host.finishes(afterSuccess);
-  const recordedRefusal = host.takeOffer();
-  assert.match(recordedRefusal.prompt, /StartRefused/);
-  assert.doesNotMatch(recordedRefusal.prompt, /CapacityAvailable/);
-  await host.claims(recordedRefusal);
-  await host.finishes(recordedRefusal);
-  await host.finishes(started);
-  await host.dropsIdleBox(started);
-  assert.equal(host.holds("TurnOffer"), false, "a successful start clears the earlier pending room refusal");
 });
 
 test("ten exponentially spaced refusal and capacity cycles pause StartsRefused with one bounded counter", async (t) => {
@@ -204,7 +124,7 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
   const initial = host.takeOffer();
   await host.claims(initial);
   await host.finishes(initial);
-  for (let cycle = 0; cycle < 10; cycle++) {
+  for (let cycle = 0; cycle <= 10; cycle++) {
     const filler = await world.startSession({ prompt: "fill the host", tags: [], boxRetention: "Warm" });
     const busy = host.takeOffer();
     assert.equal(busy.sessionId, filler.sessionId);
@@ -230,9 +150,9 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
     await host.finishes(busy);
     const written = world.tenantRowsWritten();
     await host.dropsIdleBox(busy);
-    assert.equal(world.tenantRowsWritten() - written, cycle === 0 ? 29 : 9);
-    if (cycle > 0) {
-      if (cycle === 1) {
+    assert.equal(world.tenantRowsWritten() - written, cycle <= 1 ? 29 : 9);
+    if (cycle > 1) {
+      if (cycle === 2) {
         const intervening = await world.fetch(
           world.owner,
           "POST",
@@ -261,7 +181,7 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
       assert.equal(host.holds("TurnOffer"), false);
       await world.passes(remaining - 1);
       assert.equal(host.holds("TurnOffer"), false);
-      if (cycle === 1) {
+      if (cycle === 2) {
         host.quiet();
         await world.tick(1);
         await host.beats();
@@ -278,12 +198,34 @@ test("ten exponentially spaced refusal and capacity cycles pause StartsRefused w
     const capacity = host.takeOffer();
     assert.equal((capacity.prompt.match(/"event":"CapacityAvailable"/g) ?? []).length, 1);
     await host.claims(capacity);
+    if (cycle === 0) {
+      const { served } = ServeConnectorTokenResultSchema.parse(
+        await world.call("serveConnectorToken", { turnId: capacity.turnId, connectorId: "tumpel", now: Date.now() }),
+      );
+      assert.equal(served.kind, "Served");
+      const retried = await world.fetch(
+        { tenantId: TENANT_ID, token: served.token.accessToken },
+        "POST",
+        "/v1/sessions",
+        JSON.stringify({
+          personaId: foreman.personaId,
+          repository: "https://github.com/acme/app",
+          model: "opus",
+          prompt: "crew retry",
+        }),
+      );
+      assert.equal(retried.status, 200);
+      const crew = host.takeOffer();
+      await host.claims(crew);
+      await host.finishes(crew);
+      await host.dropsIdleBox(crew);
+    }
     await host.finishes(capacity);
     const counter = world
       .tenantSql()
       .exec("SELECT starts_refused_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
       .one();
-    assert.equal(counter.starts_refused_in_a_row, cycle + 1);
+    assert.equal(counter.starts_refused_in_a_row, Math.max(1, cycle));
     assert.equal(world.tenantSql().exec("SELECT subscription_id FROM subscriptions").toArray().length, 1);
     assert.equal(host.holds("TurnOffer"), false);
   }
