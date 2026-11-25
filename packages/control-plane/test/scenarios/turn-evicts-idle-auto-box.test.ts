@@ -1,10 +1,94 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BoxMemoryLimit } from "@tumpel/schemas";
+import { BoxDiskLimit, BoxMemoryLimit, GetTurnFailureResultSchema, StartSessionResultSchema } from "@tumpel/schemas";
+import { failsSnapshot, SnapshotRequestSchema } from "./harness/snapshot-chunks.ts";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
-import { type TurnOffer, World } from "./harness/world.ts";
+import { TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const BOX = BoxMemoryLimit.DefaultMib;
+const DISK = BoxDiskLimit.DefaultMib;
+
+test("a start short of disk snapshots and evicts an idle Auto box whose last snapshot failed", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "full", { usage: { ...DEFAULT_USAGE, diskBudgetMib: DISK } });
+
+  await world.startSession({ prompt: "keep work on the box", tags: [] });
+  const idle = host.takeOffer();
+  await host.claims(idle);
+  await host.completes(idle);
+  await failsSnapshot(host, SnapshotRequestSchema.parse(host.take("SnapshotRequest")).snapshotId);
+  await failsSnapshot(host, SnapshotRequestSchema.parse(host.take("SnapshotRequest")).snapshotId);
+  assert.equal(host.holds("SnapshotRequest"), false);
+  assert.equal((await world.session(idle.sessionId)).state, "Idle");
+  host.report({ memoryHeldMib: BOX, diskHeldMib: DISK });
+  await world.settle();
+
+  const { started } = StartSessionResultSchema.parse(
+    await world.tryStartSession({ prompt: "start another session", tags: [] }),
+  );
+  assert.equal(started.kind, "Started", JSON.stringify(started));
+  const { session, turn } = started.started;
+
+  assert.equal((await world.session(idle.sessionId)).state, "Stopping");
+  assert.equal(host.holds("SnapshotRequest"), true);
+  assert.equal(host.holds("BoxTeardown"), false);
+  assert.equal(host.holds("TurnOffer"), false);
+  await host.answersSnapshot(idle.sessionId);
+  assert.deepEqual(host.take("BoxTeardown"), { type: "BoxTeardown", sessionId: idle.sessionId, boxId: idle.boxId });
+  assert.equal(host.holds("TurnOffer"), false);
+
+  await host.dropsIdleBox(idle);
+  assert.equal((await world.session(idle.sessionId)).state, "Stopped");
+  host.report({ memoryHeldMib: 0, diskHeldMib: 0 });
+  await world.settle();
+
+  const offered = host.takeOffer();
+  assert.deepEqual([offered.sessionId, offered.turnId], [session.sessionId, turn.turnId]);
+});
+
+test("a failed eviction snapshot leaves the box Idle and fails the start on the first heartbeat", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "full", { usage: { ...DEFAULT_USAGE, diskBudgetMib: DISK } });
+
+  await world.startSession({ prompt: "keep work on the box", tags: [] });
+  const idle = host.takeOffer();
+  await host.claims(idle);
+  await host.completes(idle);
+  await failsSnapshot(host, SnapshotRequestSchema.parse(host.take("SnapshotRequest")).snapshotId);
+  const failed = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
+  await failsSnapshot(host, failed.snapshotId);
+  assert.equal(host.holds("SnapshotRequest"), false);
+  assert.equal((await world.session(idle.sessionId)).state, "Idle");
+  host.report({ memoryHeldMib: BOX, diskHeldMib: DISK });
+  await world.settle();
+
+  const { started } = StartSessionResultSchema.parse(
+    await world.tryStartSession({ prompt: "start another session", tags: [] }),
+  );
+  assert.equal(started.kind, "Started", JSON.stringify(started));
+  const { turnId } = started.started.turn;
+  const eviction = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
+  assert.equal(eviction.sessionId, idle.sessionId);
+  assert.notEqual(eviction.snapshotId, failed.snapshotId);
+  await failsSnapshot(host, eviction.snapshotId);
+
+  assert.equal((await world.session(idle.sessionId)).state, "Idle");
+  assert.equal((await world.turn(turnId)).state, "Offered");
+  await host.beats();
+
+  assert.equal((await world.turn(turnId)).state, "Failed");
+  const { failure } = GetTurnFailureResultSchema.parse(
+    await world.call("getTurnFailure", { tenantId: TENANT_ID, turnId }),
+  );
+  assert.equal(failure?.reason, "PoolExhausted");
+  assert.match(failure.detail, /short of disk/);
+  assert.equal((await world.session(idle.sessionId)).state, "Idle");
+  assert.equal(host.holds("SnapshotRequest"), false);
+  assert.equal(host.holds("BoxTeardown"), false);
+  assert.equal(host.holds("TurnOffer"), false);
+});
 
 test("a turn to a session with no box, on a host whose memory idle Auto boxes of other sessions hold, tears down the oldest of them and is offered", async (t) => {
   const world = await World.open();
