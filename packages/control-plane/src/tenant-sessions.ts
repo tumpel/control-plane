@@ -1842,14 +1842,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
               SELECT 1 FROM stop_failures x WHERE x.session_id = s.session_id
                 AND x.created_at >= COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), 0)
                 AND NOT EXISTS (SELECT 1 FROM snapshots p WHERE p.session_id = s.session_id AND p.updated_at > x.created_at)
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
-                SELECT MAX(seq) FROM (
-                  SELECT snapshot_seq AS seq FROM snapshots WHERE session_id = s.session_id
-                  UNION ALL SELECT snapshot_seq FROM snapshot_requests WHERE session_id = s.session_id
-                )
-              ), -1)
             )) AS evictable,
           COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), s.updated_at) AS last_turn_ended_at
         FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
