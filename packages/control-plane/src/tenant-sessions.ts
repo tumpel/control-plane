@@ -112,9 +112,7 @@ import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
-  indexBytesFor,
   LivePacks,
-  MAX_INDEX_BYTES,
   type ManifestRead,
   mergedDraft,
   packKey,
@@ -3513,21 +3511,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
     const seconds = Math.floor((expiresAt - now) / 1000);
     if (seconds < 1) return refused(`the download window for turn ${message.turnId} has expired`);
-    const index = await this.restorableIndex(tenantId, session.session_id);
-    if (index !== null && index.kind !== "Read") {
-      return refused(`session ${session.session_id} restores a snapshot that is unreadable: ${index.detail}`);
-    }
-    const asked = new Map<string, boolean>();
-    for (const chunk of message.chunks) {
-      asked.set(
-        chunk.packDigest,
-        (asked.get(chunk.packDigest) ?? true) && index?.kind === "Read" && index.value.holds(chunk),
-      );
-    }
-    const held = [...asked]
-      .filter(([, all]) => all)
-      .map(([packDigest]) => packDigest)
-      .sort();
+    const held = [...new Set(message.chunks.map((chunk) => chunk.packDigest))].sort();
     const heads = await Promise.all(held.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
     const packs = held.flatMap((packDigest, at) => {
       const head = heads[at];
@@ -3893,7 +3877,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     request: SnapshotRequestRow,
-    chunkCount: number,
   ): Promise<{ kind: "Rejected"; detail: string } | { kind: "Checked"; packs: ReadonlySet<string> }> {
     const rejected = async (detail: string) => ({
       kind: "Rejected" as const,
@@ -3909,12 +3892,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (!parsed.success) {
       return rejected(
         `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
-      );
-    }
-    const indexBytes = indexBytesFor(chunkCount + parsed.data.manifest.length);
-    if (indexBytes > MAX_INDEX_BYTES) {
-      return rejected(
-        `stored a snapshot under ${request.storage_key} whose chunk index would take ${indexBytes} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds, so the session keeps its previous snapshot; remove large generated trees from the workspace before the next turn`,
       );
     }
     const packs = await snapshotPackSet(this.env.STORE, request.storage_key);
@@ -3944,7 +3921,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   > {
     const storageFailed = (error: unknown): string =>
       `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`;
-    const checked = await this.snapshotChecked(tenantId, hostId, request, message.chunkCount).catch(
+    const checked = await this.snapshotChecked(tenantId, hostId, request).catch(
       (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
     );
     if (checked.kind === "Rejected") return checked;

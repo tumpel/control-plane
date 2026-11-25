@@ -30,7 +30,7 @@ export const draftKey = (storageKey: string): string => `${storageKey}.draft`;
 const placementsOf = (root: Placement[]): number =>
   Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) + root.length;
 
-export const indexBytesFor = (placements: number): number =>
+const indexBytesFor = (placements: number): number =>
   placements * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
 
 const indexBytesOf = (root: Placement[]): number => indexBytesFor(placementsOf(root));
