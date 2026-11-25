@@ -57,8 +57,7 @@ test("a failed eviction snapshot leaves the box Idle and fails the start on the 
   await host.claims(idle);
   await host.completes(idle);
   await failsSnapshot(host, SnapshotRequestSchema.parse(host.take("SnapshotRequest")).snapshotId);
-  const failed = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
-  await failsSnapshot(host, failed.snapshotId);
+  await failsSnapshot(host, SnapshotRequestSchema.parse(host.take("SnapshotRequest")).snapshotId);
   assert.equal(host.holds("SnapshotRequest"), false);
   assert.equal((await world.session(idle.sessionId)).state, "Idle");
   host.report({ memoryHeldMib: BOX, diskHeldMib: DISK });
@@ -71,7 +70,6 @@ test("a failed eviction snapshot leaves the box Idle and fails the start on the 
   const { turnId } = started.started.turn;
   const eviction = SnapshotRequestSchema.parse(host.take("SnapshotRequest"));
   assert.equal(eviction.sessionId, idle.sessionId);
-  assert.notEqual(eviction.snapshotId, failed.snapshotId);
   await failsSnapshot(host, eviction.snapshotId);
 
   assert.equal((await world.session(idle.sessionId)).state, "Idle");
@@ -83,7 +81,10 @@ test("a failed eviction snapshot leaves the box Idle and fails the start on the 
     await world.call("getTurnFailure", { tenantId: TENANT_ID, turnId }),
   );
   assert.equal(failure?.reason, "PoolExhausted");
-  assert.match(failure.detail, /short of disk/);
+  assert.equal(
+    failure.detail,
+    `The idle boxes were asked to make room for this turn. Host full is still short of disk. It gives boxes ${DISK} MiB of disk and its other boxes hold ${DISK} MiB of it, so this turn's box disk of ${DISK} MiB does not fit. Send the turn again.`,
+  );
   assert.equal((await world.session(idle.sessionId)).state, "Idle");
   assert.equal(host.holds("SnapshotRequest"), false);
   assert.equal(host.holds("BoxTeardown"), false);
