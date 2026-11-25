@@ -23,31 +23,38 @@ const foremanBusyOnFullHost = async (t: TestContext) => {
   return { world, host, foreman, foremanTurn, subscription };
 };
 
+const refusalOf = (foreman: { sessionId: string; personaId: string; model: string }, turnId: string) => ({
+  tenantId: TENANT_ID,
+  refusal: { code: "PoolExhausted", detail: "The host has no room." },
+  caller: { kind: "Turn", sessionId: foreman.sessionId, turnId },
+  personaId: foreman.personaId,
+  model: foreman.model,
+  requestedTags: [],
+  now: Date.now(),
+});
+
+const counts = (world: World, subscriptionId: string) => {
+  const sql = world.tenantSql();
+  return {
+    deliveries: (): number =>
+      Number(
+        sql.exec("SELECT COUNT(*) AS count FROM subscription_turns WHERE subscription_id = ?", subscriptionId).one()
+          .count,
+      ),
+    events: (): number => Number(sql.exec("SELECT COUNT(*) AS count FROM events").one().count),
+  };
+};
+
 test("a busy Foreman queues one delivery on a refusal and writes only the event and its count on repeats", async (t) => {
   const { world, host, foreman, foremanTurn, subscription } = await foremanBusyOnFullHost(t);
-  const sql = world.tenantSql();
-  const deliveries = (subscriptionId: string): number =>
-    Number(
-      sql.exec("SELECT COUNT(*) AS count FROM subscription_turns WHERE subscription_id = ?", subscriptionId).one()
-        .count,
-    );
-  const events = (): number => Number(sql.exec("SELECT COUNT(*) AS count FROM events").one().count);
-  const caller = { kind: "Turn", sessionId: foreman.sessionId, turnId: foremanTurn.turnId };
-  const input = {
-    tenantId: TENANT_ID,
-    refusal: { code: "PoolExhausted", detail: "The host has no room." },
-    caller,
-    personaId: foreman.personaId,
-    model: foreman.model,
-    requestedTags: [],
-    now: Date.now(),
-  };
+  const { deliveries, events } = counts(world, subscription.subscriptionId);
+  const input = refusalOf(foreman, foremanTurn.turnId);
   const initialRows = events();
   const initialMeter = world.tenantRowsWritten();
   assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
   assert.equal(world.tenantRowsWritten() - initialMeter, 13);
   assert.equal(events() - initialRows, 1);
-  assert.equal(deliveries(subscription.subscriptionId), 1);
+  assert.equal(deliveries(), 1);
   assert.equal(host.holds("TurnOffer"), false);
 
   for (let repeat = 1; repeat <= 5; repeat++) {
@@ -56,7 +63,7 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
     assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
     assert.equal(world.tenantRowsWritten() - before, 3);
     assert.equal(events() - rows, 1);
-    assert.equal(deliveries(subscription.subscriptionId), 1);
+    assert.equal(deliveries(), 1);
   }
   const beforePerson = world.tenantRowsWritten();
   const personRows = events();
@@ -70,13 +77,22 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
   );
   assert.equal(world.tenantRowsWritten() - beforePerson, 3);
   assert.equal(events() - personRows, 1);
-  assert.equal(deliveries(subscription.subscriptionId), 1);
-  const refusalId = sql.exec("SELECT MAX(event_id) AS id FROM events").one().id;
-
-  const ordinaryClaim = sql
+  assert.equal(deliveries(), 1);
+  const refusals = world
+    .tenantSql()
     .exec("SELECT start_refusals_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
     .one();
-  assert.equal(ordinaryClaim.start_refusals_in_a_row, 7);
+  assert.equal(refusals.start_refusals_in_a_row, 7);
+});
+
+test("a refusal delivery keeps its prompt and cursor across a host retry and a repeated claim", async (t) => {
+  const { world, host, foreman, foremanTurn, subscription } = await foremanBusyOnFullHost(t);
+  const sql = world.tenantSql();
+  assert.deepEqual(await world.call("recordStartRefusal", refusalOf(foreman, foremanTurn.turnId)), {
+    kind: "Recorded",
+  });
+  const refusalId = sql.exec("SELECT MAX(event_id) AS id FROM events").one().id;
+
   await host.finishes(foremanTurn);
   const first = host.takeOffer();
   assert.equal(first.sessionId, foreman.sessionId);
@@ -106,8 +122,8 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
       .one();
   const claimBefore = world.tenantRowsWritten();
   await host.claims(retried);
-  const claimDelta = world.tenantRowsWritten() - claimBefore;
-  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, start_refusals_in_a_row: 7 });
+  assert.equal(world.tenantRowsWritten() - claimBefore, 10);
+  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, start_refusals_in_a_row: 1 });
 
   await host.says({
     type: "TurnFailed",
@@ -119,10 +135,8 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
   assert.equal((await world.turn(retried.turnId)).state, "Offered");
   const repeatBefore = world.tenantRowsWritten();
   await host.claims(retried);
-  const repeatDelta = world.tenantRowsWritten() - repeatBefore;
-  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, start_refusals_in_a_row: 7 });
-  assert.equal(claimDelta, 10);
-  assert.equal(repeatDelta, 9);
+  assert.equal(world.tenantRowsWritten() - repeatBefore, 9);
+  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, start_refusals_in_a_row: 1 });
 });
 
 test("refusal routing uses refused tags and an unmatched refusal counts nothing", async (t) => {

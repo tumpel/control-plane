@@ -7,7 +7,6 @@ import {
   SessionStopQuerySchema,
   SessionTagsPatchSchema,
   SessionTagsSchema,
-  StartRefusalCodeSchema,
   StartRefusalSchema,
   SteerCreateSchema,
   type SteerSchema,
@@ -400,8 +399,26 @@ export const placed = <T>(
   return ok(started.started);
 };
 
-const refusalCode = (reply: StartFailure): z.infer<typeof StartRefusalSchema>["code"] | null => {
+type SendFailure =
+  | (Refused & {
+      kind:
+        | "NotFound"
+        | "Archived"
+        | "GoalRefused"
+        | "Stranded"
+        | "Draining"
+        | "ReleaseUnreadable"
+        | "Stopping"
+        | "Failed"
+        | "ConnectorDisconnected";
+    })
+  | (Refused<PlacementRefusalCode> & { kind: "Unplaced" })
+  | (Refused & { kind: "CredentialRefused"; credential: CredentialRefusal });
+
+const refusalCode = (reply: StartFailure | SendFailure): z.infer<typeof StartRefusalSchema>["code"] | null => {
   switch (reply.kind) {
+    case "Stranded":
+      return "HostOffline";
     case "Unplaced":
       return reply.problem.code;
     case "Catalog":
@@ -426,27 +443,47 @@ const refusalCode = (reply: StartFailure): z.infer<typeof StartRefusalSchema>["c
     case "TagsOverLimit":
     case "Draining":
     case "ReleaseUnreadable":
+    case "NotFound":
+    case "Archived":
+    case "GoalRefused":
+    case "Stopping":
+    case "Failed":
       return null;
   }
 };
 
+type Refusing =
+  | { operation: "Start"; start: Pick<SessionStart, "personaId" | "model" | "tags"> }
+  | { operation: "Send"; sessionId: string };
+
 const recordRefusal = async <T>(
   env: Env,
   caller: Caller,
-  start: Pick<SessionStart, "personaId" | "model" | "tags">,
-  reply: StartReply<T>,
+  refusing: Refusing,
+  reply: Accepted<T> | StartFailure | SendFailure,
   now: number,
 ): Promise<Outcome<T>> => {
   if (reply.ok) return reply;
   const code = refusalCode(reply);
-  if (code !== null) {
-    await tenantOf(env, caller).call("recordStartRefusal", {
+  if (code === null) return reply;
+  const refusal = { code, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, reply.problem.detail) };
+  const tenant = tenantOf(env, caller);
+  if (refusing.operation === "Start") {
+    await tenant.call("recordStartRefusal", {
       tenantId: caller.tenantId,
-      refusal: { code, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, reply.problem.detail) },
-      personaId: start.personaId,
-      model: start.model,
+      refusal,
+      personaId: refusing.start.personaId,
+      model: refusing.start.model,
       caller: caller.origin,
-      requestedTags: start.tags ?? [],
+      requestedTags: refusing.start.tags ?? [],
+      now,
+    });
+  } else {
+    await tenant.call("recordSendRefusal", {
+      tenantId: caller.tenantId,
+      refusal,
+      caller: caller.origin,
+      sessionId: refusing.sessionId,
       now,
     });
   }
@@ -467,7 +504,7 @@ export const startSession = async (
           .started,
       )
     : prepared;
-  return recordRefusal(env, caller, start, reply, now);
+  return recordRefusal(env, caller, { operation: "Start", start }, reply, now);
 };
 
 export const startSessionFromIssue = async (
@@ -559,7 +596,7 @@ export const startSessionFromIssue = async (
         ).started,
       )
     : prepared;
-  return recordRefusal(env, caller, start, reply, now);
+  return recordRefusal(env, caller, { operation: "Start", start }, reply, now);
 };
 
 export const getSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Session>> => {
@@ -611,21 +648,8 @@ export const sendTurn = async (
   sessionId: string,
   send: TurnSend,
   now: number,
-): Promise<Outcome<Turn>> => {
-  const reply = await sentReply(env, caller, sessionId, send, now);
-  if (reply.ok) return reply;
-  const code = StartRefusalCodeSchema.safeParse(reply.problem.code);
-  if (code.success) {
-    await tenantOf(env, caller).call("recordSendRefusal", {
-      tenantId: caller.tenantId,
-      refusal: { code: code.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, reply.problem.detail) },
-      caller: caller.origin,
-      sessionId,
-      now,
-    });
-  }
-  return reply;
-};
+): Promise<Outcome<Turn>> =>
+  recordRefusal(env, caller, { operation: "Send", sessionId }, await sentReply(env, caller, sessionId, send, now), now);
 
 const sentReply = async (
   env: Env,
@@ -633,13 +657,13 @@ const sentReply = async (
   sessionId: string,
   send: TurnSend,
   now: number,
-): Promise<Outcome<Turn>> => {
+): Promise<Accepted<Turn> | SendFailure> => {
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
-  if (session === null) return sessionNotFound(sessionId);
-  if (session.state === "Archived") return sessionArchived(sessionId, "turns");
+  if (session === null) return { kind: "NotFound", ...sessionNotFound(sessionId) };
+  if (session.state === "Archived") return { kind: "Archived", ...sessionArchived(sessionId, "turns") };
   const goal = refusedGoal(session, send);
-  if (goal !== null) return goal;
+  if (goal !== null) return { kind: "GoalRefused", ...goal };
   const hosts = await listHostRecords(env, caller.tenantId);
   const { sent } = await tenant.call("sendTurn", {
     tenantId: caller.tenantId,
@@ -650,30 +674,42 @@ const sentReply = async (
     caller: caller.origin,
   });
   if (sent.kind === "Sent") return ok(sent.turn);
-  if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
-  if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
-  if (sent.kind === "Draining") return refuse(503, deployInProgress("send the turn again"));
-  if (sent.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(sent.detail, "send the turn again"));
-  if (sent.kind === "NotFound") return sessionNotFound(sessionId);
-  if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");
+  if (sent.kind === "Stranded") return { kind: sent.kind, ...stranded(session, hosts, sent.missingTurnIds) };
+  if (sent.kind === "Unplaced") return { kind: sent.kind, ...unplaced(sent.hosts, "send the turn again") };
+  if (sent.kind === "Draining") return { kind: sent.kind, ...refuse(503, deployInProgress("send the turn again")) };
+  if (sent.kind === "ReleaseUnreadable") {
+    return { kind: sent.kind, ...refuse(422, releaseUnreadable(sent.detail, "send the turn again")) };
+  }
+  if (sent.kind === "NotFound") return { kind: sent.kind, ...sessionNotFound(sessionId) };
+  if (sent.kind === "Archived") return { kind: sent.kind, ...sessionArchived(sessionId, "turns") };
   if (sent.kind === "Stopping") {
-    return refuse(409, {
-      code: "SessionStopping",
-      title: "Session stopping",
-      detail: `session ${sessionId} is stopping: its host is snapshotting it and tearing its box down`,
-      fix: `Wait until session ${sessionId} reads Stopped or Idle, then send again`,
-    });
+    return {
+      kind: sent.kind,
+      ...refuse(409, {
+        code: "SessionStopping",
+        title: "Session stopping",
+        detail: `session ${sessionId} is stopping: its host is snapshotting it and tearing its box down`,
+        fix: `Wait until session ${sessionId} reads Stopped or Idle, then send again`,
+      }),
+    };
   }
   if (sent.kind === "Failed") {
-    return refuse(409, {
-      code: "SessionFailed",
-      title: "Session failed",
-      detail: `session ${sessionId} could not clone ${session.repository} and takes no more turns; turn ${session.lastTurnId} failed RepositoryCloneFailed`,
-      fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
-    });
+    return {
+      kind: sent.kind,
+      ...refuse(409, {
+        code: "SessionFailed",
+        title: "Session failed",
+        detail: `session ${sessionId} could not clone ${session.repository} and takes no more turns; turn ${session.lastTurnId} failed RepositoryCloneFailed`,
+        fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
+      }),
+    };
   }
-  if (sent.kind === "ConnectorDisconnected") return connectorDisconnected(sent.names);
-  return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
+  if (sent.kind === "ConnectorDisconnected") return { kind: sent.kind, ...connectorDisconnected(sent.names) };
+  return {
+    kind: sent.kind,
+    credential: sent.refusal,
+    ...credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again"),
+  };
 };
 
 export const stopSession = async (

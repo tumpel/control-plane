@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PersonaSchema, ProblemSchema, SetSecretMemberResultSchema, StartRefusedEventSchema } from "@tumpel/schemas";
 import { z } from "zod";
+import { RELEASE_CACHE_MS } from "../../src/releases.ts";
 import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { SETTINGS, TENANT_ID, World } from "./harness/world.ts";
 
-for (const { fixture, code, status } of [
-  { fixture: "Offline with a missing snapshot", code: "HostOffline", status: 409 },
-  { fixture: "Expired credential", code: "CredentialExpired", status: 422 },
-  { fixture: "Stopped on a full host", code: "PoolExhausted", status: 409 },
-  { fixture: "Stopped with an unreadable release", code: "ImageNotReleased", status: 422 },
+for (const { target, code, status } of [
+  { target: "an offline host with no snapshot", code: "HostOffline", status: 409 },
+  { target: "an expired credential", code: "CredentialExpired", status: 422 },
+  { target: "a stopped session on a full host", code: "PoolExhausted", status: 409 },
 ] as const) {
-  test(`Fixture ${fixture} records a refused send with its target tags`, async (t) => {
+  test(`a send refused for ${target} records ${code} with the session's tags`, async (t) => {
     const world = await World.open();
     t.after(() => world.close());
     await world.holdsAgentCredentials();
@@ -50,17 +50,11 @@ for (const { fixture, code, status } of [
       assert.equal(set.kind, "Set");
       await world.passes(2_000);
     }
-    if (code === "PoolExhausted" || code === "ImageNotReleased") {
+    if (code === "PoolExhausted") {
       await host.dropsIdleBox(offer);
       assert.equal((await world.session(session.sessionId)).state, "Stopped");
-    }
-    if (code === "PoolExhausted") {
       host.report({ memoryHeldMib: DEFAULT_USAGE.memoryBudgetMib });
       await world.settle();
-    }
-    if (code === "ImageNotReleased") {
-      await world.releases.put("current.json", "unreadable release");
-      await world.passes(30_001);
     }
 
     const count = (): number => Number(sql.exec("SELECT COUNT(*) AS count FROM events").one().count);
@@ -103,3 +97,32 @@ for (const { fixture, code, status } of [
     );
   });
 }
+
+test("a send refused for an unreadable release records no refusal", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  await world.holdsAgentCredentials();
+  const host = await world.hostOnline("host-1");
+  const session = await world.startSession({ prompt: "start work", tags: ["crew:x", "work:task"] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.finishes(offer);
+  await host.dropsIdleBox(offer);
+  assert.equal((await world.session(session.sessionId)).state, "Stopped");
+  await world.releases.put("current.json", "unreadable release");
+  await world.passes(RELEASE_CACHE_MS + 1);
+
+  const before = world.tenantRowsWritten();
+  const refused = await world.fetch(
+    world.owner,
+    "POST",
+    `/v1/sessions/${session.sessionId}/turns`,
+    JSON.stringify({ prompt: "continue work" }),
+  );
+  assert.equal(refused.status, 422);
+  assert.equal(ProblemSchema.parse(await refused.json()).title, "The published release is unreadable");
+  assert.equal(world.tenantRowsWritten() - before, 0);
+  const listed = await world.fetch(world.owner, "GET", "/v1/events?afterEventId=0&event=StartRefused");
+  const { events } = z.object({ events: StartRefusedEventSchema.array() }).parse(await listed.json());
+  assert.deepEqual(events, []);
+});

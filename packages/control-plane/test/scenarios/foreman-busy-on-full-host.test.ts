@@ -5,7 +5,7 @@ import { CLAUDE_CODE_VERSION } from "../../src/harness-catalog.ts";
 import { PRINCIPAL_ID, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 import { mcpPersona, startBox } from "./signal-fixtures.ts";
 
-const fixture = async (t: TestContext) => {
+const foremanBusyOnFullHost = async (t: TestContext) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -56,8 +56,8 @@ const fixture = async (t: TestContext) => {
   return { world, host, personaId, foreman, subscription, count, deliveries, refuse, hostRecord };
 };
 
-test("foremanBusyOnFullHost: nine refusals keep one delivery and the tenth pauses StartsRefused", async (t) => {
-  const { world, host, foreman, subscription, count, deliveries, refuse } = await fixture(t);
+test("nine refusals keep one delivery and the tenth pauses StartsRefused", async (t) => {
+  const { world, host, foreman, subscription, count, deliveries, refuse } = await foremanBusyOnFullHost(t);
   for (let refused = 1; refused <= 9; refused++) {
     assert.equal(await refuse(foreman.offer), refused === 1 ? 11 : 3);
     assert.equal(count(), refused);
@@ -86,8 +86,8 @@ test("foremanBusyOnFullHost: nine refusals keep one delivery and the tenth pause
   assert.equal(count(), 0);
 });
 
-test("foremanBusyOnFullHost: nine refusals and nine crew failures pause neither, and crew success keeps the refusal count", async (t) => {
-  const { world, host, personaId, foreman, subscription, count, refuse } = await fixture(t);
+test("nine refusals and nine crew failures pause neither, and crew success keeps the refusal count", async (t) => {
+  const { world, host, personaId, foreman, subscription, count, refuse } = await foremanBusyOnFullHost(t);
   const crew = await startBox(world, host, personaId, "build the work", "Warm", ["crew:x"]);
   let crewTurn = crew.offer;
   for (let failed = 1; failed <= 9; failed++) {
@@ -116,8 +116,8 @@ test("foremanBusyOnFullHost: nine refusals and nine crew failures pause neither,
   assert.equal(count(), 9);
 });
 
-test("foremanBusyOnFullHost: a successful start or send by the Foreman resets the refusal count, and an unrelated crew start does not", async (t) => {
-  const { world, host, personaId, foreman, count, refuse, hostRecord } = await fixture(t);
+test("a successful start or send by the Foreman resets the refusal count, and an unrelated crew start does not", async (t) => {
+  const { world, host, personaId, foreman, count, refuse, hostRecord } = await foremanBusyOnFullHost(t);
   const other = await startBox(world, host, personaId, "plan other work", "Warm", ["crew:x"]);
   const start = async (caller: TurnOffer): Promise<number> => {
     const before = world.tenantRowsWritten();
