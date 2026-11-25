@@ -83,7 +83,7 @@ test("a failed eviction snapshot leaves the box Idle and fails the start on the 
   assert.equal(failure?.reason, "PoolExhausted");
   assert.equal(
     failure.detail,
-    `The idle boxes were asked to make room for this turn. Host full is still short of disk. It gives boxes ${DISK} MiB of disk and its other boxes hold ${DISK} MiB of it, so this turn's box disk of ${DISK} MiB does not fit. Send the turn again.`,
+    `the idle boxes were asked to make room for this turn, and host full is still short of disk: it gives boxes ${DISK} MiB of disk and its other boxes hold ${DISK} MiB of it, so this turn's box disk of ${DISK} MiB does not fit; send the turn again`,
   );
   assert.equal((await world.session(idle.sessionId)).state, "Idle");
   assert.equal(host.holds("SnapshotRequest"), false);
