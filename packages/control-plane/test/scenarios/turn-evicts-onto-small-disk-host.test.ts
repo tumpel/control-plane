@@ -71,6 +71,6 @@ test("a turn that evicts the only idle box of a host still short of disk once th
   assert.equal(host.holds("TurnOffer"), false);
   assert.equal(
     "detail" in failed ? failed.detail : null,
-    "the idle boxes stopped to make room for this turn left host small short of disk: it gives boxes 20000 MiB of disk and its other boxes hold 8192 MiB of it, so this turn's box disk of 32768 MiB does not fit; send the turn again",
+    "the idle boxes were asked to make room for this turn, and host small is still short of disk: it gives boxes 20000 MiB of disk and its other boxes hold 8192 MiB of it, so this turn's box disk of 32768 MiB does not fit; send the turn again",
   );
 });

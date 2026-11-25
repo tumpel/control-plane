@@ -1507,7 +1507,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         short === "Memory"
           ? `${usage.memoryBudgetMib} MiB of memory and its other boxes hold ${usage.memoryHeldMib} MiB of it, so this turn's box of ${box.boxMemoryMib} MiB`
           : `${usage.diskBudgetMib} MiB of disk and its other boxes hold ${usage.diskHeldMib} MiB of it, so this turn's box disk of ${box.boxDiskMib} MiB`;
-      const detail = `the idle boxes stopped to make room for this turn left host ${host} short of ${short.toLowerCase()}: it gives boxes ${held} does not fit; send the turn again`;
+      const detail = `the idle boxes were asked to make room for this turn, and host ${host} is still short of ${short.toLowerCase()}: it gives boxes ${held} does not fit; send the turn again`;
       await this.failTurn(tenantId, turn.turn_id, "PoolExhausted", detail, iso(Date.now()));
     }
   }
