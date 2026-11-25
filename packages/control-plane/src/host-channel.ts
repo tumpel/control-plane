@@ -220,6 +220,10 @@ export class HostChannel extends DurableObject<Env> {
     if (attachment.connection.phase !== "Open") return;
     const tenantId = await this.tenantOf(hostId);
     await this.telemetry(tenantId, hostId, beat.telemetry);
+    const heldTurnIds = [...beat.heldTurnIds];
+    for (const { message } of context.ledger.load().unacked) {
+      if (message.type === "TurnOffer") heldTurnIds.push(message.turnId);
+    }
     await tenantApi(this.env.TENANT, tenantId).call("hostHeartbeat", {
       tenantId,
       hostId,
@@ -230,7 +234,7 @@ export class HostChannel extends DurableObject<Env> {
       channelProtocol: attachment.connection.protocolVersion,
       heldSessionIds: beat.heldSessionIds,
       heldClaudeSetupIds: beat.heldClaudeSetupIds,
-      heldTurnIds: beat.heldTurnIds,
+      heldTurnIds,
     });
     control.beat(context);
   }
