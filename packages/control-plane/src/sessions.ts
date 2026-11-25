@@ -7,6 +7,7 @@ import {
   SessionStopQuerySchema,
   SessionTagsPatchSchema,
   SessionTagsSchema,
+  StartRefusalCodeSchema,
   StartRefusalSchema,
   SteerCreateSchema,
   type SteerSchema,
@@ -573,7 +574,14 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
   if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
-  return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
+  return ok(
+    unpaged((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions),
+  );
+};
+
+export const unpaged = (sessions: Session[] | null): Session[] => {
+  if (sessions === null) throw new Error("an unpaged session list came back null, which only a cursor can produce");
+  return sessions;
 };
 
 export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
