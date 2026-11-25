@@ -141,18 +141,12 @@ export type HostHeadroom = {
 const rose = (before: number | null, after: number | null): boolean =>
   before !== null && after !== null && after > before;
 
-export const roomFreed = (
-  ...change:
-    | [before: HostHeadroom | "BecamePresent", after: () => HostHeadroom]
-    | [before: null, after: { state: "Idle" | "Stopped" | "Failed" | "Archived"; heldBox: () => HeldBox | undefined }]
-): "PoolExhausted" | "HostDegraded" | "NoHostAvailable" | null => {
-  if (change[0] === null) {
-    const { state, heldBox } = change[1];
-    return state !== "Idle" || heldBox()?.evictable ? "PoolExhausted" : null;
-  }
-  const [before, report] = change;
-  if (before === "BecamePresent") return "NoHostAvailable";
-  const after = report();
+export const sessionFreesRoom = (
+  state: "Idle" | "Stopped" | "Failed" | "Archived",
+  box: HeldBox | undefined,
+): "PoolExhausted" | null => (state !== "Idle" || box?.evictable ? "PoolExhausted" : null);
+
+export const roomFreed = (before: HostHeadroom, after: HostHeadroom): "PoolExhausted" | "HostDegraded" | null => {
   if (before.reported_health !== "Healthy" && after.reported_health === "Healthy") return "HostDegraded";
   return rose(after.memory_held_mib, before.memory_held_mib) ||
     rose(after.disk_held_mib, before.disk_held_mib) ||

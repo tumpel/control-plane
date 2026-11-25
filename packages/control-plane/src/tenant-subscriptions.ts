@@ -107,8 +107,10 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
 
 const refusalMatch = (subscription: string, event: string): string =>
   `(json_extract(${event}.payload, '$.caller.sessionId') = (SELECT session_id FROM subscriptions WHERE subscription_id = ${subscription})
-  OR NOT EXISTS (SELECT 1 FROM subscription_crew_tags AS c WHERE c.subscription_id = ${subscription}
-    AND c.tag NOT IN (SELECT value FROM json_each(${event}.payload, '$.crewTags'))))`;
+  OR (NOT EXISTS (SELECT 1 FROM subscriptions AS own JOIN subscription_actives AS oa ON oa.subscription_id = own.subscription_id
+      WHERE own.session_id = json_extract(${event}.payload, '$.caller.sessionId'))
+    AND NOT EXISTS (SELECT 1 FROM subscription_crew_tags AS c WHERE c.subscription_id = ${subscription}
+      AND c.tag NOT IN (SELECT value FROM json_each(${event}.payload, '$.crewTags')))))`;
 
 const eventMatch = (subscription: string, crew: string): string =>
   `CASE json_extract(e.payload, '$.event')

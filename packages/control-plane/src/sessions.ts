@@ -201,11 +201,7 @@ const unplaced = (
     first.image.architectures.length === 0 &&
     hosts.every((host) => host.reason === "NoImage")
   ) {
-    return {
-      ok: false,
-      status: 422,
-      problem: imageNotReleased(first.image.harness, first.image.harnessVersion, retry),
-    };
+    return refuse(422, imageNotReleased(first.image.harness, first.image.harnessVersion, retry));
   }
   const detail = hosts.map(why).join(", ");
   if (degradedOnly(hosts)) {

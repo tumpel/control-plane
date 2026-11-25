@@ -302,14 +302,14 @@ export class Tenant extends TenantConnectors {
     return { kind: "Recorded" };
   }
 
-  private recordSendRefusal({
+  private async recordSendRefusal({
     tenantId,
     refusal,
     caller,
     sessionId,
     now,
-  }: TenantInput<"recordSendRefusal">): z.infer<typeof RecordSendRefusalResultSchema> {
-    const session = this.getSession(tenantId, sessionId);
+  }: TenantInput<"recordSendRefusal">): Promise<z.infer<typeof RecordSendRefusalResultSchema>> {
+    const session = await this.readSession(tenantId, sessionId);
     if (session === null) return { kind: "NotFound" };
     const { personaId, model, tags: crewTags } = session;
     this.ctx.storage.transactionSync(() =>
@@ -519,11 +519,9 @@ export class Tenant extends TenantConnectors {
     startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
       started: await this.startSessionFromIssue(tenantId, input, issue, now),
     }),
-    sendTurn: async (input) => {
-      const sent = await this.sendTurn(input);
-      if (sent.kind === "Sent" && input.caller.kind === "Turn") this.recordProgress(input.caller.sessionId);
-      return { sent };
-    },
+    sendTurn: async ({ tenantId, sessionId, send, caller, hosts, now }) => ({
+      sent: await this.sendTurn(tenantId, sessionId, send, caller, hosts, now),
+    }),
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
     }),

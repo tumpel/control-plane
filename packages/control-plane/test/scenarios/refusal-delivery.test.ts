@@ -192,3 +192,38 @@ test("refusal routing uses refused tags and an unmatched refusal counts nothing"
     .one();
   assert.deepEqual({ ...state }, { cursor_event_id: eventId, start_refusals_in_a_row: 0 });
 });
+
+test("a subscription without crew tags does not count another Foreman's refusals", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const persona = await mcpPersona(world);
+  const untagged = await startBox(world, host, persona, "watch the tenant", "Warm");
+  await host.finishes(untagged.offer);
+  const watcher = await world.subscribe(untagged.session, {
+    prompt: "Continue the work",
+    goal: "Land the work",
+    events: ["StartRefused"],
+    crewTags: [],
+  });
+  const other = await startBox(world, host, persona, "plan other work", "Warm");
+  const foreman = await world.subscribe(other.session, {
+    prompt: "Continue the work",
+    goal: "Land the work",
+    events: ["StartRefused"],
+    crewTags: ["crew:x"],
+  });
+  assert.deepEqual(await world.call("recordStartRefusal", refusalOf(other.session, other.offer.turnId)), {
+    kind: "Recorded",
+  });
+  const refusals = (subscriptionId: string): number =>
+    Number(
+      world
+        .tenantSql()
+        .exec("SELECT start_refusals_in_a_row AS count FROM subscriptions WHERE subscription_id = ?", subscriptionId)
+        .one().count,
+    );
+  assert.equal(refusals(watcher.subscriptionId), 0);
+  assert.equal(refusals(foreman.subscriptionId), 1);
+  assert.equal(counts(world, watcher.subscriptionId).deliveries(), 0);
+});

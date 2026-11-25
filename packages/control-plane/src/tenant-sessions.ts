@@ -101,6 +101,7 @@ import {
   placeSession,
   type ReportedHostUsage,
   roomFreed,
+  sessionFreesRoom,
   shortOf,
   type Unplaceable,
 } from "./placement";
@@ -988,13 +989,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     else if (state === "Archived") this.appendEvent({ event: "SessionArchived", sessionId }, now);
     else return;
     if (!this.hasUnsignaledRoomWait()) return;
-    const code = roomFreed(null, { state, heldBox: () => this.heldBoxes().find((box) => box.sessionId === sessionId) });
-    if (code === null) return;
-    const host = durableDb(this.ctx.storage, {}).get<{ host_id: string }>(
-      query`SELECT host_id FROM sessions WHERE session_id = ${sessionId}`,
-    );
-    if (host === undefined) throw new Error(`session ${sessionId} has no host for its capacity signal`);
-    this.appendEvent({ event: "CapacityAvailable", hostId: host.host_id, code }, now);
+    const code = sessionFreesRoom(state, state === "Idle" ? this.heldBoxes(sessionId)[0] : undefined);
+    const session = this.sessionRow(sessionId);
+    if (session === null) throw new Error(`session ${sessionId} vanished before its capacity signal`);
+    if (code !== null) this.appendEvent({ event: "CapacityAvailable", hostId: session.host_id, code }, now);
   }
 
   protected personaRow(personaId: string): PersonaRow | null {
@@ -1636,12 +1634,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
       FROM host_reports WHERE host_id = ${hostId}`);
   }
 
-  protected reportCommitted(hostId: string, before: HostHeadroom | "BecamePresent", now: number): void {
-    const code = roomFreed(before, () => {
-      const report = this.hostHeadroom(hostId);
-      if (report === undefined) throw new Error(`host ${hostId} has no committed report`);
-      return report;
-    });
+  private headroomChanged(hostId: string, before: HostHeadroom, now: number): void {
+    const after = this.hostHeadroom(hostId);
+    if (after === undefined) throw new Error(`host ${hostId} has no committed report`);
+    const code = roomFreed(before, after);
     if (code !== null) this.appendEvent({ event: "CapacityAvailable", hostId, code }, now);
   }
 
@@ -1735,13 +1731,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
         .toArray();
       const becamePresent = heard === undefined || heard.heard_at < report.now - presenceGraceMs(settingsOf(this.env));
       if (becamePresent) this.appendEvent({ event: "HostOnline", hostId }, report.now);
-      const before = this.hasUnsignaledRoomWait()
-        ? becamePresent
-          ? "BecamePresent"
-          : this.hostHeadroom(hostId)
-        : undefined;
+      const waiting = this.hasUnsignaledRoomWait();
+      const before = waiting && !becamePresent ? this.hostHeadroom(hostId) : undefined;
       this.reportHost(hostId, report);
-      if (before !== undefined) this.reportCommitted(hostId, before, report.now);
+      if (before !== undefined) this.headroomChanged(hostId, before, report.now);
+      if (waiting && becamePresent)
+        this.appendEvent({ event: "CapacityAvailable", hostId, code: "NoHostAvailable" }, report.now);
       clearSupersededFailure(this.ctx.storage.sql, hostId);
       return this.unheldRunningTurns(hostId, heldTurnIds);
     });
@@ -1773,7 +1768,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         report.now,
         HEARD_REFRESH_MS,
       );
-      if (before !== undefined) this.reportCommitted(hostId, before, report.now);
+      if (before !== undefined) this.headroomChanged(hostId, before, report.now);
       return this.judgeHeldTurns(hostId, [...heldTurnIds, ...this.dispatchingOffers]);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);
@@ -1864,7 +1859,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => ({ hostId: row.host_id, runningTurns: row.running }));
   }
 
-  protected heldBoxes(): HeldBox[] {
+  protected heldBoxes(sessionId: string | null = null): HeldBox[] {
     return this.ctx.storage.sql
       .exec<{
         session_id: string;
@@ -1885,7 +1880,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
           COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), s.updated_at) AS last_turn_ended_at
         FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
           LEFT JOIN session_box_retention r ON r.session_id = s.session_id
-        WHERE s.state IN ('Idle', 'Stopping')`,
+        WHERE s.state IN ('Idle', 'Stopping') AND (?1 IS NULL OR s.session_id = ?1)`,
+        sessionId,
       )
       .toArray()
       .map((row) => ({
@@ -2161,19 +2157,33 @@ export abstract class TenantSessions extends DurableObject<Env> {
     };
   }
 
-  protected recordProgress(sessionId: string): void {
+  private recordProgress(sessionId: string): void {
     durableDb(this.ctx.storage, {}).run(query`UPDATE subscriptions SET start_refusals_in_a_row = 0
       WHERE session_id = ${sessionId} AND start_refusals_in_a_row > 0`);
   }
 
-  private sendWaiting(tenantId: string, session: SessionRow, send: TurnSend, now: number): Sent {
-    const turn = this.ctx.storage.transactionSync(() =>
-      this.newTurn(session.session_id, session.host_id, session.box_id, send, now),
-    );
+  private sendWaiting(
+    tenantId: string,
+    session: SessionRow,
+    send: TurnSend,
+    caller: TenantInput<"sendTurn">["caller"],
+    now: number,
+  ): Sent {
+    const turn = this.ctx.storage.transactionSync(() => {
+      if (caller.kind === "Turn") this.recordProgress(caller.sessionId);
+      return this.newTurn(session.session_id, session.host_id, session.box_id, send, now);
+    });
     return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
   }
 
-  protected async sendTurn({ tenantId, sessionId, send, hosts, now }: TenantInput<"sendTurn">): Promise<Sent> {
+  protected async sendTurn(
+    tenantId: string,
+    sessionId: string,
+    send: TurnSend,
+    caller: TenantInput<"sendTurn">["caller"],
+    hosts: HostRecord[],
+    now: number,
+  ): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
     if (session.state === "Archived") return { kind: "Archived" };
@@ -2185,13 +2195,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now);
     const online =
       !this.staleHosts(now).has(session.host_id) &&
       hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
     if (online && session.state !== "Stopped") {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
-      const turn = this.runTurn(session, session.host_id, boxId, send, now);
+      const turn = this.runTurn(session, session.host_id, boxId, send, caller, now);
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
       return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
     }
@@ -2212,11 +2222,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
     const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
-    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
     this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
-    const turn = this.runTurn(session, hostId, boxId, send, now);
+    const turn = this.runTurn(session, hostId, boxId, send, caller, now);
     await this.offerAfter(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn, placement.evict);
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
@@ -2290,8 +2300,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return null;
   }
 
-  private runTurn(session: SessionRow, hostId: string, boxId: string, send: TurnSend, now: number): TurnRow {
+  private runTurn(
+    session: SessionRow,
+    hostId: string,
+    boxId: string,
+    send: TurnSend,
+    caller: TenantInput<"sendTurn">["caller"],
+    now: number,
+  ): TurnRow {
     return this.ctx.storage.transactionSync(() => {
+      if (caller.kind === "Turn") this.recordProgress(caller.sessionId);
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
         hostId,
@@ -2733,7 +2751,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.getSession(tenantId, sessionId, this.staleHosts(Date.now()));
   }
 
-  protected getSession(tenantId: string, sessionId: string, stale: StaleHosts = NONE_STALE): Session | null {
+  private getSession(tenantId: string, sessionId: string, stale: StaleHosts = NONE_STALE): Session | null {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
