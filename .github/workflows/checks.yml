@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: write
     outputs:
-      tag: ${{ steps.candidate.outputs.tag }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,48 +53,26 @@ jobs:
           node-version: 22
           cache: npm
       - name: Publish the control-plane candidate
+        id: release
         if: steps.candidate.outputs.tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.candidate.outputs.tag }}
         run: |
-          archive="control-plane-$TAG.tgz"
-          releases="repos/$GITHUB_REPOSITORY/releases"
-          uploaded='[.assets[] | select(.state == "uploaded") | .name] | index($archive) != null and index($checksum) != null'
-          release_id=$(gh api graphql -f query='query($owner: String!, $name: String!, $tag: String!) {
-            repository(owner: $owner, name: $name) { release(tagName: $tag) { databaseId } }
-          }' -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -f tag="$TAG" \
-            --jq '.data.repository.release.databaseId // empty')
-          existing_tag=$(git tag --list "$TAG")
-          if [[ -n "$existing_tag" && $(git rev-parse "refs/tags/$TAG^{commit}") != "$GITHUB_SHA" ]]; then
-            echo "::error::$TAG points to a commit other than $GITHUB_SHA. Resolve the tag conflict before rerunning."
-            exit 1
-          fi
-          if [[ -n "$release_id" ]]; then
-            release=$(gh api "$releases/$release_id")
-            if jq -e '.draft' <<<"$release" > /dev/null; then
-              jq -e --arg sha "$GITHUB_SHA" \
-                'if .target_commitish == $sha then true else error("The draft targets a different commit. Inspect the existing release.") end' \
-                <<<"$release" > /dev/null
-            else
-              if [[ -n "$existing_tag" ]] && jq -e --arg archive "$archive" --arg checksum "$archive.sha256" \
-                ".prerelease and ($uploaded)" <<<"$release" > /dev/null; then
-                echo "$TAG is already published with both assets."
-                exit 0
-              fi
-              echo "::error::$TAG must be a prerelease on $GITHUB_SHA with $archive and $archive.sha256. Inspect the existing release."
-              exit 1
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [[ "$draft" == false ]]; then
+              echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-          elif [[ -n "$existing_tag" ]]; then
-            echo "::error::$TAG exists without a release. Resolve the tag conflict before rerunning."
-            exit 1
+            gh release delete "$TAG" --yes
           fi
 
           npm ci --no-audit --no-fund
           work=$(mktemp -d)
           package="$work/package"
           source=packages/control-plane
+          archive="control-plane-$TAG.tgz"
           npm run bundle:candidate --workspace "$source" -- --outdir "$package/dist"
           test -f "$package/dist/index.js"
           jq '.main = "dist/index.js" | .no_bundle = true | .find_additional_modules = true' \
@@ -103,16 +81,8 @@ jobs:
           tar -czf "$work/$archive" -C "$package" dist migrations wrangler.jsonc
           (cd "$work" && sha256sum "$archive" > "$archive.sha256")
 
-          if [[ -n "$release_id" ]]; then
-            gh api --method DELETE "$releases/$release_id"
-          fi
-          gh release create "$TAG" "$work/$archive" "$work/$archive.sha256" \
-            --target "$GITHUB_SHA" --draft --prerelease --title "$TAG"
-          draft=$(gh release view "$TAG" --json databaseId,isDraft,assets)
-          release_id=$(jq -er --arg archive "$archive" --arg checksum "$archive.sha256" \
-            "if .isDraft and ($uploaded) then .databaseId else error(\"The draft or its assets are missing. Inspect the release before rerunning.\") end" \
-            <<<"$draft")
-          gh api --method PATCH "$releases/$release_id" -F draft=false --jq .html_url
+          gh release create "$TAG" "$work/$archive" "$work/$archive.sha256" --target "$GITHUB_SHA" --prerelease
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   bump:
     needs: publish
