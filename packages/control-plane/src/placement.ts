@@ -130,6 +130,32 @@ export const placementRefusals = (hosts: readonly TenantUnplaceable[]): Unplacea
     return refused;
   });
 
+export type HostHeadroom = {
+  reported_health: Host["reportedHealth"];
+  memory_held_mib: number | null;
+  memory_budget_mib: number | null;
+  disk_held_mib: number | null;
+  disk_budget_mib: number | null;
+};
+
+const rose = (before: number | null, after: number | null): boolean =>
+  before !== null && after !== null && after > before;
+
+export const sessionFreesRoom = (
+  state: "Idle" | "Stopped" | "Failed" | "Archived",
+  box: HeldBox | undefined,
+): "PoolExhausted" | null => (state !== "Idle" || box?.evictable ? "PoolExhausted" : null);
+
+export const roomFreed = (before: HostHeadroom, after: HostHeadroom): "PoolExhausted" | "HostDegraded" | null => {
+  if (before.reported_health !== "Healthy" && after.reported_health === "Healthy") return "HostDegraded";
+  return rose(after.memory_held_mib, before.memory_held_mib) ||
+    rose(after.disk_held_mib, before.disk_held_mib) ||
+    rose(before.memory_budget_mib, after.memory_budget_mib) ||
+    rose(before.disk_budget_mib, after.disk_budget_mib)
+    ? "PoolExhausted"
+    : null;
+};
+
 export const degradedOnly = (hosts: readonly Unplaceable[]): boolean =>
   hosts.some(({ reason, host }) => reason === "NotOnline" && host.state === "Offline") &&
   hosts.every(({ reason }) => reason === "NotOnline" || reason === "NotHealthy");

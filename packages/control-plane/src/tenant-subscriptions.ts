@@ -26,7 +26,10 @@ type Resumed = z.infer<typeof ResumeSubscriptionResultSchema>["resumed"];
 type Completed = z.infer<typeof CompleteSubscriptionResultSchema>["completed"];
 
 const DELIVERY_FAILURE_LIMIT = 3;
-const CREW_FAILURE_LIMIT = 10;
+const FAILURE_CATEGORIES = {
+  CrewFailing: { column: "crew_failures_in_a_row", limit: 10 },
+  StartsRefused: { column: "start_refusals_in_a_row", limit: 10 },
+} as const;
 
 type SubscriptionRow = {
   subscription_id: string;
@@ -45,14 +48,18 @@ type SubscriptionRow = {
   crew_tags: string;
 };
 
-const SUBSCRIPTION_STATES = `WITH states (subscription_id, state, variant) AS (
-  SELECT subscription_id, 'Active', json_object('state', 'Active') FROM subscription_actives
-  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+const SUBSCRIPTION_STATES = `WITH paused (subscription_id, state, variant) AS (
+  SELECT subscription_id, 'Paused', json_object('state', 'Paused',
     'reason', json_object('kind', 'ByRequest', 'message', message), 'pausedAt', paused_at) FROM subscription_requested_pauses
   UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
     'reason', json_object('kind', 'DeliveryFailed', 'turnId', turn_id), 'pausedAt', paused_at) FROM subscription_delivery_failed_pauses
   UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
     'reason', json_object('kind', 'CrewFailing'), 'pausedAt', paused_at) FROM subscription_crew_failing_pauses
+  UNION ALL SELECT subscription_id, 'Paused', json_object('state', 'Paused',
+    'reason', json_object('kind', 'StartsRefused'), 'pausedAt', paused_at) FROM subscription_starts_refused_pauses
+), states (subscription_id, state, variant) AS (
+  SELECT subscription_id, 'Active', json_object('state', 'Active') FROM subscription_actives
+  UNION ALL SELECT subscription_id, state, variant FROM paused
   UNION ALL SELECT subscription_id, 'Ended', json_object('state', 'Ended', 'reason', reason, 'endedAt', ended_at) FROM subscription_ends
 )`;
 
@@ -74,6 +81,7 @@ const STATE_TABLES = [
   "subscription_requested_pauses",
   "subscription_delivery_failed_pauses",
   "subscription_crew_failing_pauses",
+  "subscription_starts_refused_pauses",
 ];
 
 const LIVE_SUBSCRIPTIONS = STATE_TABLES.map((table) => `SELECT subscription_id FROM ${table}`).join(" UNION ALL ");
@@ -97,10 +105,28 @@ const toSubscription = (tenantId: string, row: SubscriptionRow): Subscription =>
   return SubscriptionSchema.parse({ ...base, ...JSON.parse(row.variant) });
 };
 
-const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e JOIN event_sessions AS es ON es.event_id = e.event_id
+const refusalMatch = (subscription: string, event: string): string =>
+  `(json_extract(${event}.payload, '$.caller.sessionId') = (SELECT session_id FROM subscriptions WHERE subscription_id = ${subscription})
+  OR (NOT EXISTS (SELECT 1 FROM subscriptions AS own JOIN subscription_actives AS oa ON oa.subscription_id = own.subscription_id
+      WHERE own.session_id = json_extract(${event}.payload, '$.caller.sessionId'))
+    AND NOT EXISTS (SELECT 1 FROM subscription_crew_tags AS c WHERE c.subscription_id = ${subscription}
+      AND c.tag NOT IN (SELECT value FROM json_each(${event}.payload, '$.crewTags')))))`;
+
+const eventMatch = (subscription: string, crew: string): string =>
+  `CASE json_extract(e.payload, '$.event')
+    WHEN 'StartRefused' THEN ${refusalMatch(subscription, "e")}
+    WHEN 'CapacityAvailable' THEN EXISTS (SELECT 1 FROM subscription_room_signals AS s
+      WHERE s.subscription_id = ${subscription} AND s.signal_event_id = e.event_id)
+    ELSE ${crew} END`;
+
+const MATCHED_EVENTS = `SELECT e.event_id, e.payload, e.created_at FROM events AS e
+  LEFT JOIN event_sessions AS es ON es.event_id = e.event_id
   WHERE e.event_id > ?2
     AND json_extract(e.payload, '$.event') IN (SELECT event FROM subscription_events WHERE subscription_id = ?1)
-    AND ${crewMatch("?1", "es.session_id", "es.tags")}`;
+    AND ${eventMatch("?1", `es.event_id IS NOT NULL AND (${crewMatch("?1", "es.session_id", "es.tags")})`)}`;
+
+const UNSIGNALED_ROOM_WAITS = query`FROM subscription_room_waits AS w
+  WHERE NOT EXISTS (SELECT 1 FROM subscription_room_signals AS s WHERE s.subscription_id = w.subscription_id)`;
 
 const iso = (epochMs: number): string => new Date(epochMs).toISOString();
 
@@ -193,7 +219,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
         this.clearState(subscriptionId);
         sql.exec("INSERT INTO subscription_actives (subscription_id) VALUES (?)", subscriptionId);
         sql.exec(
-          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
+          "UPDATE subscriptions SET crew_failures_in_a_row = 0, delivery_failures_in_a_row = 0, start_refusals_in_a_row = 0, updated_at = ? WHERE subscription_id = ?",
           now,
           subscriptionId,
         );
@@ -273,7 +299,7 @@ export abstract class TenantSubscriptions extends TenantSessions {
   }
 
   protected override startTags(startedBy: Session["startedBy"], tags: string[]): string[] {
-    if (startedBy.kind !== "Turn") return tags;
+    if (startedBy.kind !== "Turn") return [...new Set(tags)].sort();
     return [...new Set([...this.crewTagsOf(startedBy.sessionId), ...tags])].sort();
   }
 
@@ -297,7 +323,24 @@ export abstract class TenantSubscriptions extends TenantSessions {
 
   protected override appendEvent(event: NewTenantEvent, now: number): number {
     const eventId = super.appendEvent(event, now);
+    if (event.event === "StartRefused") {
+      this.routeRefusal(eventId, event.refusal.code, now);
+      return eventId;
+    }
+    if (event.event === "CapacityAvailable") {
+      const waits = durableDb(this.ctx.storage, {}).all<{ subscription_id: string; active: number }>(
+        query`INSERT INTO subscription_room_signals (subscription_id, signal_event_id)
+          SELECT w.subscription_id, ${eventId} ${UNSIGNALED_ROOM_WAITS}
+          RETURNING subscription_id, EXISTS (SELECT 1 FROM subscription_actives AS a
+            WHERE a.subscription_id = subscription_room_signals.subscription_id) AS active`,
+      );
+      for (const wait of waits) {
+        if (wait.active === 1) this.ensureDelivery(wait.subscription_id, now);
+      }
+      return eventId;
+    }
     if (!("sessionId" in event)) return eventId;
+    if (event.event === "TurnStarted") this.acknowledgeDelivery(event.turnId);
     if (event.event === "TurnCompleted" || event.event === "TurnFailed") this.deliveryEnded(event, now);
     if (event.event === "SessionArchived" || event.event === "SessionFailed") {
       const ended = event.event;
@@ -305,6 +348,54 @@ export abstract class TenantSubscriptions extends TenantSessions {
     }
     this.matchCrew(event, now);
     return eventId;
+  }
+
+  protected override hasUnsignaledRoomWait(): boolean {
+    return durableDb(this.ctx.storage, {}).get(query`SELECT 1 ${UNSIGNALED_ROOM_WAITS} LIMIT 1`) !== undefined;
+  }
+
+  private routeRefusal(
+    eventId: number,
+    code: Extract<NewTenantEvent, { event: "StartRefused" }>["refusal"]["code"],
+    now: number,
+  ): void {
+    const room =
+      code === "PoolExhausted" || code === "NoHostAvailable" || code === "HostDegraded" || code === "HostOffline";
+    const db = durableDb(this.ctx.storage, {});
+    const recipients = db.all<{ subscription_id: string; active: number; listed: number; wait: number }>(
+      query`WITH recipients AS (SELECT live.subscription_id,
+        EXISTS (SELECT 1 FROM subscription_actives AS a WHERE a.subscription_id = live.subscription_id) AS active,
+        EXISTS (SELECT 1 FROM subscription_events AS se
+          WHERE se.subscription_id = live.subscription_id AND se.event = 'StartRefused') AS listed,
+        (${Number(room)} AND EXISTS (SELECT 1 FROM subscription_events AS se
+          WHERE se.subscription_id = live.subscription_id AND se.event = 'CapacityAvailable')) AS wait
+        FROM (${query.raw(LIVE_SUBSCRIPTIONS)}) AS live CROSS JOIN events AS e
+        WHERE e.event_id = ${eventId} AND ${query.raw(refusalMatch("live.subscription_id", "e"))})
+        SELECT subscription_id, active, listed, wait FROM recipients WHERE active = 1 OR wait = 1 ORDER BY subscription_id`,
+    );
+    for (const { subscription_id: subscriptionId, active, listed, wait } of recipients) {
+      if (wait === 1)
+        db.run(query`
+        INSERT INTO subscription_room_waits (subscription_id)
+        VALUES (${subscriptionId}) ON CONFLICT (subscription_id) DO NOTHING`);
+      if (active === 1 && !this.countFailure(subscriptionId, "StartsRefused", now) && listed === 1) {
+        this.ensureDelivery(subscriptionId, now);
+      }
+    }
+  }
+
+  private acknowledgeDelivery(turnId: string): void {
+    const db = durableDb(this.ctx.storage, {});
+    const delivery = db.get<{ subscription_id: string; last_event_id: number }>(
+      query`SELECT subscription_id, last_event_id FROM subscription_turns WHERE turn_id = ${turnId}`,
+    );
+    if (delivery === undefined) return;
+    db.run(query`
+      UPDATE subscriptions SET cursor_event_id = ${delivery.last_event_id}
+      WHERE subscription_id = ${delivery.subscription_id} AND cursor_event_id < ${delivery.last_event_id}`);
+    db.run(query`DELETE FROM subscription_room_waits WHERE subscription_id = ${delivery.subscription_id}
+      AND EXISTS (SELECT 1 FROM subscription_room_signals AS s
+        WHERE s.subscription_id = ${delivery.subscription_id} AND s.signal_event_id <= ${delivery.last_event_id})`);
   }
 
   protected override offeredPrompt(harness: string, turn: TurnRow): OfferedPrompt {
@@ -343,11 +434,10 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const prompt = batch?.prompt ?? plan;
     const lastEventId = batch?.lastEventId ?? row.cursor_event_id;
     sql.exec("UPDATE turns SET prompt = ? WHERE turn_id = ?", prompt, turn.turn_id);
-    sql.exec("UPDATE subscription_turns SET composed = 1 WHERE turn_id = ?", turn.turn_id);
     sql.exec(
-      "UPDATE subscriptions SET cursor_event_id = MAX(cursor_event_id, ?) WHERE subscription_id = ?",
+      "UPDATE subscription_turns SET composed = 1, last_event_id = ? WHERE turn_id = ?",
       lastEventId,
-      subscriptionId,
+      turn.turn_id,
     );
     if (row.state === "Active" && this.undeliveredAfter(subscriptionId, lastEventId)) {
       this.ensureDelivery(subscriptionId, Date.now());
@@ -459,6 +549,13 @@ export abstract class TenantSubscriptions extends TenantSessions {
         iso(now),
       );
     }
+    if (reason.kind === "StartsRefused") {
+      sql.exec(
+        "INSERT INTO subscription_starts_refused_pauses (subscription_id, paused_at) VALUES (?, ?)",
+        row.subscription_id,
+        iso(now),
+      );
+    }
     this.appendEvent(
       { event: "SubscriptionPaused", subscriptionId: row.subscription_id, sessionId: row.session_id, reason },
       now,
@@ -475,6 +572,9 @@ export abstract class TenantSubscriptions extends TenantSessions {
     const sql = this.ctx.storage.sql;
     this.cancelDelivery(row, now);
     this.clearState(row.subscription_id);
+    durableDb(this.ctx.storage, {}).run(
+      query`DELETE FROM subscription_room_waits WHERE subscription_id = ${row.subscription_id}`,
+    );
     sql.exec("UPDATE subscriptions SET updated_at = ? WHERE subscription_id = ?", now, row.subscription_id);
     sql.exec(
       "INSERT INTO subscription_ends (subscription_id, reason, ended_at) VALUES (?, ?, ?)",
@@ -543,19 +643,30 @@ export abstract class TenantSubscriptions extends TenantSessions {
           subscriptionId,
         );
       }
-      if (event.event === "TurnFailed" || event.event === "SessionFailed") {
-        sql.exec(
-          "UPDATE subscriptions SET crew_failures_in_a_row = crew_failures_in_a_row + 1, updated_at = ? WHERE subscription_id = ?",
-          now,
-          subscriptionId,
-        );
-        const row = this.subscriptionRow(subscriptionId);
-        if (row !== null && row.crew_failures_in_a_row >= CREW_FAILURE_LIMIT) {
-          this.pause(row, { kind: "CrewFailing" }, now);
-          continue;
-        }
+      if (
+        (event.event === "TurnFailed" || event.event === "SessionFailed") &&
+        this.countFailure(subscriptionId, "CrewFailing", now)
+      ) {
+        continue;
       }
       if (crew.listed === 1) this.ensureDelivery(subscriptionId, now);
     }
+  }
+
+  private countFailure(subscriptionId: string, category: keyof typeof FAILURE_CATEGORIES, now: number): boolean {
+    const { column, limit } = FAILURE_CATEGORIES[category];
+    const [counted] = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        `UPDATE subscriptions SET ${column} = ${column} + 1, updated_at = ? WHERE subscription_id = ? RETURNING ${column} AS count`,
+        now,
+        subscriptionId,
+      )
+      .toArray();
+    if (counted === undefined) throw new Error(`subscription ${subscriptionId} vanished while it counted a failure`);
+    if (counted.count < limit) return false;
+    const row = this.subscriptionRow(subscriptionId);
+    if (row === null) throw new Error(`subscription ${subscriptionId} vanished before its ${category} pause`);
+    this.pause(row, { kind: category }, now);
+    return true;
   }
 }

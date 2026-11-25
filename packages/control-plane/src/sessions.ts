@@ -7,6 +7,7 @@ import {
   SessionStopQuerySchema,
   SessionTagsPatchSchema,
   SessionTagsSchema,
+  StartRefusalSchema,
   SteerCreateSchema,
   type SteerSchema,
   TranscriptPageSchema,
@@ -15,6 +16,7 @@ import {
   TurnSendSchema,
 } from "@tumpel/schemas";
 import type { z } from "zod";
+import { boundedTo } from "./bounded-detail.ts";
 import { compactorOf } from "./compact.ts";
 import { DISCONNECTED_FIX, disconnectedDetail } from "./connector-rows.ts";
 import { deployInProgress } from "./deploy-drain.ts";
@@ -26,13 +28,13 @@ import {
   type HarnessCatalogEntry,
   pinnedEntry,
 } from "./harness-catalog.ts";
-import { type HostRecord, hostOf, listHostRecords, type Outcome, type Refused } from "./hosts.ts";
-import { issues, json, noContent, parseBody, problem } from "./http.ts";
+import { type HostRecord, hostOf, listHostRecords, type Outcome } from "./hosts.ts";
+import { issues, json, noContent, parseBody, problem, type Refused, refuse } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
 import { degradedOnly, placementRefusals, type Unplaceable } from "./placement.ts";
-import { releaseUnreadable } from "./releases.ts";
+import { imageNotReleased, releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
 import type { SecretSetRead } from "./tenant.ts";
@@ -90,13 +92,9 @@ export interface CompactTranscriptTurn {
   endedAt: number;
 }
 
-const refuse = (status: Refused["status"], refused: Refused["problem"]): Refused => ({
-  ok: false,
-  status,
-  problem: refused,
-});
+type Accepted<T> = Extract<Outcome<T>, { ok: true }>;
 
-const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
+const ok = <T>(value: T): Accepted<T> => ({ ok: true, value });
 
 const sessionNotFound = (sessionId: string): Refused =>
   refuse(404, {
@@ -182,7 +180,12 @@ export const placeableFix = (hosts: Unplaceable[], retry: string): string => {
   return `Start the supervisor on an ${architectures.join(" or ")} host, or enrol a new one, then ${retry}`;
 };
 
-const unplaced = (tenantRefusals: Parameters<typeof placementRefusals>[0], retry: string): Refused => {
+type PlacementRefusalCode = "PoolExhausted" | "NoHostAvailable" | "HostDegraded" | "ImageNotReleased";
+
+const unplaced = (
+  tenantRefusals: Parameters<typeof placementRefusals>[0],
+  retry: string,
+): Refused<PlacementRefusalCode> => {
   const hosts = placementRefusals(tenantRefusals);
   if (hosts.length === 0) {
     return refuse(409, {
@@ -191,6 +194,14 @@ const unplaced = (tenantRefusals: Parameters<typeof placementRefusals>[0], retry
       detail: "your tenant has no hosts",
       fix: `Enrol a host and start the supervisor on it, then ${retry}`,
     });
+  }
+  const [first] = hosts;
+  if (
+    first?.reason === "NoImage" &&
+    first.image.architectures.length === 0 &&
+    hosts.every((host) => host.reason === "NoImage")
+  ) {
+    return refuse(422, imageNotReleased(first.image.harness, first.image.harnessVersion, retry));
   }
   const detail = hosts.map(why).join(", ");
   if (degradedOnly(hosts)) {
@@ -253,32 +264,54 @@ export interface StartCheck {
   now: number;
 }
 
-export const checkStart = (check: StartCheck): Outcome<HarnessCatalogEntry> => {
+type CheckFailure =
+  | (Refused & { kind: "PersonaNotFound" | "Catalog" | "SecretSetUnreadable" })
+  | (Refused & { kind: "CredentialRefused"; credential: CredentialRefusal });
+
+type StartFailure =
+  | CheckFailure
+  | (Refused & {
+      kind: "RepositoryInvalid" | "ConnectorDisconnected" | "TagsOverLimit" | "Draining" | "ReleaseUnreadable";
+    })
+  | (Refused<PlacementRefusalCode> & { kind: "Unplaced" });
+
+type StartReply<T> = Accepted<T> | StartFailure;
+
+export const checkStart = (check: StartCheck): Accepted<HarnessCatalogEntry> | CheckFailure => {
   const { persona } = check;
-  if (persona === null) return personaNotFound(check.personaId);
+  if (persona === null) return { ...personaNotFound(check.personaId), kind: "PersonaNotFound" };
   const entry = pinnedEntry(check.pins, persona.harness);
   if (entry === undefined) {
-    return refuse(422, {
-      code: "HarnessNotInCatalog",
-      title: "Harness not in the catalog",
-      detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
-      fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
-    });
+    return {
+      kind: "Catalog",
+      ...refuse(422, {
+        code: "HarnessNotInCatalog",
+        title: "Harness not in the catalog",
+        detail: `persona ${persona.name} runs ${persona.harness}, of which the catalog has no version your tenant can run; it holds ${HARNESS_CATALOG.map((listed) => `${listed.harness} ${listed.harnessVersion}`).join(", ")}`,
+        fix: "Pin a listed version of that harness, or point the persona at a harness the catalog lists",
+      }),
+    };
   }
   const read = check.secretSet(persona);
   if (read.kind === "NotFound") {
     throw new Error(`persona ${persona.personaId} names secret set ${persona.secretSetId}, which does not exist`);
   }
-  if (read.kind === "Unreadable") return refuse(409, unreadableSecretSet(check.operation, read));
+  if (read.kind === "Unreadable") {
+    return { kind: "SecretSetUnreadable", ...refuse(409, unreadableSecretSet(check.operation, read)) };
+  }
   const { secretSet } = read;
   const credential = checkModelCredential(entry, secretSet.keys, check.model, check.now);
   if (credential.kind !== "Usable") {
-    return credentialRefused(
+    return {
+      kind: "CredentialRefused",
       credential,
-      `secret set ${secretSet.name} of persona ${persona.name}`,
-      persona.harness,
-      "start again",
-    );
+      ...credentialRefused(
+        credential,
+        `secret set ${secretSet.name} of persona ${persona.name}`,
+        persona.harness,
+        "start again",
+      ),
+    };
   }
   return ok(entry);
 };
@@ -290,10 +323,10 @@ export const startable = async (
   model: string,
   operation: string,
   now: number,
-): Promise<Outcome<HarnessCatalogEntry>> => {
+): Promise<Accepted<HarnessCatalogEntry> | CheckFailure> => {
   const tenant = tenantApi(env.TENANT, tenantId);
   const { persona } = await tenant.call("getPersona", { tenantId, personaId });
-  if (persona === null) return personaNotFound(personaId);
+  if (persona === null) return { kind: "PersonaNotFound", ...personaNotFound(personaId) };
   const { pins } = await tenant.call("listPins", {});
   const { read } = await tenant.call("getSecretSet", { tenantId, secretSetId: persona.secretSetId });
   return checkStart({ personaId, persona, pins, secretSet: () => read, model, operation, now });
@@ -310,9 +343,9 @@ const prepareStart = async (
   start: SessionStart,
   endpoint: string,
   now: number,
-): Promise<Outcome<NewSession>> => {
+): Promise<StartReply<NewSession>> => {
   const repository = startTarget(start.repository);
-  if (!repository.ok) return repository;
+  if (!repository.ok) return { kind: "RepositoryInvalid", ...repository };
   const checked = await startable(env, caller.tenantId, start.personaId, start.model, "sessions.start", now);
   if (!checked.ok) return checked;
   const entry = checked.value;
@@ -339,20 +372,118 @@ export const placed = <T>(
   started:
     | Exclude<SessionStarted<T>, { kind: "Unplaced" }>
     | { kind: "Unplaced"; hosts: Parameters<typeof placementRefusals>[0] },
-): Outcome<T> => {
-  if (started.kind === "Unplaced") return unplaced(started.hosts, "start again");
-  if (started.kind === "ConnectorDisconnected") return connectorDisconnected(started.names);
+): StartReply<T> => {
+  if (started.kind === "Unplaced") return { kind: started.kind, ...unplaced(started.hosts, "start again") };
+  if (started.kind === "ConnectorDisconnected") {
+    return { kind: started.kind, ...connectorDisconnected(started.names) };
+  }
   if (started.kind === "TagsOverLimit") {
-    return refuse(422, {
-      code: "InvalidRequest",
-      title: "Too many tags",
-      detail: `the session would carry ${started.tags.length} tags, its own and the crew tags it inherits from the session that starts it: ${started.tags.join(", ")}; a session carries at most ${SESSION_TAG_LIMIT}`,
-      fix: `Start the session with ${started.tags.length - SESSION_TAG_LIMIT} fewer tags of its own`,
+    return {
+      kind: started.kind,
+      ...refuse(422, {
+        code: "InvalidRequest",
+        title: "Too many tags",
+        detail: `The session would carry ${started.tagCount} tags, including inherited crew tags. A session carries at most ${SESSION_TAG_LIMIT} tags.`,
+        fix: `Reduce the total by ${started.tagCount - SESSION_TAG_LIMIT} tags and start the session again`,
+      }),
+    };
+  }
+  if (started.kind === "Draining") return { kind: started.kind, ...refuse(503, deployInProgress("start again")) };
+  if (started.kind === "ReleaseUnreadable") {
+    return { kind: started.kind, ...refuse(422, releaseUnreadable(started.detail, "start again")) };
+  }
+  return ok(started.started);
+};
+
+type SendFailure =
+  | (Refused & {
+      kind:
+        | "NotFound"
+        | "Archived"
+        | "GoalRefused"
+        | "Stranded"
+        | "Draining"
+        | "ReleaseUnreadable"
+        | "Stopping"
+        | "Failed"
+        | "ConnectorDisconnected";
+    })
+  | (Refused<PlacementRefusalCode> & { kind: "Unplaced" })
+  | (Refused & { kind: "CredentialRefused"; credential: CredentialRefusal });
+
+const refusalCode = (reply: StartFailure | SendFailure): z.infer<typeof StartRefusalSchema>["code"] | null => {
+  switch (reply.kind) {
+    case "Stranded":
+      return "HostOffline";
+    case "Unplaced":
+      return reply.problem.code;
+    case "Catalog":
+      return "HarnessNotInCatalog";
+    case "CredentialRefused":
+      switch (reply.credential.kind) {
+        case "NoCredential":
+        case "NoModelCredential":
+          return "NoCredential";
+        case "Expired":
+          return "CredentialExpired";
+        case "ModelUnsupported":
+          return "ModelUnsupported";
+        case "Unsupported":
+          return null;
+      }
+      break;
+    case "PersonaNotFound":
+    case "SecretSetUnreadable":
+    case "RepositoryInvalid":
+    case "ConnectorDisconnected":
+    case "TagsOverLimit":
+    case "Draining":
+    case "ReleaseUnreadable":
+    case "NotFound":
+    case "Archived":
+    case "GoalRefused":
+    case "Stopping":
+    case "Failed":
+      return null;
+  }
+};
+
+type Refusing =
+  | { operation: "Start"; start: Pick<SessionStart, "personaId" | "model" | "tags"> }
+  | { operation: "Send"; sessionId: string };
+
+const recordRefusal = async <T>(
+  env: Env,
+  caller: Caller,
+  refusing: Refusing,
+  reply: Accepted<T> | StartFailure | SendFailure,
+  now: number,
+): Promise<Outcome<T>> => {
+  if (reply.ok) return reply;
+  const code = refusalCode(reply);
+  if (code === null) return reply;
+  const refusal = { code, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, reply.problem.detail) };
+  const tenant = tenantOf(env, caller);
+  if (refusing.operation === "Start") {
+    await tenant.call("recordStartRefusal", {
+      tenantId: caller.tenantId,
+      refusal,
+      personaId: refusing.start.personaId,
+      model: refusing.start.model,
+      caller: caller.origin,
+      requestedTags: refusing.start.tags ?? [],
+      now,
+    });
+  } else {
+    await tenant.call("recordSendRefusal", {
+      tenantId: caller.tenantId,
+      refusal,
+      caller: caller.origin,
+      sessionId: refusing.sessionId,
+      now,
     });
   }
-  if (started.kind === "Draining") return refuse(503, deployInProgress("start again"));
-  if (started.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(started.detail, "start again"));
-  return ok(started.started);
+  return reply;
 };
 
 export const startSession = async (
@@ -363,11 +494,13 @@ export const startSession = async (
   now: number,
 ): Promise<Outcome<StartedSession>> => {
   const prepared = await prepareStart(env, caller, start, endpoint, now);
-  if (!prepared.ok) return prepared;
-  return placed(
-    (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
-      .started,
-  );
+  const reply = prepared.ok
+    ? placed(
+        (await tenantOf(env, caller).call("startSession", { tenantId: caller.tenantId, input: prepared.value, now }))
+          .started,
+      )
+    : prepared;
+  return recordRefusal(env, caller, { operation: "Start", start }, reply, now);
 };
 
 export const startSessionFromIssue = async (
@@ -447,17 +580,19 @@ export const startSessionFromIssue = async (
     endpoint,
     now,
   );
-  if (!prepared.ok) return prepared;
-  return placed(
-    (
-      await tenant.call("startSessionFromIssue", {
-        tenantId: caller.tenantId,
-        input: prepared.value,
-        issue: { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
-        now,
-      })
-    ).started,
-  );
+  const reply = prepared.ok
+    ? placed(
+        (
+          await tenant.call("startSessionFromIssue", {
+            tenantId: caller.tenantId,
+            input: prepared.value,
+            issue: { issueNumber: issue.number, title: issue.title, htmlUrl: issue.html_url, branch },
+            now,
+          })
+        ).started,
+      )
+    : prepared;
+  return recordRefusal(env, caller, { operation: "Start", start }, reply, now);
 };
 
 export const getSession = async (env: Env, caller: Caller, sessionId: string): Promise<Outcome<Session>> => {
@@ -472,7 +607,14 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
   if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
-  return ok((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions);
+  return ok(
+    unpaged((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions),
+  );
+};
+
+export const unpaged = (sessions: Session[] | null): Session[] => {
+  if (sessions === null) throw new Error("an unpaged session list came back null, which only a cursor can produce");
+  return sessions;
 };
 
 export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {
@@ -502,40 +644,68 @@ export const sendTurn = async (
   sessionId: string,
   send: TurnSend,
   now: number,
-): Promise<Outcome<Turn>> => {
+): Promise<Outcome<Turn>> =>
+  recordRefusal(env, caller, { operation: "Send", sessionId }, await sentReply(env, caller, sessionId, send, now), now);
+
+const sentReply = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  send: TurnSend,
+  now: number,
+): Promise<Accepted<Turn> | SendFailure> => {
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
-  if (session === null) return sessionNotFound(sessionId);
-  if (session.state === "Archived") return sessionArchived(sessionId, "turns");
+  if (session === null) return { kind: "NotFound", ...sessionNotFound(sessionId) };
+  if (session.state === "Archived") return { kind: "Archived", ...sessionArchived(sessionId, "turns") };
   const goal = refusedGoal(session, send);
-  if (goal !== null) return goal;
+  if (goal !== null) return { kind: "GoalRefused", ...goal };
   const hosts = await listHostRecords(env, caller.tenantId);
-  const { sent } = await tenant.call("sendTurn", { tenantId: caller.tenantId, sessionId, send, hosts, now });
+  const { sent } = await tenant.call("sendTurn", {
+    tenantId: caller.tenantId,
+    sessionId,
+    send,
+    hosts,
+    now,
+    caller: caller.origin,
+  });
   if (sent.kind === "Sent") return ok(sent.turn);
-  if (sent.kind === "Stranded") return stranded(session, hosts, sent.missingTurnIds);
-  if (sent.kind === "Unplaced") return unplaced(sent.hosts, "send the turn again");
-  if (sent.kind === "Draining") return refuse(503, deployInProgress("send the turn again"));
-  if (sent.kind === "ReleaseUnreadable") return refuse(422, releaseUnreadable(sent.detail, "send the turn again"));
-  if (sent.kind === "NotFound") return sessionNotFound(sessionId);
-  if (sent.kind === "Archived") return sessionArchived(sessionId, "turns");
+  if (sent.kind === "Stranded") return { kind: sent.kind, ...stranded(session, hosts, sent.missingTurnIds) };
+  if (sent.kind === "Unplaced") return { kind: sent.kind, ...unplaced(sent.hosts, "send the turn again") };
+  if (sent.kind === "Draining") return { kind: sent.kind, ...refuse(503, deployInProgress("send the turn again")) };
+  if (sent.kind === "ReleaseUnreadable") {
+    return { kind: sent.kind, ...refuse(422, releaseUnreadable(sent.detail, "send the turn again")) };
+  }
+  if (sent.kind === "NotFound") return { kind: sent.kind, ...sessionNotFound(sessionId) };
+  if (sent.kind === "Archived") return { kind: sent.kind, ...sessionArchived(sessionId, "turns") };
   if (sent.kind === "Stopping") {
-    return refuse(409, {
-      code: "SessionStopping",
-      title: "Session stopping",
-      detail: `session ${sessionId} is stopping: its host is snapshotting it and tearing its box down`,
-      fix: `Wait until session ${sessionId} reads Stopped or Idle, then send again`,
-    });
+    return {
+      kind: sent.kind,
+      ...refuse(409, {
+        code: "SessionStopping",
+        title: "Session stopping",
+        detail: `session ${sessionId} is stopping: its host is snapshotting it and tearing its box down`,
+        fix: `Wait until session ${sessionId} reads Stopped or Idle, then send again`,
+      }),
+    };
   }
   if (sent.kind === "Failed") {
-    return refuse(409, {
-      code: "SessionFailed",
-      title: "Session failed",
-      detail: `session ${sessionId} could not clone ${session.repository} and takes no more turns; turn ${session.lastTurnId} failed RepositoryCloneFailed`,
-      fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
-    });
+    return {
+      kind: sent.kind,
+      ...refuse(409, {
+        code: "SessionFailed",
+        title: "Session failed",
+        detail: `session ${sessionId} could not clone ${session.repository} and takes no more turns; turn ${session.lastTurnId} failed RepositoryCloneFailed`,
+        fix: `Read the failure of turn ${session.lastTurnId}, archive the session, and start a new session on a repository that exists, as https://github.com/owner/name`,
+      }),
+    };
   }
-  if (sent.kind === "ConnectorDisconnected") return connectorDisconnected(sent.names);
-  return credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again");
+  if (sent.kind === "ConnectorDisconnected") return { kind: sent.kind, ...connectorDisconnected(sent.names) };
+  return {
+    kind: sent.kind,
+    credential: sent.refusal,
+    ...credentialRefused(sent.refusal, `the secret set of persona ${sent.personaId}`, session.harness, "send again"),
+  };
 };
 
 export const stopSession = async (
@@ -622,8 +792,8 @@ export const patchSessionTags = async (
   return refuse(422, {
     code: "InvalidRequest",
     title: "Too many tags",
-    detail: `session ${sessionId} would carry ${tagged.tags.length} tags, and a session carries at most ${SESSION_TAG_LIMIT}`,
-    fix: `Add fewer tags or remove ${tagged.tags.length - SESSION_TAG_LIMIT} more in the same patch, then send it again`,
+    detail: `session ${sessionId} would carry ${tagged.tagCount} tags, and a session carries at most ${SESSION_TAG_LIMIT}`,
+    fix: `Add fewer tags or remove ${tagged.tagCount - SESSION_TAG_LIMIT} more in the same patch, then send it again`,
   });
 };
 

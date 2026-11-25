@@ -16,6 +16,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { createTestHarness, type TestHarness } from "wrangler";
+import { z } from "zod";
 import { pollInterval, TEST_SETTINGS } from "./timing.ts";
 
 const AUDIENCE = "tumpel-e2e";
@@ -272,6 +273,18 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
 
   const initialized = await mcp(oauthToken.access_token, 1, "initialize", { protocolVersion: "2025-06-18" });
   assert.equal(initialized.status, 200);
+  const {
+    result: { instructions },
+  } = z.object({ result: z.object({ instructions: z.string() }) }).parse(await initialized.json());
+  for (const sentence of [
+    "For ModelUnsupported, pick a model listed by tumpel_harness_list.",
+    "For HarnessNotInCatalog, start a fresh session so it uses the current catalog version.",
+    "For ImageNotReleased, tell the person.",
+    "For NoCredential or CredentialExpired, ask the person to fix the credential.",
+    "For PoolExhausted, NoHostAvailable, HostDegraded or HostOffline, end the turn and wait for CapacityAvailable if your subscription lists it. Otherwise, move the work onto a session that has room. Never poll.",
+  ]) {
+    assert.ok(instructions.includes(sentence), sentence);
+  }
   const listed = (await (await mcp(oauthToken.access_token, 2, "tools/list")).json()) as {
     result: { tools: { name: string }[] };
   };

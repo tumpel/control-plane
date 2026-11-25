@@ -11,8 +11,8 @@ import { type LifecycleCommand, readDevcontainer } from "./devcontainer.ts";
 import { type GitHubRepository, githubRepository, notARepository, repositoryUrl } from "./github.ts";
 import { GUEST_TOOLCHAINS } from "./guest-toolchains.ts";
 import { HARNESS_CATALOG, type HarnessCatalogEntry, pinnedEntry } from "./harness-catalog";
-import { listHostRecords, type Outcome, type Refused } from "./hosts";
-import { issues, json, parseBody, problem } from "./http";
+import { listHostRecords, type Outcome } from "./hosts";
+import { issues, json, parseBody, problem, type Refused } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import {

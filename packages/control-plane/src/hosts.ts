@@ -9,7 +9,7 @@ import type { z } from "zod";
 import { decodeBase64 } from "./channel/protocol.ts";
 import { randomToken, sha256Hex, TOKEN_PATTERN } from "./crypto";
 import { type HostEntry, HostEntrySchema, type HostRecord } from "./host-record";
-import type { Problem, ProblemStatus } from "./http";
+import { type Refused, refuse } from "./http";
 import type { Caller } from "./identity";
 import type { Env } from "./index";
 import { presenceGraceMs, settingsOf } from "./settings";
@@ -22,7 +22,6 @@ export type MintedEnrolmentToken = z.infer<typeof MintedEnrolmentTokenSchema>;
 export type EnrolmentToken = z.infer<typeof EnrolmentTokenSchema>;
 export type HostEnrol = z.infer<typeof HostEnrolSchema>;
 
-export type Refused = { ok: false; status: ProblemStatus; problem: Problem };
 export type Outcome<T> = { ok: true; value: T } | Refused;
 
 interface HostRow {
@@ -190,8 +189,6 @@ export const revokeEnrolmentToken = async (
     fix: "List your enrolment tokens and revoke one of their ids",
   });
 };
-
-const refuse = (status: ProblemStatus, problem: Problem): Refused => ({ ok: false, status, problem });
 
 export const enrolHost = async (env: Env, body: HostEnrol, now: number): Promise<Outcome<HostRecord>> => {
   const key = decodeBase64(body.publicKey);
