@@ -24,7 +24,6 @@ const ROWS_PER_STORED_SNAPSHOT = 20;
 const ROWS_PER_FORK = 21;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
-const GETS_PER_MANIFEST = 2;
 const LARGEST_RESTORABLE = 500_000;
 const OVER_CAP_CHUNKS = 700_000;
 const OVER_CAP_ROOT_PLACEMENTS = 700_000;
@@ -201,7 +200,7 @@ test("a session forked from a prebuild of 100000 chunks writes the rows of a for
   assert.ok(small <= ROWS_PER_FORK, `a fork wrote ${small} rows`);
 });
 
-test("sessions that snapshot at once read each manifest once, however many parts they send", async () => {
+test("sessions that snapshot at once read no object storage for their chunk asks, however many parts they send", async () => {
   await inWorld(async (world, host) => {
     await world.holdsAgentCredentials();
     const sessions: { sessionId: string; chunks: Placement[]; snapshotId: string }[] = [];
@@ -229,12 +228,13 @@ test("sessions that snapshot at once read each manifest once, however many parts
         const answer = ChunksHeldSchema.parse(
           await host.says({ type: "SnapshotChunks", snapshotId: session.snapshotId, part: part + 1, digests }),
         );
-        assert.equal(answer.reply.held.length, digests.length);
+        assert.deepEqual(answer.reply.held, []);
       }
     }
     const gets = world.store.gets - before;
-    assert.ok(
-      gets <= CONCURRENT_SESSIONS * GETS_PER_MANIFEST,
+    assert.equal(
+      gets,
+      0,
       `${CONCURRENT_SESSIONS} sessions sending ${count} parts each read object storage ${gets} times`,
     );
   });

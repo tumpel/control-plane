@@ -439,3 +439,38 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
   assert.deepEqual(over, [], `actions over ${BUDGET_MS} ms of compute`);
   assert.deepEqual(broken, [], `actions the test could not run:\n${broken.join("\n")}`);
 });
+
+test("a chunk ask after a restart stays inside the budget, whatever the size of the previous snapshot", {
+  timeout: 900_000,
+}, async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  await world.holdsAgentCredentials();
+  const session = await world.startSession({ prompt: "build a large tree", tags: [] });
+  const chunks = tree(200_000);
+  const first = host.takeOffer();
+  await host.claims(first);
+  await host.completes(first);
+  await storesTree(world, host, session.sessionId, chunks);
+  await releasesBoxes(host);
+  await world.sendTurn(session.sessionId, "change one file");
+  const second = host.takeOffer();
+  await host.claims(second);
+  await host.completes(second);
+  const request = z.object({ snapshotId: z.string() }).parse(host.received("SnapshotRequest").at(-1));
+
+  await world.restartTenant();
+  const ms = await world.computeMs("hostMessage", {
+    tenantId: TENANT_ID,
+    hostId: host.hostId,
+    message: {
+      type: "SnapshotChunks",
+      snapshotId: request.snapshotId,
+      part: 1,
+      digests: chunks.slice(0, DIGESTS_PER_PART).map((chunk) => chunk.digest),
+    },
+  });
+  console.log(`${ms.toFixed(2)} ms for the first chunk ask after a restart`);
+  assert.ok(ms <= BUDGET_MS, `the first chunk ask after a restart took ${ms.toFixed(2)} ms`);
+});
