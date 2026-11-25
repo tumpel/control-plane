@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: checks-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -24,3 +24,122 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+
+  publish:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.candidate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the candidate if the push ships code
+        id: candidate
+        run: |
+          changed=$(git diff --name-only "$GITHUB_SHA^1" "$GITHUB_SHA")
+          if grep -qvE '^(docs?/.*|.*\.md|LICENSE|\.github/ISSUE_TEMPLATE/.*)$' <<<"$changed"; then
+            count=$(git rev-list --count "$GITHUB_SHA")
+            echo "tag=rc.$count" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.candidate.outputs.tag != ''
+        with:
+          node-version: 22
+          cache: npm
+      - name: Publish the control-plane candidate
+        if: steps.candidate.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          archive="control-plane-$TAG.tgz"
+          releases="repos/$GITHUB_REPOSITORY/releases"
+          uploaded='[.assets[] | select(.state == "uploaded") | .name] | index($archive) != null and index($checksum) != null'
+          release_id=$(gh api graphql -f query='query($owner: String!, $name: String!, $tag: String!) {
+            repository(owner: $owner, name: $name) { release(tagName: $tag) { databaseId } }
+          }' -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -f tag="$TAG" \
+            --jq '.data.repository.release.databaseId // empty')
+          existing_tag=$(git tag --list "$TAG")
+          if [[ -n "$existing_tag" && $(git rev-parse "refs/tags/$TAG^{commit}") != "$GITHUB_SHA" ]]; then
+            echo "::error::$TAG points to a commit other than $GITHUB_SHA. Resolve the tag conflict before rerunning."
+            exit 1
+          fi
+          if [[ -n "$release_id" ]]; then
+            release=$(gh api "$releases/$release_id")
+            if jq -e '.draft' <<<"$release" > /dev/null; then
+              jq -e --arg sha "$GITHUB_SHA" \
+                'if .target_commitish == $sha then true else error("The draft targets a different commit. Inspect the existing release.") end' \
+                <<<"$release" > /dev/null
+            else
+              if [[ -n "$existing_tag" ]] && jq -e --arg archive "$archive" --arg checksum "$archive.sha256" \
+                ".prerelease and ($uploaded)" <<<"$release" > /dev/null; then
+                echo "$TAG is already published with both assets."
+                exit 0
+              fi
+              echo "::error::$TAG must be a prerelease on $GITHUB_SHA with $archive and $archive.sha256. Inspect the existing release."
+              exit 1
+            fi
+          elif [[ -n "$existing_tag" ]]; then
+            echo "::error::$TAG exists without a release. Resolve the tag conflict before rerunning."
+            exit 1
+          fi
+
+          npm ci --no-audit --no-fund
+          work=$(mktemp -d)
+          package="$work/package"
+          source=packages/control-plane
+          npm run bundle:candidate --workspace "$source" -- --outdir "$package/dist"
+          test -f "$package/dist/index.js"
+          jq '.main = "dist/index.js" | .no_bundle = true | .find_additional_modules = true' \
+            "$source/wrangler.jsonc" > "$package/wrangler.jsonc"
+          cp -r "$source/migrations" "$package/"
+          tar -czf "$work/$archive" -C "$package" dist migrations wrangler.jsonc
+          (cd "$work" && sha256sum "$archive" > "$archive.sha256")
+
+          if [[ -n "$release_id" ]]; then
+            gh api --method DELETE "$releases/$release_id"
+          fi
+          gh release create "$TAG" "$work/$archive" "$work/$archive.sha256" \
+            --target "$GITHUB_SHA" --draft --prerelease --title "$TAG"
+          draft=$(gh release view "$TAG" --json databaseId,isDraft,assets)
+          release_id=$(jq -er --arg archive "$archive" --arg checksum "$archive.sha256" \
+            "if .isDraft and ($uploaded) then .databaseId else error(\"The draft or its assets are missing. Inspect the release before rerunning.\") end" \
+            <<<"$draft")
+          gh api --method PATCH "$releases/$release_id" -F draft=false --jq .html_url
+
+  bump:
+    needs: publish
+    if: needs.publish.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: tumpel/deploy
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: tumpel
+          repositories: deploy
+          permission-contents: write
+      - name: Bump the control-plane pin
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ needs.publish.outputs.tag }}
+        run: node npm-scripts/bump-pin.mjs control-plane "$TAG"
