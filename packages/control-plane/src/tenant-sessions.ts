@@ -706,6 +706,7 @@ export const sealContext = (secretSetId: string, name: string): string => `${sec
 export abstract class TenantSessions extends DurableObject<Env> {
   protected eventsAppended = false;
   private readonly runningTails = new Map<string, Promise<RunningTail>>();
+  private readonly dispatchingOffers = new Set<string>();
 
   protected abstract failPrebuild(
     prebuildId: string,
@@ -1278,8 +1279,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offer === null) return;
     const refused = this.reportRefusesOffer(session.host_id, Date.now());
     if (refused !== null) return this.sendSettled(tenantId, turn.turn_id, session.host_id, refused);
+    this.dispatchingOffers.add(turn.turn_id);
     const sent = await this.host(session.host_id)
       .send(offer)
+      .finally(() => {
+        this.dispatchingOffers.delete(turn.turn_id);
+      })
       .catch((error: unknown) => errorOf(error));
     await this.sendSettled(tenantId, turn.turn_id, session.host_id, sent);
   }
@@ -1644,7 +1649,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         hostId,
         JSON.stringify(heldTurnIds),
       )
-      .toArray();
+      .toArray()
+      .filter((turn) => turn.state !== "Offered" || !this.dispatchingOffers.has(turn.turn_id));
   }
 
   private unheldRunningTurns(hostId: string, heldTurnIds: string[]): string[] {
