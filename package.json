@@ -35,8 +35,6 @@
     "harness:layer": "node npm-scripts/harness-layer.mjs",
     "smoke:pi": "node npm-scripts/pi-smoke.mjs",
     "release:publish": "node npm-scripts/release-publish.mjs",
-    "release:update-dashboard": "node npm-scripts/update-dashboard.mjs",
-    "release:dispatch-deploy": "node npm-scripts/dispatch-deploy.mjs",
     "release:secrets": "node npm-scripts/release-secrets.mjs",
     "db:schema": "node npm-scripts/db-schema.mjs"
   },

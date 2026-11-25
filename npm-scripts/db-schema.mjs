@@ -21,18 +21,15 @@ const BUILDERS = { INTEGER: "integer", TEXT: "text", REAL: "real", BLOB: "blob" 
 
 const camel = (name) => name.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
 
-const rows = (db, query) => db.prepare(query).all();
+export const rows = (db, query) => db.prepare(query).all();
 
-const migratedDatabase = (directory) => {
+export const migratedDatabase = (sources) => {
   const db = new DatabaseSync(":memory:");
-  const files = readdirSync(directory)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) db.exec(readFileSync(join(directory, file), "utf8"));
+  for (const sql of sources) db.exec(sql);
   return db;
 };
 
-const tableNames = (db) =>
+export const tableNames = (db) =>
   rows(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").map(
     (row) => row.name,
   );
@@ -128,7 +125,10 @@ const tableSource = (db, description, used) => {
 };
 
 export const schemaSource = (directory) => {
-  const db = migratedDatabase(directory);
+  const files = readdirSync(directory)
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+  const db = migratedDatabase(files.map((file) => readFileSync(join(directory, file), "utf8")));
   const used = new Set(["sqliteTable"]);
   const descriptions = tableNames(db).map((table) => describe(db, table));
   const body = descriptions.map((description) => tableSource(db, description, used)).join("\n\n");

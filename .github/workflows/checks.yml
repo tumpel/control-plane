@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: checks-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -24,3 +24,92 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+
+  publish:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the candidate if the push ships code
+        id: candidate
+        run: |
+          changed=$(git diff --name-only --no-renames "$GITHUB_SHA^1" "$GITHUB_SHA")
+          if grep -qvE '^(docs?/.*|.*\.md|LICENSE|\.github/ISSUE_TEMPLATE/.*)$' <<<"$changed"; then
+            count=$(git rev-list --count "$GITHUB_SHA")
+            echo "tag=rc.$count" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.candidate.outputs.tag != ''
+        with:
+          node-version: 22
+          cache: npm
+      - name: Publish the control-plane candidate
+        id: release
+        if: steps.candidate.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [[ "$draft" == false ]]; then
+              echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            gh release delete "$TAG" --yes
+          fi
+
+          npm ci --no-audit --no-fund
+          work=$(mktemp -d)
+          package="$work/package"
+          source=packages/control-plane
+          archive="control-plane-$TAG.tgz"
+          npx --workspace "$source" wrangler deploy --dry-run --outdir "$package/dist"
+          test -f "$package/dist/index.js"
+          jq '.main = "dist/index.js" | .no_bundle = true | .find_additional_modules = true' \
+            "$source/wrangler.jsonc" > "$package/wrangler.jsonc"
+          cp -r "$source/migrations" "$package/"
+          tar -czf "$work/$archive" -C "$package" dist migrations wrangler.jsonc
+          (cd "$work" && sha256sum "$archive" > "$archive.sha256")
+
+          gh release create "$TAG" "$work/$archive" "$work/$archive.sha256" --target "$GITHUB_SHA" --prerelease
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  bump:
+    needs: publish
+    if: needs.publish.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: tumpel/deploy
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: tumpel
+          repositories: deploy
+          permission-contents: write
+      - name: Bump the control-plane pin
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ needs.publish.outputs.tag }}
+        run: node npm-scripts/bump-pin.mjs control-plane "$TAG"

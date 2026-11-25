@@ -22,6 +22,4 @@ Always follow `rules/errors.md`, `rules/coding-standards.md` and `rules/architec
 
 ## Releases
 
-Dashboard publishers must dispatch only after the checks workflow for the exact released main SHA completes successfully. The control plane queries that run once as provenance and refuses a missing, pending or unsuccessful run.
-
-Dashboard dependency updates must use one bot pull request. Required checks, review and branch protection govern squash auto-merge; dependency updates must never commit directly to main.
+After checks pass on main, each push that changes code publishes a control-plane candidate and updates its dev pin in [tumpel/deploy](https://github.com/tumpel/deploy). Normal pull requests update the stable `@tumpel/pages` dependency.
