@@ -42,7 +42,7 @@ jobs:
       - name: Name the candidate if the push ships code
         id: candidate
         run: |
-          changed=$(git diff --name-only "$GITHUB_SHA^1" "$GITHUB_SHA")
+          changed=$(git diff --name-only --no-renames "$GITHUB_SHA^1" "$GITHUB_SHA")
           if grep -qvE '^(docs?/.*|.*\.md|LICENSE|\.github/ISSUE_TEMPLATE/.*)$' <<<"$changed"; then
             count=$(git rev-list --count "$GITHUB_SHA")
             echo "tag=rc.$count" >> "$GITHUB_OUTPUT"
