@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { ChannelProtocol, HostFrameSchema } from "@tumpel/schemas";
+import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
@@ -300,8 +300,42 @@ const seeded = async (t: { after(fn: () => void): void }) => {
     .array(z.object({ total: z.number() }))
     .parse(world.tenantSql().exec("SELECT count(*) AS total FROM events").toArray());
   console.log(`seeded ${sessions.length} sessions, ${events[0]?.total ?? 0} events`);
-  return { world, known };
+  return { world, known, host, sessions };
 };
+
+test("the unpaged session list returns all sessions on a loaded tenant", { timeout: 900_000 }, async (t) => {
+  const { world, host, sessions } = await seeded(t);
+  await world.call("hostHello", {
+    tenantId: TENANT_ID,
+    hostId: host.hostId,
+    heldTurnIds: [],
+    boxCapacity: 100,
+    usage: {
+      ...BUDGETS,
+      boxesWarm: 0,
+      loadAverage: 0,
+      memoryBudgetMib: 500_000,
+      memoryAvailableMib: 500_000,
+      diskBudgetMib: 5_000_000,
+    },
+    now: Date.now(),
+    channelProtocol: ChannelProtocol.Oldest,
+  });
+  await world.tick(1);
+  const added: string[] = [];
+  for (let at = 0; at < 60; at++) {
+    const session = await world.startSession({ prompt: `page session ${at}`, tags: [] });
+    added.push(session.sessionId);
+  }
+  const unpaged = await world.fetch(world.owner, "GET", "/v1/sessions");
+  assert.equal(unpaged.status, 200);
+  assert.deepEqual(
+    SessionSchema.array()
+      .parse(await unpaged.json())
+      .map(({ sessionId }) => sessionId),
+    [...sessions.toSorted(), ...added.toSorted()],
+  );
+});
 
 const DESTRUCTIVE = /^(delete|archive|forget|revoke|remove|stop|cancel|clear|purge|disconnect|restore)/;
 
