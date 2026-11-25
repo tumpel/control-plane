@@ -607,9 +607,16 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
   if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
-  return ok(
-    unpaged((await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter })).sessions),
-  );
+  if (query.limit !== undefined) filter.limit = query.limit;
+  if (query.after !== undefined) filter.after = query.after;
+  const { sessions } = await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter });
+  if (sessions !== null) return ok(sessions);
+  return refuse(400, {
+    code: "InvalidRequest",
+    title: "No such session to page after",
+    detail: `after names ${query.after}, which is no session of your tenant`,
+    fix: "Send after as the sessionId of the last session of the previous page, or leave it out for the first page",
+  });
 };
 
 export const unpaged = (sessions: Session[] | null): Session[] => {
@@ -1189,7 +1196,7 @@ export const handleSessions = async (
   }
   if (pathname === "/v1/sessions") {
     const tag = url.searchParams.getAll("tag");
-    const query = SessionListQuerySchema.safeParse({ ...queryOf(url, []), ...(tag.length > 0 ? { tag } : {}) });
+    const query = SessionListQuerySchema.safeParse({ ...queryOf(url, ["limit"]), ...(tag.length > 0 ? { tag } : {}) });
     if (!query.success) return invalidQuery("sessions.list", query.error);
     return answer(await listSessions(env, caller, query.data));
   }

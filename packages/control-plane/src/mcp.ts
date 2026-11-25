@@ -783,7 +783,7 @@ export const TOOLS: ToolDefinition[] = [
     "GET",
     "/v1/sessions",
     SessionListQuerySchema,
-    "List the tenant's sessions, optionally only those in one state, on one host, carrying every tag in tag, started by the trigger triggerId, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset).",
+    "List the tenant's sessions, optionally only those in one state, on one host, carrying every tag in tag, started by the trigger triggerId, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset). Sessions come oldest first; with limit (1 to 50) it returns at most limit of them, and after set to the last sessionId of a page reads the next. A page shorter than limit is the last.",
   ),
   rest(
     "tumpel_session_get",

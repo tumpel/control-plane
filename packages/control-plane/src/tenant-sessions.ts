@@ -2760,7 +2760,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
       : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id), stale);
   }
 
-  protected async listSessions(tenantId: string, filter: SessionFilter): Promise<Session[]> {
+  protected async listSessions(tenantId: string, filter: SessionFilter): Promise<Session[] | null> {
+    let keyset: [number, string] | [] = [];
+    if (filter.after !== undefined) {
+      const [after] = this.ctx.storage.sql
+        .exec<{ created_at: number }>("SELECT created_at FROM sessions WHERE session_id = ?", filter.after)
+        .toArray();
+      if (after === undefined) return null;
+      keyset = [after.created_at, filter.after];
+    }
     const stale = this.staleHosts(Date.now());
     return this.ctx.storage.sql
       .exec<SessionViewRow>(
@@ -2770,12 +2778,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
           WHERE wanted.value NOT IN (SELECT tag FROM session_tags WHERE session_tags.session_id = s.session_id))
         AND NOT EXISTS (SELECT 1 FROM prebuild_sessions WHERE prebuild_sessions.session_id = s.session_id)
         AND (?5 IS NULL OR g.trigger_id = ?5)
-        ORDER BY s.created_at, s.session_id`,
+        ${keyset.length === 0 ? "" : "AND (s.created_at, s.session_id) > (?7, ?8)"}
+        ORDER BY s.created_at, s.session_id LIMIT ?6`,
         filter.state ?? null,
         filter.hostId ?? null,
         filter.lastTurnBefore ?? null,
         JSON.stringify(filter.tags ?? []),
         filter.triggerId ?? null,
+        filter.limit ?? -1,
+        ...keyset,
       )
       .toArray()
       .map((row) =>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { ChannelProtocol, HostFrameSchema } from "@tumpel/schemas";
+import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
@@ -300,8 +300,76 @@ const seeded = async (t: { after(fn: () => void): void }) => {
     .array(z.object({ total: z.number() }))
     .parse(world.tenantSql().exec("SELECT count(*) AS total FROM events").toArray());
   console.log(`seeded ${sessions.length} sessions, ${events[0]?.total ?? 0} events`);
-  return { world, known };
+  return { world, known, host, sessions };
 };
+
+test("a session list page stays inside the budget and reads no more rows as the tenant grows", {
+  timeout: 900_000,
+}, async (t) => {
+  const { world, host, sessions } = await seeded(t);
+  await world.call("hostHello", {
+    tenantId: TENANT_ID,
+    hostId: host.hostId,
+    heldTurnIds: [],
+    boxCapacity: 100,
+    usage: {
+      ...BUDGETS,
+      boxesWarm: 0,
+      loadAverage: 0,
+      memoryBudgetMib: 500_000,
+      memoryAvailableMib: 500_000,
+      diskBudgetMib: 5_000_000,
+    },
+    now: Date.now(),
+    channelProtocol: ChannelProtocol.Oldest,
+  });
+  await world.tick(1);
+  const added: string[] = [];
+  for (let at = 0; at < 60; at++) {
+    const session = await world.startSession({ prompt: `page session ${at}`, tags: [] });
+    added.push(session.sessionId);
+  }
+  const exec = t.mock.method(world.tenantSql(), "exec");
+  const rowsRead = async (path: string): Promise<{ ids: string[]; rows: number }> => {
+    exec.mock.resetCalls();
+    const listed = await world.fetch(world.owner, "GET", path);
+    assert.equal(listed.status, 200);
+    const ids = SessionSchema.array()
+      .parse(await listed.json())
+      .map(({ sessionId }) => sessionId);
+    return { ids, rows: exec.mock.calls.reduce((sum, call) => sum + (call.result?.toArray().length ?? 0), 0) };
+  };
+  const ordered = [...sessions.toSorted(), ...added.toSorted()];
+
+  const first = await rowsRead("/v1/sessions?limit=50");
+  assert.deepEqual(first.ids, ordered.slice(0, 50));
+  const timing = await measured(() => world.computeMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } }));
+  console.log(`${timing.median.toFixed(2)} ms median, ${timing.first.toFixed(2)} ms first, ${first.rows} rows read`);
+  assert.ok(timing.median <= BUDGET_MS, `a page of 50 took ${timing.median.toFixed(2)} ms`);
+
+  await world.tick(1);
+  for (let at = 60; at < 90; at++) {
+    const session = await world.startSession({ prompt: `page session ${at}`, tags: [] });
+    added.push(session.sessionId);
+  }
+  const grown = await rowsRead("/v1/sessions?limit=50");
+  assert.deepEqual(grown.ids, first.ids);
+  assert.equal(grown.rows, first.rows);
+
+  const paged: string[] = [];
+  let page = grown.ids;
+  while (page.length === 50) {
+    paged.push(...page);
+    page = (await rowsRead(`/v1/sessions?limit=50&after=${page.at(-1)}`)).ids;
+  }
+  paged.push(...page);
+  assert.equal(paged.length, 100);
+  assert.deepEqual(paged, [...ordered, ...added.slice(60).toSorted()]);
+
+  const unknown = await world.fetch(world.owner, "GET", "/v1/sessions?limit=50&after=no-such-session");
+  assert.equal(unknown.status, 400);
+  assert.match(z.object({ detail: z.string() }).parse(await unknown.json()).detail, /^after names no-such-session/);
+});
 
 const DESTRUCTIVE = /^(delete|archive|forget|revoke|remove|stop|cancel|clear|purge|disconnect|restore)/;
 
