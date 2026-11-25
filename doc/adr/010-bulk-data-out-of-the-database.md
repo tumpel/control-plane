@@ -17,3 +17,13 @@ Tenant SQL holds a fixed, small number of rows per entity: keys, digests, sizes 
 > We treat cost as a signal.
 
 This applies tenet 9 and adds tenet 10. The cost is that a lookup by chunk digest reads a manifest from R2, and retention can no longer find an unreferenced pack with a join. The gain is that a snapshot writes the same few rows whatever the size of its tree, and the bill grows with sessions and turns instead of files. `rules/storage.md` gives the rules for agents.
+
+## Amendment: pack reference counts
+
+Status: accepted, 2026-11-25
+
+Retention keeps one count per pack in tenant SQL, the one exception to "no table holds one row per pack". `pack_refs` holds one row per live pack: its digest and the number of live `snapshots` rows whose pack list names it, plus the number of sessions that hold it. `pack_holds` holds one row per pack of an upload in flight. Only a `snapshots` row carries references; a pack list in R2 without a row carries none.
+
+The bound: the `pack_refs` rows one frame writes equal the packs whose net count changes, and the `pack_holds` rows it writes equal the packs its upload adds or releases. A stored snapshot commits its row, the deletion of the rows it releases, the release of its session's holds and the net change of each pack in one transaction, so a snapshot that reuses a pack writes no row for it. A pack whose count reaches 0 keeps its row until R2 deletes the pack. Rows grow with live packs, never with chunks, files or turns.
+
+A tenant's one-time import of its `live-packs.json` object reconciles it against the `snapshots` rows and writes its rows and an imported marker in one transaction, so it runs once.

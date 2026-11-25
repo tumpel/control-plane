@@ -11,6 +11,9 @@ import {
 
 const LARGE = 100_000;
 const ROWS_PER_FAILED_SNAPSHOT = 25;
+const ROWS_PER_NEW_PACK = 2;
+
+const packsOf = (count: number): number => new Set(tree(count).map((chunk) => chunk.packDigest)).size;
 
 const rowsOfFailedSnapshot = (chunks: Placement[], attempts: number): Promise<number> =>
   inWorld(async (world, host) => {
@@ -27,9 +30,9 @@ const rowsOfFailedSnapshot = (chunks: Placement[], attempts: number): Promise<nu
     return world.tenantRowsWritten() - before;
   });
 
-test("a snapshot of 100000 chunks that the host uploads 3 times and then fails writes the rows of a one-chunk snapshot that fails at once", async () => {
-  const large = await rowsOfFailedSnapshot(tree(LARGE), 3);
-  const small = await rowsOfFailedSnapshot(tree(1), 1);
+test("a snapshot of 100000 chunks that the host uploads 3 times and then fails writes the rows of a one-chunk snapshot that fails at once, plus a count and a hold per pack", async () => {
+  const large = (await rowsOfFailedSnapshot(tree(LARGE), 3)) - ROWS_PER_NEW_PACK * packsOf(LARGE);
+  const small = (await rowsOfFailedSnapshot(tree(1), 1)) - ROWS_PER_NEW_PACK * packsOf(1);
   assert.equal(large, small);
-  assert.ok(small <= ROWS_PER_FAILED_SNAPSHOT, `a failed snapshot wrote ${small} rows`);
+  assert.ok(small <= ROWS_PER_FAILED_SNAPSHOT, `a failed snapshot wrote ${small} rows besides its packs`);
 });

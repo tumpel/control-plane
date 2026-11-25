@@ -113,7 +113,7 @@ import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
   indexBytesFor,
-  LivePacks,
+  livePacksKey,
   MAX_INDEX_BYTES,
   type ManifestRead,
   mergedDraft,
@@ -122,8 +122,10 @@ import {
   type SnapshotIndex,
   SnapshotManifests,
   STORE_DELETE_BATCH,
+  savedLivePacks,
   snapshotDraft,
   snapshotPackSet,
+  storedPackList,
 } from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
@@ -448,6 +450,17 @@ type SnapshotRequestRow = {
   snapshot_seq: number;
   storage_key: string;
 };
+
+type PackChange = Map<string, number>;
+
+type Claim = {
+  kind: "Claimed";
+  older: { snapshot_id: string; storage_key: string }[];
+  lists: ReadonlySet<string>[];
+  proven: string[];
+};
+
+type Collected = { now: number; older: { snapshot_id: string; storage_key: string }[]; change: PackChange };
 
 const SESSION_SELECT =
   "SELECT session_id, principal_id, host_id, box_id, persona_id, repository, harness, harness_version, model, state, last_line_seq, endpoint, COALESCE((SELECT box_memory_mib FROM session_box_memory WHERE session_box_memory.session_id = sessions.session_id), box_memory_mib) AS box_memory_mib, box_disk_mib, COALESCE((SELECT box_retention FROM session_box_retention WHERE session_box_retention.session_id = sessions.session_id), 'Auto') AS box_retention, created_at, updated_at FROM sessions";
@@ -854,17 +867,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private readonly manifests = new SnapshotManifests();
-
-  private readonly live = new LivePacks(this.manifests, (after, limit) =>
-    this.ctx.storage.sql
-      .exec<{ storage_key: string }>(
-        "SELECT storage_key FROM snapshots WHERE storage_key > ? ORDER BY storage_key LIMIT ?",
-        after,
-        limit,
-      )
-      .toArray()
-      .map((row) => row.storage_key),
-  );
 
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
@@ -2529,16 +2531,16 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
-    await this.live.release(this.env.STORE, tenantId, sessionId, [
-      ...stored.map((snapshot) => snapshot.storage_key),
-      ...unstored.map((row) => row.storage_key),
-    ]);
-    await this.deleteObjects([...this.objectKeys(unstored), ...this.objectKeys(stored)]);
-    this.ctx.storage.transactionSync(() => {
+    const lists = await Promise.all(stored.map((snapshot) => storedPackList(this.env.STORE, snapshot.storage_key)));
+    const change = this.ctx.storage.transactionSync(() => {
+      const change = this.releasedPacks(sessionId, lists);
       this.releaseSnapshots(stored);
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
+      return change;
     });
+    await this.deleteObjects([...this.objectKeys(unstored), ...this.objectKeys(stored)]);
+    await this.freePacks(tenantId, change);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -2553,27 +2555,153 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Deleted" };
   }
 
-  private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    const failed = sql
+  private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, collected: Collected): Promise<void> {
+    const failed = this.ctx.storage.sql
       .exec<{ storage_key: string }>(
         "SELECT storage_key FROM snapshot_failures WHERE session_id = ? AND snapshot_seq < ? AND storage_key != ''",
         stored.session_id,
         stored.snapshot_seq,
       )
       .toArray();
-    const older = this.storedSnapshots(
-      "WHERE session_id = ? AND snapshot_seq < ?",
-      stored.session_id,
-      stored.snapshot_seq,
-    );
-    await this.live.release(this.env.STORE, tenantId, stored.session_id, [
-      ...older.map((snapshot) => snapshot.storage_key),
-      ...failed.map((row) => row.storage_key),
+    await this.freePacks(tenantId, collected.change);
+    await this.deleteObjects([
+      ...this.objectKeys(collected.older),
+      ...this.objectKeys(failed),
+      draftKey(stored.storage_key),
     ]);
-    await this.deleteObjects([...this.objectKeys(older), ...this.objectKeys(failed)]);
-    this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
-    await this.archiveSupersededPrebuilds(tenantId, now);
+    await this.archiveSupersededPrebuilds(tenantId, collected.now);
+  }
+
+  private holdPacks(sessionId: string, packDigests: string[]): string[] {
+    const sql = this.ctx.storage.sql;
+    const digests = JSON.stringify(packDigests);
+    return this.ctx.storage.transactionSync(() => {
+      const named = new Set(
+        sql
+          .exec<{ pack_digest: string }>(
+            "SELECT pack_digest FROM pack_refs WHERE refs > 0 AND pack_digest IN (SELECT value FROM json_each(?))",
+            digests,
+          )
+          .toArray()
+          .map((row) => row.pack_digest),
+      );
+      const unproven = new Set(
+        sql
+          .exec<{ pack_digest: string }>(
+            "SELECT pack_digest FROM pack_holds WHERE session_id = ? AND uploaded = 0 AND pack_digest IN (SELECT value FROM json_each(?))",
+            sessionId,
+            digests,
+          )
+          .toArray()
+          .map((row) => row.pack_digest),
+      );
+      const unnamed = packDigests.filter((packDigest) => !named.has(packDigest));
+      for (const packDigest of unnamed) {
+        sql.exec(
+          "INSERT INTO pack_refs (pack_digest, refs) VALUES (?, 1) ON CONFLICT (pack_digest) DO UPDATE SET refs = refs + 1",
+          packDigest,
+        );
+        sql.exec("INSERT INTO pack_holds (session_id, pack_digest, uploaded) VALUES (?, ?, 0)", sessionId, packDigest);
+      }
+      return packDigests.filter((packDigest) => !named.has(packDigest) || unproven.has(packDigest));
+    });
+  }
+
+  private releasedPacks(
+    sessionId: string,
+    lists: ReadonlySet<string>[],
+    change = new Map<string, number>(),
+  ): PackChange {
+    const sql = this.ctx.storage.sql;
+    const held = sql
+      .exec<{ pack_digest: string }>("SELECT pack_digest FROM pack_holds WHERE session_id = ?", sessionId)
+      .toArray()
+      .map((row) => row.pack_digest);
+    for (const packs of [...lists, held]) {
+      for (const packDigest of packs) change.set(packDigest, (change.get(packDigest) ?? 0) - 1);
+    }
+    sql.exec("DELETE FROM pack_holds WHERE session_id = ?", sessionId);
+    for (const [packDigest, delta] of change) {
+      if (delta > 0) {
+        sql.exec(
+          "INSERT INTO pack_refs (pack_digest, refs) VALUES (?1, ?2) ON CONFLICT (pack_digest) DO UPDATE SET refs = refs + ?2",
+          packDigest,
+          delta,
+        );
+      }
+      if (
+        delta < 0 &&
+        sql.exec("UPDATE pack_refs SET refs = refs + ? WHERE pack_digest = ?", delta, packDigest).rowsWritten === 0
+      ) {
+        throw new Error(`pack ${packDigest} has no reference count, though a released snapshot or hold names it`);
+      }
+    }
+    return change;
+  }
+
+  private async freePacks(tenantId: string, change: PackChange): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const lowered = [...change].flatMap(([packDigest, delta]) => (delta < 0 ? [packDigest] : []));
+    const freed = sql
+      .exec<{ pack_digest: string }>(
+        "SELECT pack_digest FROM pack_refs WHERE refs = 0 AND pack_digest IN (SELECT value FROM json_each(?))",
+        JSON.stringify(lowered),
+      )
+      .toArray()
+      .map((row) => row.pack_digest);
+    for (let start = 0; start < freed.length; start += STORE_DELETE_BATCH) {
+      const batch = freed.slice(start, start + STORE_DELETE_BATCH);
+      await this.env.STORE.delete(batch.map((packDigest) => packKey(tenantId, packDigest)));
+      sql.exec(
+        "DELETE FROM pack_refs WHERE refs = 0 AND pack_digest IN (SELECT value FROM json_each(?))",
+        JSON.stringify(batch),
+      );
+    }
+  }
+
+  protected async importPackRefs(tenantId: string): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const [imported] = sql.exec("SELECT 1 FROM pack_refs_imported").toArray();
+    if (imported !== undefined) return;
+    const saved = (await savedLivePacks(this.env.STORE, tenantId)) ?? { members: [], counts: [], held: [] };
+    const counts = new Map(saved.counts);
+    const members = new Set(saved.members);
+    const live = new Set(
+      sql
+        .exec<{ storage_key: string }>("SELECT storage_key FROM snapshots")
+        .toArray()
+        .map((row) => row.storage_key),
+    );
+    const reconciled = [
+      ...[...members].filter((member) => !live.has(member)).map((storageKey) => ({ storageKey, by: -1 })),
+      ...[...live].filter((storageKey) => !members.has(storageKey)).map((storageKey) => ({ storageKey, by: 1 })),
+    ];
+    for (const { storageKey, by } of reconciled) {
+      for (const packDigest of await storedPackList(this.env.STORE, storageKey)) {
+        counts.set(packDigest, (counts.get(packDigest) ?? 0) + by);
+      }
+    }
+    this.ctx.storage.transactionSync(() => {
+      for (const [packDigest, refs] of counts) {
+        sql.exec("INSERT INTO pack_refs (pack_digest, refs) VALUES (?, ?)", packDigest, refs);
+      }
+      for (const [sessionId, packs] of saved.held) {
+        for (const [packDigest, uploaded] of packs) {
+          sql.exec(
+            "INSERT INTO pack_holds (session_id, pack_digest, uploaded) VALUES (?, ?, ?)",
+            sessionId,
+            packDigest,
+            uploaded ? 1 : 0,
+          );
+        }
+      }
+      sql.exec("INSERT INTO pack_refs_imported (import_slot, imported_at) VALUES (1, ?)", Date.now());
+    });
+    await this.freePacks(
+      tenantId,
+      new Map([...counts].filter(([, refs]) => refs === 0).map(([packDigest]) => [packDigest, -1])),
+    );
+    await this.env.STORE.delete(livePacksKey(tenantId));
   }
 
   private releaseSnapshots(snapshots: { snapshot_id: string; storage_key: string }[]): void {
@@ -3456,7 +3584,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, ${merged.detail}`,
       );
     }
-    const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
+    const uploading = new Set(this.holdPacks(window.request.session_id, [...listed]));
     await this.env.STORE.put(draftKey(window.request.storage_key), JSON.stringify(merged.draft));
     const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
     const signer = signerOf(
@@ -3940,7 +4068,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<
     | { kind: "Rejected"; detail: string }
     | { kind: "Answered" }
-    | { kind: "Stored"; now: number; completes: boolean; next: string | null }
+    | { kind: "Stored"; now: number; completes: boolean; next: string | null; collected: Collected }
   > {
     const storageFailed = (error: unknown): string =>
       `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`;
@@ -3950,25 +4078,65 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (checked.kind === "Rejected") return checked;
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
-    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs).then(
-      (gone) => ({ gone }),
-      (error: unknown) => ({ failed: storageFailed(error) }),
+    const claimed = await this.claimPacks(tenantId, request, checked.packs).catch(
+      (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
     );
-    if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
-    if (claimed.gone !== null) {
-      return {
-        kind: "Rejected",
-        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which neither a stored snapshot nor an upload of the session holds any longer, so the session keeps its previous snapshot`,
-      };
-    }
+    if (claimed.kind === "Rejected") return claimed;
+    const reusesGone = (packDigest: string) => ({
+      kind: "Rejected" as const,
+      detail: `snapshot ${request.snapshot_id} reuses pack ${packDigest}, which neither a stored snapshot nor an upload of the session holds any longer, so the session keeps its previous snapshot`,
+    });
+    if (claimed.kind === "Missing") return reusesGone(claimed.packDigest);
     const [stillPending] = this.ctx.storage.sql
       .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
       .toArray();
-    if (stillPending === undefined) {
-      await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
-      return { kind: "Answered" };
-    }
-    return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended) };
+    if (stillPending === undefined) return { kind: "Answered" };
+    const gone = this.gonePack(checked.packs);
+    if (gone !== undefined) return reusesGone(gone);
+    return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended, checked.packs, claimed) };
+  }
+
+  private async claimPacks(
+    tenantId: string,
+    request: SnapshotRequestRow,
+    packs: ReadonlySet<string>,
+  ): Promise<{ kind: "Missing"; packDigest: string } | Claim> {
+    const sorted = [...packs].sort();
+    const unproven = this.ctx.storage.sql
+      .exec<{ pack_digest: string }>(
+        `SELECT pack_digest FROM pack_refs JOIN (
+          SELECT pack_digest, COUNT(*) AS holders, MAX(uploaded) AS uploaded FROM pack_holds
+          WHERE pack_digest IN (SELECT value FROM json_each(?)) GROUP BY pack_digest
+        ) USING (pack_digest) WHERE uploaded = 0 AND holders = refs ORDER BY pack_digest`,
+        JSON.stringify(sorted),
+      )
+      .toArray()
+      .map((row) => row.pack_digest);
+    const found = await Promise.all(unproven.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
+    const missing = unproven.find((_, at) => found[at] === null);
+    if (missing !== undefined) return { kind: "Missing", packDigest: missing };
+    const older = this.storedSnapshots(
+      "WHERE session_id = ? AND snapshot_seq < ?",
+      request.session_id,
+      request.snapshot_seq,
+    );
+    const lists = await Promise.all(older.map((snapshot) => storedPackList(this.env.STORE, snapshot.storage_key)));
+    await this.env.STORE.put(packListKey(request.storage_key), JSON.stringify(sorted));
+    return { kind: "Claimed", older, lists, proven: unproven };
+  }
+
+  private gonePack(packs: ReadonlySet<string>): string | undefined {
+    const sorted = [...packs].sort();
+    const named = new Set(
+      this.ctx.storage.sql
+        .exec<{ pack_digest: string }>(
+          "SELECT pack_digest FROM pack_refs WHERE refs > 0 AND pack_digest IN (SELECT value FROM json_each(?))",
+          JSON.stringify(sorted),
+        )
+        .toArray()
+        .map((row) => row.pack_digest),
+    );
+    return sorted.find((packDigest) => !named.has(packDigest));
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
@@ -4034,7 +4202,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
       return null;
     }
-    const { now, completes, next } = outcome;
+    const { now, completes, next, collected } = outcome;
     await this.prebuildStored(tenantId, request, message.uploadedBytes, now);
     const completed = this.sessionRow(session.session_id);
     if (completes && completed?.state === "Idle" && completed.box_retention === "Off")
@@ -4046,7 +4214,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         throw new Error(`session ${session.session_id} has no turn, though a start always offers one`);
       await this.snapshotOrTeardown(tenantId, session, latest);
     }
-    await this.collectSnapshots(tenantId, request, now);
+    await this.collectSnapshots(tenantId, request, collected);
     return null;
   }
 
@@ -4054,12 +4222,22 @@ export abstract class TenantSessions extends DurableObject<Env> {
     request: SnapshotRequestRow,
     uploadedBytes: number,
     ended: EndedTranscript | null,
-  ): { now: number; completes: boolean; next: string | null } {
+    packs: ReadonlySet<string>,
+    claim: Claim,
+  ): { now: number; completes: boolean; next: string | null; collected: Collected } {
     const sql = this.ctx.storage.sql;
     const now = Date.now();
     const completes = this.turnRow(request.turn_id)?.state === "Running";
     const state = this.hostPrebuild(request.session_id) === null ? "Idle" : "Stopping";
+    const change = new Map([...packs].map((packDigest) => [packDigest, 1]));
     const next = this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        "UPDATE pack_holds SET uploaded = 1 WHERE uploaded = 0 AND session_id != ? AND pack_digest IN (SELECT value FROM json_each(?))",
+        request.session_id,
+        JSON.stringify(claim.proven),
+      );
+      this.releasedPacks(request.session_id, claim.lists, change);
+      this.releaseSnapshots(claim.older);
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
       sql.exec(
         "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4093,6 +4271,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return this.takeNextWaiting(request.session_id, now);
     });
     if (completes) this.runningTails.delete(request.turn_id);
-    return { now, completes, next };
+    return { now, completes, next, collected: { now, older: claim.older, change } };
   }
 }

@@ -239,6 +239,8 @@ export class Tenant extends TenantConnectors {
     this.limits = effectiveLimits(limitsOf(env), this.tier, null);
     this.opened = this.ctx.blockConcurrencyWhile(async () => {
       await migrateDurableObject(this.ctx.storage, TENANT_MIGRATIONS);
+      const tenantId = this.ctx.id.name;
+      if (tenantId !== undefined) await this.importPackRefs(tenantId);
       await this.holdDataKey();
       await this.sealPlaintext();
       await this.openMeter();

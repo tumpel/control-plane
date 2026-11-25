@@ -1539,7 +1539,7 @@ suite("sessions", () => {
     const hostAfter = await hostRows();
 
     const spent = { tenantWritten: tenantAfter - tenantBefore, hostWritten: hostAfter - hostBefore };
-    assert.ok(spent.tenantWritten <= 53, `the turn wrote ${spent.tenantWritten} tenant rows`);
+    assert.ok(spent.tenantWritten <= 56, `the turn wrote ${spent.tenantWritten} tenant rows`);
     assert.ok(spent.hostWritten <= 13, `the turn wrote ${spent.hostWritten} host rows`);
   });
 

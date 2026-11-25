@@ -21,6 +21,7 @@ import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const LARGE = 100_000;
 const ROWS_PER_STORED_SNAPSHOT = 20;
+const ROWS_PER_NEW_PACK = 3;
 const ROWS_PER_FORK = 21;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
@@ -187,11 +188,12 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
     return world.tenantRowsWritten() - before;
   });
 
-test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot, and its archive frees every pack", async () => {
-  const large = await rowsOfStoredSnapshot(tree(LARGE));
-  const small = await rowsOfStoredSnapshot(tree(1));
+test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot plus a count, a hold and its release per new pack, and its archive frees every pack", async () => {
+  const packsOf = (count: number): number => new Set(tree(count).map((chunk) => chunk.packDigest)).size + 1;
+  const large = (await rowsOfStoredSnapshot(tree(LARGE))) - ROWS_PER_NEW_PACK * packsOf(LARGE);
+  const small = (await rowsOfStoredSnapshot(tree(1))) - ROWS_PER_NEW_PACK * packsOf(1);
   assert.equal(large, small);
-  assert.ok(small <= ROWS_PER_STORED_SNAPSHOT, `a stored snapshot wrote ${small} rows`);
+  assert.ok(small <= ROWS_PER_STORED_SNAPSHOT, `a stored snapshot wrote ${small} rows besides its packs`);
 });
 
 test("a session forked from a prebuild of 100000 chunks writes the rows of a fork from a one-chunk prebuild", async () => {

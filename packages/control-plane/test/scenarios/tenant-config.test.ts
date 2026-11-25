@@ -151,7 +151,12 @@ const tenantRows = (): Record<string, unknown[]> => {
     .toArray()
     .map((row) => String(row.name));
   const rows: Record<string, unknown[]> = {};
-  for (const name of tables) rows[name] = sql.exec(`SELECT * FROM "${name}" ORDER BY rowid`).toArray();
+  for (const name of tables) {
+    rows[name] = sql
+      .exec(`SELECT * FROM "${name}"`)
+      .toArray()
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  }
   return rows;
 };
 

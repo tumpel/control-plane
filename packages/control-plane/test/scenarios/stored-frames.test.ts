@@ -131,5 +131,5 @@ test("a turn of 201 lines, its telemetry on five heartbeats and a snapshot stays
   assert.equal((await world.turn(offer.turnId)).state, "Completed");
 
   const spent = { tenant: world.tenantRowsWritten() - tenant, channel: world.hostRows(host.hostId) - channel };
-  assert.ok(spent.tenant <= 53 && spent.channel <= 5, `the turn wrote ${JSON.stringify(spent)} rows`);
+  assert.ok(spent.tenant <= 56 && spent.channel <= 5, `the turn wrote ${JSON.stringify(spent)} rows`);
 });
