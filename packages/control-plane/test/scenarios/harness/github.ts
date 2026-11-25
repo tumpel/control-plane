@@ -78,6 +78,7 @@ const bodyOf = async (request: IncomingMessage): Promise<string> => {
 
 export class GitHubStub {
   readonly tokenRequests: unknown[] = [];
+  beforeInstallationToken = (): Promise<void> => Promise.resolve();
   private readonly userReads = new Map<string, number>();
   private readonly server: Server;
   origin = "";
@@ -106,6 +107,7 @@ export class GitHubStub {
     const known = repository(request.method ?? "", path, Date.now());
     if (known !== null) {
       if (body !== "") this.tokenRequests.push(JSON.parse(body));
+      if (path === `/app/installations/${INSTALLATION_ID}/access_tokens`) await this.beforeInstallationToken();
       return answer(response, known.status, known.body);
     }
     const token = (request.headers.authorization ?? "").replace(/^Bearer /, "");

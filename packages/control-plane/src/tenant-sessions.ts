@@ -712,6 +712,7 @@ export const sealContext = (secretSetId: string, name: string): string => `${sec
 export abstract class TenantSessions extends DurableObject<Env> {
   protected eventsAppended = false;
   private readonly runningTails = new Map<string, Promise<RunningTail>>();
+  private readonly dispatchingOffers = new Set<string>();
 
   protected abstract failPrebuild(
     prebuildId: string,
@@ -1292,10 +1293,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offer === null) return;
     const refused = this.reportRefusesOffer(session.host_id, Date.now());
     if (refused !== null) return this.sendSettled(tenantId, turn.turn_id, session.host_id, refused);
-    const sent = await this.host(session.host_id)
+    await this.dispatchOffer(tenantId, turn.turn_id, session.host_id, offer);
+  }
+
+  private async dispatchOffer(tenantId: string, turnId: string, hostId: string, offer: StoredTurnOffer): Promise<void> {
+    this.dispatchingOffers.add(turnId);
+    const sent = await this.host(hostId)
       .send(offer)
+      .finally(() => {
+        this.dispatchingOffers.delete(turnId);
+      })
       .catch((error: unknown) => errorOf(error));
-    await this.sendSettled(tenantId, turn.turn_id, session.host_id, sent);
+    await this.sendSettled(tenantId, turnId, hostId, sent);
   }
 
   private reportRefusesOffer(hostId: string, now: number): "RateLimited" | "Degraded" | null {
@@ -1512,7 +1521,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         short === "Memory"
           ? `${usage.memoryBudgetMib} MiB of memory and its other boxes hold ${usage.memoryHeldMib} MiB of it, so this turn's box of ${box.boxMemoryMib} MiB`
           : `${usage.diskBudgetMib} MiB of disk and its other boxes hold ${usage.diskHeldMib} MiB of it, so this turn's box disk of ${box.boxDiskMib} MiB`;
-      const detail = `the idle boxes stopped to make room for this turn left host ${host} short of ${short.toLowerCase()}: it gives boxes ${held} does not fit; send the turn again`;
+      const detail = `the idle boxes were asked to make room for this turn, and host ${host} is still short of ${short.toLowerCase()}: it gives boxes ${held} does not fit; send the turn again`;
       await this.failTurn(tenantId, turn.turn_id, "PoolExhausted", detail, iso(Date.now()));
     }
   }
@@ -1765,7 +1774,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         HEARD_REFRESH_MS,
       );
       if (before !== undefined) this.reportCommitted(hostId, before, report.now);
-      return this.judgeHeldTurns(hostId, heldTurnIds);
+      return this.judgeHeldTurns(hostId, [...heldTurnIds, ...this.dispatchingOffers]);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);
     await this.reconcileHeldSessions(tenantId, hostId, heldSessionIds, report.now);
@@ -1872,14 +1881,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
               SELECT 1 FROM stop_failures x WHERE x.session_id = s.session_id
                 AND x.created_at >= COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), 0)
                 AND NOT EXISTS (SELECT 1 FROM snapshots p WHERE p.session_id = s.session_id AND p.updated_at > x.created_at)
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM snapshot_failures f WHERE f.session_id = s.session_id AND f.snapshot_seq > COALESCE((
-                SELECT MAX(seq) FROM (
-                  SELECT snapshot_seq AS seq FROM snapshots WHERE session_id = s.session_id
-                  UNION ALL SELECT snapshot_seq FROM snapshot_requests WHERE session_id = s.session_id
-                )
-              ), -1)
             )) AS evictable,
           COALESCE((SELECT MAX(t.updated_at) FROM turns t WHERE t.session_id = s.session_id), s.updated_at) AS last_turn_ended_at
         FROM sessions s LEFT JOIN session_box_memory m ON m.session_id = s.session_id
@@ -2226,10 +2227,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
     const handoff = await this.placeElsewhere(tenantId, session, turn);
     if (handoff === null) return;
-    const sent = await this.host(handoff.hostId)
-      .send(handoff.offer)
-      .catch((error: unknown) => errorOf(error));
-    await this.sendSettled(tenantId, turn.turn_id, handoff.hostId, sent);
+    await this.dispatchOffer(tenantId, turn.turn_id, handoff.hostId, handoff.offer);
   }
 
   private async placeElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<Handoff | null> {
@@ -3334,14 +3332,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     snapshotId: string,
-  ): { request: SnapshotRequestRow; now: number; expiresAt: number; seconds: number } | Refused | null {
+  ): { request: SnapshotRequestRow; now: number; expiresAt: number; seconds: number } | Refused {
     const [request] = this.ctx.storage.sql
       .exec<SnapshotRequestRow & { created_at: number }>(
         "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at FROM snapshot_requests WHERE snapshot_id = ?",
         snapshotId,
       )
       .toArray();
-    if (request === undefined) return null;
+    if (request === undefined) return refused(`snapshot ${snapshotId} has no pending upload request`);
     if (this.sessionRow(request.session_id)?.host_id !== hostId) {
       return refused(
         `host ${hostId} sent chunks of snapshot ${snapshotId} of tenant ${tenantId}, which it was not asked for`,
@@ -3349,7 +3347,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const now = Date.now();
     const seconds = this.uploadSecondsLeft(request.created_at, now);
-    if (seconds < 1) return null;
+    if (seconds < 1) return refused(`the upload window for snapshot ${snapshotId} has expired`);
     return { request, now, expiresAt: this.uploadExpiresAt(request.created_at), seconds };
   }
 
@@ -3387,9 +3385,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotChunks" }>,
-  ): Promise<ChunkReply | Refused | null> {
+  ): Promise<ChunkReply | Refused> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if (window === null || "type" in window) return window;
+    if ("type" in window) return window;
     const index = await this.restorableIndex(tenantId, window.request.session_id);
     const held = index?.kind === "Read" ? index.value : null;
     return {
@@ -3404,9 +3402,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotPacks" }>,
-  ): Promise<ChunkReply | Refused | null> {
+  ): Promise<ChunkReply | Refused> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if (window === null || "type" in window) return window;
+    if ("type" in window) return window;
     const listed = new Set(message.packs.map((pack) => pack.packDigest));
     const unlisted = message.chunks.find((chunk) => !listed.has(chunk.packDigest));
     if (unlisted !== undefined) {
@@ -3465,13 +3463,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "RestoreChunks" }>,
-  ): Promise<ChunkReply | Refused | null> {
+  ): Promise<ChunkReply | Refused> {
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || turn.host_id !== hostId) {
       return refused(`host ${hostId} asked for the chunks of turn ${message.turnId}, which is not offered to it`);
     }
-    if (!IN_FLIGHT.includes(turn.state)) return null;
+    if (!IN_FLIGHT.includes(turn.state)) return refused(`turn ${message.turnId} has ended`);
     const sql = this.ctx.storage.sql;
     const [offered] = sql
       .exec<{ offered_at: number | null }>(
@@ -3485,10 +3483,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const now = Date.now();
     const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
     const seconds = Math.floor((expiresAt - now) / 1000);
-    if (seconds < 1) return null;
+    if (seconds < 1) return refused(`the download window for turn ${message.turnId} has expired`);
     const index = await this.restorableIndex(tenantId, session.session_id);
     if (index !== null && index.kind !== "Read") {
-      throw new Error(`session ${session.session_id} restores a snapshot that is unreadable: ${index.detail}`);
+      return refused(`session ${session.session_id} restores a snapshot that is unreadable: ${index.detail}`);
     }
     const asked = new Map<string, boolean>();
     for (const chunk of message.chunks) {

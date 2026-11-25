@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChannelProtocol, ClaudeSetupSchema, HostSchema, SecretSetSchema } from "@tumpel/schemas";
+import { DEFAULT_USAGE } from "./harness/supervisor.ts";
 import { type Host, SETTINGS, TENANT_ID, type TurnOffer, World } from "./harness/world.ts";
 
 const GRACE_MS = SETTINGS.heartbeatDeadlineSeconds * 1000;
@@ -61,6 +62,37 @@ test("an offered turn survives one heartbeat that does not name it and fails Hos
   const host = await quietHost(world);
   await world.startSession({ prompt: "wait for the claim", tags: [] });
   const { turnId } = host.takeOffer();
+  await host.beats();
+
+  await host.beats({ heldTurnIds: [] });
+  assert.equal((await world.turn(turnId)).state, "Offered");
+
+  await host.beats({ heldTurnIds: [] });
+  assert.equal(reasonOf(await world.turn(turnId)), "HostDropped");
+});
+
+test("an unacknowledged offer stays Offered until two heartbeats leave it out after acknowledgment", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  const host = await quietHost(world);
+  const ack = host.carried().received;
+  await world.startSession({ prompt: "wait for the claim", tags: [] });
+  const { turnId } = host.takeOffer();
+
+  for (let beat = 1; beat <= 3; beat++) {
+    host.raw({
+      type: "Heartbeat",
+      sentAt: new Date().toISOString(),
+      usage: DEFAULT_USAGE,
+      heldTurnIds: [],
+      heldSessionIds: host.holding().heldSessionIds,
+      heldClaudeSetupIds: [],
+      ack,
+      telemetry: { instruments: [], samples: [], turns: [] },
+    });
+    await world.settle();
+    assert.equal((await world.turn(turnId)).state, "Offered", `heartbeat ${beat} before acknowledgment`);
+  }
 
   await host.beats({ heldTurnIds: [] });
   assert.equal((await world.turn(turnId)).state, "Offered");
