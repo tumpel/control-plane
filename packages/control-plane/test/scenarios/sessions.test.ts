@@ -1732,7 +1732,7 @@ suite("sessions", () => {
       prompt: "too many tags",
       tags: Array.from({ length: 16 }, (_, index) => `own-${index}`),
     });
-    assert.match(overLimit.text, /would carry 17 tags, its own and the crew tags it inherits/);
+    assert.match(overLimit.text, /would carry 17 tags, including inherited crew tags/);
     const crewStart = await asTurn(foremanToken, "tumpel_session_start", {
       ...start,
       prompt: "fix issue 12",

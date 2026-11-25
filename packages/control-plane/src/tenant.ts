@@ -4,6 +4,8 @@ import {
   type HarnessPinCreateSchema,
   HarnessPinSchema,
   type PersonaPatchChangeSchema,
+  type RecordSendRefusalResultSchema,
+  type RecordStartRefusalResultSchema,
   type SecretSetCreateSchema,
   type SecretSetPatchSchema,
   SecretSetSchema,
@@ -57,7 +59,7 @@ import {
 import { TenantConnectors } from "./tenant-connectors.ts";
 import { appendEvent, listEvents } from "./tenant-events.ts";
 import { TENANT_MIGRATIONS } from "./tenant-migrations";
-import { memberRows, sealContext } from "./tenant-sessions";
+import { memberRows, SESSION_TAG_LIMIT, sealContext } from "./tenant-sessions";
 import { type SavedCounter, UsageMeter } from "./usage-meter.ts";
 import { webhookSenderName } from "./webhook-sender.ts";
 
@@ -284,6 +286,38 @@ export class Tenant extends TenantConnectors {
     return null;
   }
 
+  private recordStartRefusal({
+    caller,
+    requestedTags,
+    refusal,
+    personaId,
+    model,
+    now,
+  }: TenantInput<"recordStartRefusal">): z.infer<typeof RecordStartRefusalResultSchema> {
+    const crewTags = this.startTags(caller, requestedTags);
+    if (crewTags.length > SESSION_TAG_LIMIT) return { kind: "TagsOverLimit", tagCount: crewTags.length };
+    this.ctx.storage.transactionSync(() =>
+      this.appendEvent({ event: "StartRefused", operation: "Start", refusal, personaId, model, caller, crewTags }, now),
+    );
+    return { kind: "Recorded" };
+  }
+
+  private async recordSendRefusal({
+    tenantId,
+    refusal,
+    caller,
+    sessionId,
+    now,
+  }: TenantInput<"recordSendRefusal">): Promise<z.infer<typeof RecordSendRefusalResultSchema>> {
+    const session = await this.readSession(tenantId, sessionId);
+    if (session === null) return { kind: "NotFound" };
+    const { personaId, model, tags: crewTags } = session;
+    this.ctx.storage.transactionSync(() =>
+      this.appendEvent({ event: "StartRefused", operation: "Send", refusal, personaId, model, caller, crewTags }, now),
+    );
+    return { kind: "Recorded" };
+  }
+
   private async setLimits({ tenantId }: TenantInput<"setLimits">): Promise<TenantLimitsView> {
     this.relimit(await storedLimitsOf(this.env.DB, tenantId, limitsOf(this.env).defaultTier));
     return this.limits;
@@ -485,8 +519,8 @@ export class Tenant extends TenantConnectors {
     startSessionFromIssue: async ({ tenantId, input, issue, now }) => ({
       started: await this.startSessionFromIssue(tenantId, input, issue, now),
     }),
-    sendTurn: async ({ tenantId, sessionId, send, hosts, now }) => ({
-      sent: await this.sendTurn(tenantId, sessionId, send, hosts, now),
+    sendTurn: async ({ tenantId, sessionId, send, caller, hosts, now }) => ({
+      sent: await this.sendTurn(tenantId, sessionId, send, caller, hosts, now),
     }),
     stopSession: async ({ tenantId, sessionId, cancelledBy, now }) => ({
       stopped: await this.stopSession(tenantId, sessionId, cancelledBy, now),
@@ -555,6 +589,8 @@ export class Tenant extends TenantConnectors {
     listTurns: async ({ tenantId, sessionId }) => ({ turns: await this.listTurns(tenantId, sessionId) }),
     getTurn: async ({ tenantId, turnId }) => ({ turn: await this.readTurn(tenantId, turnId) }),
     listEvents: (input) => ({ listed: listEvents(this.ctx.storage.sql, input) }),
+    recordStartRefusal: (input) => this.recordStartRefusal(input),
+    recordSendRefusal: (input) => this.recordSendRefusal(input),
     listPushSubscriptions: ({ tenantId, principalId }) => ({
       subscriptions: this.listPushSubscriptions(tenantId, principalId),
     }),

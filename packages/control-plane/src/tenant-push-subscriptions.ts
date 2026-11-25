@@ -197,9 +197,14 @@ export abstract class TenantPushSubscriptions extends TenantTriggers {
               body:
                 event.reason.kind === "ByRequest"
                   ? event.reason.message
-                  : event.reason.kind === "DeliveryFailed"
-                    ? "A delivery turn failed. Open the session to decide what to do next."
-                    : "Several crew turns failed. Open the session to decide what to do next.",
+                  : {
+                      DeliveryFailed: "A delivery turn failed. Open the session to decide what to do next.",
+                      CreditExhausted:
+                        "The provider ran out of credit. Add credit to the provider account or change the persona's secret set, then resume the subscription.",
+                      CrewFailing: "Several crew turns failed. Open the session to decide what to do next.",
+                      StartsRefused:
+                        "Crew sessions repeatedly could not start or take a turn. Open the session to decide what to do next.",
+                    }[event.reason.kind],
               path,
             }
           : {

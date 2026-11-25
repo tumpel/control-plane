@@ -60,3 +60,60 @@ test("a delivery prompt delivers by reference an event too long to fit on its ow
   });
   assert.ok(batch.prompt.length <= DELIVERY_PROMPT_LIMIT);
 });
+
+const refusal = (eventId: number, code: string, detail = "") => ({
+  event_id: eventId,
+  created_at: 1_000,
+  payload: JSON.stringify({
+    event: "StartRefused",
+    operation: "Start",
+    refusal: { code, detail },
+    personaId: "foreman",
+    model: "opus",
+    caller: { kind: "Person", principalId: "person" },
+    crewTags: ["crew:x"],
+  }),
+});
+
+const capacity = (eventId: number) => ({
+  event_id: eventId,
+  created_at: 1_000,
+  payload: JSON.stringify({ event: "CapacityAvailable", hostId: "host-1", code: "PoolExhausted" }),
+});
+
+test("delivery keeps the latest refusal by code and capacity signal within the longest fitting prefix", () => {
+  const batch = deliveryPrompt("Plan.", "t1", [
+    refusal(1, "PoolExhausted", "x".repeat(5_000)),
+    capacity(2),
+    idle(3),
+    refusal(4, "PoolExhausted"),
+    refusal(5, "ModelUnsupported"),
+    capacity(6),
+  ]);
+  assert.ok(batch?.kind === "Batch");
+  assert.deepEqual(
+    batch.prompt
+      .split("\n")
+      .slice(2)
+      .map((line) => JSON.parse(line).eventId),
+    [3, 4, 5, 6],
+  );
+  assert.equal(batch.lastEventId, 6);
+});
+
+test("a long refusal reference includes its code", () => {
+  const batch = deliveryPrompt("Plan.", "t1", [refusal(41, "PoolExhausted", "x".repeat(5_000))]);
+  assert.deepEqual(batch, {
+    kind: "Batch",
+    prompt:
+      'Plan.\n\n{"eventId":41,"event":"StartRefused","code":"PoolExhausted","tooLongToInline":"read it in full with GET /v1/events?afterEventId=40&event=StartRefused (tumpel_events_list); it is the first event of the page"}',
+    lastEventId: 41,
+  });
+});
+
+test("a refusal after the fitting crew-event prefix stays pending", () => {
+  const batch = deliveryPrompt("Plan.", "t1", [idle(8), refusal(9, "ModelUnsupported", "x".repeat(5_000))]);
+  assert.ok(batch?.kind === "Batch");
+  assert.equal(batch.lastEventId, 8);
+  assert.doesNotMatch(batch.prompt, /StartRefused/);
+});

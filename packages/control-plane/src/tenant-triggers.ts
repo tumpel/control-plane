@@ -12,7 +12,8 @@ import {
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
-import type { Outcome, Refused } from "./hosts.ts";
+import type { Outcome } from "./hosts.ts";
+import type { Refused } from "./http.ts";
 import { placed } from "./sessions.ts";
 import { apiOriginOf } from "./settings.ts";
 import type { NewSession } from "./tenant-sessions.ts";
