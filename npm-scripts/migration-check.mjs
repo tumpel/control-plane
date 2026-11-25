@@ -10,6 +10,7 @@ const CONTRACT_REVIEWED = /--[^\S\r\n]*contract-reviewed:[^\S\r\n]*\S/;
 const CONTRACT_BASELINE = {
   "packages/control-plane/migrations": "0028_hosts_without_reported_health.sql",
   "packages/control-plane/migrations/host": "0005_drop_frame_tables.sql",
+  "packages/control-plane/migrations/metrics": "0002_metrics_in_analytics_engine.sql",
   "packages/control-plane/migrations/tenant": "0099_sessions_host_state.sql",
 };
 const BASELINE = {
@@ -32,9 +33,10 @@ export const contractChanges = (before, migration) => {
   const db = migratedDatabase(before);
   const old = schema(db);
   db.exec(migration);
+  const after = schema(db);
   const changes = [];
   for (const [table, columns] of old) {
-    const now = schema(db).get(table);
+    const now = after.get(table);
     if (now === undefined) {
       changes.push(`drops table ${table}`);
       continue;
