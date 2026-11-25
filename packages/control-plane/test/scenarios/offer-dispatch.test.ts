@@ -42,3 +42,56 @@ test("an offered turn survives heartbeats while dispatch waits for a GitHub toke
   await host.claims(offer);
   assert.equal((await world.turn(turnId)).state, "Running");
 });
+
+test("a handed-over turn survives heartbeats while dispatch waits for a GitHub token", async (t) => {
+  const world = await World.open();
+  t.after(() => world.close());
+  await installApp(world.db, TENANT_ID, "acme");
+  const updating = await world.online(world.owner, "updating");
+  updating.quiet();
+  await world.startSession({ prompt: "resume on another host", tags: [] });
+  const original = updating.takeOffer();
+  await updating.claims(original);
+  const other = await world.online(world.owner, "other");
+  other.quiet();
+
+  let releaseToken = (): void => undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseToken = resolve;
+  });
+  const requested = new Promise<void>((resolve) => {
+    world.github.beforeInstallationToken = () => {
+      resolve();
+      return held;
+    };
+  });
+  const handover = world.call("hostMessage", {
+    tenantId: TENANT_ID,
+    hostId: updating.hostId,
+    message: {
+      type: "TurnFailed",
+      turnId: original.turnId,
+      reason: "HostUpdating",
+      detail: "the supervisor is updating",
+      failedAt: new Date().toISOString(),
+    },
+  });
+  assert.equal(await Promise.race([requested, handover]), undefined);
+
+  try {
+    for (let beat = 0; beat < 3; beat++) {
+      await world.tick(world.settings.heartbeatIntervalSeconds * 1000);
+      await other.beats({ heldTurnIds: [] });
+      const turn = await world.turn(original.turnId);
+      assert.equal(turn.state === "Failed" ? turn.reason : turn.state, "Offered");
+    }
+  } finally {
+    releaseToken();
+    await handover;
+  }
+
+  const offer = other.takeOffer();
+  assert.equal(offer.turnId, original.turnId);
+  await other.claims(offer);
+  assert.equal((await world.turn(original.turnId)).state, "Running");
+});

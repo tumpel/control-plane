@@ -1279,14 +1279,18 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (offer === null) return;
     const refused = this.reportRefusesOffer(session.host_id, Date.now());
     if (refused !== null) return this.sendSettled(tenantId, turn.turn_id, session.host_id, refused);
-    this.dispatchingOffers.add(turn.turn_id);
-    const sent = await this.host(session.host_id)
+    await this.dispatchOffer(tenantId, turn.turn_id, session.host_id, offer);
+  }
+
+  private async dispatchOffer(tenantId: string, turnId: string, hostId: string, offer: StoredTurnOffer): Promise<void> {
+    this.dispatchingOffers.add(turnId);
+    const sent = await this.host(hostId)
       .send(offer)
       .finally(() => {
-        this.dispatchingOffers.delete(turn.turn_id);
+        this.dispatchingOffers.delete(turnId);
       })
       .catch((error: unknown) => errorOf(error));
-    await this.sendSettled(tenantId, turn.turn_id, session.host_id, sent);
+    await this.sendSettled(tenantId, turnId, hostId, sent);
   }
 
   private reportRefusesOffer(hostId: string, now: number): "RateLimited" | "Degraded" | null {
@@ -1649,8 +1653,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         hostId,
         JSON.stringify(heldTurnIds),
       )
-      .toArray()
-      .filter((turn) => turn.state !== "Offered" || !this.dispatchingOffers.has(turn.turn_id));
+      .toArray();
   }
 
   private unheldRunningTurns(hostId: string, heldTurnIds: string[]): string[] {
@@ -1732,7 +1735,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         report.now,
         HEARD_REFRESH_MS,
       );
-      return this.judgeHeldTurns(hostId, heldTurnIds);
+      return this.judgeHeldTurns(hostId, [...heldTurnIds, ...this.dispatchingOffers]);
     });
     await this.dropTurns(tenantId, hostId, dropped, report.now);
     await this.reconcileHeldSessions(tenantId, hostId, heldSessionIds, report.now);
@@ -2193,10 +2196,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private async offerElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<void> {
     const handoff = await this.placeElsewhere(tenantId, session, turn);
     if (handoff === null) return;
-    const sent = await this.host(handoff.hostId)
-      .send(handoff.offer)
-      .catch((error: unknown) => errorOf(error));
-    await this.sendSettled(tenantId, turn.turn_id, handoff.hostId, sent);
+    await this.dispatchOffer(tenantId, turn.turn_id, handoff.hostId, handoff.offer);
   }
 
   private async placeElsewhere(tenantId: string, session: SessionRow, turn: TurnRow): Promise<Handoff | null> {
