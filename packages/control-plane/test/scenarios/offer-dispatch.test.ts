@@ -21,8 +21,9 @@ test("an offered turn survives heartbeats while dispatch waits for a GitHub toke
     };
   });
   const starting = world.startSession({ prompt: "wait for the GitHub token", tags: [] });
-  await Promise.race([requested, starting]);
-  const { turn_id: turnId } = world.tenantSql().exec<{ turn_id: string }>("SELECT turn_id FROM turns").one();
+  assert.equal(await Promise.race([requested, starting]), undefined);
+  const { turn_id: turnId } = world.tenantSql().exec("SELECT turn_id FROM turns").one();
+  assert.ok(typeof turnId === "string");
 
   try {
     for (let beat = 0; beat < 3; beat++) {
