@@ -83,7 +83,7 @@ test("a busy Foreman records a full-host refusal and skips prebuilds, unreadable
   assert.equal(refused.status, 409, await refused.clone().text());
   const pool = ProblemSchema.parse(await refused.json());
   assert.equal(pool.code, "PoolExhausted");
-  assert.equal(world.tenantRowsWritten() - beforeStart, 12);
+  assert.equal(world.tenantRowsWritten() - beforeStart, 13);
   const first = await listRefusals();
   assert.equal(first.length, 1);
   assert.deepEqual(
@@ -167,7 +167,7 @@ test("a busy Foreman records a full-host refusal and skips prebuilds, unreadable
 });
 
 for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] as const) {
-  test(`a Foreman wakes after ${code}, resets on a successful retry and pauses on the eleventh new wake`, async (t) => {
+  test(`a Foreman wakes after ${code}, resets on a successful retry and pauses on the tenth refusal in a row`, async (t) => {
     const world = await World.open({ vars: { TUMPEL_SETTINGS: { ...SETTINGS, turnTotalBudgetSeconds: 7_200 } } });
     t.after(() => world.close());
     const host = await world.hostOnline("host-1");
@@ -214,10 +214,10 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       Number(
         sql
           .exec(
-            "SELECT wakes_without_progress FROM subscriptions WHERE subscription_id = ?",
+            "SELECT start_refusals_in_a_row FROM subscriptions WHERE subscription_id = ?",
             subscription.subscriptionId,
           )
-          .one().wakes_without_progress,
+          .one().start_refusals_in_a_row,
       );
     const quiet = world.tenantRowsWritten();
     await world.tick(3_600_000);
@@ -245,8 +245,9 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       assert.equal(world.tenantRowsWritten() - before, writes);
     };
     for (let attempt = 1; attempt <= 6; attempt++) {
-      await refuse(foremanTurn.member, attempt === 1 ? (code === "PoolExhausted" ? 12 : 10) : 2);
+      await refuse(foremanTurn.member, attempt === 1 ? (code === "PoolExhausted" ? 13 : 11) : 3);
       assert.equal(count("StartRefused"), attempt);
+      assert.equal(counter(), attempt);
       assert.equal(deliveries(), 1);
     }
     assert.equal(host.holds("TurnOffer"), false);
@@ -261,7 +262,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
     assert.equal(refusal.refusal.code, code);
     assert.deepEqual(refusal.caller, { kind: "Turn", sessionId: foreman.sessionId, turnId: foremanTurn.offer.turnId });
     assert.deepEqual(refusal.crewTags, ["crew:x"]);
-    assert.equal(counter(), 1);
+    assert.equal(counter(), 6);
 
     if (fullBox !== null) {
       await host.finishes(wake.offer);
@@ -278,7 +279,7 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
       const signal = CapacityAvailableEventSchema.parse(JSON.parse(capacity[0] ?? ""));
       assert.equal(signal.code, "PoolExhausted");
       assert.equal(signal.hostId, host.hostId);
-      assert.equal(counter(), 2);
+      assert.equal(counter(), 6);
       assert.equal(host.holds("TurnOffer"), false);
     }
 
@@ -306,16 +307,16 @@ for (const code of ["PoolExhausted", "HarnessNotInCatalog", "ModelUnsupported"] 
     if (code === "HarnessNotInCatalog") {
       await world.call("pin", { pin: { harness: "ClaudeCode", harnessVersion: "2.1.1" }, now: Date.now() });
     }
-    for (let claimed = 1; claimed <= 10; claimed++) {
-      await refuse(wake.member, claimed === 1 && code === "PoolExhausted" ? 12 : 10);
+    for (let refused = 1; refused <= 9; refused++) {
+      await refuse(wake.member, refused === 1 && code === "PoolExhausted" ? 13 : 11);
       assert.equal(deliveries(), 1);
+      assert.equal(counter(), refused);
       await host.finishes(wake.offer);
       wake = await claimForeman(world, host, foreman.sessionId);
       assert.match(wake.offer.prompt, new RegExp(`"code":"${code}"`));
-      assert.equal(counter(), claimed);
     }
     assert.equal((await world.subscription(subscription.subscriptionId)).state, "Active");
-    await refuse(wake.member, 10);
+    await refuse(wake.member, 12);
     await host.finishes(wake.offer);
     assert.equal(host.holds("TurnOffer"), false);
     assert.equal(counter(), 10);

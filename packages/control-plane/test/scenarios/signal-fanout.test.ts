@@ -32,9 +32,9 @@ const idleForemenOnFullHost = async (t: TestContext, n: number) => {
 };
 
 for (const [n, refusalBudget] of [
-  [1, 24],
-  [10, 222],
-  [50, 1102],
+  [1, 25],
+  [10, 232],
+  [50, 1152],
 ] as const) {
   test(`a matched refusal offers a delivery to each of ${n} idle Foremen`, async (t) => {
     const { world, host, personaId, foremen, crew } = await idleForemenOnFullHost(t, n);

@@ -79,7 +79,7 @@ test("a stop offers capacity once and a claim clears the wait and signal", async
   assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_signals").one().count, 1);
   const claimBefore = world.tenantRowsWritten();
   await host.claims(first);
-  assert.equal(world.tenantRowsWritten() - claimBefore, 15);
+  assert.equal(world.tenantRowsWritten() - claimBefore, 13);
   assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_waits").one().count, 0);
   assert.equal(sql.exec("SELECT COUNT(*) AS count FROM subscription_room_signals").one().count, 0);
   await host.says({

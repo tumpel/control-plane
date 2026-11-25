@@ -23,7 +23,7 @@ const foremanBusyOnFullHost = async (t: TestContext) => {
   return { world, host, foreman, foremanTurn, subscription };
 };
 
-test("a busy Foreman queues one delivery on a refusal and writes only the event on repeats", async (t) => {
+test("a busy Foreman queues one delivery on a refusal and writes only the event and its count on repeats", async (t) => {
   const { world, host, foreman, foremanTurn, subscription } = await foremanBusyOnFullHost(t);
   const sql = world.tenantSql();
   const deliveries = (subscriptionId: string): number =>
@@ -45,7 +45,7 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
   const initialRows = events();
   const initialMeter = world.tenantRowsWritten();
   assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
-  assert.equal(world.tenantRowsWritten() - initialMeter, 12);
+  assert.equal(world.tenantRowsWritten() - initialMeter, 13);
   assert.equal(events() - initialRows, 1);
   assert.equal(deliveries(subscription.subscriptionId), 1);
   assert.equal(host.holds("TurnOffer"), false);
@@ -54,7 +54,7 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
     const before = world.tenantRowsWritten();
     const rows = events();
     assert.deepEqual(await world.call("recordStartRefusal", input), { kind: "Recorded" });
-    assert.equal(world.tenantRowsWritten() - before, 2);
+    assert.equal(world.tenantRowsWritten() - before, 3);
     assert.equal(events() - rows, 1);
     assert.equal(deliveries(subscription.subscriptionId), 1);
   }
@@ -68,15 +68,15 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
     }),
     { kind: "Recorded" },
   );
-  assert.equal(world.tenantRowsWritten() - beforePerson, 2);
+  assert.equal(world.tenantRowsWritten() - beforePerson, 3);
   assert.equal(events() - personRows, 1);
   assert.equal(deliveries(subscription.subscriptionId), 1);
   const refusalId = sql.exec("SELECT MAX(event_id) AS id FROM events").one().id;
 
   const ordinaryClaim = sql
-    .exec("SELECT wakes_without_progress FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
+    .exec("SELECT start_refusals_in_a_row FROM subscriptions WHERE subscription_id = ?", subscription.subscriptionId)
     .one();
-  assert.equal(ordinaryClaim.wakes_without_progress, 0);
+  assert.equal(ordinaryClaim.start_refusals_in_a_row, 7);
   await host.finishes(foremanTurn);
   const first = host.takeOffer();
   assert.equal(first.sessionId, foreman.sessionId);
@@ -100,14 +100,14 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
   const state = () =>
     sql
       .exec(
-        "SELECT cursor_event_id, wakes_without_progress FROM subscriptions WHERE subscription_id = ?",
+        "SELECT cursor_event_id, start_refusals_in_a_row FROM subscriptions WHERE subscription_id = ?",
         subscription.subscriptionId,
       )
       .one();
   const claimBefore = world.tenantRowsWritten();
   await host.claims(retried);
   const claimDelta = world.tenantRowsWritten() - claimBefore;
-  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, wakes_without_progress: 1 });
+  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, start_refusals_in_a_row: 7 });
 
   await host.says({
     type: "TurnFailed",
@@ -120,12 +120,12 @@ test("a busy Foreman queues one delivery on a refusal and writes only the event 
   const repeatBefore = world.tenantRowsWritten();
   await host.claims(retried);
   const repeatDelta = world.tenantRowsWritten() - repeatBefore;
-  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, wakes_without_progress: 1 });
-  assert.equal(claimDelta, 12);
+  assert.deepEqual({ ...state() }, { cursor_event_id: refusalId, start_refusals_in_a_row: 7 });
+  assert.equal(claimDelta, 10);
   assert.equal(repeatDelta, 9);
 });
 
-test("refusal routing uses refused tags and an ordinary crew delivery does not count as a wake", async (t) => {
+test("refusal routing uses refused tags and an unmatched refusal counts nothing", async (t) => {
   const world = await World.open();
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -172,9 +172,9 @@ test("refusal routing uses refused tags and an ordinary crew delivery does not c
   assert.equal(world.tenantRowsWritten() - claimBefore, 10);
   const state = sql
     .exec(
-      "SELECT cursor_event_id, wakes_without_progress FROM subscriptions WHERE subscription_id = ?",
+      "SELECT cursor_event_id, start_refusals_in_a_row FROM subscriptions WHERE subscription_id = ?",
       subscription.subscriptionId,
     )
     .one();
-  assert.deepEqual({ ...state }, { cursor_event_id: eventId, wakes_without_progress: 0 });
+  assert.deepEqual({ ...state }, { cursor_event_id: eventId, start_refusals_in_a_row: 0 });
 });

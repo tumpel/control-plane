@@ -2162,8 +2162,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   protected recordProgress(sessionId: string): void {
-    durableDb(this.ctx.storage, {}).run(query`UPDATE subscriptions SET wakes_without_progress = 0
-      WHERE session_id = ${sessionId} AND wakes_without_progress > 0`);
+    durableDb(this.ctx.storage, {}).run(query`UPDATE subscriptions SET start_refusals_in_a_row = 0
+      WHERE session_id = ${sessionId} AND start_refusals_in_a_row > 0`);
   }
 
   private sendWaiting(tenantId: string, session: SessionRow, send: TurnSend, now: number): Sent {

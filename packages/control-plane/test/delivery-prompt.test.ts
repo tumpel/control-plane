@@ -31,7 +31,6 @@ test("a delivery prompt holds the plan, then one JSON line per event in order", 
       '{"event":"SessionIdle","eventId":7,"tenantId":"t1","createdAt":1000,"sessionId":"crew-1","turnId":"turn-7"}',
     ].join("\n"),
     lastEventId: 7,
-    wake: false,
   });
 });
 
@@ -58,7 +57,6 @@ test("a delivery prompt delivers by reference an event too long to fit on its ow
         "read it in full with GET /v1/events?afterEventId=40&event=TurnFailed&sessionId=crew-1 (tumpel_events_list); it is the first event of the page",
     })}`,
     lastEventId: 41,
-    wake: false,
   });
   assert.ok(batch.prompt.length <= DELIVERY_PROMPT_LIMIT);
 });
@@ -101,24 +99,21 @@ test("delivery keeps the latest refusal by code and capacity signal within the l
     [3, 4, 5, 6],
   );
   assert.equal(batch.lastEventId, 6);
-  assert.equal(batch.wake, true);
 });
 
-test("a long refusal reference includes its code and counts as a wake", () => {
+test("a long refusal reference includes its code", () => {
   const batch = deliveryPrompt("Plan.", "t1", [refusal(41, "PoolExhausted", "x".repeat(5_000))]);
   assert.deepEqual(batch, {
     kind: "Batch",
     prompt:
       'Plan.\n\n{"eventId":41,"event":"StartRefused","code":"PoolExhausted","tooLongToInline":"read it in full with GET /v1/events?afterEventId=40&event=StartRefused (tumpel_events_list); it is the first event of the page"}',
     lastEventId: 41,
-    wake: true,
   });
 });
 
-test("a wake after the fitting crew-event prefix stays pending", () => {
+test("a refusal after the fitting crew-event prefix stays pending", () => {
   const batch = deliveryPrompt("Plan.", "t1", [idle(8), refusal(9, "ModelUnsupported", "x".repeat(5_000))]);
   assert.ok(batch?.kind === "Batch");
   assert.equal(batch.lastEventId, 8);
-  assert.equal(batch.wake, false);
   assert.doesNotMatch(batch.prompt, /StartRefused/);
 });

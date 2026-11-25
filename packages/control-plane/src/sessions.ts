@@ -612,6 +612,28 @@ export const sendTurn = async (
   send: TurnSend,
   now: number,
 ): Promise<Outcome<Turn>> => {
+  const reply = await sentReply(env, caller, sessionId, send, now);
+  if (reply.ok) return reply;
+  const code = StartRefusalCodeSchema.safeParse(reply.problem.code);
+  if (code.success) {
+    await tenantOf(env, caller).call("recordSendRefusal", {
+      tenantId: caller.tenantId,
+      refusal: { code: code.data, detail: boundedTo(StartRefusalSchema.shape.detail.maxLength, reply.problem.detail) },
+      caller: caller.origin,
+      sessionId,
+      now,
+    });
+  }
+  return reply;
+};
+
+const sentReply = async (
+  env: Env,
+  caller: Caller,
+  sessionId: string,
+  send: TurnSend,
+  now: number,
+): Promise<Outcome<Turn>> => {
   const tenant = tenantOf(env, caller);
   const { session } = await tenant.call("getSession", { tenantId: caller.tenantId, sessionId });
   if (session === null) return sessionNotFound(sessionId);
