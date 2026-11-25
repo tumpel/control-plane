@@ -73,7 +73,7 @@ jobs:
           package="$work/package"
           source=packages/control-plane
           archive="control-plane-$TAG.tgz"
-          npm run bundle:candidate --workspace "$source" -- --outdir "$package/dist"
+          npx --workspace "$source" wrangler deploy --dry-run --outdir "$package/dist"
           test -f "$package/dist/index.js"
           jq '.main = "dist/index.js" | .no_bundle = true | .find_additional_modules = true' \
             "$source/wrangler.jsonc" > "$package/wrangler.jsonc"
