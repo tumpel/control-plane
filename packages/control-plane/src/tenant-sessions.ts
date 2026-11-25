@@ -3295,14 +3295,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     snapshotId: string,
-  ): { request: SnapshotRequestRow; now: number; expiresAt: number; seconds: number } | Refused | null {
+  ): { request: SnapshotRequestRow; now: number; expiresAt: number; seconds: number } | Refused {
     const [request] = this.ctx.storage.sql
       .exec<SnapshotRequestRow & { created_at: number }>(
         "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at FROM snapshot_requests WHERE snapshot_id = ?",
         snapshotId,
       )
       .toArray();
-    if (request === undefined) return null;
+    if (request === undefined) return refused(`snapshot ${snapshotId} has no pending upload request`);
     if (this.sessionRow(request.session_id)?.host_id !== hostId) {
       return refused(
         `host ${hostId} sent chunks of snapshot ${snapshotId} of tenant ${tenantId}, which it was not asked for`,
@@ -3310,7 +3310,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     }
     const now = Date.now();
     const seconds = this.uploadSecondsLeft(request.created_at, now);
-    if (seconds < 1) return null;
+    if (seconds < 1) return refused(`the upload window for snapshot ${snapshotId} has expired`);
     return { request, now, expiresAt: this.uploadExpiresAt(request.created_at), seconds };
   }
 
@@ -3348,9 +3348,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotChunks" }>,
-  ): Promise<ChunkReply | Refused | null> {
+  ): Promise<ChunkReply | Refused> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if (window === null || "type" in window) return window;
+    if ("type" in window) return window;
     const index = await this.restorableIndex(tenantId, window.request.session_id);
     const held = index?.kind === "Read" ? index.value : null;
     return {
@@ -3365,9 +3365,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotPacks" }>,
-  ): Promise<ChunkReply | Refused | null> {
+  ): Promise<ChunkReply | Refused> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if (window === null || "type" in window) return window;
+    if ("type" in window) return window;
     const listed = new Set(message.packs.map((pack) => pack.packDigest));
     const unlisted = message.chunks.find((chunk) => !listed.has(chunk.packDigest));
     if (unlisted !== undefined) {
@@ -3426,13 +3426,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "RestoreChunks" }>,
-  ): Promise<ChunkReply | Refused | null> {
+  ): Promise<ChunkReply | Refused> {
     const turn = this.turnRow(message.turnId);
     const session = turn === null ? null : this.sessionRow(turn.session_id);
     if (turn === null || session === null || turn.host_id !== hostId) {
       return refused(`host ${hostId} asked for the chunks of turn ${message.turnId}, which is not offered to it`);
     }
-    if (!IN_FLIGHT.includes(turn.state)) return null;
+    if (!IN_FLIGHT.includes(turn.state)) return refused(`turn ${message.turnId} has ended`);
     const sql = this.ctx.storage.sql;
     const [offered] = sql
       .exec<{ offered_at: number | null }>(
@@ -3446,10 +3446,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const now = Date.now();
     const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
     const seconds = Math.floor((expiresAt - now) / 1000);
-    if (seconds < 1) return null;
+    if (seconds < 1) return refused(`the download window for turn ${message.turnId} has expired`);
     const index = await this.restorableIndex(tenantId, session.session_id);
     if (index !== null && index.kind !== "Read") {
-      throw new Error(`session ${session.session_id} restores a snapshot that is unreadable: ${index.detail}`);
+      return refused(`session ${session.session_id} restores a snapshot that is unreadable: ${index.detail}`);
     }
     const asked = new Map<string, boolean>();
     for (const chunk of message.chunks) {
