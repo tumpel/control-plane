@@ -505,6 +505,7 @@ type ChunkReply = Extract<
   }
 >;
 type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
+type SnapshotNotStored = Extract<StoredControlMessage, { type: "SnapshotNotStored" }>;
 type Handoff = { hostId: string; offer: StoredTurnOffer };
 type TurnHandoff = Handoff & { type: "TurnHandoff" };
 type StaleHosts = ReadonlyMap<string, number>;
@@ -3980,7 +3981,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     request: SnapshotRequestRow,
     message: Extract<HostMessage, { type: "SnapshotDone" }>,
   ): Promise<
-    | { kind: "Rejected"; detail: string }
+    | { kind: "Rejected"; reason: "Rejected" | "PackMissing"; detail: string }
     | { kind: "Answered" }
     | { kind: "Stored"; now: number; completes: boolean; next: string | null }
   > {
@@ -3992,7 +3993,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         detail: storageFailed(error),
       }),
     );
-    if (checked.kind === "Rejected") return checked;
+    if (checked.kind === "Rejected") return { ...checked, reason: "Rejected" };
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
     return this.ctx.blockConcurrencyWhile(async () => {
@@ -4001,10 +4002,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const missing = await this.unheldPack(tenantId, previous, sorted, checked.reused).catch((error: unknown) => ({
         failed: storageFailed(error),
       }));
-      if (typeof missing === "object") return { kind: "Rejected", detail: missing.failed };
+      if (typeof missing === "object") return { kind: "Rejected", reason: "Rejected", detail: missing.failed };
       if (missing !== undefined) {
         return {
           kind: "Rejected",
+          reason: "PackMissing",
           detail: `snapshot ${request.snapshot_id} names pack ${missing}, which object storage does not hold, so the session keeps its previous snapshot`,
         };
       }
@@ -4043,6 +4045,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     hostId: string,
     message: Extract<HostMessage, { type: "SnapshotDone" | "SnapshotFailed" }>,
   ): Promise<Refused | null> {
+    const notStored = async (reason: SnapshotNotStored["reason"]): Promise<null> => {
+      await this.host(hostId).send({ type: "SnapshotNotStored", snapshotId: message.snapshotId, reason });
+      return null;
+    };
     const sql = this.ctx.storage.sql;
     const [request] = sql
       .exec<SnapshotRequestRow>(
@@ -4050,7 +4056,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
         message.snapshotId,
       )
       .toArray();
-    if (request === undefined) return null;
+    if (request === undefined) {
+      if (message.type === "SnapshotFailed") return null;
+      const [stored] = sql.exec("SELECT 1 FROM snapshots WHERE snapshot_id = ?", message.snapshotId).toArray();
+      return stored === undefined ? notStored("RequestNotPending") : null;
+    }
     const session = this.sessionRow(request.session_id);
     if (session?.host_id !== hostId) {
       return refused(
@@ -4073,13 +4083,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
       return null;
     }
     const outcome = await this.snapshotOutcome(tenantId, hostId, request, message);
-    if (outcome.kind === "Answered") return null;
+    if (outcome.kind === "Answered") return notStored("RequestNotPending");
     if (outcome.kind === "Rejected") {
       this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
       await this.prebuildUnstored(session, outcome.detail);
       await this.snapshotNotStored(tenantId, request, outcome.detail);
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
-      return null;
+      return notStored(outcome.reason);
     }
     const { now, completes, next } = outcome;
     await this.prebuildStored(tenantId, request, message.uploadedBytes, now);

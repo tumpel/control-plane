@@ -49,6 +49,7 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   SnapshotChunksHeld: ChannelProtocol.Oldest,
   SnapshotChunkCheckHeld: 40,
   SnapshotIndexUpload: 40,
+  SnapshotNotStored: 42,
   SnapshotPackUploads: ChannelProtocol.Oldest,
   RestoreDownloads: ChannelProtocol.Oldest,
   BoxTeardown: ChannelProtocol.Oldest,
