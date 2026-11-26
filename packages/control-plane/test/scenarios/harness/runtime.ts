@@ -2,8 +2,6 @@ import { timingSafeEqual } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
-import { setFlagsFromString } from "node:v8";
-import { runInNewContext } from "node:vm";
 
 type Row = Record<string, unknown>;
 
@@ -17,9 +15,6 @@ Object.defineProperty(crypto.subtle, "timingSafeEqual", {
     ),
   configurable: true,
 });
-
-setFlagsFromString("--expose-gc");
-export const collectGarbage = runInNewContext("gc") as () => void;
 
 export const cpuMs = (): number => {
   const { user, system } = process.cpuUsage();
@@ -423,6 +418,7 @@ export class DurableObjectState {
   readonly storage: Storage;
   readonly id: { name: string; toString(): string };
   object: object | null = null;
+  retired = false;
   private readonly pending: Promise<unknown>[] = [];
   private readonly sockets: ServerSocket[] = [];
   private blocking: Promise<unknown> = Promise.resolve();
@@ -531,6 +527,7 @@ export class Namespace<T extends object> {
   restart(name: string): void {
     const held = this.instance(name);
     held.ctx.sever();
+    held.ctx.retired = true;
     this.born(name, new DurableObjectState(name, held.ctx.storage));
   }
 
@@ -552,7 +549,7 @@ export class Namespace<T extends object> {
 }
 
 export class Runtime {
-  private readonly objects: { object: object; ctx: DurableObjectState }[] = [];
+  private objects: { object: object; ctx: DurableObjectState }[] = [];
 
   constructor(start: number) {
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: start });
@@ -580,6 +577,7 @@ export class Runtime {
 
   async settle(): Promise<void> {
     for (const { ctx } of this.objects) await ctx.settle();
+    this.objects = this.objects.filter(({ ctx }) => !ctx.retired);
   }
 
   async advance(ms: number): Promise<void> {
