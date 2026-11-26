@@ -528,7 +528,7 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
   const members = (defOf(HostFrameSchema.shape.message).getter as () => unknown)();
   for (const option of defOf(members).options as unknown[]) {
     const type = String((defOf((defOf(option).shape as Record<string, unknown>).type).values as unknown[])[0]);
-    if (["TelemetryBatch", "TurnLine", "SnapshotChunkCheck", "SnapshotIndexAsk"].includes(type)) continue;
+    if (["TelemetryBatch", "TurnLine"].includes(type)) continue;
     const operation =
       type === "SupervisorUpdateStep" || type === "SupervisorUpdateFailed" ? "supervisorUpdate" : "hostMessage";
     await timed(
@@ -595,7 +595,12 @@ const CHUNKS_PER_PACK = 16;
 const R2_LATENCY_MS = 25;
 
 const ChunkCheckReplySchema = z.object({
-  reply: z.object({ type: z.literal("SnapshotChunkCheckHeld"), check: z.number(), held: z.array(z.unknown()) }),
+  reply: z.object({
+    type: z.literal("SnapshotChunkCheckHeld"),
+    snapshotId: z.string(),
+    check: z.number(),
+    held: z.array(z.unknown()),
+  }),
 });
 
 const streamChunks = (count: number): Placement[] =>
