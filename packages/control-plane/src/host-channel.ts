@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { CloseCode } from "@tumpel/schemas";
+import { ChannelProtocol, CloseCode } from "@tumpel/schemas";
 import { errorOf } from "./backoff.ts";
 import * as control from "./channel/control.ts";
 import { refusal, resendable } from "./channel/failure.ts";
@@ -90,19 +90,22 @@ export class HostChannel extends DurableObject<Env> {
   async send(message: StoredControlMessage): Promise<OfferSent> {
     const host = this.host();
     if (host === null) throw new Error(`a ${message.type} reached a host object that was never registered`);
-    if (message.type === "TurnOffer" && this.openSocket() === undefined) return "Offline";
+    const needed = control.CONTROL_MESSAGE_VERSIONS[message.type];
+    const onlyOpen = message.type === "TurnOffer" || needed > ChannelProtocol.Oldest;
+    if (onlyOpen && this.openSocket() === undefined) return "Offline";
     if (this.openSocket() === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null));
       return "Sent";
     }
     const spoken = await control.prepare(message, this.context(null, host, null));
     const open = this.openSocket();
-    if (message.type === "TurnOffer" && open === undefined) return "Offline";
+    if (onlyOpen && open === undefined) return "Offline";
     if (open === undefined) {
       await control.send({ phase: "Closed" }, message, this.context(null, host, null), spoken);
       return "Sent";
     }
     const attachment = this.attachment(open);
+    if (attachment.connection.phase === "Open" && attachment.connection.protocolVersion < needed) return "Offline";
     const sent = control.send(attachment.connection, message, this.context(open, host, attachment), spoken);
     open.serializeAttachment(attachment);
     await sent;
