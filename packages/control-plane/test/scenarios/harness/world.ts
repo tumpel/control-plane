@@ -495,6 +495,20 @@ export class World {
     return elapsed;
   }
 
+  async alarm(tenantId: string = TENANT_ID): Promise<number | null> {
+    const { object, ctx } = this.tenants.instance(tenantId);
+    const at = ctx.storage.alarmAt;
+    if (at === null || at > Date.now()) return null;
+    ctx.storage.alarmAt = null;
+    await ctx.unblocked();
+    const spent = ioClock.spentMs;
+    const started = performance.now();
+    await (object as unknown as { alarm(): Promise<void> }).alarm();
+    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    await this.runtime.settle();
+    return elapsed;
+  }
+
   hostOnline(name: string): Promise<Host> {
     return this.online(this.owner, name);
   }

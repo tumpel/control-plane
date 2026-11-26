@@ -180,6 +180,19 @@ export class SqlStorage {
 export class Storage {
   readonly sql = new SqlStorage(new DatabaseSync(":memory:"));
   private readonly values = new Map<string, unknown>();
+  alarmAt: number | null = null;
+
+  async getAlarm(): Promise<number | null> {
+    return this.alarmAt;
+  }
+
+  async setAlarm(at: number | Date): Promise<void> {
+    this.alarmAt = typeof at === "number" ? at : at.getTime();
+  }
+
+  async deleteAlarm(): Promise<void> {
+    this.alarmAt = null;
+  }
 
   transactionSync<T>(run: () => T): T {
     return this.sql.inTransaction(run);
