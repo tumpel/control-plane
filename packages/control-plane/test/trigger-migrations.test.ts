@@ -83,7 +83,7 @@ test("rebuilding triggers and trigger_routes keeps every condition row, and each
       "INSERT INTO tenants (tenant_id, name, tier, created_at, updated_at) VALUES (?, 'acme', 'Configured', 1, 1)",
     )
     .run(TENANT_ID);
-  const d1 = new D1Database(central);
+  const d1 = new D1Database(central) as unknown as Parameters<typeof matchedTriggers>[0];
 
   const insertTrigger = tenant.prepare(
     `INSERT INTO triggers (trigger_id, name, source, event, persona_id, model, prompt, principal_id, created_at, updated_at)
