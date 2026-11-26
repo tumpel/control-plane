@@ -92,6 +92,11 @@ export class PackCleanup {
         await mark(ctx.storage, store, run.marked, input);
         run.known.add(input.snapshot_id);
       }
+      const open = durableDb(ctx.storage, {}).all<{ storage_key: string }>(
+        query`SELECT storage_key FROM snapshot_requests`,
+      );
+      const drafts = await Promise.all(open.map((request) => snapshotDraft(store, request.storage_key)));
+      for (const draft of drafts) for (const packDigest of draft?.packs ?? []) run.marked.add(packDigest);
       const doomed = listed.objects
         .filter((object) => object.uploaded.getTime() < run.startedAt - PACK_GRACE_MS)
         .filter((object) => !run.marked.has(object.key.slice(prefix.length)))

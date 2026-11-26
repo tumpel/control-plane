@@ -18,6 +18,7 @@ import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
 const MINUTE_MS = 60_000;
+const LARGEST_DRAFT_PACKS = 16_384;
 
 const RestoreDownloadsSchema = z.object({
   reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
@@ -383,7 +384,7 @@ test("a written pack object storage already holds is presigned again and survive
   assert.notEqual(await world.store.head(packKey(written)), null, "the written pack stays");
 });
 
-test("a pack uploaded again between the sweep's listing and its delete makes the snapshot naming it refuse, never store", async (t) => {
+test("a pack an open upload writes again between the sweep's listing and its delete survives, and the snapshot stores and restores", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -397,6 +398,7 @@ test("a pack uploaded again between the sweep's listing and its delete makes the
   await host.completes(offer);
   const request = snapshotAsked(host, session.sessionId);
   await archives(world, other.sessionId);
+  await world.restartTenant();
   await world.tick(10 * MINUTE_MS);
   assert.notEqual(await world.alarmStep(), null, "the archive starts a run");
   const manifest = JSON.stringify({ entries: [] }, null, 1);
@@ -437,7 +439,15 @@ test("a pack uploaded again between the sweep's listing and its delete makes the
   );
   assert.deepEqual(
     snapshots.snapshots.map((snapshot) => snapshot.outcome.state),
-    ["Failed"],
+    ["Stored"],
+  );
+  assert.notEqual(await world.store.head(packKey(raced)), null, "the written pack survives the delete");
+  const restored = RestoreDownloadsSchema.parse(
+    await host.says({ type: "RestoreChunks", turnId: offer.turnId, part: 1, chunks: [chunk] }),
+  );
+  assert.deepEqual(
+    restored.reply.packs.map((pack) => pack.packDigest),
+    [raced],
   );
 });
 
@@ -497,3 +507,39 @@ for (const packsPerList of [30, 1]) {
     );
   });
 }
+
+test("a sweep with 20 open uploads, one naming the most packs a draft holds, keeps their packs and stays within the budget on a restarted tenant", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const live = await startsStored(world, host, "the live tree", tree(10, "live"));
+  const archived = await startsStored(world, host, "the archived tree", tree(10, "archived"));
+  const largest = Array.from({ length: LARGEST_DRAFT_PACKS }, (_, at) => sha256(`open pack ${at}`));
+  const orphan = packKey(sha256("orphan beside open uploads"));
+  await world.store.put(orphan, "pack");
+  await world.store.put(packKey(largest[0] ?? ""), "pack");
+  await world.tick(61 * MINUTE_MS);
+  const sql = world.tenantSql();
+  for (let at = 0; at < 20; at++) {
+    const storageKey = `${TENANT_ID}/snapshots/open-${at}`;
+    sql.exec(
+      "INSERT INTO snapshot_requests (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at) SELECT ?, session_id, box_id, turn_id, ?, ?, ? FROM snapshots WHERE storage_key = ?",
+      `open-${at}`,
+      at + 100,
+      storageKey,
+      Date.now(),
+      live.storageKey,
+    );
+    const packs = at === 0 ? largest : Array.from({ length: 300 }, (_, pack) => sha256(`open ${at} pack ${pack}`));
+    await world.store.put(`${storageKey}.draft`, JSON.stringify({ lastPart: 1, packs, reused: [] }));
+  }
+  await archives(world, archived.sessionId);
+  await world.tick(10 * MINUTE_MS);
+  await world.restartTenant();
+  const steps = await cleanupSteps(world);
+
+  console.log(`20 open uploads: ${steps.length} steps, the slowest ${Math.max(...steps).toFixed(2)} ms`);
+  assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
+  assert.equal(await world.store.head(orphan), null, "the old orphan goes");
+  assert.notEqual(await world.store.head(packKey(largest[0] ?? "")), null, "an open upload's old pack stays");
+});
