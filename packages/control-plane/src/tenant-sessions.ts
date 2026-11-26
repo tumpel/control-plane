@@ -292,6 +292,13 @@ type SessionViewRow = SessionRow & {
   origin_turn_id: string | null;
   origin_trigger_id: string | null;
   origin_delivery_id: string | null;
+  image_kind: string | null;
+  image_digest: string;
+  image_harness_layer_digest: string | null;
+  layer_prebuild_id: string | null;
+  layer_digest: string | null;
+  layer_reason: string | null;
+  layer_detail: string | null;
 };
 
 type PersonaRow = {
@@ -425,13 +432,6 @@ type HostPrebuildRow = {
 
 type StoredSnapshotRow = { snapshot_id: string; snapshot_seq: number; storage_key: string };
 
-type LayerRow = {
-  prebuild_id: string | null;
-  layer_digest: string | null;
-  reason: string | null;
-  detail: string | null;
-};
-
 type ImageRow = { kind: string; digest: string; harness_layer_digest: string | null };
 
 type LayerAbsence = Extract<SessionPrebuildLayer, { layer: "None" }>;
@@ -461,14 +461,22 @@ const SESSION_VIEW_SELECT = `SELECT s.session_id, s.principal_id, s.host_id, s.b
   t.reason AS last_turn_reason, t.detail AS last_turn_detail, t.failed_at AS last_turn_failed_at,
   i.issue_number, i.title AS issue_title, i.html_url AS issue_html_url, i.branch AS issue_branch,
   (SELECT json_group_array(tag) FROM session_tags WHERE session_tags.session_id = s.session_id) AS tags,
-  o.origin_session_id, o.origin_turn_id, g.trigger_id AS origin_trigger_id, g.delivery_id AS origin_delivery_id
+  o.origin_session_id, o.origin_turn_id, g.trigger_id AS origin_trigger_id, g.delivery_id AS origin_delivery_id,
+  CASE WHEN fi.turn_id IS NOT NULL THEN 'Full' WHEN li.turn_id IS NOT NULL THEN 'Layered' END AS image_kind,
+  COALESCE(fi.guest_image_digest, li.base_image_digest) AS image_digest, li.harness_layer_digest AS image_harness_layer_digest,
+  pl.prebuild_id AS layer_prebuild_id, pl.layer_digest, la.reason AS layer_reason, la.detail AS layer_detail
   FROM sessions AS s
   JOIN (${TURN_SELECT}) AS t ON t.turn_id = (SELECT turn_id FROM turns WHERE session_id = s.session_id ORDER BY created_at DESC, turn_id DESC LIMIT 1)
   LEFT JOIN session_issues AS i ON i.session_id = s.session_id
   LEFT JOIN session_box_memory AS m ON m.session_id = s.session_id
   LEFT JOIN session_box_retention AS r ON r.session_id = s.session_id
   LEFT JOIN session_origins AS o ON o.session_id = s.session_id
-  LEFT JOIN session_trigger_origins AS g ON g.session_id = s.session_id`;
+  LEFT JOIN session_trigger_origins AS g ON g.session_id = s.session_id
+  LEFT JOIN turn_full_images AS fi ON fi.turn_id = t.turn_id
+  LEFT JOIN turn_layered_images AS li ON li.turn_id = t.turn_id
+  LEFT JOIN session_prebuild_layers AS sp ON sp.session_id = s.session_id
+  LEFT JOIN prebuild_layers AS pl ON pl.prebuild_id = sp.prebuild_id
+  LEFT JOIN session_layer_absences AS la ON la.session_id = s.session_id`;
 const SNAPSHOT_SELECT = `SELECT * FROM (
   SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, NULL AS reason, NULL AS detail, NULL AS failed_at, created_at, updated_at FROM snapshots
   UNION ALL
@@ -532,13 +540,30 @@ const startedByOf = (row: SessionViewRow): SessionStartedBy => {
   return { kind: "Person", principalId: row.principal_id };
 };
 
-const toSession = (
-  tenantId: string,
-  row: SessionViewRow,
-  lastTurnImage: TurnImage | null,
-  prebuildLayer: SessionPrebuildLayer | null,
-  stale: StaleHosts,
-): Session => {
+const toTurnImage = (row: ImageRow): TurnImage =>
+  TurnImageSchema.parse(
+    row.kind === "Full"
+      ? { kind: "Full", guestImageDigest: row.digest }
+      : { kind: "Layered", baseImageDigest: row.digest, harnessLayerDigest: row.harness_layer_digest },
+  );
+
+const toSession = (tenantId: string, row: SessionViewRow, stale: StaleHosts): Session => {
+  const lastTurnImage =
+    row.image_kind === null
+      ? null
+      : toTurnImage({
+          kind: row.image_kind,
+          digest: row.image_digest,
+          harness_layer_digest: row.image_harness_layer_digest,
+        });
+  const prebuildLayer =
+    row.layer_prebuild_id === null && row.layer_reason === null
+      ? null
+      : SessionPrebuildLayerSchema.parse(
+          row.layer_prebuild_id === null
+            ? { layer: "None", reason: row.layer_reason, detail: row.layer_detail }
+            : { layer: "Prebuild", prebuildId: row.layer_prebuild_id, layerDigest: row.layer_digest },
+        );
   const lastTurn = toTurn(
     tenantId,
     {
@@ -2786,9 +2811,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const [row] = this.ctx.storage.sql
       .exec<SessionViewRow>(`${SESSION_VIEW_SELECT} WHERE s.session_id = ?`, sessionId)
       .toArray();
-    return row === undefined
-      ? null
-      : toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id), stale);
+    return row === undefined ? null : toSession(tenantId, row, stale);
   }
 
   protected async listSessions(tenantId: string, filter: SessionFilter): Promise<Session[] | null> {
@@ -2820,9 +2843,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         ...keyset,
       )
       .toArray()
-      .map((row) =>
-        toSession(tenantId, row, this.turnImage(row.last_turn_id), this.sessionLayer(row.session_id), stale),
-      );
+      .map((row) => toSession(tenantId, row, stale));
   }
 
   protected startTags(_startedBy: SessionStartedBy, tags: string[]): string[] {
@@ -2909,29 +2930,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
         turnId,
       )
       .toArray();
-    if (row === undefined) return null;
-    return TurnImageSchema.parse(
-      row.kind === "Full"
-        ? { kind: "Full", guestImageDigest: row.digest }
-        : { kind: "Layered", baseImageDigest: row.digest, harnessLayerDigest: row.harness_layer_digest },
-    );
-  }
-
-  private sessionLayer(sessionId: string): SessionPrebuildLayer | null {
-    const [row] = this.ctx.storage.sql
-      .exec<LayerRow>(
-        `SELECT p.prebuild_id, l.layer_digest, NULL AS reason, NULL AS detail FROM session_prebuild_layers AS p
-        JOIN prebuild_layers AS l ON l.prebuild_id = p.prebuild_id WHERE p.session_id = ?1
-        UNION ALL SELECT NULL, NULL, reason, detail FROM session_layer_absences WHERE session_id = ?1`,
-        sessionId,
-      )
-      .toArray();
-    if (row === undefined) return null;
-    return SessionPrebuildLayerSchema.parse(
-      row.prebuild_id === null
-        ? { layer: "None", reason: row.reason, detail: row.detail }
-        : { layer: "Prebuild", prebuildId: row.prebuild_id, layerDigest: row.layer_digest },
-    );
+    return row === undefined ? null : toTurnImage(row);
   }
 
   private recordImage(turnId: string, image: BootImage, now: number): void {
