@@ -108,6 +108,9 @@ import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
+  heldPlacements,
+  indexKey,
+  MAX_INDEX_BYTES,
   mergedDraft,
   packKey,
   packListKey,
@@ -471,12 +474,12 @@ const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 
-export type TenantHostMessage = Exclude<
-  HostMessage,
-  SupervisorUpdateMessage | { type: "SnapshotChunkCheck" | "SnapshotIndexAsk" }
->;
+export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
-type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
+type ChunkAsk = Extract<
+  SessionHostMessage,
+  { type: "SnapshotChunks" | "SnapshotChunkCheck" | "SnapshotIndexAsk" | "SnapshotPacks" | "RestoreChunks" }
+>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;
 type TurnFailed = Extract<SessionHostMessage, { type: "TurnFailed" }>;
 type TurnClaim = Extract<SessionHostMessage, { type: "TurnClaim" }>;
@@ -487,7 +490,14 @@ type HostEvent = Exclude<
 type TurnEvent = Exclude<HostEvent, { type: "BoxGone" | "BoxTeardownFailed" }>;
 type ChunkReply = Extract<
   StoredControlMessage,
-  { type: "SnapshotChunksHeld" | "SnapshotPackUploads" | "RestoreDownloads" }
+  {
+    type:
+      | "SnapshotChunksHeld"
+      | "SnapshotChunkCheckHeld"
+      | "SnapshotIndexUpload"
+      | "SnapshotPackUploads"
+      | "RestoreDownloads";
+  }
 >;
 type StoredTurnOffer = Extract<StoredControlMessage, { type: "TurnOffer" }>;
 type Handoff = { hostId: string; offer: StoredTurnOffer };
@@ -2579,6 +2589,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       snapshot.storage_key,
       packListKey(snapshot.storage_key),
       draftKey(snapshot.storage_key),
+      indexKey(snapshot.storage_key),
     ]);
   }
 
@@ -3326,6 +3337,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     message: SessionHostMessage,
   ): Promise<HostReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
+    if (message.type === "SnapshotChunkCheck") return this.snapshotChunkCheck(tenantId, hostId, message);
+    if (message.type === "SnapshotIndexAsk") return this.snapshotIndexAsk(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
     if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, message);
     if ((message.type === "TurnComplete" || message.type === "TurnFailed") && message.credentialFile !== undefined) {
@@ -3387,6 +3400,66 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
     if ("type" in window) return window;
     return { type: "SnapshotChunksHeld", snapshotId: message.snapshotId, part: message.part, held: [] };
+  }
+
+  private async snapshotChunkCheck(
+    tenantId: string,
+    hostId: string,
+    message: Extract<ChunkAsk, { type: "SnapshotChunkCheck" }>,
+  ): Promise<ChunkReply | Refused> {
+    const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
+    if ("type" in window) return window;
+    const [previous] = this.ctx.storage.sql
+      .exec<{ storage_key: string }>(
+        `SELECT storage_key FROM (
+          SELECT 0 AS source, snapshot_seq, storage_key FROM snapshots WHERE session_id = ?1
+          UNION ALL SELECT 1, snapshots.snapshot_seq, snapshots.storage_key FROM session_prebuild_layers
+          JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
+          WHERE session_prebuild_layers.session_id = ?1
+        ) ORDER BY source, snapshot_seq DESC LIMIT 1`,
+        window.request.session_id,
+      )
+      .toArray();
+    if (previous === undefined) {
+      return { type: "SnapshotChunkCheckHeld", snapshotId: message.snapshotId, check: message.check, held: [] };
+    }
+    const held = await heldPlacements(this.env.STORE, previous.storage_key, message.digests);
+    if (held.kind !== "Read") {
+      return refused(`host ${hostId} checked chunks of snapshot ${message.snapshotId}, but ${held.detail}`);
+    }
+    return { type: "SnapshotChunkCheckHeld", snapshotId: message.snapshotId, check: message.check, held: held.value };
+  }
+
+  private async snapshotIndexAsk(
+    tenantId: string,
+    hostId: string,
+    message: Extract<ChunkAsk, { type: "SnapshotIndexAsk" }>,
+  ): Promise<ChunkReply | Refused> {
+    if (message.sizeBytes > MAX_INDEX_BYTES) {
+      return refused(
+        `host ${hostId} asked to upload a ${message.sizeBytes}-byte index of snapshot ${message.snapshotId}, above the ${MAX_INDEX_BYTES} of the largest snapshot's index`,
+      );
+    }
+    const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
+    if ("type" in window) return window;
+    const url = await signerOf(
+      this.env,
+      this.env.R2_BUCKET_NAME,
+      this.env.R2_ACCESS_KEY_ID,
+      this.env.R2_SECRET_ACCESS_KEY,
+    ).presignChecked(
+      indexKey(window.request.storage_key),
+      message.digest,
+      message.sizeBytes,
+      window.seconds,
+      new Date(window.now),
+    );
+    return {
+      type: "SnapshotIndexUpload",
+      snapshotId: message.snapshotId,
+      url,
+      uploadExpiresAt: iso(window.expiresAt),
+    };
   }
 
   private async snapshotPacks(

@@ -718,6 +718,7 @@ class R2Object {
 export class R2Bucket {
   private readonly objects = new Map<string, { body: Uint8Array; uploaded: Date }>();
   gets = 0;
+  latencyMs = 0;
   failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
 
   put(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
@@ -733,6 +734,7 @@ export class R2Bucket {
 
   get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2Object | null> {
     return awaitingIo(async () => {
+      await this.travels();
       this.gets += 1;
       this.fails("get", key);
       return this.read(key, options?.range);
@@ -744,6 +746,11 @@ export class R2Bucket {
       this.fails("head", key);
       return this.read(key, undefined);
     });
+  }
+
+  private async travels(): Promise<void> {
+    const arrives = performance.now() + this.latencyMs;
+    while (performance.now() < arrives) await new Promise((resolve) => setImmediate(resolve));
   }
 
   private read(key: string, range: { offset: number; length: number } | undefined): R2Object | null {
