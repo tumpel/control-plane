@@ -17,9 +17,9 @@ import * as tenantSchema from "./db/tenant-schema.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
 import type { Outcome } from "./hosts.ts";
 import type { Refused } from "./http.ts";
-import { placed } from "./sessions.ts";
+import { placed, sendFailure, sessionNotFound } from "./sessions.ts";
 import { apiOriginOf } from "./settings.ts";
-import type { NewSession } from "./tenant-sessions.ts";
+import type { Claim, NewSession } from "./tenant-sessions.ts";
 import { TenantWebhooks } from "./tenant-webhooks.ts";
 import { conditionRows, conditionsOf } from "./trigger-match.ts";
 
@@ -197,6 +197,8 @@ export abstract class TenantTriggers extends TenantWebhooks {
     const repeated = this.startedFor(triggerId, deliveryId);
     if (repeated !== null) return { kind: "Repeated", sessionId: repeated };
     if (fired.kind === "Refused") return this.refuseStart(origin, fired.refusal, now);
+    if (trigger.sessionId !== undefined)
+      return this.sendTargeted(tenantId, trigger, trigger.sessionId, origin, fired.prompt, now);
     const checked = check(trigger);
     if (!checked.ok) return this.refuseStart(origin, refusalOf(checked), now);
     const entry = checked.value;
@@ -221,6 +223,49 @@ export abstract class TenantTriggers extends TenantWebhooks {
     );
     if (started.ok) return { kind: "Started", started: started.value };
     return this.refuseStart(origin, refusalOf(started), now);
+  }
+
+  private async sendTargeted(
+    tenantId: string,
+    trigger: Trigger,
+    sessionId: string,
+    origin: Origin,
+    prompt: string,
+    now: number,
+  ): Promise<Fired> {
+    let taken = false;
+    const claim: Claim = () => {
+      const session = this.db()
+        .select({ state: sessions.state })
+        .from(sessions)
+        .where(eq(sessions.sessionId, sessionId))
+        .get();
+      if (session === undefined) return { kind: "NotFound" };
+      const { state } = session;
+      if (state === "Archived" || state === "Failed" || state === "Stopping") return { kind: state };
+      taken = !this.deleteTrigger(trigger.triggerId);
+      return taken ? { kind: "NotFound" } : null;
+    };
+    const caller = { kind: "Person" as const, principalId: trigger.principalId };
+    const hosts = await this.hostRecords(tenantId);
+    const sent = await this.sendTurn(tenantId, sessionId, { prompt }, caller, hosts, now, claim);
+    if (sent.kind === "Sent") return { kind: "Sent", sessionId, turnId: sent.turn.turnId };
+    if (taken) return { kind: "NotFound" };
+    const session = await this.readSession(tenantId, sessionId);
+    const refusal = refusalOf(
+      session === null ? sessionNotFound(sessionId) : sendFailure(sent, sessionId, session, hosts),
+    );
+    if (sent.kind !== "NotFound" && sent.kind !== "Archived" && sent.kind !== "Failed") {
+      return this.refuseStart(origin, refusal, now);
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.deleteTrigger(trigger.triggerId);
+      this.appendEvent(
+        { event: "TriggerStartRefused", triggerId: origin.triggerId, deliveryId: origin.deliveryId, refusal },
+        now,
+      );
+    });
+    return { kind: "Gone", refusal };
   }
 
   private refuseStart(origin: Origin, refusal: TriggerStartRefusal, now: number): Fired {

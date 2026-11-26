@@ -309,6 +309,7 @@ export const fireTriggers = async (env: Env, delivery: Delivery): Promise<void> 
     }
     const fired = matchedOf(trigger, delivery.payload, delivery.repository);
     const answer = await tenant.call("triggerFired", { tenantId, triggerId, deliveryId, fired, now: Date.now() });
-    if (answer.fired.kind === "NotFound") await dropRoute(env.DB, tenantId, triggerId);
+    const { kind } = answer.fired;
+    if (kind === "Sent" || kind === "Gone" || kind === "NotFound") await dropRoute(env.DB, tenantId, triggerId);
   }
 };
