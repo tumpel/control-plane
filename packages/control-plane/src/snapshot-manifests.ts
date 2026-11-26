@@ -22,6 +22,95 @@ export const packListKey = (storageKey: string): string => `${storageKey}.packs`
 
 export const draftKey = (storageKey: string): string => `${storageKey}.draft`;
 
+export const indexKey = (storageKey: string): string => `${storageKey}.idx`;
+
+const INDEX_HEADER_BYTES = 16;
+const INDEX_PACK_BYTES = 32;
+const INDEX_RECORD_BYTES = 44;
+const LARGEST_SNAPSHOT_BYTES = 32 * 1024 ** 3;
+const SMALLEST_CHUNK_BYTES = 512 * 1024;
+const SMALLEST_CLOSED_PACK_BYTES = 8 * 1024 ** 2;
+export const MAX_INDEX_BYTES =
+  INDEX_HEADER_BYTES +
+  (LARGEST_SNAPSHOT_BYTES / SMALLEST_CLOSED_PACK_BYTES) * INDEX_PACK_BYTES +
+  (LARGEST_SNAPSHOT_BYTES / SMALLEST_CHUNK_BYTES) * INDEX_RECORD_BYTES;
+
+const hexOf = (bytes: Uint8Array): string => {
+  let hex = "";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return hex;
+};
+
+const bytesOf = (hex: string): Uint8Array =>
+  Uint8Array.from({ length: hex.length / 2 }, (_, at) => Number.parseInt(hex.slice(at * 2, at * 2 + 2), 16));
+
+const compared = (bytes: Uint8Array, at: number, digest: Uint8Array): number => {
+  for (let byte = 0; byte < digest.length; byte++) {
+    const difference = (bytes[at + byte] ?? 0) - (digest[byte] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+};
+
+export const heldPlacements = async (
+  store: R2Bucket,
+  storageKey: string,
+  digests: string[],
+): Promise<ManifestRead<Placement[]>> => {
+  const object = await store.get(indexKey(storageKey));
+  if (object === null) return { kind: "Read", value: [] };
+  if (object.size > MAX_INDEX_BYTES) {
+    return {
+      kind: "Unreadable",
+      detail: `${indexKey(storageKey)} holds ${object.size} bytes, above the ${MAX_INDEX_BYTES} of the largest snapshot's index`,
+    };
+  }
+  const bytes = new Uint8Array(await object.arrayBuffer());
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const magic = new TextDecoder().decode(bytes.subarray(0, 4));
+  if (bytes.byteLength < INDEX_HEADER_BYTES || magic !== "TPIX" || view.getUint32(4, true) !== 1) {
+    return { kind: "Unreadable", detail: `${indexKey(storageKey)} is no version 1 chunk index` };
+  }
+  const packs = view.getUint32(8, true);
+  const records = view.getUint32(12, true);
+  const recordsAt = INDEX_HEADER_BYTES + packs * INDEX_PACK_BYTES;
+  const size = recordsAt + records * INDEX_RECORD_BYTES;
+  if (bytes.byteLength !== size) {
+    return {
+      kind: "Unreadable",
+      detail: `${indexKey(storageKey)} holds ${bytes.byteLength} bytes, but its ${packs} packs and ${records} records take ${size}`,
+    };
+  }
+  const held: Placement[] = [];
+  for (const digest of digests) {
+    const wanted = bytesOf(digest);
+    let low = 0;
+    let high = records;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (compared(bytes, recordsAt + middle * INDEX_RECORD_BYTES, wanted) < 0) low = middle + 1;
+      else high = middle;
+    }
+    const at = recordsAt + low * INDEX_RECORD_BYTES;
+    if (low === records || compared(bytes, at, wanted) !== 0) continue;
+    const pack = view.getUint32(at + 32, true);
+    if (pack >= packs) {
+      return {
+        kind: "Unreadable",
+        detail: `${indexKey(storageKey)} places chunk ${digest} in pack ${pack}, but it lists ${packs} packs`,
+      };
+    }
+    const packAt = INDEX_HEADER_BYTES + pack * INDEX_PACK_BYTES;
+    held.push({
+      digest,
+      packDigest: hexOf(bytes.subarray(packAt, packAt + INDEX_PACK_BYTES)),
+      offset: view.getUint32(at + 36, true),
+      length: view.getUint32(at + 40, true),
+    });
+  }
+  return { kind: "Read", value: held };
+};
+
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
