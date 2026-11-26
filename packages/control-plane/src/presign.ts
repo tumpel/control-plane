@@ -54,6 +54,12 @@ const amzDate = (now: Date): string =>
     .replace(/[-:]/g, "")
     .replace(/\.\d{3}/, "");
 
+const signingKey = async (credentials: SigV4Credentials, day: string): Promise<ArrayBuffer> => {
+  let key: ArrayBuffer = await hmac(new Uint8Array(encoder.encode(`AWS4${credentials.secretAccessKey}`)), day);
+  for (const part of [credentials.region, credentials.service, "aws4_request"]) key = await hmac(key, part);
+  return key;
+};
+
 export const presignUrl = async (
   credentials: SigV4Credentials,
   method: PresignMethod,
@@ -62,6 +68,7 @@ export const presignUrl = async (
   expiresInSeconds: number,
   now: Date,
   signedHeaders: [string, string][] = [],
+  keyOf: (day: string) => Promise<ArrayBuffer> = (day) => signingKey(credentials, day),
 ): Promise<string> => {
   if (expiresInSeconds < 1 || expiresInSeconds > MAX_EXPIRY_SECONDS) {
     throw new Error(`a presigned URL lives 1 to ${MAX_EXPIRY_SECONDS} seconds, not ${expiresInSeconds}`);
@@ -94,23 +101,36 @@ export const presignUrl = async (
     "UNSIGNED-PAYLOAD",
   ].join("\n");
   const toSign = ["AWS4-HMAC-SHA256", timestamp, scope, await sha256(canonical)].join("\n");
-  let key: ArrayBuffer = await hmac(new Uint8Array(encoder.encode(`AWS4${credentials.secretAccessKey}`)), day);
-  for (const part of [credentials.region, credentials.service, "aws4_request"]) key = await hmac(key, part);
-  const signature = hex(await hmac(key, toSign));
+  const signature = hex(await hmac(await keyOf(day), toSign));
   return `${origin}${path}?${query}&X-Amz-Signature=${signature}`;
 };
 
 const r2Signer = (accountId: string, bucket: string, credentials: SigV4Credentials): Signer => {
   const origin = `https://${accountId}.r2.cloudflarestorage.com`;
   const segments = (storageKey: string): string[] => [bucket, ...storageKey.split("/")];
+  const keys = new Map<string, Promise<ArrayBuffer>>();
+  const keyOf = (day: string): Promise<ArrayBuffer> => {
+    const key = keys.get(day) ?? signingKey(credentials, day);
+    keys.set(day, key);
+    return key;
+  };
   return {
     presign: (method, storageKey, expiresInSeconds, now) =>
-      presignUrl(credentials, method, origin, segments(storageKey), expiresInSeconds, now),
+      presignUrl(credentials, method, origin, segments(storageKey), expiresInSeconds, now, [], keyOf),
     presignChecked: (storageKey, sha256Hex, sizeBytes, expiresInSeconds, now) =>
-      presignUrl(credentials, "PUT", origin, segments(storageKey), expiresInSeconds, now, [
-        ["content-length", String(sizeBytes)],
-        [CHECKSUM_HEADER, checksumOf(sha256Hex)],
-      ]),
+      presignUrl(
+        credentials,
+        "PUT",
+        origin,
+        segments(storageKey),
+        expiresInSeconds,
+        now,
+        [
+          ["content-length", String(sizeBytes)],
+          [CHECKSUM_HEADER, checksumOf(sha256Hex)],
+        ],
+        keyOf,
+      ),
   };
 };
 
