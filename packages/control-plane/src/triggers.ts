@@ -146,21 +146,24 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   });
   if (created.kind === "NameTaken") return nameTaken(trigger.name);
   if (created.kind === "PersonaNotFound") return personaNotFound(trigger.personaId);
-  if (created.kind !== "Created") {
-    const target = sessionId ?? "";
-    if (created.kind === "NotFound") return targetNotFound(target);
-    if (created.kind === "SessionMismatch") return sessionMismatch(target, created);
-    if (created.kind === "LimitReached") return limitReached(target, created.scope);
-    return targetEnded(target, created.kind);
+  if (created.kind === "Created") {
+    await projectRoute(env.DB, created.trigger);
+    return json(created.trigger);
   }
-  await projectRoute(env.DB, created.trigger);
-  return json(created.trigger);
+  if (sessionId !== undefined) {
+    if (created.kind === "NotFound") return targetNotFound(sessionId);
+    if (created.kind === "SessionMismatch") return sessionMismatch(sessionId, created);
+    if (created.kind === "LimitReached") return limitReached(sessionId, created.scope);
+    return targetEnded(sessionId, created.kind);
+  }
+  throw new Error(
+    `the tenant answered ${created.kind}, which only a targeted create has, to untargeted trigger ${trigger.name}`,
+  );
 };
 
 const update = async (request: Request, env: Env, caller: Caller, current: Trigger): Promise<Response> => {
   const refused = writeRefused(caller, "triggers.update");
   if (refused !== null) return refused;
-  if (current.sessionId !== undefined) return targetedImmutable(current.triggerId);
   const body = await parseBody(request, TriggerPatchSchema, "triggers.update");
   if (!body.ok) return body.response;
   const patch = body.value;

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { type TestContext, test } from "node:test";
-import { PrepareOfferResultSchema, StartedSessionSchema, TriggerSchema } from "@tumpel/schemas";
+import {
+  PersonaSchema,
+  PrepareOfferResultSchema,
+  ProblemSchema,
+  SecretSetSchema,
+  StartedSessionSchema,
+  TriggerSchema,
+} from "@tumpel/schemas";
 import { z } from "zod";
 import { type Host, type Member, TENANT_ID, World } from "./harness/world.ts";
 import { mcpPersona, startBox } from "./signal-fixtures.ts";
@@ -88,6 +95,38 @@ const statusTrigger = (name: string, personaId: string, sessionId?: string) => (
   ...(sessionId === undefined ? {} : { sessionId }),
 });
 
+const configApply = async (world: World, triggerNames: string[]) => {
+  const [persona] = PersonaSchema.array().parse(await (await world.fetch(world.owner, "GET", "/v1/personas")).json());
+  assert.ok(persona);
+  const secretSet = SecretSetSchema.parse(
+    await (await world.fetch(world.owner, "GET", `/v1/secret-sets/${persona.secretSetId}`)).json(),
+  );
+  return {
+    config: {
+      personas: [
+        {
+          name: persona.name,
+          harness: persona.harness,
+          secretSetName: secretSet.name,
+          connectorNames: [],
+          files: [],
+          tumpelMcp: true,
+        },
+      ],
+      secretSets: [{ name: secretSet.name, secrets: [] }],
+      harnessPins: [],
+      hosts: [],
+      triggers: triggerNames.map((name) => {
+        const { personaId: _, ...trigger } = statusTrigger(name, persona.personaId);
+        return { ...trigger, personaName: persona.name };
+      }),
+    },
+    files: [],
+    secretValues: [],
+    expiryValues: [],
+  };
+};
+
 const foremanIdle = async (t: TestContext) => {
   const world = await World.open();
   t.after(() => world.close());
@@ -133,12 +172,13 @@ test("a Foreman's turn token creates, reads and deletes only triggers that targe
     ["tumpel_trigger_create", statusTrigger("sneaky", personaId, crew.session.sessionId)],
     ["tumpel_trigger_update", { triggerId: owned.triggerId, prompt: "changed" }],
     ["tumpel_trigger_update", { triggerId: trigger.triggerId, prompt: "changed" }],
+    ["tumpel_config_apply", await configApply(world, ["config-review"])],
   ];
   for (const [name, args] of refusals) {
     const quiet = rows();
     const refused = await tool(world, token, name, args);
     assert.equal(refused.ok, false, `${name} was not refused`);
-    assert.match(refused.text, /^(Only your own session|Only a person can do this): /, `${name}: ${refused.text}`);
+    assert.match(refused.text, /^Forbidden: /, `${name}: ${refused.text}`);
     assert.deepEqual(written(quiet), { tenant: 0, central: 0 }, name);
   }
 
@@ -149,7 +189,7 @@ test("a Foreman's turn token creates, reads and deletes only triggers that targe
     statusTrigger("owner-review", personaId, foremanId),
   );
   assert.equal(collision.ok, false);
-  assert.match(collision.text, /^Trigger name taken: /);
+  assert.match(collision.text, /^Conflict: /);
 
   const ownerUpdate = await world.fetch(
     world.owner,
@@ -184,7 +224,7 @@ test("targets are refused past 10 per session and 50 per tenant, and a create wr
   const quiet = rows();
   const eleventh = await tool(world, token, "tumpel_trigger_create", statusTrigger("f-10", personaId, foremanId));
   assert.equal(eleventh.ok, false);
-  assert.match(eleventh.text, /^Too many targeted triggers: /);
+  assert.match(eleventh.text, /^TriggerLimitReached: /);
   assert.match(eleventh.text, new RegExp(`session ${foremanId} already has 10 targeted triggers`));
   assert.deepEqual(written(quiet), { tenant: 0, central: 0 });
 
@@ -256,4 +296,64 @@ test("a targeted create is refused for a mismatched persona or model, and deleti
     left.map((trigger) => trigger.name),
     ["owner-review"],
   );
+});
+
+test("an Owner's config apply keeps the Foreman's armed trigger, and a config trigger of its name fails the plan", async (t) => {
+  const { world, personaId, foreman, token } = await foremanIdle(t);
+  const created = await tool(
+    world,
+    token,
+    "tumpel_trigger_create",
+    statusTrigger("wake-pr-7", personaId, foreman.session.sessionId),
+  );
+  assert.ok(created.ok, created.text);
+  const armed = TriggerSchema.parse(JSON.parse(created.text));
+  const listed = async () =>
+    TriggerSchema.array().parse(await (await world.fetch(world.owner, "GET", "/v1/triggers")).json());
+
+  const applied = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/tenant-config/apply",
+    JSON.stringify(await configApply(world, [])),
+  );
+  assert.equal(applied.status, 200, await applied.clone().text());
+  assert.deepEqual(await listed(), [armed]);
+
+  const colliding = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/tenant-config/apply",
+    JSON.stringify(await configApply(world, ["wake-pr-7"])),
+  );
+  const problem = ProblemSchema.parse(await colliding.json());
+  assert.match(
+    problem.detail,
+    new RegExp(
+      `has the name of targeted trigger ${armed.triggerId}, which waits for session ${foreman.session.sessionId}`,
+    ),
+  );
+  assert.deepEqual(await listed(), [armed]);
+});
+
+test("a targeted create is refused NotFound for an unknown session and SessionArchived for an archived one, writing 0", async (t) => {
+  const { world, host, personaId, rows, written, ownerCreate } = await foremanIdle(t);
+  const quiet = rows();
+  const unknown = await ownerCreate("wake-nobody", "ses-unknown");
+  assert.equal(unknown.status, 404);
+  const missing = ProblemSchema.parse(await unknown.json());
+  assert.equal(missing.code, "NotFound");
+  assert.match(missing.detail, /no session ses-unknown to target/);
+  assert.deepEqual(written(quiet), { tenant: 0, central: 0 });
+
+  const crew = await startBox(world, host, personaId, "build the change", "Warm");
+  await host.finishes(crew.offer);
+  await world.settle();
+  const archived = await world.fetch(world.owner, "POST", `/v1/sessions/${crew.session.sessionId}/archive`);
+  assert.equal(archived.status, 200, await archived.clone().text());
+  const before = rows();
+  const refused = await ownerCreate("wake-archived", crew.session.sessionId);
+  assert.equal(refused.status, 409);
+  assert.equal(ProblemSchema.parse(await refused.json()).code, "SessionArchived");
+  assert.deepEqual(written(before), { tenant: 0, central: 0 });
 });

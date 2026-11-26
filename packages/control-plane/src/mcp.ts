@@ -1063,7 +1063,7 @@ const toolRequest = (
 const refusalText = async (answer: Response): Promise<string> => {
   const problem = ProblemSchema.safeParse(await answer.json().catch(() => null));
   if (!problem.success) return `the control plane answered ${answer.status} without a problem document`;
-  return `${problem.data.title}: ${problem.data.detail}. ${problem.data.fix}`;
+  return `${problem.data.code}: ${problem.data.title}: ${problem.data.detail}. ${problem.data.fix}`;
 };
 
 const runTool = async (
