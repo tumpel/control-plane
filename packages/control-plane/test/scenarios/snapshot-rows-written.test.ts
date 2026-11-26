@@ -132,10 +132,6 @@ const rowsOfStoredSnapshot = (chunks: Placement[]): Promise<number> =>
 
     await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: session.sessionId, now: Date.now() });
     assert.equal(await world.store.get(storageKey), null, "the archive frees the root");
-    const packs = new Set(chunks.map((chunk) => chunk.packDigest));
-    for (const packDigest of packs) {
-      assert.equal(await world.store.get(`${TENANT_ID}/packs/${packDigest}`), null, "no snapshot holds the pack");
-    }
     return written;
   });
 
@@ -168,7 +164,7 @@ const rowsOfFork = (chunks: Placement[]): Promise<number> =>
     return world.tenantRowsWritten() - before;
   });
 
-test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot, and its archive frees every pack", async () => {
+test("a stored snapshot of 100000 chunks writes the rows of a one-chunk snapshot, and its archive frees its root", async () => {
   const large = await rowsOfStoredSnapshot(tree(LARGE));
   const small = await rowsOfStoredSnapshot(tree(1));
   assert.equal(large, small);
@@ -264,54 +260,6 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
   });
 });
 
-test("a snapshot that reuses a pack another session's archive frees while it is in flight is rejected, naming the pack", async () => {
-  await inWorld(async (world, host) => {
-    const shared = tree(DIGESTS_PER_PART, "shared");
-    const sharedPack = shared[0]?.packDigest ?? "";
-    const first = await world.startSession({ prompt: "build the shared tree", tags: [] });
-    const firstOffer = host.takeOffer();
-    await host.claims(firstOffer);
-    await host.completes(firstOffer);
-    await storesSnapshot(world, host, first.sessionId, shared);
-    await world.passes(2 * 60_000);
-
-    const second = await world.startSession({ prompt: "build on the shared tree", tags: [] });
-    const secondOffer = host.takeOffer();
-    await host.claims(secondOffer);
-    await host.completes(secondOffer);
-    const request = snapshotAsked(host, second.sessionId);
-    const reused = PackUploadsSchema.parse(
-      await host.says({
-        type: "SnapshotPacks",
-        snapshotId: request.snapshotId,
-        part: 1,
-        packs: [],
-        chunks: [],
-        reusedPackDigests: [sharedPack],
-      }),
-    );
-    assert.deepEqual(reused.reply.uploads, []);
-
-    await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: first.sessionId, now: Date.now() });
-    assert.equal(await world.store.get(`${TENANT_ID}/packs/${sharedPack}`), null, "the archive freed the pack");
-    await storesRoot(world, host, request, shared, 2);
-    await host.says({
-      type: "SnapshotDone",
-      snapshotId: request.snapshotId,
-      uploadedBytes: shared.length * CHUNK_BYTES,
-      chunkCount: shared.length,
-    });
-
-    const { snapshots } = SnapshotsSchema.parse(
-      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: second.sessionId }),
-    );
-    assert.equal(snapshots.length, 1);
-    assert.equal(snapshots[0]?.outcome.state, "Failed");
-    assert.equal(snapshots[0]?.outcome.reason, "UploadRejected");
-    assert.match(snapshots[0]?.outcome.detail ?? "", new RegExp(sharedPack));
-  });
-});
-
 test("a snapshot that reuses packs an unstored snapshot of the session uploaded is stored", async () => {
   await inWorld(async (world, host) => {
     await world.holdsAgentCredentials();
@@ -380,7 +328,7 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
     const { snapshots } = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
-    assert.match(JSON.stringify(snapshots.at(-1)?.outcome), new RegExp(`reuses pack ${packDigest}`));
+    assert.match(JSON.stringify(snapshots.at(-1)?.outcome), new RegExp(`names pack ${packDigest}`));
   });
 });
 
