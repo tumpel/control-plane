@@ -448,7 +448,7 @@ const planHosts = (desired: ConfigHost[], live: HostRecord[], steps: Step[], pro
   }
 };
 
-const triggerShape = (trigger: ConfigTrigger): string =>
+const triggerShape = (trigger: Pick<ConfigTrigger, "source" | "personaName" | "model" | "prompt">): string =>
   JSON.stringify([
     trigger.source.kind,
     trigger.source.event,

@@ -12,12 +12,16 @@ export const STORES = [
   { migrations: "packages/control-plane/migrations", schema: "packages/control-plane/src/db/central-schema.ts" },
   { migrations: "packages/control-plane/migrations/host", schema: "packages/control-plane/src/db/host-schema.ts" },
   {
+    migrations: "packages/control-plane/migrations/tenant",
+    schema: "packages/control-plane/src/db/tenant-schema.ts",
+  },
+  {
     migrations: "packages/control-plane/migrations/metrics",
     schema: "packages/control-plane/src/db/metrics-schema.ts",
   },
 ];
 
-const BUILDERS = { INTEGER: "integer", TEXT: "text", REAL: "real", BLOB: "blob" };
+const BUILDERS = { INTEGER: "integer", INT: "integer", TEXT: "text", REAL: "real", BLOB: "blob" };
 
 const camel = (name) => name.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
 
@@ -58,7 +62,6 @@ const describe = (db, table) => {
     else composite.push(ordered);
   }
   const indexes = rows(db, `PRAGMA index_list(${JSON.stringify(table)})`).filter((index) => index.origin !== "pk");
-  if (indexes.some((index) => index.partial === 1)) throw new Error(`${table} has a partial index`);
   return { table, columns, keys, referenced, composite, indexes };
 };
 
@@ -91,6 +94,13 @@ const cascade = (reference) => {
   return action === undefined ? "" : `.onDelete("${action}")`;
 };
 
+const partialWhere = (db, index) => {
+  const { sql: definition } = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(index);
+  const where = definition.match(/\)\s+WHERE\s+([\s\S]+)$/i);
+  if (where === null) throw new Error(`index ${index} is partial but its WHERE clause could not be read`);
+  return `.where(sql\`${where[1].trim()}\`)`;
+};
+
 const tableSource = (db, description, used) => {
   const { table, columns, keys, composite, indexes } = description;
   const fields = columns.map((column) => {
@@ -120,7 +130,8 @@ const tableSource = (db, description, used) => {
     } else {
       const builder = index.unique === 1 ? "uniqueIndex" : "index";
       used.add(builder);
-      extras.push(`${builder}("${index.name}").on(${members})`);
+      const where = index.partial === 1 ? partialWhere(db, index.name) : "";
+      extras.push(`${builder}("${index.name}").on(${members})${where}`);
     }
   }
   const tail = extras.length === 0 ? "" : `, (table) => [${extras.join(", ")}]`;

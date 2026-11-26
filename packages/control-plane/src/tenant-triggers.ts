@@ -9,8 +9,11 @@ import {
   TriggerStartRefusalSchema,
   type UpdateTriggerResultSchema,
 } from "@tumpel/schemas";
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
+import { type DurableDb, durableDb } from "./db/client.ts";
+import * as tenantSchema from "./db/tenant-schema.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
 import type { Outcome } from "./hosts.ts";
 import type { Refused } from "./http.ts";
@@ -56,7 +59,7 @@ const TRIGGER_SELECT = `SELECT t.trigger_id, t.name, t.source, t.event, t.person
     FROM (SELECT position, field, value FROM trigger_conditions WHERE trigger_id = t.trigger_id ORDER BY position, value)) AS conditions
   FROM triggers AS t`;
 
-const toTrigger = (tenantId: string, row: TriggerRow): Trigger =>
+const toTrigger = (tenantId: string, row: TriggerRow, sessionId: string | undefined): Trigger =>
   TriggerSchema.parse({
     triggerId: row.trigger_id,
     tenantId,
@@ -68,21 +71,41 @@ const toTrigger = (tenantId: string, row: TriggerRow): Trigger =>
     principalId: row.principal_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    sessionId,
   });
+
+const { triggerSessionTargets } = tenantSchema;
 
 export abstract class TenantTriggers extends TenantWebhooks {
   protected listTriggers(tenantId: string): Trigger[] {
+    const targets = new Map(
+      this.db()
+        .select()
+        .from(triggerSessionTargets)
+        .all()
+        .map((target) => [target.triggerId, target.sessionId]),
+    );
     return this.ctx.storage.sql
       .exec<TriggerRow>(`${TRIGGER_SELECT} ORDER BY t.created_at, t.trigger_id`)
       .toArray()
-      .map((row) => toTrigger(tenantId, row));
+      .map((row) => toTrigger(tenantId, row, targets.get(row.trigger_id)));
   }
 
   protected getTrigger(tenantId: string, triggerId: string): Trigger | null {
     const [row] = this.ctx.storage.sql
       .exec<TriggerRow>(`${TRIGGER_SELECT} WHERE t.trigger_id = ?`, triggerId)
       .toArray();
-    return row === undefined ? null : toTrigger(tenantId, row);
+    if (row === undefined) return null;
+    const target = this.db()
+      .select({ sessionId: triggerSessionTargets.sessionId })
+      .from(triggerSessionTargets)
+      .where(eq(triggerSessionTargets.triggerId, triggerId))
+      .get();
+    return toTrigger(tenantId, row, target?.sessionId);
+  }
+
+  private db(): DurableDb<typeof tenantSchema> {
+    return durableDb(this.ctx.storage, tenantSchema);
   }
 
   protected createTrigger(tenantId: string, create: TriggerCreate, principalId: string, now: number): Created {

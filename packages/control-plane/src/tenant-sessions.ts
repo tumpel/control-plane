@@ -235,7 +235,7 @@ export type Archive =
   | { kind: "NotFound" }
   | { kind: "NotStopped"; state: SessionState };
 
-export type SessionDeleted = { kind: "Deleted" } | Exclude<Archive, { kind: "Archived" }>;
+export type SessionDeleted = { kind: "Deleted"; triggerIds: string[] } | Exclude<Archive, { kind: "Archived" }>;
 
 export type TranscriptCursor = {
   sessionState: SessionState;
@@ -2570,7 +2570,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
     await deleteTranscript(this.env.STORE, transcriptPrefix(tenantId, sessionId));
     sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
-    return { kind: "Deleted" };
+    return { kind: "Deleted", triggerIds: [] };
   }
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {

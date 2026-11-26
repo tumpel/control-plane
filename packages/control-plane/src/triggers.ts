@@ -91,6 +91,8 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   });
   if (created.kind === "NameTaken") return nameTaken(trigger.name);
   if (created.kind === "PersonaNotFound") return personaNotFound(trigger.personaId);
+  if (created.kind !== "Created")
+    throw new Error(`the tenant answered ${created.kind} to an untargeted trigger create`);
   await projectRoute(env.DB, created.trigger);
   return json(created.trigger);
 };
@@ -115,6 +117,7 @@ const update = async (request: Request, env: Env, caller: Caller, current: Trigg
   if (updated.kind === "NotFound") return notFound(triggerId);
   if (updated.kind === "NameTaken") return nameTaken(patch.name ?? current.name);
   if (updated.kind === "PersonaNotFound") return personaNotFound(patch.personaId ?? current.personaId);
+  if (updated.kind === "Targeted") throw new Error(`the tenant refused to update trigger ${triggerId} as targeted`);
   await projectRoute(env.DB, updated.trigger);
   return json(updated.trigger);
 };
