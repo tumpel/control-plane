@@ -70,6 +70,7 @@ import {
   type TranscriptLine,
   transcriptPrefix,
 } from "./transcript.ts";
+import { dropRoute } from "./trigger-routes.ts";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
@@ -841,7 +842,10 @@ export const deleteSession = async (env: Env, caller: Caller, sessionId: string)
     if (offline !== null) return offline;
   }
   const { deleted } = await tenant.call("deleteSession", { tenantId: caller.tenantId, sessionId });
-  if (deleted.kind === "Deleted") return ok(null);
+  if (deleted.kind === "Deleted") {
+    for (const triggerId of deleted.triggerIds) await dropRoute(env.DB, caller.tenantId, triggerId);
+    return ok(null);
+  }
   if (deleted.kind === "NotFound") return sessionNotFound(sessionId);
   if (deleted.state === "Archived") {
     return refuse(409, {

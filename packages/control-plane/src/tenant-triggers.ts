@@ -9,7 +9,7 @@ import {
   TriggerStartRefusalSchema,
   type UpdateTriggerResultSchema,
 } from "@tumpel/schemas";
-import { eq } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
 import { type DurableDb, durableDb } from "./db/client.ts";
@@ -74,7 +74,10 @@ const toTrigger = (tenantId: string, row: TriggerRow, sessionId: string | undefi
     sessionId,
   });
 
-const { triggerSessionTargets } = tenantSchema;
+const { sessions, triggerSessionTargets } = tenantSchema;
+
+export const TARGETS_PER_SESSION = 10;
+export const TARGETS_PER_TENANT = 50;
 
 export abstract class TenantTriggers extends TenantWebhooks {
   protected listTriggers(tenantId: string): Trigger[] {
@@ -110,10 +113,39 @@ export abstract class TenantTriggers extends TenantWebhooks {
 
   protected createTrigger(tenantId: string, create: TriggerCreate, principalId: string, now: number): Created {
     if (!this.personaHeld(create.personaId)) return { kind: "PersonaNotFound" };
+    const { sessionId } = create;
+    if (sessionId !== undefined) {
+      const refused = this.targetRefused(sessionId, create);
+      if (refused !== null) return refused;
+    }
     if (this.triggerNameTaken(create.name, null)) return { kind: "NameTaken" };
     const triggerId = crypto.randomUUID();
-    this.ctx.storage.transactionSync(() => this.insertTrigger(triggerId, create, principalId, now));
+    this.ctx.storage.transactionSync(() => {
+      this.insertTrigger(triggerId, create, principalId, now);
+      if (sessionId !== undefined) this.db().insert(triggerSessionTargets).values({ triggerId, sessionId }).run();
+    });
     return { kind: "Created", trigger: this.presentTrigger(tenantId, triggerId) };
+  }
+
+  private targetRefused(sessionId: string, create: TriggerCreate): Exclude<Created, { kind: "Created" }> | null {
+    const db = this.db();
+    const session = db
+      .select({ state: sessions.state, personaId: sessions.personaId, model: sessions.model })
+      .from(sessions)
+      .where(eq(sessions.sessionId, sessionId))
+      .get();
+    if (session === undefined) return { kind: "NotFound" };
+    if (session.state === "Archived" || session.state === "Failed") return { kind: session.state };
+    if (session.personaId !== create.personaId || session.model !== create.model) {
+      return { kind: "SessionMismatch", personaId: session.personaId, model: session.model };
+    }
+    const held = (where?: ReturnType<typeof eq>): number =>
+      db.select({ held: count() }).from(triggerSessionTargets).where(where).get()?.held ?? 0;
+    if (held(eq(triggerSessionTargets.sessionId, sessionId)) >= TARGETS_PER_SESSION) {
+      return { kind: "LimitReached", scope: "Session" };
+    }
+    if (held() >= TARGETS_PER_TENANT) return { kind: "LimitReached", scope: "Tenant" };
+    return null;
   }
 
   protected updateTrigger(
@@ -125,6 +157,7 @@ export abstract class TenantTriggers extends TenantWebhooks {
   ): Updated {
     const current = this.getTrigger(tenantId, triggerId);
     if (current === null) return { kind: "NotFound" };
+    if (current.sessionId !== undefined) return { kind: "Targeted" };
     if (patch.personaId !== undefined && !this.personaHeld(patch.personaId)) return { kind: "PersonaNotFound" };
     if (patch.name !== undefined && this.triggerNameTaken(patch.name, triggerId)) return { kind: "NameTaken" };
     this.ctx.storage.transactionSync(() => this.replaceTrigger(triggerId, { ...current, ...patch }, principalId, now));

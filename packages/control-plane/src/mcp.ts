@@ -861,9 +861,15 @@ export const TOOLS: ToolDefinition[] = [
     "POST",
     "/v1/triggers",
     TriggerCreateSchema,
-    "Create a trigger that starts a fresh session whenever a GitHub event of one type arrives through the stage's GitHub App and every condition holds on its payload. source is {kind: GitHub, event, conditions}: event is pull_request, push, status or issues; each condition names a dotted field path into the webhook payload, such as pull_request.base.ref, label.name or sender.login, and the values it may equal, compared as JSON text, so true matches a boolean; a path through an array matches any element. The session runs on personaId with model, on the event's repository, with prompt as its first prompt, where each {{field}} placeholder is filled from the payload. Every session runs as you. Tumpel only listens: tell the session in the prompt how to report back, such as with a review or a commit status. Test it first with tumpel_trigger_test. Only an Owner, outside a tumpel box, creates one.",
+    "Create a trigger that starts a fresh session whenever a GitHub event of one type arrives through the stage's GitHub App and every condition holds on its payload. source is {kind: GitHub, event, conditions}: event is pull_request, pull_request_review, push, status, check_suite or issues; each condition names a dotted field path into the webhook payload, such as pull_request.base.ref, label.name or sender.login, and the values it may equal, compared as JSON text, so true matches a boolean; a path through an array matches any element. The session runs on personaId with model, on the event's repository, with prompt as its first prompt, where each {{field}} placeholder is filled from the payload. Every session runs as you. Tumpel only listens: tell the session in the prompt how to report back, such as with a review or a commit status. Test it first with tumpel_trigger_test. Only an Owner, outside a tumpel box, creates one. With sessionId set, the trigger instead sends that existing session one turn with the filled prompt and then deletes itself; personaId and model must be the session's. A session may create such a trigger targeting itself, at most 10 per session and 50 per tenant.",
   ),
-  rest("tumpel_trigger_list", "GET", "/v1/triggers", NO_ARGUMENTS, "List the tenant's triggers."),
+  rest(
+    "tumpel_trigger_list",
+    "GET",
+    "/v1/triggers",
+    NO_ARGUMENTS,
+    "List the tenant's triggers; a targeted one carries the sessionId it wakes.",
+  ),
   rest("tumpel_trigger_get", "GET", "/v1/triggers/{triggerId}", TriggerPathSchema, "Read one trigger."),
   rest(
     "tumpel_trigger_update",
@@ -877,7 +883,7 @@ export const TOOLS: ToolDefinition[] = [
     "DELETE",
     "/v1/triggers/{triggerId}",
     TriggerPathSchema,
-    "Delete a trigger; the sessions it started stay. Only an Owner, outside a tumpel box, deletes one.",
+    "Delete a trigger; the sessions it started stay. Only an Owner, outside a tumpel box, deletes one, except that a session may delete a trigger targeting itself.",
   ),
   rest(
     "tumpel_trigger_test",

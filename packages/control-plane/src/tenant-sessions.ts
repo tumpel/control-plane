@@ -30,7 +30,7 @@ import {
   TurnSchema,
   type TurnSendSchema,
 } from "@tumpel/schemas";
-import { sql as query } from "drizzle-orm";
+import { eq, inArray, sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
@@ -57,6 +57,7 @@ import {
 } from "./connector-rows.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
 import { durableDb } from "./db/client.ts";
+import * as tenantSchema from "./db/tenant-schema.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
@@ -2569,8 +2570,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
     await deleteTranscript(this.env.STORE, transcriptPrefix(tenantId, sessionId));
-    sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
-    return { kind: "Deleted", triggerIds: [] };
+    const db = durableDb(this.ctx.storage, tenantSchema);
+    const triggerIds = db
+      .select({ triggerId: tenantSchema.triggerSessionTargets.triggerId })
+      .from(tenantSchema.triggerSessionTargets)
+      .where(eq(tenantSchema.triggerSessionTargets.sessionId, sessionId))
+      .all()
+      .map((target) => target.triggerId);
+    this.ctx.storage.transactionSync(() => {
+      if (triggerIds.length > 0)
+        db.delete(tenantSchema.triggers).where(inArray(tenantSchema.triggers.triggerId, triggerIds)).run();
+      sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
+    });
+    return { kind: "Deleted", triggerIds };
   }
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {

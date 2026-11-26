@@ -14,7 +14,7 @@ import type { Env } from "./index.ts";
 import { ownerRequired } from "./members.ts";
 import { startable, startTarget } from "./sessions.ts";
 import { tenantApi } from "./tenant-api.ts";
-import type { Trigger } from "./tenant-triggers.ts";
+import { TARGETS_PER_SESSION, TARGETS_PER_TENANT, type Trigger } from "./tenant-triggers.ts";
 import { fillPrompt, matches, verdicts } from "./trigger-match.ts";
 import { dropRoute, matchedTriggers, projectRoute } from "./trigger-routes.ts";
 
@@ -39,6 +39,60 @@ export const turnRefused = (caller: Caller, operation: string): Response | null 
 
 const writeRefused = (caller: Caller, operation: string): Response | null =>
   turnRefused(caller, operation) ?? ownerRequired(caller, operation);
+
+const targetRefused = (caller: Caller, sessionId: string | undefined, operation: string): Response | null => {
+  if (caller.origin.kind !== "Turn") return ownerRequired(caller, operation);
+  if (sessionId === caller.origin.sessionId) return null;
+  return problem(403, {
+    code: "Forbidden",
+    title: "Only your own session",
+    detail: `${operation} from inside tumpel session ${caller.origin.sessionId} takes only a trigger targeting that session`,
+    fix: `Set sessionId to ${caller.origin.sessionId}, or tell your person what the trigger must do and let an Owner set it up`,
+  });
+};
+
+const targetNotFound = (sessionId: string): Response =>
+  problem(404, {
+    code: "NotFound",
+    title: "No such session",
+    detail: `your tenant has no session ${sessionId} to target`,
+    fix: "List your sessions and target one of their ids",
+  });
+
+const targetEnded = (sessionId: string, state: "Archived" | "Failed"): Response =>
+  problem(409, {
+    code: state === "Archived" ? "SessionArchived" : "SessionFailed",
+    title: `Session ${state.toLowerCase()}`,
+    detail: `session ${sessionId} is ${state} and takes no more turns, so no trigger can target it`,
+    fix: "Target a session that is still running, or start a new one",
+  });
+
+const sessionMismatch = (sessionId: string, session: { personaId: string; model: string }): Response =>
+  problem(400, {
+    code: "InvalidRequest",
+    title: "Trigger differs from its session",
+    detail: `session ${sessionId} runs persona ${session.personaId} with model ${session.model}, and a trigger targeting it must name the same`,
+    fix: `Set personaId to ${session.personaId} and model to ${session.model}`,
+  });
+
+const limitReached = (sessionId: string, scope: string): Response =>
+  problem(409, {
+    code: "TriggerLimitReached",
+    title: "Too many targeted triggers",
+    detail:
+      scope === "Session"
+        ? `session ${sessionId} already has ${TARGETS_PER_SESSION} targeted triggers, the most one session may have`
+        : `your tenant already has ${TARGETS_PER_TENANT} targeted triggers, the most one tenant may have`,
+    fix: "Delete a targeted trigger you no longer wait on, then create this one again",
+  });
+
+const targetedImmutable = (triggerId: string): Response =>
+  problem(400, {
+    code: "InvalidRequest",
+    title: "Targeted trigger is immutable",
+    detail: `trigger ${triggerId} targets a session, and a targeted trigger never changes`,
+    fix: "Delete the trigger and create a new one",
+  });
 
 const notFound = (triggerId: string): Response =>
   problem(404, {
@@ -75,11 +129,12 @@ const unstartable = async (
 };
 
 const create = async (request: Request, env: Env, caller: Caller): Promise<Response> => {
-  const refused = writeRefused(caller, "triggers.create");
-  if (refused !== null) return refused;
   const body = await parseBody(request, TriggerCreateSchema, "triggers.create");
   if (!body.ok) return body.response;
   const trigger = body.value;
+  const { sessionId } = trigger;
+  const refused = targetRefused(caller, sessionId, "triggers.create");
+  if (refused !== null) return refused;
   const unusable = await unstartable(env, caller, trigger, "triggers.create");
   if (unusable !== null) return unusable;
   const { tenantId, principalId } = caller;
@@ -91,8 +146,13 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
   });
   if (created.kind === "NameTaken") return nameTaken(trigger.name);
   if (created.kind === "PersonaNotFound") return personaNotFound(trigger.personaId);
-  if (created.kind !== "Created")
-    throw new Error(`the tenant answered ${created.kind} to an untargeted trigger create`);
+  if (created.kind !== "Created") {
+    const target = sessionId ?? "";
+    if (created.kind === "NotFound") return targetNotFound(target);
+    if (created.kind === "SessionMismatch") return sessionMismatch(target, created);
+    if (created.kind === "LimitReached") return limitReached(target, created.scope);
+    return targetEnded(target, created.kind);
+  }
   await projectRoute(env.DB, created.trigger);
   return json(created.trigger);
 };
@@ -100,6 +160,7 @@ const create = async (request: Request, env: Env, caller: Caller): Promise<Respo
 const update = async (request: Request, env: Env, caller: Caller, current: Trigger): Promise<Response> => {
   const refused = writeRefused(caller, "triggers.update");
   if (refused !== null) return refused;
+  if (current.sessionId !== undefined) return targetedImmutable(current.triggerId);
   const body = await parseBody(request, TriggerPatchSchema, "triggers.update");
   if (!body.ok) return body.response;
   const patch = body.value;
@@ -117,15 +178,22 @@ const update = async (request: Request, env: Env, caller: Caller, current: Trigg
   if (updated.kind === "NotFound") return notFound(triggerId);
   if (updated.kind === "NameTaken") return nameTaken(patch.name ?? current.name);
   if (updated.kind === "PersonaNotFound") return personaNotFound(patch.personaId ?? current.personaId);
-  if (updated.kind === "Targeted") throw new Error(`the tenant refused to update trigger ${triggerId} as targeted`);
+  if (updated.kind === "Targeted") return targetedImmutable(triggerId);
   await projectRoute(env.DB, updated.trigger);
   return json(updated.trigger);
 };
 
 const remove = async (env: Env, caller: Caller, triggerId: string): Promise<Response> => {
-  const refused = writeRefused(caller, "triggers.delete");
-  if (refused !== null) return refused;
   const { tenantId } = caller;
+  if (caller.origin.kind === "Turn") {
+    const { trigger } = await tenantApi(env.TENANT, tenantId).call("getTrigger", { tenantId, triggerId });
+    if (trigger === null) return notFound(triggerId);
+    const refused = targetRefused(caller, trigger.sessionId, "triggers.delete");
+    if (refused !== null) return refused;
+  } else {
+    const refused = ownerRequired(caller, "triggers.delete");
+    if (refused !== null) return refused;
+  }
   const { deleted } = await tenantApi(env.TENANT, tenantId).call("deleteTrigger", {
     tenantId,
     triggerId,
