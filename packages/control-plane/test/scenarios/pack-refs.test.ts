@@ -227,6 +227,82 @@ test("a pack another session lists stays in object storage across a reset after 
   assert.deepEqual(refsOf(world, [shared, onlyThird, onlyFirst]), [1]);
 });
 
+test("an archive that a stored snapshot races fails and keeps every pack the stored snapshot lists in object storage", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const kept = sha256("kept pack");
+  const dropped = sha256("dropped pack");
+  const added = sha256("added pack");
+
+  const s2 = await turnAsksSnapshot(world, host, null);
+  await sendsParts(world, host, s2, [kept, dropped], []);
+  await host.says(done(s2));
+  const s2Listed: string[] = JSON.parse((await (await world.store.get(`${s2.storageKey}.packs`))?.text()) ?? "[]");
+  const onlyS2 = s2Listed.filter((packDigest) => packDigest !== kept);
+  const other = await turnAsksSnapshot(world, host, null);
+  await sendsParts(world, host, other, [], onlyS2);
+  await host.says(done(other));
+  await world.sendTurn(s2.sessionId, "next");
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.writes(offer.turnId, 2, ['{"type":"result","subtype":"error_during_execution","is_error":false}']);
+  await host.says({
+    type: "TurnComplete",
+    turnId: offer.turnId,
+    lastLineSeq: 2,
+    completedAt: new Date(Date.now()).toISOString(),
+  });
+  const s3 = snapshotAsked(host, s2.sessionId);
+  await sendsParts(world, host, s3, [added], [kept]);
+  const get = world.store.get.bind(world.store);
+  let raced = false;
+  t.mock.method(world.store, "get", async (key: string) => {
+    const object = await get(key);
+    if (!raced && key === `${s2.storageKey}.packs`) {
+      raced = true;
+      await host.says(done(s3));
+    }
+    return object;
+  });
+
+  await assert.rejects(
+    world.call("archiveSession", { tenantId: TENANT_ID, sessionId: s2.sessionId, now: Date.now() }),
+    new RegExp(`stored snapshot ${s3.snapshotId} while it was being archived`),
+  );
+  assert.equal(await inStore(world, kept), true, "the stored snapshot still lists the kept pack");
+  const listed: string[] = JSON.parse((await (await get(`${s3.storageKey}.packs`))?.text()) ?? "[]");
+  assert.ok(listed.includes(kept));
+  for (const packDigest of listed) assert.equal(await inStore(world, packDigest), true, `${packDigest} stays`);
+  assert.deepEqual(refsOf(world, [...listed, ...onlyS2]), Array(listed.length + onlyS2.length).fill(1));
+
+  await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: s2.sessionId, now: Date.now() });
+  assert.deepEqual(refsOf(world, [...listed, ...onlyS2]), Array(onlyS2.length).fill(1));
+  for (const packDigest of listed) assert.equal(await inStore(world, packDigest), false);
+  for (const packDigest of onlyS2) assert.equal(await inStore(world, packDigest), true, "the other session lists it");
+});
+
+test("the import deletes the old pack counts before it deletes a pack no snapshot lists", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const p1 = sha256("imported pack 1");
+  const dead = `${TENANT_ID}/imported/snapshots/00000000-dead`;
+  await world.store.put(`${dead}.packs`, JSON.stringify([p1]));
+  await world.store.put(`${TENANT_ID}/packs/${p1}`, "pack");
+  await world.store.put(
+    `${TENANT_ID}/live-packs.json`,
+    JSON.stringify({ members: [dead], counts: [[p1, 1]], held: [] }),
+  );
+  world.tenantSql().exec("DELETE FROM pack_refs_imported");
+  world.store.failure = { operation: "delete", prefix: `${TENANT_ID}/packs/`, error: new Error("delete refused") };
+  await assert.rejects(world.restartTenant(), /delete refused/);
+  world.store.failure = null;
+
+  assert.equal(await world.store.get(`${TENANT_ID}/live-packs.json`), null);
+  assert.deepEqual(refsOf(world, [p1]), [0]);
+  assert.notEqual(await world.store.get(`${TENANT_ID}/packs/${p1}`), null);
+});
+
 test("the import of the tenant's pack counts drops dead members, adds live snapshots it misses, and runs once", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
@@ -238,10 +314,11 @@ test("the import of the tenant's pack counts drops dead members, adds live snaps
   const counted = await seedsSnapshot(world, "imported", 1, [p1, p2]);
   await seedsSnapshot(world, "imported", 2, [p2, p3]);
   const dead = `${TENANT_ID}/imported/snapshots/00000000-dead`;
+  const unlisted = `${TENANT_ID}/imported/snapshots/00000000-unlisted`;
   await world.store.put(`${dead}.packs`, JSON.stringify([p1, p4]));
   await world.store.put(`${TENANT_ID}/packs/${p4}`, "pack");
   const saved = JSON.stringify({
-    members: [counted, dead],
+    members: [counted, dead, unlisted],
     counts: [
       [p1, 2],
       [p2, 1],

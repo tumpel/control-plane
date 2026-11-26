@@ -37,7 +37,7 @@ const indexBytesOf = (root: Placement[]): number => indexBytesFor(placementsOf(r
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
-const packList = async (
+export const packList = async (
   store: R2Bucket,
   storageKey: string,
 ): Promise<{ kind: "Read"; value: ReadonlySet<string> } | { kind: "Unreadable"; detail: string } | null> => {
