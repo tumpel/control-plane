@@ -292,6 +292,8 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
   if (secretSets.kind === "Unreadable") {
     return { ok: false, response: problem(409, unreadableSecretSet(operation, secretSets)) };
   }
+  const sessions = await everySession(env, tenantId, operation);
+  if (!sessions.ok) return sessions;
   return {
     ok: true,
     value: {
@@ -305,7 +307,7 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
       secretSets: secretSets.secretSets,
       pins: effectiveVersions((await api.call("listPins", {})).pins),
       hosts: await listHostRecords(env, tenantId),
-      sessions: await everySession(env, tenantId),
+      sessions: sessions.value,
       triggers: (await api.call("listTriggers", { tenantId })).triggers,
     },
   };
