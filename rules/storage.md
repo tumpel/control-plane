@@ -8,6 +8,7 @@
 4. Every retry backs off exponentially and fails hard after 10 retries.
 5. Every endpoint has a limit. Every write endpoint caps what one request writes.
 6. Cost is a signal (tenet 9). A rising bill is a design fault to fix.
+7. Durable information, meaning what must survive a restart, never lives in process memory, such as a Worker or Durable Object variable, or in a flat file. A local database is the minimum. Bulk data stays in R2 under rule 1.
 
 ## Queries
 
