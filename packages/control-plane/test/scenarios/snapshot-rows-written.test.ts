@@ -222,7 +222,7 @@ test("sessions that snapshot at once read no object storage for their chunk asks
   });
 });
 
-test("an object storage failure while SnapshotDone reads the root fails only that snapshot, and the next one is stored", async () => {
+test("an object storage failure while SnapshotDone reads the root fails only that snapshot, and the next one is stored", async (t) => {
   await inWorld(async (world, host) => {
     const chunks = tree(DIGESTS_PER_PART, "flaky storage");
     const session = await world.startSession({ prompt: "build while storage fails", tags: [] });
@@ -232,18 +232,17 @@ test("an object storage failure while SnapshotDone reads the root fails only tha
     const request = snapshotAsked(host, session.sessionId);
     await uploadsChunks(world, host, request.snapshotId, chunks);
     await storesRoot(world, host, request, chunks, parts(chunks).length + 1);
-    world.store.failure = {
-      operation: "get",
-      prefix: request.storageKey,
-      error: new Error("object storage timed out"),
-    };
+    const get = world.store.get.bind(world.store);
+    const reads = t.mock.method(world.store, "get", (key: string) =>
+      key === request.storageKey ? Promise.reject(new Error("object storage timed out")) : get(key),
+    );
     await host.says({
       type: "SnapshotDone",
       snapshotId: request.snapshotId,
       uploadedBytes: chunks.length * CHUNK_BYTES,
       chunkCount: chunks.length,
     });
-    world.store.failure = null;
+    reads.mock.restore();
 
     const failed = SnapshotsSchema.parse(
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -410,7 +409,12 @@ test("a snapshot whose root places its manifest in a pack no part named is not s
       snapshots[0]?.outcome.detail ?? "",
       new RegExp(`places its manifest in pack ${root.packDigest}, which no SnapshotPacks part named`),
     );
-    assert.equal(await world.store.get(`${request.storageKey}.packs`), null);
+    const listed = await world.store.get(`${request.storageKey}.packs`);
+    assert.deepEqual(
+      JSON.parse((await listed?.text()) ?? "null"),
+      [...new Set(chunks.map((chunk) => chunk.packDigest))].sort(),
+      "the rejected snapshot's pack list names the packs its parts named",
+    );
   });
 });
 

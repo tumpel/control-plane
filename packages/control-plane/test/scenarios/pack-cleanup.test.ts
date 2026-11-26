@@ -19,6 +19,9 @@ import { type Host, UNMETERED, World } from "./harness/world.ts";
 const BUDGET_MS = 30;
 const MINUTE_MS = 60_000;
 
+const RestoreDownloadsSchema = z.object({
+  reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
+});
 const SnapshotsSchema = z.object({ snapshots: z.array(z.object({ outcome: z.object({ state: z.string() }) })) });
 
 const packKey = (packDigest: string): string => `${TENANT_ID}/packs/${packDigest}`;
@@ -147,7 +150,7 @@ test("a snapshot stored during a run keeps the old pack it reuses from the snaps
   assert.notEqual(await world.store.head(packKey(reused)), null, "the reused old pack stays");
 });
 
-test("a pack only a failed upload's hold keeps goes in a cleanup run, and another session's snapshot reusing it is refused, never stored", async (t) => {
+test("a pack only a failed upload names stays through a cleanup run, and another session's snapshot reusing it stores", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -174,7 +177,7 @@ test("a pack only a failed upload's hold keeps goes in a cleanup run, and anothe
   await world.tick(10 * MINUTE_MS);
   const steps = await cleanupSteps(world);
   assert.ok(steps.length > 0, "the archive runs a cleanup");
-  assert.equal(await world.store.head(packKey(held)), null, "the pack only a hold keeps goes");
+  assert.notEqual(await world.store.head(packKey(held)), null, "the failed upload's pack list keeps its pack");
 
   const second = await world.startSession({ prompt: "build on the held tree", tags: [] });
   const next = host.takeOffer();
@@ -201,7 +204,113 @@ test("a pack only a failed upload's hold keeps goes in a cleanup run, and anothe
   );
   assert.deepEqual(
     snapshots.snapshots.map((snapshot) => snapshot.outcome.state),
-    ["Failed"],
+    ["Stored"],
+  );
+});
+
+test("a refused snapshot's packs survive a cleanup run, so the box's next snapshot reusing them stores and restores", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  await world.holdsAgentCredentials();
+  const other = await startsStored(world, host, "another tree", tree(10, "other"));
+  const session = await world.startSession({ prompt: "build the base tree", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const refused = snapshotAsked(host, session.sessionId);
+  const base = sha256("base pack");
+  const chunk = { digest: sha256("base chunk"), packDigest: base, offset: 0, length: CHUNK_BYTES };
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: refused.snapshotId,
+    part: 1,
+    packs: [{ packDigest: base, sizeBytes: CHUNK_BYTES }],
+    chunks: [chunk],
+    reusedPackDigests: [],
+  });
+  await world.store.put(packKey(base), "pack");
+  await host.says({ type: "SnapshotDone", snapshotId: refused.snapshotId, uploadedBytes: CHUNK_BYTES, chunkCount: 1 });
+  await world.restartTenant();
+  await world.tick(61 * MINUTE_MS);
+  await archives(world, other.sessionId);
+  await world.tick(10 * MINUTE_MS);
+  const steps = await cleanupSteps(world);
+  assert.ok(steps.length > 0, "the archive runs a cleanup");
+
+  const { turnId } = await world.sendTurn(session.sessionId, "change one file");
+  const next = host.takeOffer();
+  await host.claims(next);
+  await host.completes(next);
+  const reasked = snapshotAsked(host, session.sessionId);
+  assert.notEqual(reasked.snapshotId, refused.snapshotId, "the refusal asks the turn's snapshot again");
+  const request = snapshotAsked(host, session.sessionId);
+  const manifest = JSON.stringify({ entries: [] }, null, 4);
+  const rootDigest = createHash("sha256").update(manifest).digest("hex");
+  const root = { digest: rootDigest, packDigest: rootDigest, offset: 0, length: Buffer.byteLength(manifest) };
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: request.snapshotId,
+    part: 1,
+    packs: [{ packDigest: rootDigest, sizeBytes: root.length }],
+    chunks: [root],
+    reusedPackDigests: [base],
+  });
+  await world.store.put(packKey(rootDigest), manifest);
+  await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
+  await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: root.length, chunkCount: 2 });
+
+  const snapshots = SnapshotsSchema.parse(
+    await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+  );
+  assert.deepEqual(snapshots.snapshots.map((snapshot) => snapshot.outcome.state).sort(), ["Failed", "Stored"]);
+  const restored = RestoreDownloadsSchema.parse(
+    await host.says({ type: "RestoreChunks", turnId, part: 1, chunks: [chunk] }),
+  );
+  assert.deepEqual(
+    restored.reply.packs.map((pack) => pack.packDigest),
+    [base],
+  );
+});
+
+test("a failure recorded before failures wrote pack lists ends the cleanup run with no deletes and logs its key", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const other = await startsStored(world, host, "another tree", tree(10, "other"));
+  const session = await world.startSession({ prompt: "build the old tree", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const failed = snapshotAsked(host, session.sessionId);
+  const held = sha256("old held pack");
+  const chunk = { digest: sha256("old held chunk"), packDigest: held, offset: 0, length: CHUNK_BYTES };
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: failed.snapshotId,
+    part: 1,
+    packs: [{ packDigest: held, sizeBytes: CHUNK_BYTES }],
+    chunks: [chunk],
+    reusedPackDigests: [],
+  });
+  await world.store.put(packKey(held), "pack");
+  await failsSnapshot(host, failed.snapshotId);
+  await world.store.delete(`${failed.storageKey}.packs`);
+  const orphan = packKey(sha256("orphan beside an old failure"));
+  await world.store.put(orphan, "pack");
+  await world.restartTenant();
+  await world.tick(61 * MINUTE_MS);
+  await archives(world, other.sessionId);
+  await world.tick(10 * MINUTE_MS);
+  const logged = t.mock.method(console, "error", () => undefined);
+  const steps = await cleanupSteps(world);
+
+  assert.ok(steps.length > 0, "the archive starts a cleanup");
+  assert.notEqual(await world.store.head(packKey(held)), null, "the old failure's pack stays");
+  assert.notEqual(await world.store.head(orphan), null, "the run deletes nothing");
+  assert.ok(
+    logged.mock.calls.some((call) => String(call.arguments[0]).includes(failed.storageKey)),
+    "the run logs the failure's key",
   );
 });
 
