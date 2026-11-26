@@ -8,7 +8,7 @@
 4. Every retry backs off exponentially and fails hard after 10 retries.
 5. Every endpoint has a limit. Every write endpoint caps what one request writes.
 6. Cost is a signal (tenet 9). A rising bill is a design fault to fix.
-7. Durable information lives in Durable Object SQL or another database. Never keep it in a Worker or Durable Object variable, in a flat file, or in a whole-tenant R2 object rewritten as one blob. Process memory is lost on every restart, and a rewritten blob costs a full read and write per change and loses concurrent updates.
+7. State a process remembers across frames or restarts never lives in process memory, such as a Worker or Durable Object variable, or in a flat file. A local database is the minimum. Bulk data stays in R2 under rule 1.
 
 ## Queries
 
