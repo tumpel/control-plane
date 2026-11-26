@@ -3925,13 +3925,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Checked", packs };
   }
 
-  private async packsListed(storageKey: string): Promise<void> {
-    const draft = await snapshotDraft(this.env.STORE, storageKey);
-    if (draft === null) return;
-    await this.env.STORE.put(packListKey(storageKey), JSON.stringify([...new Set(draft.packs)].sort()));
-    await this.env.STORE.delete(draftKey(storageKey));
-  }
-
   private async snapshotOutcome(
     tenantId: string,
     hostId: string,
@@ -3944,12 +3937,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
   > {
     const storageFailed = (error: unknown): string =>
       `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`;
-    const checked = await this.packsListed(request.storage_key)
-      .then(() => this.snapshotChecked(tenantId, hostId, request))
-      .catch((error: unknown): { kind: "Rejected"; detail: string } => ({
+    const checked = await this.snapshotChecked(tenantId, hostId, request).catch(
+      (error: unknown): { kind: "Rejected"; detail: string } => ({
         kind: "Rejected",
         detail: storageFailed(error),
-      }));
+      }),
+    );
     if (checked.kind === "Rejected") return checked;
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
@@ -3970,6 +3963,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
         .toArray();
       if (stillPending === undefined) return { kind: "Answered" };
+      await this.env.STORE.put(packListKey(request.storage_key), JSON.stringify(sorted));
+      await this.env.STORE.delete(draftKey(request.storage_key));
       return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended) };
     });
   }

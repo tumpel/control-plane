@@ -358,11 +358,7 @@ test("a snapshot whose root places its manifest in a pack no part named is not s
       snapshots[0]?.outcome.detail ?? "",
       new RegExp(`places its manifest in pack ${root.packDigest}, which no SnapshotPacks part named`),
     );
-    assert.notEqual(
-      await world.store.get(`${request.storageKey}.packs`),
-      null,
-      "a rejected snapshot lists its packs too",
-    );
+    assert.equal(await world.store.get(`${request.storageKey}.packs`), null);
   });
 });
 
