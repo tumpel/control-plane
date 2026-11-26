@@ -338,7 +338,7 @@ for (const packsPerList of [30, 1]) {
       await world.tick(380);
     }
     await world.tick(firstAt + 10 * MINUTE_MS - Date.now());
-    assert.notEqual(await world.store.head(`${TENANT_ID}/live-packs.json`), null, "the tenant keeps live pack names");
+    await world.store.put(`${TENANT_ID}/live-packs.json`, "{}");
     await world.restartTenant();
     const get = world.store.get.bind(world.store);
     const read: string[] = [];

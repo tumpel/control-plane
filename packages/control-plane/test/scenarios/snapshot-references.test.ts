@@ -231,6 +231,7 @@ test("with two open requests, the first store keeps the previous snapshot until 
   const kept = sha256("kept pack");
   const other = await startsStored(world, host, "the other tree", [sha256("other pack")]);
   const session = await startsStored(world, host, "the previous tree", [kept]);
+  await world.tick(61 * MINUTE_MS);
 
   await world.sendTurn(session.sessionId, "fail once");
   const failing = host.takeOffer();
@@ -250,7 +251,6 @@ test("with two open requests, the first store keeps the previous snapshot until 
   const second = snapshotAsked(host, session.sessionId);
 
   await answers(world, host, first, [sha256("first pack")], []);
-  await world.tick(61 * MINUTE_MS);
   await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: other.sessionId, now: Date.now() });
   await world.tick(10 * MINUTE_MS);
   assert.ok((await cleanupSteps(world)) > 0, "the archive starts a cleanup run");

@@ -108,11 +108,9 @@ import { why } from "./sessions.ts";
 import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
-  LivePacks,
   mergedDraft,
   packKey,
   packListKey,
-  SnapshotManifests,
   STORE_DELETE_BATCH,
   snapshotDraft,
   snapshotPackSet,
@@ -850,8 +848,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { record: { layer: "Prebuild", prebuildId: layer.prebuild_id }, restored: [layer] };
   }
 
-  private readonly manifests = new SnapshotManifests();
-
   private readonly cleanup = new PackCleanup();
 
   protected async cleanPacks(): Promise<void> {
@@ -859,17 +855,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (tenantId === undefined) throw new Error("the tenant Durable Object cleaning packs has no name");
     await this.cleanup.step(this.ctx, this.env.STORE, tenantId, Date.now());
   }
-
-  private readonly live = new LivePacks(this.manifests, (after, limit) =>
-    this.ctx.storage.sql
-      .exec<{ storage_key: string }>(
-        "SELECT storage_key FROM snapshots WHERE storage_key > ? ORDER BY storage_key LIMIT ?",
-        after,
-        limit,
-      )
-      .toArray()
-      .map((row) => row.storage_key),
-  );
 
   private sessionRow(sessionId: string): SessionRow | null {
     const [row] = this.ctx.storage.sql.exec<SessionRow>(`${SESSION_SELECT} WHERE session_id = ?`, sessionId).toArray();
@@ -2538,10 +2523,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     const stored = this.storedSnapshots("WHERE session_id = ?", sessionId);
-    await this.live.release(this.env.STORE, tenantId, sessionId, [
-      ...stored.map((snapshot) => snapshot.storage_key),
-      ...unstored.map((row) => row.storage_key),
-    ]);
     await this.deleteObjects([...this.objectKeys(unstored), ...this.objectKeys(stored)]);
     this.ctx.storage.transactionSync(() => {
       this.releaseSnapshots(stored);
@@ -2565,6 +2546,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {
     const sql = this.ctx.storage.sql;
+    const [open] = sql
+      .exec("SELECT 1 FROM snapshot_requests WHERE session_id = ? LIMIT 1", stored.session_id)
+      .toArray();
+    if (open !== undefined) return this.archiveSupersededPrebuilds(tenantId, now);
     const failed = sql
       .exec<{ storage_key: string }>(
         "SELECT storage_key FROM snapshot_failures WHERE session_id = ? AND snapshot_seq < ? AND storage_key != ''",
@@ -2577,10 +2562,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
       stored.session_id,
       stored.snapshot_seq,
     );
-    await this.live.release(this.env.STORE, tenantId, stored.session_id, [
-      ...older.map((snapshot) => snapshot.storage_key),
-      ...failed.map((row) => row.storage_key),
-    ]);
     await this.deleteObjects([...this.objectKeys(older), ...this.objectKeys(failed)]);
     this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
     if (older.length + failed.length > 0) await this.cleanup.request(this.ctx.storage, now);
@@ -3437,7 +3418,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, ${merged.detail}`,
       );
     }
-    await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]);
     await this.env.STORE.put(draftKey(window.request.storage_key), JSON.stringify(merged.draft));
     const signer = signerOf(
       this.env,
@@ -3872,6 +3852,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Checked", packs };
   }
 
+  private async packsListed(storageKey: string): Promise<void> {
+    const draft = await snapshotDraft(this.env.STORE, storageKey);
+    if (draft === null) return;
+    await this.env.STORE.put(packListKey(storageKey), JSON.stringify([...new Set(draft.packs)].sort()));
+    await this.env.STORE.delete(draftKey(storageKey));
+  }
+
   private async snapshotOutcome(
     tenantId: string,
     hostId: string,
@@ -3884,31 +3871,32 @@ export abstract class TenantSessions extends DurableObject<Env> {
   > {
     const storageFailed = (error: unknown): string =>
       `object storage failed while the control plane checked snapshot ${request.snapshot_id}, so the session keeps its previous snapshot: ${errorOf(error).message}`;
-    const checked = await this.snapshotChecked(tenantId, hostId, request).catch(
-      (error: unknown): { kind: "Rejected"; detail: string } => ({ kind: "Rejected", detail: storageFailed(error) }),
-    );
+    const checked = await this.packsListed(request.storage_key)
+      .then(() => this.snapshotChecked(tenantId, hostId, request))
+      .catch((error: unknown): { kind: "Rejected"; detail: string } => ({
+        kind: "Rejected",
+        detail: storageFailed(error),
+      }));
     if (checked.kind === "Rejected") return checked;
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
     return this.ctx.blockConcurrencyWhile(async () => {
-      const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs).then(
-        (gone) => ({ gone }),
-        (error: unknown) => ({ failed: storageFailed(error) }),
-      );
-      if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
-      if (claimed.gone !== null) {
+      const sorted = [...checked.packs].sort();
+      const found = await Promise.all(
+        sorted.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))),
+      ).catch((error: unknown) => storageFailed(error));
+      if (typeof found === "string") return { kind: "Rejected", detail: found };
+      const missing = sorted.find((_, at) => found[at] === null);
+      if (missing !== undefined) {
         return {
           kind: "Rejected",
-          detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which neither a stored snapshot nor an upload of the session holds any longer, so the session keeps its previous snapshot`,
+          detail: `snapshot ${request.snapshot_id} names pack ${missing}, which object storage does not hold, so the session keeps its previous snapshot`,
         };
       }
       const [stillPending] = this.ctx.storage.sql
         .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
         .toArray();
-      if (stillPending === undefined) {
-        await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
-        return { kind: "Answered" };
-      }
+      if (stillPending === undefined) return { kind: "Answered" };
       return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended) };
     });
   }
