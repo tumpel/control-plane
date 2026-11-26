@@ -3452,11 +3452,15 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<ChunkReply | Refused> {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
     if ("type" in window) return window;
+    const noIndex = refused("the session's previous snapshot has no chunk index, so this snapshot uploads its chunks");
     const previous = this.previousSnapshot(window.request.session_id);
-    if (previous === undefined) {
-      return { type: "SnapshotChunkCheckHeld", snapshotId: message.snapshotId, check: message.check, held: [] };
-    }
+    if (previous === undefined) return noIndex;
     const held = await heldPlacements(this.env.STORE, previous.storage_key, message.digests);
+    if (held.kind === "NoIndex") return noIndex;
+    if (held.kind === "BadHeader") {
+      console.error(`ChunkIndexUnreadable: ${held.detail}`);
+      return noIndex;
+    }
     if (held.kind !== "Read") {
       return refused(`host ${hostId} checked chunks of snapshot ${message.snapshotId}, but ${held.detail}`);
     }
