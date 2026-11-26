@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { turnCredentialSeconds } from "../../src/settings.ts";
-import { MAX_INDEX_BYTES } from "../../src/snapshot-manifests.ts";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
@@ -594,6 +593,7 @@ test("a chunk ask after a restart stays inside the budget, whatever the size of 
 const MIB = 1_048_576;
 const CHUNKS_PER_PACK = 16;
 const R2_LATENCY_MS = 25;
+const MAX_INDEX_BYTES = 3_014_672;
 
 const ChunkCheckReplySchema = z.object({
   reply: z.object({
