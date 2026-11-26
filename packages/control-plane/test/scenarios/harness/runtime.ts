@@ -2,6 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 
 type Row = Record<string, unknown>;
 
@@ -16,12 +18,19 @@ Object.defineProperty(crypto.subtle, "timingSafeEqual", {
   configurable: true,
 });
 
-export const cpuMs = (): number => {
+setFlagsFromString("--expose-gc");
+const collectGarbage = runInNewContext("gc") as () => void;
+
+export const budgetClock = (): void => {
   if (!process.execArgv.includes("--single-threaded")) {
     throw new Error(
       "budget tests read the process CPU clock, so run them with node --single-threaded, as npm test does",
     );
   }
+  collectGarbage();
+};
+
+export const cpuMs = (): number => {
   const { user, system } = process.cpuUsage();
   return (user + system) / 1000;
 };

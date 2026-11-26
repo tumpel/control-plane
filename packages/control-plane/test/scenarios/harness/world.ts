@@ -25,6 +25,7 @@ import { TEST_SETTINGS } from "../../timing.ts";
 import { ACCESS_AUDIENCE, AccessStub } from "./access.ts";
 import { GitHubStub, installApp } from "./github.ts";
 import {
+  budgetClock,
   cpuMs,
   D1Database,
   flight,
@@ -486,6 +487,7 @@ export class World {
   }
 
   async coldMs(operation: string, input: unknown): Promise<number> {
+    budgetClock();
     const spent = ioClock.spentMs;
     const started = cpuMs();
     this.tenants.restart(TENANT_ID);
@@ -503,6 +505,7 @@ export class World {
     if (at === null || at > Date.now()) return null;
     ctx.storage.alarmAt = null;
     await ctx.unblocked();
+    budgetClock();
     const spent = ioClock.spentMs;
     const started = cpuMs();
     await (object as unknown as { alarm(): Promise<void> }).alarm();
