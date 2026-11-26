@@ -854,3 +854,51 @@ test("the chunk check answers from the previous snapshot's .idx over the channel
   await storesTree(world, host, session.sessionId, tree(5));
   assert.equal(await world.store.head(`${previous}.idx`), null);
 });
+
+test("every cleanup step, the delete step too, stays within the budget beside 20 open uploads, one naming 16384 packs, on a restarted tenant", {
+  timeout: 300_000,
+}, async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const sessions: string[] = [];
+  for (const name of ["live", "archived"]) {
+    const session = await world.startSession({ prompt: `build the ${name} tree`, tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    await storesTree(world, host, session.sessionId, tree(DIGESTS_PER_PART));
+    sessions.push(session.sessionId);
+  }
+  const [live = "", archived = ""] = sessions;
+  const largest = Array.from({ length: 16_384 }, (_, at) => sha256(`open pack ${at}`));
+  const orphan = `${TENANT_ID}/packs/${sha256("orphan beside open uploads")}`;
+  await world.store.put(orphan, "pack");
+  await world.store.put(`${TENANT_ID}/packs/${largest[0]}`, "pack");
+  await world.tick(61 * 60_000);
+  for (let at = 0; at < 20; at++) {
+    const storageKey = `${TENANT_ID}/snapshots/open-${at}`;
+    world
+      .tenantSql()
+      .exec(
+        "INSERT INTO snapshot_requests (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at) SELECT ?, session_id, box_id, turn_id, ?, ?, ? FROM snapshots WHERE storage_key = ?",
+        `open-${at}`,
+        at + 100,
+        storageKey,
+        Date.now(),
+        storageKeyOf(world, live),
+      );
+    const packs = at === 0 ? largest : Array.from({ length: 300 }, (_, pack) => sha256(`open ${at} pack ${pack}`));
+    await world.store.put(`${storageKey}.draft`, JSON.stringify({ lastPart: 1, packs, reused: [] }));
+  }
+  await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: archived, now: Date.now() });
+  await world.tick(10 * 60_000);
+  await world.restartTenant();
+
+  const steps: number[] = [];
+  for (let ms = await world.alarmStep(); ms !== null; ms = await world.alarmStep()) steps.push(ms);
+  console.log(`cleanup beside 20 open uploads: ${steps.map((ms) => ms.toFixed(2)).join(", ")} ms`);
+  assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
+  assert.equal(await world.store.head(orphan), null, "the old orphan goes");
+  assert.notEqual(await world.store.head(`${TENANT_ID}/packs/${largest[0]}`), null, "an open upload's old pack stays");
+});

@@ -18,7 +18,6 @@ import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
 const MINUTE_MS = 60_000;
-const LARGEST_DRAFT_PACKS = 16_384;
 
 const RestoreDownloadsSchema = z.object({
   reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
@@ -384,7 +383,7 @@ test("a written pack object storage already holds is presigned again and survive
   assert.notEqual(await world.store.head(packKey(written)), null, "the written pack stays");
 });
 
-test("a pack an open upload writes again between the sweep's listing and its delete survives, and the snapshot stores and restores", async (t) => {
+test("a pack an open upload names and writes again between the sweep's draft mark and its delete survives, and the snapshot stores and restores", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -405,34 +404,38 @@ test("a pack an open upload writes again between the sweep's listing and its del
   const rootDigest = createHash("sha256").update(manifest).digest("hex");
   const root = { digest: rootDigest, packDigest: rootDigest, offset: 0, length: Buffer.byteLength(manifest) };
   const chunk = { digest: sha256("raced chunk"), packDigest: raced, offset: 0, length: CHUNK_BYTES };
-  const answer = PackUploadsSchema.parse(
-    await host.says({
-      type: "SnapshotPacks",
-      snapshotId: request.snapshotId,
-      part: 1,
-      packs: [
-        { packDigest: raced, sizeBytes: CHUNK_BYTES },
-        { packDigest: rootDigest, sizeBytes: root.length },
-      ],
-      chunks: [chunk, root],
-      reusedPackDigests: [],
-    }),
-  );
-  assert.ok(
-    answer.reply.uploads.some((upload) => upload.packDigest === raced),
-    "the old orphan is presigned again",
-  );
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: request.snapshotId,
+    part: 1,
+    packs: [{ packDigest: rootDigest, sizeBytes: root.length }],
+    chunks: [root],
+    reusedPackDigests: [],
+  });
   await world.store.put(packKey(rootDigest), manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
   const list = world.store.list.bind(world.store);
+  const presigned: string[] = [];
   t.mock.method(world.store, "list", async (options: Parameters<typeof list>[0]) => {
     const listed = await list(options);
+    const answer = PackUploadsSchema.parse(
+      await host.says({
+        type: "SnapshotPacks",
+        snapshotId: request.snapshotId,
+        part: 2,
+        packs: [{ packDigest: raced, sizeBytes: CHUNK_BYTES }],
+        chunks: [chunk],
+        reusedPackDigests: [],
+      }),
+    );
+    presigned.push(...answer.reply.uploads.map((upload) => upload.packDigest));
     await world.store.put(packKey(raced), "pack");
     return listed;
   });
   await cleanupSteps(world);
   t.mock.restoreAll();
-  await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: CHUNK_BYTES, chunkCount: 1 });
+  assert.deepEqual(presigned, [raced], "the old orphan is presigned again after the draft mark");
+  await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: CHUNK_BYTES, chunkCount: 2 });
 
   const snapshots = SnapshotsSchema.parse(
     await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
@@ -508,38 +511,51 @@ for (const packsPerList of [30, 1]) {
   });
 }
 
-test("a sweep with 20 open uploads, one naming the most packs a draft holds, keeps their packs and stays within the budget on a restarted tenant", async (t) => {
+test("a draft that grows past 256 KiB between the sweep's draft mark and its delete makes that step delete nothing, and a later step marks it and deletes", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
   const live = await startsStored(world, host, "the live tree", tree(10, "live"));
   const archived = await startsStored(world, host, "the archived tree", tree(10, "archived"));
-  const largest = Array.from({ length: LARGEST_DRAFT_PACKS }, (_, at) => sha256(`open pack ${at}`));
-  const orphan = packKey(sha256("orphan beside open uploads"));
+  const orphan = packKey(sha256("orphan beside a growing draft"));
+  const grown = Array.from({ length: 4000 }, (_, at) => sha256(`grown pack ${at}`));
   await world.store.put(orphan, "pack");
-  await world.store.put(packKey(largest[0] ?? ""), "pack");
+  await world.store.put(packKey(grown[0] ?? ""), "pack");
   await world.tick(61 * MINUTE_MS);
-  const sql = world.tenantSql();
-  for (let at = 0; at < 20; at++) {
-    const storageKey = `${TENANT_ID}/snapshots/open-${at}`;
-    sql.exec(
+  const storageKey = `${TENANT_ID}/snapshots/open-growing`;
+  world
+    .tenantSql()
+    .exec(
       "INSERT INTO snapshot_requests (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at) SELECT ?, session_id, box_id, turn_id, ?, ?, ? FROM snapshots WHERE storage_key = ?",
-      `open-${at}`,
-      at + 100,
+      "open-growing",
+      100,
       storageKey,
       Date.now(),
       live.storageKey,
     );
-    const packs = at === 0 ? largest : Array.from({ length: 300 }, (_, pack) => sha256(`open ${at} pack ${pack}`));
-    await world.store.put(`${storageKey}.draft`, JSON.stringify({ lastPart: 1, packs, reused: [] }));
-  }
+  await world.store.put(
+    `${storageKey}.draft`,
+    JSON.stringify({ lastPart: 1, packs: [sha256("first pack")], reused: [] }),
+  );
   await archives(world, archived.sessionId);
   await world.tick(10 * MINUTE_MS);
   await world.restartTenant();
-  const steps = await cleanupSteps(world);
+  const list = world.store.list.bind(world.store);
+  let lists = 0;
+  t.mock.method(world.store, "list", async (options: Parameters<typeof list>[0]) => {
+    lists += 1;
+    if (lists === 1) {
+      const draft = JSON.stringify({ lastPart: 2, packs: grown, reused: [] });
+      assert.ok(Buffer.byteLength(draft) > 256 * 1024);
+      await world.store.put(`${storageKey}.draft`, draft);
+    }
+    return list(options);
+  });
+  while (lists === 0) assert.notEqual(await world.alarmStep(), null, "the run reaches its first delete step");
 
-  console.log(`20 open uploads: ${steps.length} steps, the slowest ${Math.max(...steps).toFixed(2)} ms`);
-  assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
+  assert.notEqual(await world.store.head(orphan), null, "the step that saw the grown draft deletes nothing");
+  await cleanupSteps(world);
+  assert.ok(lists > 1, "a later delete step lists again");
   assert.equal(await world.store.head(orphan), null, "the old orphan goes");
-  assert.notEqual(await world.store.head(packKey(largest[0] ?? "")), null, "an open upload's old pack stays");
+  assert.notEqual(await world.store.head(packKey(grown[0] ?? "")), null, "the grown draft's old pack stays");
 });
