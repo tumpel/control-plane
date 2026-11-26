@@ -26,10 +26,12 @@ const inputs = (storage: DurableObjectStorage): Input[] =>
 const held = (storage: DurableObjectStorage, input: Input): boolean =>
   durableDb(storage, {}).get(query`SELECT 1 FROM snapshots WHERE snapshot_id = ${input.snapshot_id}`) !== undefined;
 
+const HeldSchema = LivePacksSchema.pick({ held: true });
+
 const markHeld = async (store: R2Bucket, marked: Set<string>, tenantId: string): Promise<void> => {
   const saved = await store.get(livePacksKey(tenantId));
   if (saved === null) return;
-  for (const [, packs] of LivePacksSchema.parse(JSON.parse(await saved.text())).held) {
+  for (const [, packs] of HeldSchema.parse(JSON.parse(await saved.text())).held) {
     for (const [packDigest] of packs) marked.add(packDigest);
   }
 };

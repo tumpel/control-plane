@@ -300,8 +300,25 @@ test("1400 archives in 10 minutes start one run over 1400 live snapshots, each s
     await world.tick(380);
   }
   await world.tick(firstAt + 10 * MINUTE_MS - Date.now());
+  const counted = Array.from({ length: 40_000 }, (_, at) => [
+    sha256(`seeded ${Math.floor(at / 30)} pack ${at % 30}`),
+    1,
+  ]);
+  const holds = Array.from({ length: 20 }, (_, session) => [
+    `held-session-${session}`,
+    Array.from({ length: 50 }, (_, pack) => [sha256(`held ${session} pack ${pack}`), false]),
+  ]);
+  const livePacks = JSON.stringify({
+    members: Array.from({ length: 1400 }, (_, at) => `${TENANT_ID}/snapshots/seeded-${at}`),
+    counts: counted,
+    held: holds,
+  });
+  await world.store.put(`${TENANT_ID}/live-packs.json`, livePacks);
+  console.log(`live-packs.json of ${livePacks.length} bytes`);
   await world.restartTenant();
   const steps = await cleanupSteps(world);
+  console.log(`the first step took ${steps[0]?.toFixed(2)} ms`);
+  assert.ok((steps[0] ?? Infinity) <= BUDGET_MS, "the first step reads the full live pack names within the budget");
 
   console.log(`${steps.length} steps, the slowest ${Math.max(...steps).toFixed(2)} ms`);
   assert.ok(steps.length > 1, "one run of several steps");
