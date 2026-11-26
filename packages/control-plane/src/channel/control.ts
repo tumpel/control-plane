@@ -47,6 +47,8 @@ export const CONTROL_MESSAGE_VERSIONS: MessageVersions = {
   TurnCancel: ChannelProtocol.Oldest,
   SnapshotRequest: ChannelProtocol.Oldest,
   SnapshotChunksHeld: ChannelProtocol.Oldest,
+  SnapshotChunkCheckHeld: 40,
+  SnapshotIndexUpload: 40,
   SnapshotPackUploads: ChannelProtocol.Oldest,
   RestoreDownloads: ChannelProtocol.Oldest,
   BoxTeardown: ChannelProtocol.Oldest,

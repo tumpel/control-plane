@@ -268,6 +268,7 @@ test("every MCP tool answers what its REST operation answers, and no secret valu
     { harness: "Codex", harnessVersion: "0.169.1", pinned: false },
     { harness: "OpenCode", harnessVersion: "1.19.5", pinned: false },
     { harness: "PiDev", harnessVersion: "1.5.2", pinned: false },
+    { harness: "Gemini", harnessVersion: "0.71.1", pinned: false },
   ]);
 
   const window = { from: "2026-11-16T00:00:00+02:00", to: "2026-11-17T00:00:00+02:00" };

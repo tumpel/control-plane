@@ -10,6 +10,13 @@ export const CODEX_VERSION = "0.169.1";
 const CODEX_SIBLING_BINARY_PATHS = ["codex-code-mode-host", "codex-exec-server"];
 const OPENCODE_VERSION = "1.19.5";
 const PI_VERSION = "1.5.2";
+export const GEMINI_VERSION = "0.71.1";
+const GEMINI_BUNDLE = {
+  url: `https://github.com/google-gemini/gemini-cli/releases/download/v${GEMINI_VERSION}/gemini-cli-bundle.zip`,
+  sha256: "2761ebcdf6a0e5610e80a6541596ba9c71cdcf13ce837f3a7cba8c3763ff7f62",
+  binaryPath: "gemini.js",
+  siblingBinaryPaths: [],
+};
 
 export const GOAL_TURN_CAP = 20;
 
@@ -289,6 +296,37 @@ export const HARNESS_CATALOG: readonly HarnessCatalogEntry[] = HarnessCatalogEnt
         },
       ],
       stripComponents: 1,
+    },
+  },
+  {
+    harness: "Gemini",
+    compactTranscript: compactorOf("Gemini") !== null,
+    goals: GOAL_FOLDS.has("Gemini"),
+    harnessVersion: GEMINI_VERSION,
+    credentialChoice: "CatalogOrder",
+    credentials: [
+      {
+        provider: "Google",
+        kind: "CredentialFile",
+        variable: "GEMINI_OAUTH_CREDS_JSON",
+        path: ".gemini/oauth_creds.json",
+        fixed: [
+          { name: "GOOGLE_GENAI_USE_GCA", value: "true" },
+          { name: "NO_BROWSER", value: "true" },
+        ],
+        arguments: [],
+        costBasis: "NotBilled",
+        modelSupport: { kind: "Listed", models: ["auto", "pro", "flash", "flash-lite"] },
+      },
+    ],
+    personaFilePaths: [".gemini/settings.json", ".gemini/GEMINI.md"],
+    installRecipe: {
+      kind: "Zip",
+      archives: [
+        { architecture: "Amd64", ...GEMINI_BUNDLE },
+        { architecture: "Arm64", ...GEMINI_BUNDLE },
+      ],
+      stripComponents: 0,
     },
   },
 ]);

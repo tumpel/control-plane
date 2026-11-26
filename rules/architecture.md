@@ -7,7 +7,7 @@
 5. No shared secrets and no standing credentials on hosts.
 6. The control plane hosts the MCP server. The `tumpel` CLI is a client of the same public API.
 7. The guest image ships build-essential, pkg-config, git, gh, curl, jq, zip, unzip, ripgrep, fd, tree, Node (LTS through fnm), Python (through uv) and a stable Rust toolchain with clippy and rustfmt (`doc/guest-image.md`). Never install them in a box.
-8. Supported harnesses: Claude Code, Codex, OpenCode and Pi.dev.
+8. Supported harnesses: Claude Code, Codex, OpenCode, Pi.dev and Gemini CLI.
 9. Every Cloudflare token, secret and resource is a tofu resource in `packages/control-plane/infra`. Never create one with a script or a manual wrangler step.
 10. On the dev stage, apply the tofu with `npm run deploy:infra`, without a plan review.
 11. Decisions live in `doc/adr`, designs in `doc/RFC` and `doc/EDD`.
