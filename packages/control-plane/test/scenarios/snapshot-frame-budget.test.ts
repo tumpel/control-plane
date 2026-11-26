@@ -1,20 +1,22 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { ChannelProtocol } from "@tumpel/schemas";
 import { z } from "zod";
 import { turnCredentialSeconds } from "../../src/settings.ts";
-import { type Host, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
+import {
+  DIGESTS_PER_PART,
+  type Placement,
+  parts,
+  releasesBoxes,
+  sha256,
+  storesTree,
+  tree,
+} from "./harness/snapshot-chunks.ts";
+import { TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
 
-const CHUNK_BYTES = 65_536;
-const DIGESTS_PER_PART = 500;
-
 const RESTORED_CHUNKS = 200_000;
-const _RESULT = '{"type":"result","subtype":"success","is_error":false}';
-
-type Placement = { digest: string; packDigest: string; offset: number; length: number };
 
 const RestoreReplySchema = z.object({
   reply: z.object({
@@ -22,90 +24,6 @@ const RestoreReplySchema = z.object({
     packs: z.array(z.object({ packDigest: z.string(), url: z.string() })),
   }),
 });
-
-const partsOf = (chunks: Placement[]): Placement[][] =>
-  Array.from({ length: Math.ceil(chunks.length / DIGESTS_PER_PART) }, (_, at) =>
-    chunks.slice(at * DIGESTS_PER_PART, (at + 1) * DIGESTS_PER_PART),
-  );
-
-const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
-
-const tree = (count: number): Placement[] =>
-  Array.from({ length: count }, (_, at) => ({
-    digest: sha256(`tree chunk ${at}`),
-    packDigest: sha256(`tree pack ${Math.floor(at / DIGESTS_PER_PART)}`),
-    offset: (at % DIGESTS_PER_PART) * CHUNK_BYTES,
-    length: CHUNK_BYTES,
-  }));
-
-const storesTree = async (world: World, host: Host, sessionId: string, chunks: Placement[]): Promise<Placement> => {
-  const request = z
-    .object({ snapshotId: z.string(), sessionId: z.string(), storageKey: z.string() })
-    .parse(host.take("SnapshotRequest"));
-  assert.equal(request.sessionId, sessionId);
-  for (let at = 0; at * DIGESTS_PER_PART < chunks.length; at++) {
-    const part = chunks.slice(at * DIGESTS_PER_PART, (at + 1) * DIGESTS_PER_PART);
-    const packDigest = part[0]?.packDigest ?? "";
-    await host.says({
-      type: "SnapshotChunks",
-      snapshotId: request.snapshotId,
-      part: at + 1,
-      digests: part.map((chunk) => chunk.digest),
-    });
-    const answer = z.object({ reply: z.object({ uploads: z.array(z.object({ packDigest: z.string() })) }) }).parse(
-      await host.says({
-        type: "SnapshotPacks",
-        snapshotId: request.snapshotId,
-        part: at + 1,
-        packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
-        chunks: part,
-        reusedPackDigests: [],
-      }),
-    );
-    for (const upload of answer.reply.uploads) await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
-  }
-  const manifest = JSON.stringify({
-    entries: [
-      {
-        kind: "File",
-        path: "tree",
-        mode: 420,
-        uid: 0,
-        gid: 0,
-        mtimeSeconds: 0,
-        mtimeNanos: 0,
-        sizeBytes: chunks.length * CHUNK_BYTES,
-        chunks,
-      },
-    ],
-  });
-  const digest = sha256(manifest);
-  const root = { digest, packDigest: digest, offset: 0, length: manifest.length };
-  await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
-  await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
-  await host.says({
-    type: "SnapshotPacks",
-    snapshotId: request.snapshotId,
-    part: Math.ceil(chunks.length / DIGESTS_PER_PART) + 1,
-    packs: [{ packDigest: digest, sizeBytes: manifest.length }],
-    chunks: [root],
-    reusedPackDigests: [],
-  });
-  await host.says({
-    type: "SnapshotDone",
-    snapshotId: request.snapshotId,
-    uploadedBytes: chunks.length * CHUNK_BYTES,
-    chunkCount: chunks.length,
-  });
-  return root;
-};
-
-const releasesBoxes = async (host: Host): Promise<void> => {
-  while (host.received("BoxTeardown").length > 0) {
-    const teardown = z.object({ sessionId: z.string(), boxId: z.string() }).parse(host.take("BoxTeardown"));
-    await host.says({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
-  }
-};
 
 test("a host of the tenant gets the restore URLs of a 200000-chunk snapshot with no offered turn or open window, each part within the budget on a restarted tenant", {
   timeout: 900_000,
@@ -123,9 +41,8 @@ test("a host of the tenant gets the restore URLs of a 200000-chunk snapshot with
   const lost = chunks.at(-1)?.packDigest ?? "";
   await world.store.delete(`${TENANT_ID}/packs/${lost}`);
   await world.tick(turnCredentialSeconds(world.settings) * 1000);
-  await world.restartTenant();
 
-  const asked = [[root], ...partsOf(chunks)];
+  const asked = [[root], ...parts(chunks)];
   const spent: number[] = [];
   for (const [at, part] of asked.entries()) {
     const input = {

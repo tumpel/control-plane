@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { type Host, UNMETERED, World } from "./world.ts";
@@ -80,5 +81,79 @@ export const inWorld = async <T>(run: (world: World, host: Host) => Promise<T>):
     return await run(world, await world.hostOnline("host-1"));
   } finally {
     await world.close();
+  }
+};
+
+export const storesTree = async (
+  world: World,
+  host: Host,
+  sessionId: string,
+  chunks: Placement[],
+): Promise<Placement> => {
+  const request = z
+    .object({ snapshotId: z.string(), sessionId: z.string(), storageKey: z.string() })
+    .parse(host.take("SnapshotRequest"));
+  assert.equal(request.sessionId, sessionId);
+  for (let at = 0; at * DIGESTS_PER_PART < chunks.length; at++) {
+    const part = chunks.slice(at * DIGESTS_PER_PART, (at + 1) * DIGESTS_PER_PART);
+    const packDigest = part[0]?.packDigest ?? "";
+    await host.says({
+      type: "SnapshotChunks",
+      snapshotId: request.snapshotId,
+      part: at + 1,
+      digests: part.map((chunk) => chunk.digest),
+    });
+    const answer = z.object({ reply: z.object({ uploads: z.array(z.object({ packDigest: z.string() })) }) }).parse(
+      await host.says({
+        type: "SnapshotPacks",
+        snapshotId: request.snapshotId,
+        part: at + 1,
+        packs: [{ packDigest, sizeBytes: part.length * CHUNK_BYTES }],
+        chunks: part,
+        reusedPackDigests: [],
+      }),
+    );
+    for (const upload of answer.reply.uploads) await world.store.put(`${TENANT_ID}/packs/${upload.packDigest}`, "pack");
+  }
+  const manifest = JSON.stringify({
+    entries: [
+      {
+        kind: "File",
+        path: "tree",
+        mode: 420,
+        uid: 0,
+        gid: 0,
+        mtimeSeconds: 0,
+        mtimeNanos: 0,
+        sizeBytes: chunks.length * CHUNK_BYTES,
+        chunks,
+      },
+    ],
+  });
+  const digest = sha256(manifest);
+  const root = { digest, packDigest: digest, offset: 0, length: manifest.length };
+  await world.store.put(`${TENANT_ID}/packs/${digest}`, manifest);
+  await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: request.snapshotId,
+    part: Math.ceil(chunks.length / DIGESTS_PER_PART) + 1,
+    packs: [{ packDigest: digest, sizeBytes: manifest.length }],
+    chunks: [root],
+    reusedPackDigests: [],
+  });
+  await host.says({
+    type: "SnapshotDone",
+    snapshotId: request.snapshotId,
+    uploadedBytes: chunks.length * CHUNK_BYTES,
+    chunkCount: chunks.length,
+  });
+  return root;
+};
+
+export const releasesBoxes = async (host: Host): Promise<void> => {
+  while (host.received("BoxTeardown").length > 0) {
+    const teardown = z.object({ sessionId: z.string(), boxId: z.string() }).parse(host.take("BoxTeardown"));
+    await host.says({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
   }
 };
