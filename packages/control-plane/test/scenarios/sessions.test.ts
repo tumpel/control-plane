@@ -427,6 +427,7 @@ const tenant = async () => {
     sessionId: string,
     digests: string[],
     packs: Record<string, string[]>,
+    base: Placement[] = [],
   ): Promise<{
     request: Extract<ControlMessage, { type: "SnapshotRequest" }>;
     held: Placement[];
@@ -445,7 +446,7 @@ const tenant = async () => {
       part: 1,
       packs: Object.entries(packs).map(([packDigest, held]) => ({ packDigest, sizeBytes: held.length * CHUNK_BYTES })),
       chunks,
-      reusedPackDigests: [...new Set(answer.held.map((chunk) => chunk.packDigest))].filter(
+      reusedPackDigests: [...new Set(base.map((chunk) => chunk.packDigest))].filter(
         (packDigest) => !(packDigest in packs),
       ),
     });
@@ -458,7 +459,7 @@ const tenant = async () => {
       assert.equal(url.searchParams.get("X-Tumpel-Checksum"), Buffer.from(upload.packDigest, "hex").toString("base64"));
       await store.put(url.pathname.replace("/tumpel-sessions/", ""), "pack bytes");
     }
-    const { placement, pack } = await storePlacedRoot(request.storageKey, [...answer.held, ...chunks]);
+    const { placement, pack } = await storePlacedRoot(request.storageKey, [...base, ...chunks]);
     host.send({
       type: "SnapshotPacks",
       snapshotId: request.snapshotId,
@@ -2272,8 +2273,10 @@ suite("sessions", () => {
       lastLineSeq: lineSeq,
       completedAt: new Date().toISOString(),
     });
-    const newer = await storedChunks(sessionId, [one, two], { [packTwo]: [two] });
-    assert.deepEqual(newer.held, [{ digest: one, packDigest: packOne, offset: 0, length: CHUNK_BYTES }]);
+    const newer = await storedChunks(sessionId, [two], { [packTwo]: [two] }, [
+      { digest: one, packDigest: packOne, offset: 0, length: CHUNK_BYTES },
+    ]);
+    assert.deepEqual(newer.held, []);
     await until(
       "the older snapshot gone",
       () => tool("tumpel_snapshot_list", { sessionId }, SnapshotSchema.array()),

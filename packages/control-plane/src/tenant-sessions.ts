@@ -3408,21 +3408,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.manifests.index(this.env.STORE, tenantId, restorable.storage_key);
   }
 
-  private async snapshotChunks(
+  private snapshotChunks(
     tenantId: string,
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotChunks" }>,
-  ): Promise<ChunkReply | Refused> {
+  ): ChunkReply | Refused {
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
     if ("type" in window) return window;
-    const index = await this.restorableIndex(tenantId, window.request.session_id);
-    const held = index?.kind === "Read" ? index.value : null;
-    return {
-      type: "SnapshotChunksHeld",
-      snapshotId: message.snapshotId,
-      part: message.part,
-      held: [...new Set(message.digests)].sort().flatMap((digest) => held?.find(digest) ?? []),
-    };
+    return { type: "SnapshotChunksHeld", snapshotId: message.snapshotId, part: message.part, held: [] };
   }
 
   private async snapshotPacks(

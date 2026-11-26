@@ -250,7 +250,7 @@ export class HostChannel extends DurableObject<Env> {
     if (reply.type === "TurnHandoff")
       throw new Error(`the tenant answered host ${hostId} with a TurnHandoff, which it sends itself`);
     if (reply.type === "Refused") {
-      console.error(`FrameRefused: host ${hostId} frame ${frame.seq}: ${reply.reason}`);
+      console.error(`FrameRefused: host ${hostId} frame ${frame.seq} (${frame.message.type}): ${reply.reason}`);
       return control.refuseFrame(context.port, frame.seq, reply.reason);
     }
     return control.send(attachment.connection, reply, context);
