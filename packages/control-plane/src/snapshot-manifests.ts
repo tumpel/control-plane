@@ -248,7 +248,7 @@ type LiveState = {
   unreadable: Map<string, string>;
 };
 
-export const LivePacksSchema = z.object({
+const LivePacksSchema = z.object({
   members: z.array(z.string()),
   counts: z.array(z.tuple([z.string(), z.number().int().min(1)])),
   held: z.array(z.tuple([z.string(), z.array(z.tuple([z.string(), z.boolean()]))])).default([]),
@@ -351,7 +351,7 @@ export class LivePacks {
         if (gone !== undefined) return gone;
         const unproven = sorted.filter((packDigest) => {
           const hold = held.get(packDigest);
-          return hold !== undefined && !hold.uploaded && hold.count === state.counts.get(packDigest);
+          return hold !== undefined && hold.count === state.counts.get(packDigest);
         });
         const found = await Promise.all(unproven.map((packDigest) => store.head(packKey(tenantId, packDigest))));
         const missing = unproven.find((_, at) => found[at] === null);

@@ -2220,7 +2220,7 @@ suite("sessions", () => {
     assert.match(failure.detail, /cancelled the turn/);
   });
 
-  test("a snapshot uploads only the packs object storage lacks, a restore gets every pack of its tenant it names, and an archive deletes the packs no snapshot holds", async () => {
+  test("a snapshot presigns every pack it writes, even one object storage holds, a restore gets every pack of its tenant it names, and an archive deletes the packs no snapshot holds", async () => {
     const { host, getJson, tool, completedTurn, storedChunks } = await tenant();
     const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
     const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
@@ -2239,7 +2239,7 @@ suite("sessions", () => {
       [packThree]: [three],
     });
     assert.deepEqual(shared.held, []);
-    assert.deepEqual(shared.uploaded, [packThree]);
+    assert.deepEqual(shared.uploaded, [packTwo, packThree]);
 
     await tool("tumpel_turn_send", { sessionId: first.session.sessionId, prompt: "restore me" }, TurnSchema);
     const restoring = await host.next("TurnOffer");
@@ -2347,7 +2347,7 @@ suite("sessions", () => {
     const third = await completedTurn("chunk the third");
     const again = await storedChunks(third.session.sessionId, [one, two], { [packOne]: [one], [packTwo]: [two] });
     assert.deepEqual(again.held, []);
-    assert.deepEqual(again.uploaded, [packOne]);
+    assert.deepEqual(again.uploaded, [packOne, packTwo]);
   });
 
   test("a stored snapshot deletes the session's older root and keeps the packs its chunks lie in", async () => {

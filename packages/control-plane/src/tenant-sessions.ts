@@ -3437,9 +3437,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, ${merged.detail}`,
       );
     }
-    const uploading = new Set(await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]));
+    await this.live.hold(this.env.STORE, tenantId, window.request.session_id, [...listed]);
     await this.env.STORE.put(draftKey(window.request.storage_key), JSON.stringify(merged.draft));
-    const missing = message.packs.filter((pack) => uploading.has(pack.packDigest));
     const signer = signerOf(
       this.env,
       this.env.R2_BUCKET_NAME,
@@ -3447,7 +3446,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       this.env.R2_SECRET_ACCESS_KEY,
     );
     const uploads = [];
-    for (const pack of missing) {
+    for (const pack of message.packs) {
       uploads.push({
         packDigest: pack.packDigest,
         sizeBytes: pack.sizeBytes,
@@ -3891,25 +3890,27 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (checked.kind === "Rejected") return checked;
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
-    const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs).then(
-      (gone) => ({ gone }),
-      (error: unknown) => ({ failed: storageFailed(error) }),
-    );
-    if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
-    if (claimed.gone !== null) {
-      return {
-        kind: "Rejected",
-        detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which neither a stored snapshot nor an upload of the session holds any longer, so the session keeps its previous snapshot`,
-      };
-    }
-    const [stillPending] = this.ctx.storage.sql
-      .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
-      .toArray();
-    if (stillPending === undefined) {
-      await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
-      return { kind: "Answered" };
-    }
-    return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended) };
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const claimed = await this.live.claim(this.env.STORE, tenantId, request.storage_key, checked.packs).then(
+        (gone) => ({ gone }),
+        (error: unknown) => ({ failed: storageFailed(error) }),
+      );
+      if ("failed" in claimed) return { kind: "Rejected", detail: claimed.failed };
+      if (claimed.gone !== null) {
+        return {
+          kind: "Rejected",
+          detail: `snapshot ${request.snapshot_id} reuses pack ${claimed.gone}, which neither a stored snapshot nor an upload of the session holds any longer, so the session keeps its previous snapshot`,
+        };
+      }
+      const [stillPending] = this.ctx.storage.sql
+        .exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id)
+        .toArray();
+      if (stillPending === undefined) {
+        await this.live.unclaim(this.env.STORE, tenantId, request.storage_key);
+        return { kind: "Answered" };
+      }
+      return { kind: "Stored", ...this.storeSnapshot(request, message.uploadedBytes, ended) };
+    });
   }
 
   private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
