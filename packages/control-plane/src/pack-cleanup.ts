@@ -1,6 +1,6 @@
 import { sql as query } from "drizzle-orm";
 import { durableDb } from "./db/client.ts";
-import { PackListSchema, packListKey } from "./snapshot-manifests.ts";
+import { draftKey, PackListSchema, packListKey } from "./snapshot-manifests.ts";
 
 export const CLEANUP_DELAY_MS = 10 * 60_000;
 export const PACK_GRACE_MS = 60 * 60_000;
@@ -32,9 +32,10 @@ const mark = async (
   store: R2Bucket,
   marked: Set<string>,
   input: Input,
-): Promise<number> => {
+): Promise<number | null> => {
   const listed = await store.get(packListKey(input.storage_key));
-  if (listed === null && (input.stored === 0 || !held(storage, input))) return 0;
+  if (listed === null && input.stored === 0) return (await store.head(draftKey(input.storage_key))) === null ? 0 : null;
+  if (listed === null && !held(storage, input)) return 0;
   if (listed === null) throw new Error(`snapshot ${input.storage_key} is stored but has no pack list to mark`);
   for (const packDigest of PackListSchema.parse(JSON.parse(await listed.text()))) marked.add(packDigest);
   return listed.size;
@@ -67,16 +68,19 @@ export class PackCleanup {
       const last = run.next + MARK_INPUTS;
       for (let read = 0; run.next < Math.min(run.inputs.length, last) && read < MARK_BYTES; run.next += 1) {
         const input = run.inputs[run.next];
-        if (input !== undefined) read += await mark(ctx.storage, store, run.marked, input);
+        if (input === undefined) continue;
+        const size = await mark(ctx.storage, store, run.marked, input);
+        if (size === null) return this.stopped(ctx, run, input, now);
+        read += size;
       }
       return ctx.storage.setAlarm(now);
     }
     const prefix = `${tenantId}/packs/`;
     const listed = await store.list({ prefix, startAfter: run.after, limit: SWEEP_PAGE });
-    await ctx.blockConcurrencyWhile(async () => {
+    const unlisted = await ctx.blockConcurrencyWhile(async () => {
       for (const input of inputs(ctx.storage)) {
         if (run.known.has(input.snapshot_id)) continue;
-        await mark(ctx.storage, store, run.marked, input);
+        if ((await mark(ctx.storage, store, run.marked, input)) === null) return input;
         run.known.add(input.snapshot_id);
       }
       const doomed = listed.objects
@@ -84,9 +88,19 @@ export class PackCleanup {
         .filter((object) => !run.marked.has(object.key.slice(prefix.length)))
         .map((object) => object.key);
       if (doomed.length > 0) await store.delete(doomed);
+      return undefined;
     });
+    if (unlisted !== undefined) return this.stopped(ctx, run, unlisted, now);
     run.after = listed.objects.at(-1)?.key ?? run.after;
     if (listed.truncated) return ctx.storage.setAlarm(now);
+    this.run = null;
+    if (run.again) await ctx.storage.setAlarm(now + CLEANUP_DELAY_MS);
+  }
+
+  private async stopped(ctx: DurableObjectState, run: Run, input: Input, now: number): Promise<void> {
+    console.error(
+      `PackCleanupStopped: failed snapshot ${input.storage_key} has a draft but no pack list, so the cleanup run deletes nothing until a newer snapshot or an archive releases it`,
+    );
     this.run = null;
     if (run.again) await ctx.storage.setAlarm(now + CLEANUP_DELAY_MS);
   }
