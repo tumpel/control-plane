@@ -5,6 +5,7 @@ import { PackListSchema, packListKey } from "./snapshot-manifests.ts";
 export const CLEANUP_DELAY_MS = 10 * 60_000;
 export const PACK_GRACE_MS = 60 * 60_000;
 const MARK_BYTES = 1024 * 1024;
+const MARK_INPUTS = 100;
 const SWEEP_PAGE = 1000;
 
 type Input = { snapshot_id: string; storage_key: string; stored: number };
@@ -63,7 +64,8 @@ export class PackCleanup {
       return ctx.storage.setAlarm(now);
     }
     if (run.next < run.inputs.length) {
-      for (let read = 0; run.next < run.inputs.length && read < MARK_BYTES; run.next += 1) {
+      const last = run.next + MARK_INPUTS;
+      for (let read = 0; run.next < Math.min(run.inputs.length, last) && read < MARK_BYTES; run.next += 1) {
         const input = run.inputs[run.next];
         if (input !== undefined) read += await mark(ctx.storage, store, run.marked, input);
       }

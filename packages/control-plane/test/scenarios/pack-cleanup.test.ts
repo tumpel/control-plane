@@ -305,53 +305,59 @@ test("a pack uploaded again between the sweep's listing and its delete makes the
   );
 });
 
-test("1400 archives in 10 minutes start one run over 1400 live snapshots, each step within the budget on a restarted tenant", {
-  timeout: 600_000,
-}, async (t) => {
-  const world = await World.open({ limits: UNMETERED });
-  t.after(() => world.close());
-  const host = await world.hostOnline("host-1");
-  const live = await startsStored(world, host, "the live tree", tree(10, "live"));
-  const archived = await startsStored(world, host, "the archived tree", tree(10, "archived"));
-  const sql = world.tenantSql();
-  for (let at = 0; at < 1400; at++) {
-    const storageKey = `${TENANT_ID}/snapshots/seeded-${at}`;
-    sql.exec(
-      "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) SELECT ?, session_id, box_id, turn_id, ?, ?, size_bytes, created_at, updated_at FROM snapshots WHERE storage_key = ?",
-      `seeded-${at}`,
-      at + 100,
-      storageKey,
-      live.storageKey,
+for (const packsPerList of [30, 1]) {
+  test(`1400 archives in 10 minutes start one run over 1400 live snapshots of ${packsPerList} packs each, each step within the budget on a restarted tenant`, {
+    timeout: 600_000,
+  }, async (t) => {
+    const world = await World.open({ limits: UNMETERED });
+    t.after(() => world.close());
+    const host = await world.hostOnline("host-1");
+    const live = await startsStored(world, host, "the live tree", tree(10, "live"));
+    const archived = await startsStored(world, host, "the archived tree", tree(10, "archived"));
+    const sql = world.tenantSql();
+    for (let at = 0; at < 1400; at++) {
+      const storageKey = `${TENANT_ID}/snapshots/seeded-${at}`;
+      sql.exec(
+        "INSERT INTO snapshots (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, size_bytes, created_at, updated_at) SELECT ?, session_id, box_id, turn_id, ?, ?, size_bytes, created_at, updated_at FROM snapshots WHERE storage_key = ?",
+        `seeded-${at}`,
+        at + 100,
+        storageKey,
+        live.storageKey,
+      );
+      const packs = Array.from({ length: packsPerList }, (_, pack) => sha256(`seeded ${at} pack ${pack}`));
+      await world.store.put(`${storageKey}.packs`, JSON.stringify(packs));
+      for (const packDigest of packs) await world.store.put(packKey(packDigest), "pack");
+    }
+    const orphans = Array.from({ length: 3000 }, (_, at) => packKey(sha256(`orphan ${at}`)));
+    for (const key of orphans) await world.store.put(key, "pack");
+    await world.tick(61 * MINUTE_MS);
+
+    const firstAt = Date.now();
+    for (let at = 0; at < 1400; at++) {
+      await archives(world, archived.sessionId);
+      await world.tick(380);
+    }
+    await world.tick(firstAt + 10 * MINUTE_MS - Date.now());
+    assert.notEqual(await world.store.head(`${TENANT_ID}/live-packs.json`), null, "the tenant keeps live pack names");
+    await world.restartTenant();
+    const get = world.store.get.bind(world.store);
+    const read: string[] = [];
+    t.mock.method(world.store, "get", (key: string, options?: Parameters<typeof get>[1]) => {
+      read.push(key);
+      return get(key, options);
+    });
+    const steps = await cleanupSteps(world);
+    assert.ok(!read.includes(`${TENANT_ID}/live-packs.json`), "no cleanup step reads the live pack names");
+
+    console.log(`${packsPerList} packs a list: ${steps.length} steps, the slowest ${Math.max(...steps).toFixed(2)} ms`);
+    assert.ok(steps.length > 1, "one run of several steps");
+    assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
+    assert.equal(await world.tenantStorage(TENANT_ID).getAlarm(), null, "the archives fold into that one run");
+    for (const key of orphans) assert.equal(await world.store.head(key), null, "every old orphan goes");
+    assert.notEqual(
+      await world.store.head(packKey(sha256(`seeded 1399 pack ${packsPerList - 1}`))),
+      null,
+      "live packs stay",
     );
-    const packs = Array.from({ length: 30 }, (_, pack) => sha256(`seeded ${at} pack ${pack}`));
-    await world.store.put(`${storageKey}.packs`, JSON.stringify(packs));
-    for (const packDigest of packs) await world.store.put(packKey(packDigest), "pack");
-  }
-  const orphans = Array.from({ length: 3000 }, (_, at) => packKey(sha256(`orphan ${at}`)));
-  for (const key of orphans) await world.store.put(key, "pack");
-  await world.tick(61 * MINUTE_MS);
-
-  const firstAt = Date.now();
-  for (let at = 0; at < 1400; at++) {
-    await archives(world, archived.sessionId);
-    await world.tick(380);
-  }
-  await world.tick(firstAt + 10 * MINUTE_MS - Date.now());
-  assert.notEqual(await world.store.head(`${TENANT_ID}/live-packs.json`), null, "the tenant keeps live pack names");
-  await world.restartTenant();
-  const get = world.store.get.bind(world.store);
-  const read: string[] = [];
-  t.mock.method(world.store, "get", (key: string, options?: Parameters<typeof get>[1]) => {
-    read.push(key);
-    return get(key, options);
   });
-  const steps = await cleanupSteps(world);
-  assert.ok(!read.includes(`${TENANT_ID}/live-packs.json`), "no cleanup step reads the live pack names");
-
-  console.log(`${steps.length} steps, the slowest ${Math.max(...steps).toFixed(2)} ms`);
-  assert.ok(steps.length > 1, "one run of several steps");
-  assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
-  assert.equal(await world.tenantStorage(TENANT_ID).getAlarm(), null, "the archives fold into that one run");
-  for (const key of orphans) assert.equal(await world.store.head(key), null, "every old orphan goes");
-  assert.notEqual(await world.store.head(packKey(sha256("seeded 1399 pack 29"))), null, "live packs stay");
-});
+}
