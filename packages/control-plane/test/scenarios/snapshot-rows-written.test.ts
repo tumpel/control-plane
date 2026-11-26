@@ -11,36 +11,18 @@ import {
   PackUploadsSchema,
   type Placement,
   parts,
-  sha256,
   snapshotAsked,
   TENANT_ID,
   tree,
   uploadsChunks,
 } from "./harness/snapshot-chunks.ts";
-import { type Host, UNMETERED, World } from "./harness/world.ts";
+import type { Host, World } from "./harness/world.ts";
 
 const LARGE = 100_000;
 const ROWS_PER_STORED_SNAPSHOT = 20;
 const ROWS_PER_FORK = 21;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
-const LARGEST_RESTORABLE = 500_000;
-const OVER_CAP_CHUNKS = 700_000;
-const OVER_CAP_ROOT_PLACEMENTS = 700_000;
-
-type ManifestsModule = {
-  MAX_INDEX_BYTES: number;
-  SnapshotManifests: new () => {
-    index(
-      store: R2Bucket,
-      tenantId: string,
-      storageKey: string,
-    ): Promise<
-      | { kind: "Read"; value: { bytes: number; find(digest: string): Placement | undefined } }
-      | { kind: "Gone" | "Unreadable"; detail: string }
-    >;
-  };
-};
 
 const RestoreDownloadsSchema = z.object({
   reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
@@ -399,83 +381,6 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
       await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
     );
     assert.match(JSON.stringify(snapshots.at(-1)?.outcome), new RegExp(`reuses pack ${packDigest}`));
-  });
-});
-
-test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
-  const world = await World.open({ limits: UNMETERED });
-  try {
-    const chunks = tree(LARGEST_RESTORABLE, "largest");
-    const storageKey = `${TENANT_ID}/session/snapshots/largest`;
-    await putsRoot(world.store, storageKey, chunks, 0);
-    const { MAX_INDEX_BYTES, SnapshotManifests }: ManifestsModule = await import(
-      new URL("../../src/snapshot-manifests.ts", import.meta.url).href
-    );
-    const read = await new SnapshotManifests().index(world.store, TENANT_ID, storageKey);
-    assert.equal(read.kind, "Read", read.kind === "Read" ? "" : read.detail);
-    if (read.kind !== "Read") return;
-    assert.ok(read.value.bytes <= MAX_INDEX_BYTES, `the index takes ${read.value.bytes} bytes`);
-    const last = chunks.at(-1);
-    assert.deepEqual(last === undefined ? undefined : { ...read.value.find(last.digest) }, last);
-  } finally {
-    await world.close();
-  }
-});
-
-test("a snapshot whose chunk count would pass the index cap is not stored, and the session keeps its previous snapshot", async () => {
-  await inWorld(async (world, host) => {
-    const chunks = tree(1, "over the cap");
-    const session = await world.startSession({ prompt: "build a tree past the index cap", tags: [] });
-    const offer = host.takeOffer();
-    await host.claims(offer);
-    await host.completes(offer);
-    const request = snapshotAsked(host, session.sessionId);
-    await uploadsChunks(world, host, request.snapshotId, chunks);
-    await storesRoot(world, host, request, chunks, parts(chunks).length + 1);
-    await host.says({
-      type: "SnapshotDone",
-      snapshotId: request.snapshotId,
-      uploadedBytes: CHUNK_BYTES,
-      chunkCount: OVER_CAP_CHUNKS,
-    });
-
-    const { snapshots } = SnapshotsSchema.parse(
-      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
-    );
-    assert.equal(snapshots[0]?.outcome.state, "Failed");
-    assert.equal(snapshots[0]?.outcome.reason, "UploadRejected");
-    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take \d+ bytes, above the \d+ bytes/);
-    assert.equal(await world.store.get(`${request.storageKey}.packs`), null);
-  });
-});
-
-test("a snapshot root whose own placements would pass the index cap is rejected at SnapshotDone", async () => {
-  await inWorld(async (world, host) => {
-    const session = await world.startSession({ prompt: "build a root of one-byte chunks", tags: [] });
-    const offer = host.takeOffer();
-    await host.claims(offer);
-    await host.completes(offer);
-    const request = snapshotAsked(host, session.sessionId);
-    const packDigest = sha256("one-byte pack");
-    const manifest = Array.from({ length: OVER_CAP_ROOT_PLACEMENTS }, (_, at) => ({
-      digest: sha256("one-byte chunk"),
-      packDigest,
-      offset: at,
-      length: 1,
-    }));
-    await world.store.put(request.storageKey, JSON.stringify({ manifest }));
-    await host.says({
-      type: "SnapshotDone",
-      snapshotId: request.snapshotId,
-      uploadedBytes: OVER_CAP_ROOT_PLACEMENTS,
-      chunkCount: 1,
-    });
-
-    const { snapshots } = SnapshotsSchema.parse(
-      await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
-    );
-    assert.equal(snapshots[0]?.outcome.state, "Failed");
-    assert.match(snapshots[0]?.outcome.detail ?? "", /chunk index would take/);
   });
 });
 

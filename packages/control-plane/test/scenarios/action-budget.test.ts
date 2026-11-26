@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
+import { turnCredentialSeconds } from "../../src/settings.ts";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
@@ -120,9 +121,22 @@ const SUBSCRIPTIONS_PER_SESSION = 2;
 const CHUNK_BYTES = 65_536;
 const DIGESTS_PER_PART = 500;
 const TREE_CHUNKS = 5000;
+const RESTORED_CHUNKS = 200_000;
 const RESULT = '{"type":"result","subtype":"success","is_error":false}';
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
+
+const RestoreReplySchema = z.object({
+  reply: z.object({
+    type: z.literal("RestoreDownloads"),
+    packs: z.array(z.object({ packDigest: z.string(), url: z.string() })),
+  }),
+});
+
+const partsOf = (chunks: Placement[]): Placement[][] =>
+  Array.from({ length: Math.ceil(chunks.length / DIGESTS_PER_PART) }, (_, at) =>
+    chunks.slice(at * DIGESTS_PER_PART, (at + 1) * DIGESTS_PER_PART),
+  );
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
@@ -134,7 +148,7 @@ const tree = (count: number): Placement[] =>
     length: CHUNK_BYTES,
   }));
 
-const storesTree = async (world: World, host: Host, sessionId: string, chunks: Placement[]): Promise<void> => {
+const storesTree = async (world: World, host: Host, sessionId: string, chunks: Placement[]): Promise<Placement> => {
   const request = z
     .object({ snapshotId: z.string(), sessionId: z.string(), storageKey: z.string() })
     .parse(host.take("SnapshotRequest"));
@@ -193,6 +207,7 @@ const storesTree = async (world: World, host: Host, sessionId: string, chunks: P
     uploadedBytes: chunks.length * CHUNK_BYTES,
     chunkCount: chunks.length,
   });
+  return root;
 };
 
 const releasesBoxes = async (host: Host): Promise<void> => {
@@ -302,6 +317,47 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   console.log(`seeded ${sessions.length} sessions, ${events[0]?.total ?? 0} events`);
   return { world, known, host, sessions };
 };
+
+test("a host of the tenant gets the restore URLs of a 200000-chunk snapshot with no offered turn or open window, each part within the budget on a restarted tenant", {
+  timeout: 900_000,
+}, async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const chunks = tree(RESTORED_CHUNKS);
+  const session = await world.startSession({ prompt: "build the large tree", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const root = await storesTree(world, host, session.sessionId, chunks);
+  await releasesBoxes(host);
+  const lost = chunks.at(-1)?.packDigest ?? "";
+  await world.store.delete(`${TENANT_ID}/packs/${lost}`);
+  await world.tick(turnCredentialSeconds(world.settings) * 1000);
+  await world.restartTenant();
+
+  const asked = [[root], ...partsOf(chunks)];
+  const spent: number[] = [];
+  for (const [at, part] of asked.entries()) {
+    const input = {
+      tenantId: TENANT_ID,
+      hostId: host.hostId,
+      message: { type: "RestoreChunks", turnId: offer.turnId, part: at + 1, chunks: part },
+    };
+    spent.push(await world.computeMs("hostMessage", input));
+    const { reply } = RestoreReplySchema.parse(await world.call("hostMessage", input));
+    const packs = [...new Set(part.map((chunk) => chunk.packDigest))].filter((packDigest) => packDigest !== lost);
+    assert.deepEqual(
+      reply.packs.map((pack) => pack.packDigest),
+      packs,
+      `part ${at + 1}`,
+    );
+    for (const pack of reply.packs) assert.match(pack.url, new RegExp(`/packs/${pack.packDigest}`));
+  }
+  console.log(`first part ${spent[0]?.toFixed(2)} ms, slowest ${Math.max(...spent).toFixed(2)} ms`);
+  const over = spent.flatMap((ms, at) => (ms > BUDGET_MS ? [`part ${at + 1}: ${ms.toFixed(2)} ms`] : []));
+  assert.deepEqual(over, [], `RestoreChunks parts over ${BUDGET_MS} ms of compute`);
+});
 
 test("a session list page stays inside the budget and reads no more rows as the tenant grows", {
   timeout: 900_000,

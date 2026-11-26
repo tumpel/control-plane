@@ -2118,7 +2118,7 @@ suite("sessions", () => {
     assert.match(failure.detail, /cancelled the turn/);
   });
 
-  test("a snapshot uploads only the packs object storage lacks, a restore gets only the packs of its snapshot, and an archive deletes the packs no snapshot holds", async () => {
+  test("a snapshot uploads only the packs object storage lacks, a restore gets every pack of its tenant it names, and an archive deletes the packs no snapshot holds", async () => {
     const { host, getJson, tool, completedTurn, storedChunks } = await tenant();
     const [one, two, three] = ["1", "2", "3"].map((digit) => digit.repeat(64)) as [string, string, string];
     const [packOne, packTwo, packThree] = ["a", "b", "c"].map((digit) => digit.repeat(64)) as [string, string, string];
@@ -2163,6 +2163,7 @@ suite("sessions", () => {
       [
         [packOne, CHUNK_BYTES, "GET"],
         [packTwo, CHUNK_BYTES, "GET"],
+        [packThree, CHUNK_BYTES, "GET"],
       ],
     );
     host.send({
