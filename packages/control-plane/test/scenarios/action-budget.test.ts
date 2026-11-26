@@ -422,6 +422,26 @@ test("a session list page stays inside the budget and reads no more rows as the 
   assert.equal(paged.length, 100);
   assert.deepEqual(paged, [...ordered, ...added.slice(60).toSorted()]);
 
+  const plan = await world.fetch(
+    world.owner,
+    "POST",
+    "/v1/tenant-config/plan",
+    JSON.stringify({
+      config: { personas: [], secretSets: [], harnessPins: [], hosts: [] },
+      files: [],
+      expiryValues: [],
+      secretValues: [],
+    }),
+  );
+  assert.equal(plan.status, 422);
+  assert.ok(
+    z
+      .object({ detail: z.string() })
+      .parse(await plan.json())
+      .detail.includes(`still used by session ${paged.join(", ")}, which is neither Failed nor Archived`),
+    "a config plan names every session past the first page",
+  );
+
   const unknown = await world.fetch(world.owner, "GET", "/v1/sessions?limit=50&after=no-such-session");
   assert.equal(unknown.status, 400);
   assert.match(z.object({ detail: z.string() }).parse(await unknown.json()).detail, /^after names no-such-session/);
@@ -466,7 +486,7 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
   for (const [name, operation] of operations) {
     await timed(world, name, () => generate(operation.input, known, name), results, broken);
   }
-  const members = HostFrameSchema.shape.message as unknown as z.ZodType as unknown;
+  const members = (defOf(HostFrameSchema.shape.message).getter as () => unknown)();
   for (const option of defOf(members).options as unknown[]) {
     const type = String((defOf((defOf(option).shape as Record<string, unknown>).type).values as unknown[])[0]);
     if (type === "TelemetryBatch" || type === "TurnLine") continue;

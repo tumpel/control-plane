@@ -601,13 +601,12 @@ export const getSession = async (env: Env, caller: Caller, sessionId: string): P
 };
 
 export const listSessions = async (env: Env, caller: Caller, query: SessionListQuery): Promise<Outcome<Session[]>> => {
-  const filter: SessionFilter = {};
+  const filter: SessionFilter = { limit: query.limit };
   if (query.state !== undefined) filter.state = query.state;
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
   if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
-  if (query.limit !== undefined) filter.limit = query.limit;
   if (query.after !== undefined) filter.after = query.after;
   const { sessions } = await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter });
   if (sessions !== null) return ok(sessions);
@@ -619,9 +618,19 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   });
 };
 
-export const unpaged = (sessions: Session[] | null): Session[] => {
-  if (sessions === null) throw new Error("an unpaged session list came back null, which only a cursor can produce");
-  return sessions;
+const SESSION_PAGE = 50;
+
+export const everySession = async (env: Env, tenantId: string): Promise<Session[]> => {
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const sessions: Session[] = [];
+  for (;;) {
+    const after = sessions.at(-1)?.sessionId;
+    const filter: SessionFilter = after === undefined ? { limit: SESSION_PAGE } : { limit: SESSION_PAGE, after };
+    const { sessions: page } = await tenant.call("listSessions", { tenantId, filter });
+    if (page === null) throw new Error(`session ${after} left tenant ${tenantId} while its sessions were paged`);
+    sessions.push(...page);
+    if (page.length < SESSION_PAGE) return sessions;
+  }
 };
 
 export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {

@@ -1,12 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { MCP_PATH } from "@tumpel/api/constants";
-import {
-  type CredentialRefusal,
-  checkModelCredential,
-  credentialProblem,
-  dispatchVariables,
-  type SecretMember,
-} from "@tumpel/api/credentials";
+import { checkModelCredential, credentialProblem, dispatchVariables, type SecretMember } from "@tumpel/api/credentials";
 import type { BoxRetentionSchema, ServeConnectorTokenResultSchema } from "@tumpel/schemas";
 import {
   CredentialHandoverSchema,
@@ -29,6 +23,7 @@ import {
   type SteerSchema,
   StopFailureSchema,
   TranscriptLineSchema,
+  TurnCredentialRefusedSchema,
   TurnFailedEventSchema,
   TurnFailureSchema,
   TurnImageSchema,
@@ -195,6 +190,8 @@ export type Started<T> =
 export type SessionStarted<T> = Started<T> | z.infer<typeof SessionTagsOverLimitSchema>;
 
 type ImageLookup = { kind: "Read"; image: ImageAvailability } | ReleaseUnreadable;
+
+type CredentialRefusal = z.infer<typeof TurnCredentialRefusedSchema>["refusal"];
 
 export type Sent =
   | { kind: "Sent"; turn: Turn }
@@ -1085,7 +1082,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     const checked = checkModelCredential(entry, stored.keys, session.model, now);
-    return checked.kind === "Usable" ? null : checked;
+    return checked.kind === "Usable" ? null : TurnCredentialRefusedSchema.shape.refusal.parse(checked);
   }
 
   private wrappedDataKey(): string | null {
