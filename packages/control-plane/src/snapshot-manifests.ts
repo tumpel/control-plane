@@ -107,7 +107,7 @@ export const heldPlacements = async (
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
-const packList = async (
+export const packList = async (
   store: R2Bucket,
   storageKey: string,
 ): Promise<{ kind: "Read"; value: ReadonlySet<string> } | { kind: "Unreadable"; detail: string } | null> => {
@@ -123,6 +123,7 @@ const packList = async (
 const SnapshotDraftSchema = z.object({
   lastPart: z.number().int().min(1),
   packs: z.array(z.string()),
+  reused: z.array(z.string()).default([]),
 });
 
 type SnapshotDraft = z.infer<typeof SnapshotDraftSchema>;
@@ -130,7 +131,8 @@ type SnapshotDraft = z.infer<typeof SnapshotDraftSchema>;
 export const mergedDraft = (
   draft: SnapshotDraft | null,
   part: number,
-  packs: string[],
+  written: string[],
+  reused: string[],
 ): { kind: "Merged"; draft: SnapshotDraft } | { kind: "Refused"; detail: string } => {
   const continues = draft !== null && (part === draft.lastPart || part === draft.lastPart + 1);
   if (part !== 1 && !continues) {
@@ -139,14 +141,18 @@ export const mergedDraft = (
       detail: `but the control plane expects part ${draft === null ? 1 : draft.lastPart + 1}, so the snapshot cannot name its packs`,
     };
   }
-  const merged = new Set([...(part === 1 || draft === null ? [] : draft.packs), ...packs]);
+  const earlier = part === 1 || draft === null ? { packs: [], reused: [] } : draft;
+  const merged = new Set([...earlier.packs, ...written, ...reused]);
   if (merged.size > MAX_PACKS_PER_MANIFEST) {
     return {
       kind: "Refused",
       detail: `which brings it to ${merged.size} packs, above the ${MAX_PACKS_PER_MANIFEST} the control plane indexes, so the snapshot cannot name its packs`,
     };
   }
-  return { kind: "Merged", draft: { lastPart: part, packs: [...merged] } };
+  return {
+    kind: "Merged",
+    draft: { lastPart: part, packs: [...merged], reused: [...new Set([...earlier.reused, ...reused])] },
+  };
 };
 
 export const snapshotDraft = async (store: R2Bucket, storageKey: string): Promise<SnapshotDraft | null> => {
@@ -155,15 +161,6 @@ export const snapshotDraft = async (store: R2Bucket, storageKey: string): Promis
   const parsed = SnapshotDraftSchema.safeParse(parsedJson(await draft.text()));
   if (!parsed.success) throw new Error(`the pack draft of ${storageKey} does not parse: ${issues(parsed.error)}`);
   return parsed.data;
-};
-
-export const snapshotPackSet = async (store: R2Bucket, storageKey: string): Promise<ReadonlySet<string> | null> => {
-  const draft = await snapshotDraft(store, storageKey);
-  if (draft !== null) return new Set(draft.packs);
-  const claimed = await packList(store, storageKey);
-  if (claimed === null) return null;
-  if (claimed.kind !== "Read") throw new Error(claimed.detail);
-  return claimed.value;
 };
 
 const parsedJson = (text: string): unknown => {

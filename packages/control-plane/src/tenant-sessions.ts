@@ -113,10 +113,10 @@ import {
   MAX_INDEX_BYTES,
   mergedDraft,
   packKey,
+  packList,
   packListKey,
   STORE_DELETE_BATCH,
   snapshotDraft,
-  snapshotPackSet,
 } from "./snapshot-manifests.ts";
 import { STEER_CONNECTOR_ID, STEER_SETTINGS_PATH, steerSettings } from "./steer.ts";
 import { clearSupersededFailure, forgetSupervisorUpdates, type SupervisorUpdateMessage } from "./supervisor-updates";
@@ -3402,13 +3402,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { type: "SnapshotChunksHeld", snapshotId: message.snapshotId, part: message.part, held: [] };
   }
 
-  private async snapshotChunkCheck(
-    tenantId: string,
-    hostId: string,
-    message: Extract<ChunkAsk, { type: "SnapshotChunkCheck" }>,
-  ): Promise<ChunkReply | Refused> {
-    const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
-    if ("type" in window) return window;
+  private previousSnapshot(sessionId: string): { storage_key: string } | undefined {
     const [previous] = this.ctx.storage.sql
       .exec<{ storage_key: string }>(
         `SELECT storage_key FROM (
@@ -3417,9 +3411,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
           JOIN prebuild_sessions USING (prebuild_id) JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
           WHERE session_prebuild_layers.session_id = ?1
         ) ORDER BY source, snapshot_seq DESC LIMIT 1`,
-        window.request.session_id,
+        sessionId,
       )
       .toArray();
+    return previous;
+  }
+
+  private async snapshotChunkCheck(
+    tenantId: string,
+    hostId: string,
+    message: Extract<ChunkAsk, { type: "SnapshotChunkCheck" }>,
+  ): Promise<ChunkReply | Refused> {
+    const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
+    if ("type" in window) return window;
+    const previous = this.previousSnapshot(window.request.session_id);
     if (previous === undefined) {
       return { type: "SnapshotChunkCheckHeld", snapshotId: message.snapshotId, check: message.check, held: [] };
     }
@@ -3482,10 +3487,12 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `host ${hostId} listed pack ${twice} of snapshot ${message.snapshotId} in part ${message.part} as both written and reused`,
       );
     }
-    const merged = mergedDraft(await snapshotDraft(this.env.STORE, window.request.storage_key), message.part, [
-      ...listed,
-      ...message.reusedPackDigests,
-    ]);
+    const merged = mergedDraft(
+      await snapshotDraft(this.env.STORE, window.request.storage_key),
+      message.part,
+      [...listed],
+      message.reusedPackDigests,
+    );
     if (merged.kind === "Refused") {
       return refused(
         `host ${hostId} sent SnapshotPacks part ${message.part} of snapshot ${message.snapshotId}, ${merged.detail}`,
@@ -3893,7 +3900,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     tenantId: string,
     hostId: string,
     request: SnapshotRequestRow,
-  ): Promise<{ kind: "Rejected"; detail: string } | { kind: "Checked"; packs: ReadonlySet<string> }> {
+  ): Promise<{ kind: "Rejected"; detail: string } | { kind: "Checked"; packs: string[]; reused: ReadonlySet<string> }> {
     const rejected = async (detail: string) => ({
       kind: "Rejected" as const,
       detail: `host ${await this.hostName(tenantId, hostId)} ${detail}`,
@@ -3910,19 +3917,20 @@ export abstract class TenantSessions extends DurableObject<Env> {
         `stored snapshot root ${request.storage_key}, which is no snapshot root: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
       );
     }
-    const packs = await snapshotPackSet(this.env.STORE, request.storage_key);
-    if (packs === null) {
+    const draft = await snapshotDraft(this.env.STORE, request.storage_key);
+    if (draft === null) {
       return rejected(
         `answered SnapshotDone for snapshot ${request.snapshot_id} without sending SnapshotPacks part 1, so the control plane cannot name its packs and the session keeps its previous snapshot; update the supervisor`,
       );
     }
+    const packs = new Set(draft.packs);
     const unnamed = parsed.data.manifest.find((placement) => !packs.has(placement.packDigest));
     if (unnamed !== undefined) {
       return rejected(
         `stored snapshot ${request.snapshot_id} whose root places its manifest in pack ${unnamed.packDigest}, which no SnapshotPacks part named, so the control plane cannot keep it and the session keeps its previous snapshot; update the supervisor`,
       );
     }
-    return { kind: "Checked", packs };
+    return { kind: "Checked", packs: [...packs].sort(), reused: new Set(draft.reused) };
   }
 
   private async snapshotOutcome(
@@ -3947,12 +3955,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const turn = this.turnRow(request.turn_id);
     const ended = turn === null ? null : await this.endedTranscript(tenantId, turn);
     return this.ctx.blockConcurrencyWhile(async () => {
-      const sorted = [...checked.packs].sort();
+      const sorted = checked.packs;
+      const previous = this.previousSnapshot(request.session_id);
+      const listed =
+        previous === undefined
+          ? null
+          : await packList(this.env.STORE, previous.storage_key).catch((error: unknown) => ({
+              kind: "Unreadable" as const,
+              detail: errorOf(error).message,
+            }));
+      if (listed?.kind === "Unreadable") return { kind: "Rejected", detail: storageFailed(new Error(listed.detail)) };
+      const named = listed?.kind === "Read" ? listed.value : new Set<string>();
+      const unproven = sorted.filter((packDigest) => !checked.reused.has(packDigest) || !named.has(packDigest));
       const found = await Promise.all(
-        sorted.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))),
+        unproven.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))),
       ).catch((error: unknown) => storageFailed(error));
       if (typeof found === "string") return { kind: "Rejected", detail: found };
-      const missing = sorted.find((_, at) => found[at] === null);
+      const missing = unproven.find((_, at) => found[at] === null);
       if (missing !== undefined) {
         return {
           kind: "Rejected",

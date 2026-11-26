@@ -162,6 +162,78 @@ test("a SnapshotPacks part and a SnapshotDone each stay within the budget on a r
   assert.ok(doneMs <= BUDGET_MS, `the SnapshotDone took ${doneMs.toFixed(2)} ms`);
 });
 
+test("a SnapshotDone naming 3000 reused packs and 30 written ones stays within the budget on a restarted tenant", {
+  timeout: 600_000,
+}, async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  await world.holdsAgentCredentials();
+  const reused = Array.from({ length: 3000 }, (_, pack) => sha256(`reused pack ${pack}`));
+  const session = await world.startSession({ prompt: "build the wide tree", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const first = snapshotAsked(host, session.sessionId);
+  for (let part = 0; part < reused.length / 500; part++) {
+    const packs = reused.slice(part * 500, (part + 1) * 500);
+    await host.says({
+      type: "SnapshotPacks",
+      snapshotId: first.snapshotId,
+      part: part + 1,
+      packs: packs.map((packDigest) => ({ packDigest, sizeBytes: CHUNK_BYTES })),
+      chunks: packs.map((packDigest) => ({
+        digest: sha256(`chunk of ${packDigest}`),
+        packDigest,
+        offset: 0,
+        length: CHUNK_BYTES,
+      })),
+      reusedPackDigests: [],
+    });
+    for (const packDigest of packs) await world.store.put(packKey(packDigest), "pack");
+  }
+  const base = snapshotPacks(first, [], []);
+  await host.says({ ...base.message, part: 7 } as never);
+  await world.store.put(packKey(base.root.packDigest), base.manifest);
+  await world.store.put(first.storageKey, JSON.stringify({ manifest: [base.root] }));
+  await host.says({ type: "SnapshotDone", snapshotId: first.snapshotId, uploadedBytes: 0, chunkCount: 3001 });
+  assert.deepEqual(await states(world, session.sessionId), ["Stored"]);
+
+  await world.sendTurn(session.sessionId, "change thirty files");
+  const next = host.takeOffer();
+  await host.claims(next);
+  await host.completes(next);
+  const request = snapshotAsked(host, session.sessionId);
+  for (let part = 0; part < reused.length / 500; part++) {
+    await host.says({
+      type: "SnapshotPacks",
+      snapshotId: request.snapshotId,
+      part: part + 1,
+      packs: [],
+      chunks: [],
+      reusedPackDigests: reused.slice(part * 500, (part + 1) * 500),
+    });
+  }
+  const written = Array.from({ length: 30 }, (_, pack) => sha256(`written pack ${pack}`));
+  const last = snapshotPacks(request, written, []);
+  await host.says({ ...last.message, part: 7 } as never);
+  for (const packDigest of written) await world.store.put(packKey(packDigest), "pack");
+  await world.store.put(packKey(last.root.packDigest), last.manifest);
+  await world.store.put(request.storageKey, JSON.stringify({ manifest: [last.root] }));
+  await world.restartTenant();
+  const heads = t.mock.method(world.store, "head");
+  const doneMs = await world.computeMs("hostMessage", {
+    tenantId: TENANT_ID,
+    hostId: host.hostId,
+    message: { type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0, chunkCount: 3031 },
+  });
+
+  console.log(`SnapshotDone of 3031 packs ${doneMs.toFixed(2)} ms after a restart, ${heads.mock.callCount()} HEADs`);
+  assert.deepEqual(await states(world, session.sessionId), ["Stored"]);
+  assert.equal(heads.mock.callCount(), 31, "only the written packs and the root are checked");
+  assert.ok(doneMs <= BUDGET_MS, `the SnapshotDone took ${doneMs.toFixed(2)} ms`);
+});
+
 test("a pack shared with another session survives a reset between a store and its collection, the next store and a cleanup run", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
