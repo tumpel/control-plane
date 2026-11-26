@@ -314,6 +314,37 @@ test("a corrupt pack list of the previous snapshot does not refuse the next snap
   assert.deepEqual((await states(world, session.sessionId)).at(-1), "Stored");
 });
 
+test("a storage failure reading the previous pack list fails only that snapshot, and the next one stores and collects", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  await world.holdsAgentCredentials();
+  const kept = sha256("kept pack");
+  const session = await startsStored(world, host, "the unread tree", [kept]);
+  await world.restartTenant();
+
+  await world.sendTurn(session.sessionId, "change one file");
+  const failing = host.takeOffer();
+  await host.claims(failing);
+  await host.completes(failing);
+  world.store.failure = { operation: "get", prefix: `${session.storageKey}.packs`, error: new Error("R2 is down") };
+  const failed = snapshotAsked(host, session.sessionId);
+  await answers(world, host, failed, [], [kept]);
+  world.store.failure = null;
+  assert.deepEqual(await states(world, session.sessionId), ["Stored", "Failed"]);
+  assert.equal(
+    world.tenantSql().exec("SELECT 1 FROM snapshot_requests WHERE snapshot_id = ?", failed.snapshotId).toArray().length,
+    0,
+    "the failed snapshot closes its request",
+  );
+
+  const request = snapshotAsked(host, session.sessionId);
+  await answers(world, host, request, [], [kept]);
+
+  assert.equal((await states(world, session.sessionId)).at(-1), "Stored");
+  assert.equal(await world.store.head(session.storageKey), null, "the next store collects the first snapshot");
+});
+
 test("with two open requests, the first store keeps the previous snapshot until the second reuses its pack, stores and restores", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());

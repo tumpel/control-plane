@@ -3933,6 +3933,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return { kind: "Checked", packs: [...packs].sort(), reused: new Set(draft.reused) };
   }
 
+  private async unheldPack(
+    tenantId: string,
+    previous: { storage_key: string } | undefined,
+    packs: string[],
+    reused: ReadonlySet<string>,
+  ): Promise<string | undefined> {
+    const listed = previous === undefined ? null : await packList(this.env.STORE, previous.storage_key);
+    const named = listed?.kind === "Read" ? listed.value : new Set<string>();
+    const unproven = packs.filter((packDigest) => !reused.has(packDigest) || !named.has(packDigest));
+    const found = await Promise.all(unproven.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
+    return unproven.find((_, at) => found[at] === null);
+  }
+
   private async snapshotOutcome(
     tenantId: string,
     hostId: string,
@@ -3957,14 +3970,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const sorted = checked.packs;
       const previous = this.previousSnapshot(request.session_id);
-      const listed = previous === undefined ? null : await packList(this.env.STORE, previous.storage_key);
-      const named = listed?.kind === "Read" ? listed.value : new Set<string>();
-      const unproven = sorted.filter((packDigest) => !checked.reused.has(packDigest) || !named.has(packDigest));
-      const found = await Promise.all(
-        unproven.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))),
-      ).catch((error: unknown) => storageFailed(error));
-      if (typeof found === "string") return { kind: "Rejected", detail: found };
-      const missing = unproven.find((_, at) => found[at] === null);
+      const missing = await this.unheldPack(tenantId, previous, sorted, checked.reused).catch((error: unknown) => ({
+        failed: storageFailed(error),
+      }));
+      if (typeof missing === "object") return { kind: "Rejected", detail: missing.failed };
       if (missing !== undefined) {
         return {
           kind: "Rejected",
