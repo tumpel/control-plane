@@ -258,14 +258,15 @@ export abstract class TenantTriggers extends TenantWebhooks {
     if (sent.kind !== "NotFound" && sent.kind !== "Archived" && sent.kind !== "Failed") {
       return this.refuseStart(origin, refusal, now);
     }
-    this.ctx.storage.transactionSync(() => {
-      this.deleteTrigger(trigger.triggerId);
+    const deleted = this.ctx.storage.transactionSync(() => {
+      if (!this.deleteTrigger(trigger.triggerId)) return false;
       this.appendEvent(
         { event: "TriggerStartRefused", triggerId: origin.triggerId, deliveryId: origin.deliveryId, refusal },
         now,
       );
+      return true;
     });
-    return { kind: "Gone", refusal };
+    return deleted ? { kind: "Gone", refusal } : { kind: "NotFound" };
   }
 
   private refuseStart(origin: Origin, refusal: TriggerStartRefusal, now: number): Fired {

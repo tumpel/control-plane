@@ -12,6 +12,7 @@ const CONDITION_VALUES = 4;
 const CLAIM_CENTRAL_ROWS = 3 + CONDITION_VALUES;
 const FIRE_TENANT_ROWS = { idle: 21, busy: 13, stopped: 21 };
 const GONE_TENANT_ROWS = 10;
+const SUBREQUEST_BOUND = 200;
 const HEAD = "4f1c9e2";
 
 const deliver = (world: World, event: string, payload: Record<string, unknown>, deliveryId = randomUUID()) => {
@@ -116,25 +117,39 @@ test("a matching status places a stopped Foreman on a fresh box with exactly one
   assert.equal(counted.tenant, FIRE_TENANT_ROWS.stopped);
 });
 
-test("two concurrent deliveries commit one turn, and a redelivery of the same delivery commits nothing", async (t) => {
-  const { world, arm, prompts, held, routed } = await armed(t);
+test("a delivery that loses the claim to a concurrent one commits no turn, and a redelivery commits nothing", async (t) => {
+  const { world, arm, prompts, held, routed, refusals } = await armed(t);
   const trigger = await arm("wake-race");
+  const operations = world.tenantOperations() as unknown as {
+    triggerFired: (input: unknown) => Promise<{ fired: { kind: string } }>;
+  };
+  const head = world.releases.head.bind(world.releases);
+  let raced: string | null = null;
+  world.releases.head = async (key) => {
+    if (raced === null) {
+      raced = "racing";
+      const { fired } = await operations.triggerFired({
+        tenantId: TENANT_ID,
+        triggerId: trigger.triggerId,
+        deliveryId: randomUUID(),
+        fired: { kind: "Matched", repository: "https://github.com/acme/app", prompt: "the concurrent delivery" },
+        now: Date.now(),
+      });
+      raced = fired.kind;
+    }
+    return head(key);
+  };
   const deliveryId = randomUUID();
-  const answers = await Promise.all([
-    deliver(world, "status", status("success"), deliveryId),
-    deliver(world, "status", status("failure")),
-  ]);
-  assert.deepEqual(
-    answers.map((answer) => answer.status),
-    [204, 204],
-  );
+  assert.equal((await deliver(world, "status", status("success"), deliveryId)).status, 204);
   await world.settle();
-  assert.equal(prompts().length, 1);
+  assert.equal(raced, "Sent");
+  assert.deepEqual(prompts(), ["the concurrent delivery"]);
+  assert.equal(refusals(), 0);
   assert.equal(held(trigger.triggerId), 0);
   assert.equal(await routed(trigger.triggerId), false);
   assert.equal((await deliver(world, "status", status("success"), deliveryId)).status, 204);
   await world.settle();
-  assert.equal(prompts().length, 1);
+  assert.deepEqual(prompts(), ["the concurrent delivery"]);
 });
 
 test("an unrelated status leaves the trigger armed, and agent-review wakes the Foreman once", async (t) => {
@@ -418,25 +433,39 @@ test("one status for fifty targets commits fifty turns and drops fifty-five rout
   const routes = (): number => Number(world.db.sql.exec("SELECT COUNT(*) AS held FROM trigger_routes").one().held);
   assert.equal(routes(), 55);
 
-  let subrequests = 0;
+  const counted = { tenantCalls: 0, workerQueries: 0 };
+  let inTenant = 0;
   const prepare = world.db.prepare.bind(world.db);
   world.db.prepare = (query) => {
-    subrequests += 1;
+    if (inTenant === 0) counted.workerQueries += 1;
     return prepare(query);
   };
-  const tenant = world.tenantSteps() as unknown as { handle: (request: unknown) => Promise<unknown> };
-  const handle = tenant.handle.bind(tenant);
-  tenant.handle = (request) => {
-    subrequests += 1;
-    return handle(request);
+  const tenant = world.tenantSteps() as unknown as {
+    handleForTenant: (request: unknown, writes: number) => Promise<unknown>;
+  };
+  const handleForTenant = tenant.handleForTenant.bind(tenant);
+  tenant.handleForTenant = async (request, writes) => {
+    counted.tenantCalls += 1;
+    inTenant += 1;
+    try {
+      return await handleForTenant(request, writes);
+    } finally {
+      inTenant -= 1;
+    }
   };
   assert.equal((await deliver(world, "status", status("success"))).status, 204);
   await world.settle();
   world.db.prepare = prepare;
-  tenant.handle = handle;
+  tenant.handleForTenant = handleForTenant;
   assert.equal(turns(), 50);
   assert.equal(routes(), 0);
-  assert.ok(subrequests <= 200, `one delivery made ${subrequests} subrequests`);
+  const matched = 50;
+  const stale = 5;
+  assert.deepEqual(counted, {
+    tenantCalls: matched + stale + matched,
+    workerQueries: 1 + 1 + 1 + matched + stale,
+  });
+  assert.ok(counted.tenantCalls + counted.workerQueries <= SUBREQUEST_BOUND);
 });
 
 test("the 601st delivery in a minute answers 429, writes nothing and keeps the trigger", async (t) => {
