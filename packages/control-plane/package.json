@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
-    "test": "node --single-threaded --test --test-timeout=90000 test/*.test.ts test/scenarios/*.test.ts"
+    "test": "node --single-threaded --test --test-timeout=90000 $(ls test/*.test.ts test/scenarios/*.test.ts | grep -v -e action-budget -e snapshot-frame-budget -e snapshot-references -e pack-cleanup) && node --single-threaded --test --test-concurrency=1 --test-timeout=90000 test/scenarios/action-budget.test.ts test/scenarios/snapshot-frame-budget.test.ts test/scenarios/snapshot-references.test.ts test/scenarios/pack-cleanup.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.0",
