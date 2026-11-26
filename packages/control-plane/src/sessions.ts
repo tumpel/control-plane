@@ -73,7 +73,16 @@ import {
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
-export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+const PAGE_LIMIT = SessionListQuerySchema.shape.limit;
+const unpagedList: z.core.$ZodErrorMap = (issue) =>
+  issue.input === undefined
+    ? "a session list reads one page: send limit (1 to 50), and after set to the last sessionId of a page to read the next"
+    : undefined;
+
+export const PagedSessionListQuerySchema = SessionListQuerySchema.extend({
+  limit: PAGE_LIMIT.clone({ ...PAGE_LIMIT.def, error: unpagedList }),
+});
+export type SessionListQuery = z.infer<typeof PagedSessionListQuerySchema>;
 type Steer = z.infer<typeof SteerSchema>;
 type SessionStopQuery = z.infer<typeof SessionStopQuerySchema>;
 export type SessionStartFromIssue = z.infer<typeof SessionStartFromIssueSchema>;
@@ -1205,7 +1214,10 @@ export const handleSessions = async (
   }
   if (pathname === "/v1/sessions") {
     const tag = url.searchParams.getAll("tag");
-    const query = SessionListQuerySchema.safeParse({ ...queryOf(url, ["limit"]), ...(tag.length > 0 ? { tag } : {}) });
+    const query = PagedSessionListQuerySchema.safeParse({
+      ...queryOf(url, ["limit"]),
+      ...(tag.length > 0 ? { tag } : {}),
+    });
     if (!query.success) return invalidQuery("sessions.list", query.error);
     return answer(await listSessions(env, caller, query.data));
   }

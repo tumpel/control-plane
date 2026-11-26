@@ -359,7 +359,7 @@ test("a host of the tenant gets the restore URLs of a 200000-chunk snapshot with
   assert.deepEqual(over, [], `RestoreChunks parts over ${BUDGET_MS} ms of compute`);
 });
 
-test("a session list page stays inside the budget and reads no more rows as the tenant grows", {
+test("a session list page stays inside the budget and reads no more rows as the tenant grows, and an unpaged list is refused", {
   timeout: 900_000,
 }, async (t) => {
   const { world, host, sessions } = await seeded(t);
@@ -411,6 +411,33 @@ test("a session list page stays inside the budget and reads no more rows as the 
   const grown = await rowsRead("/v1/sessions?limit=50");
   assert.deepEqual(grown.ids, first.ids);
   assert.equal(grown.rows, first.rows);
+  const grownTiming = await measured(() =>
+    world.computeMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } }),
+  );
+  assert.ok(grownTiming.median <= BUDGET_MS, `a page of 50 of 100 took ${grownTiming.median.toFixed(2)} ms`);
+
+  const unpagedHttp = await world.fetch(world.owner, "GET", "/v1/sessions");
+  assert.equal(unpagedHttp.status, 400);
+  const unpagedDetail = z.object({ detail: z.string() }).parse(await unpagedHttp.json()).detail;
+  assert.match(unpagedDetail, /^sessions\.list refused the query: limit: .*send limit \(1 to 50\), and after set to/);
+  const unpagedMcp = await world.fetch(
+    world.owner,
+    "POST",
+    "/mcp",
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "tumpel_session_list", arguments: {} },
+    }),
+  );
+  const mcpAnswer = z
+    .object({ result: z.object({ content: z.array(z.object({ text: z.string() })), isError: z.literal(true) }) })
+    .parse(await unpagedMcp.json());
+  assert.match(
+    mcpAnswer.result.content[0]?.text ?? "",
+    /^tumpel_session_list refused its arguments: limit: .*send limit \(1 to 50\), and after set to/,
+  );
 
   const paged: string[] = [];
   let page = grown.ids;
