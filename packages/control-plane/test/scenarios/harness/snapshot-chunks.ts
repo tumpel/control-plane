@@ -157,3 +157,13 @@ export const releasesBoxes = async (host: Host): Promise<void> => {
     await host.says({ type: "BoxGone", sessionId: teardown.sessionId, boxId: teardown.boxId });
   }
 };
+
+export const storageKeyOf = (world: World, sessionId: string): string =>
+  z
+    .object({ storage_key: z.string() })
+    .parse(
+      world
+        .tenantSql()
+        .exec("SELECT storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq DESC LIMIT 1", sessionId)
+        .one(),
+    ).storage_key;

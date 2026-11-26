@@ -9,6 +9,7 @@ import {
   parts,
   releasesBoxes,
   sha256,
+  storageKeyOf,
   storesTree,
   tree,
 } from "./harness/snapshot-chunks.ts";
@@ -140,16 +141,6 @@ const indexOf = (chunks: Placement[]): Uint8Array => {
   }
   return bytes;
 };
-
-const storageKeyOf = (world: World, sessionId: string): string =>
-  z
-    .object({ storage_key: z.string() })
-    .parse(
-      world
-        .tenantSql()
-        .exec("SELECT storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq DESC LIMIT 1", sessionId)
-        .one(),
-    ).storage_key;
 
 for (const entries of [2_098, 32_768, 65_536]) {
   test(`a chunk check of 100 digests over a ${entries}-entry .idx gets its 60 held placements from one GET within the budget on a restarted tenant`, {

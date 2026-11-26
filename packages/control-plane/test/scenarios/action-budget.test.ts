@@ -3,7 +3,15 @@ import { test } from "node:test";
 import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
-import { type Placement, releasesBoxes, storesTree, tree } from "./harness/snapshot-chunks.ts";
+import {
+  DIGESTS_PER_PART,
+  type Placement,
+  releasesBoxes,
+  sha256,
+  storageKeyOf,
+  storesTree,
+  tree,
+} from "./harness/snapshot-chunks.ts";
 import { BUDGETS, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
@@ -332,6 +340,101 @@ test("a session list page stays inside the budget and reads no more rows as the 
   assert.match(z.object({ detail: z.string() }).parse(await unknown.json()).detail, /^after names no-such-session/);
 });
 
+test("a cold session list page of 50 on a tenant of 1400 sessions stays inside the budget and returns each session's last turn image and prebuild layer", {
+  timeout: 900_000,
+}, async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const claimed = await world.startSession({ prompt: "boot the copied session", tags: ["crew:copied"] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const sql = world.tenantSql();
+  const copy = (table: string, key: string, from: string, replace: Record<string, string>) => {
+    const columns = z
+      .array(z.object({ name: z.string() }))
+      .parse(sql.exec(`SELECT name FROM pragma_table_info('${table}')`).toArray())
+      .map(({ name }) => name);
+    sql.exec(
+      `INSERT INTO ${table} (${columns.join(", ")}) SELECT ${columns.map((name) => (replace[name] === undefined ? name : "?")).join(", ")} FROM ${table} WHERE ${key} = ?`,
+      ...columns.flatMap((name) => replace[name] ?? []),
+      from,
+    );
+  };
+  const fullDigest = "f".repeat(64);
+  const copies: { sessionId: string; image: "Full" | "Layered" | "None"; layered: boolean }[] = [];
+  for (let at = 0; at < 1399; at++) {
+    const sessionId = crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+    copy("sessions", "session_id", claimed.sessionId, { session_id: sessionId });
+    sql.exec("UPDATE sessions SET created_at = created_at + ? WHERE session_id = ?", at + 1, sessionId);
+    copy("session_tags", "session_id", claimed.sessionId, { session_id: sessionId });
+    copy("session_layer_absences", "session_id", claimed.sessionId, { session_id: sessionId });
+    copy("turns", "turn_id", offer.turnId, { turn_id: turnId, session_id: sessionId });
+    copy("turn_layered_images", "turn_id", offer.turnId, { turn_id: turnId });
+    const image = at % 5 === 4 ? "None" : at % 2 === 1 ? "Full" : "Layered";
+    if (image !== "Layered") sql.exec("DELETE FROM turn_layered_images WHERE turn_id = ?", turnId);
+    if (image === "Full") {
+      sql.exec(
+        "INSERT INTO turn_full_images (turn_id, guest_image_digest, created_at) VALUES (?, ?, ?)",
+        turnId,
+        fullDigest,
+        Date.now(),
+      );
+    }
+    const layered = at % 3 !== 2;
+    if (!layered) sql.exec("DELETE FROM session_layer_absences WHERE session_id = ?", sessionId);
+    copies.push({ sessionId, image, layered });
+  }
+  const read = async (path: string) => {
+    const answer = await world.fetch(world.owner, "GET", path);
+    assert.equal(answer.status, 200, path);
+    return answer.json();
+  };
+  const original = SessionSchema.parse(await read(`/v1/sessions/${claimed.sessionId}`));
+  assert.equal(original.lastTurnImage?.kind, "Layered");
+  assert.equal(original.prebuildLayer?.layer === "None" && original.prebuildLayer.reason, "NoPrebuild");
+  const expected = new Map([
+    [claimed.sessionId, { lastTurnImage: original.lastTurnImage, prebuildLayer: original.prebuildLayer }],
+    ...copies.map(
+      ({ sessionId, image, layered }) =>
+        [
+          sessionId,
+          {
+            lastTurnImage: {
+              Full: { kind: "Full", guestImageDigest: fullDigest },
+              Layered: original.lastTurnImage,
+              None: undefined,
+            }[image],
+            prebuildLayer: layered ? original.prebuildLayer : undefined,
+          },
+        ] as const,
+    ),
+  ]);
+  const ordered = [...expected.keys()];
+
+  const ms = await world.coldMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } });
+  const page = SessionSchema.array().parse(await read("/v1/sessions?limit=50"));
+  console.log(`a cold page of 50 of 1400 sessions took ${ms.toFixed(2)} ms`);
+  assert.deepEqual(
+    page.map(({ sessionId }) => sessionId),
+    ordered.slice(0, 50),
+  );
+  assert.deepEqual(
+    page.map(({ sessionId, lastTurnImage, prebuildLayer, tags }) => ({
+      sessionId,
+      lastTurnImage,
+      prebuildLayer,
+      tags,
+    })),
+    ordered.slice(0, 50).map((sessionId) => ({ sessionId, ...expected.get(sessionId), tags: ["crew:copied"] })),
+  );
+  for (const session of page)
+    assert.deepEqual(session, SessionSchema.parse(await read(`/v1/sessions/${session.sessionId}`)));
+  assert.ok(ms <= BUDGET_MS, `a cold page of 50 of 1400 sessions took ${ms.toFixed(2)} ms`);
+});
+
 const DESTRUCTIVE = /^(delete|archive|forget|revoke|remove|stop|cancel|clear|purge|disconnect|restore)/;
 
 type Result = { label: string; ms: number };
@@ -395,4 +498,51 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
   const over = results.filter(({ ms }) => ms > BUDGET_MS).map(({ label, ms }) => `${label}: ${ms.toFixed(2)} ms`);
   assert.deepEqual(over, [], `actions over ${BUDGET_MS} ms of compute`);
   assert.deepEqual(broken, [], `actions the test could not run:\n${broken.join("\n")}`);
+});
+test("every cleanup step, the delete step too, stays within the budget beside 20 open uploads, one naming 16384 packs, on a restarted tenant", {
+  timeout: 300_000,
+}, async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const sessions: string[] = [];
+  for (const name of ["live", "archived"]) {
+    const session = await world.startSession({ prompt: `build the ${name} tree`, tags: [] });
+    const offer = host.takeOffer();
+    await host.claims(offer);
+    await host.completes(offer);
+    await storesTree(world, host, session.sessionId, tree(DIGESTS_PER_PART));
+    sessions.push(session.sessionId);
+  }
+  const [live = "", archived = ""] = sessions;
+  const largest = Array.from({ length: 16_384 }, (_, at) => sha256(`open pack ${at}`));
+  const orphan = `${TENANT_ID}/packs/${sha256("orphan beside open uploads")}`;
+  await world.store.put(orphan, "pack");
+  await world.store.put(`${TENANT_ID}/packs/${largest[0]}`, "pack");
+  await world.tick(61 * 60_000);
+  for (let at = 0; at < 20; at++) {
+    const storageKey = `${TENANT_ID}/snapshots/open-${at}`;
+    world
+      .tenantSql()
+      .exec(
+        "INSERT INTO snapshot_requests (snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key, created_at) SELECT ?, session_id, box_id, turn_id, ?, ?, ? FROM snapshots WHERE storage_key = ?",
+        `open-${at}`,
+        at + 100,
+        storageKey,
+        Date.now(),
+        storageKeyOf(world, live),
+      );
+    const packs = at === 0 ? largest : Array.from({ length: 300 }, (_, pack) => sha256(`open ${at} pack ${pack}`));
+    await world.store.put(`${storageKey}.draft`, JSON.stringify({ lastPart: 1, packs, reused: [] }));
+  }
+  await world.call("archiveSession", { tenantId: TENANT_ID, sessionId: archived, now: Date.now() });
+  await world.tick(10 * 60_000);
+  await world.restartTenant();
+
+  const steps: number[] = [];
+  for (let ms = await world.alarmStep(); ms !== null; ms = await world.alarmStep()) steps.push(ms);
+  console.log(`cleanup beside 20 open uploads: ${steps.map((ms) => ms.toFixed(2)).join(", ")} ms`);
+  assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
+  assert.equal(await world.store.head(orphan), null, "the old orphan goes");
+  assert.notEqual(await world.store.head(`${TENANT_ID}/packs/${largest[0]}`), null, "an open upload's old pack stays");
 });

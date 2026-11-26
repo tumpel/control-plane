@@ -1,11 +1,13 @@
 import { sql as query } from "drizzle-orm";
 import { durableDb } from "./db/client.ts";
-import { PackListSchema, packList, packListKey, snapshotDraft } from "./snapshot-manifests.ts";
+import { draftKey, PackListSchema, packList, packListKey, parsedDraft, snapshotDraft } from "./snapshot-manifests.ts";
 
 export const CLEANUP_DELAY_MS = 10 * 60_000;
 export const PACK_GRACE_MS = 60 * 60_000;
 const MARK_BYTES = 1024 * 1024;
 const MARK_INPUTS = 100;
+const DRAFT_BYTES = 4 * 1024 * 1024;
+const LOCKED_DRAFT_BYTES = 256 * 1024;
 const SWEEP_PAGE = 1000;
 const PACK_LIST_ENTRY_BYTES = 67;
 
@@ -19,7 +21,11 @@ type Run = {
   marked: Set<string>;
   after: string | undefined;
   again: boolean;
+  draftEtags: Map<string, string>;
+  unmarkedDrafts: string[] | null;
 };
+
+type ChangedDraft = { storageKey: string; draft: R2ObjectBody };
 
 const inputs = (storage: DurableObjectStorage): Input[] =>
   durableDb(storage, {}).all<Input>(query`SELECT snapshot_id, storage_key, 1 AS stored FROM snapshots
@@ -53,6 +59,28 @@ const mark = async (
   return listed.size;
 };
 
+const openRequests = (storage: DurableObjectStorage): string[] =>
+  durableDb(storage, {})
+    .all<{ storage_key: string }>(query`SELECT storage_key FROM snapshot_requests`)
+    .map((request) => request.storage_key);
+
+const changedDraft = async (
+  store: R2Bucket,
+  etags: Map<string, string>,
+  storageKey: string,
+): Promise<ChangedDraft | null> => {
+  const etag = etags.get(storageKey);
+  const draft = await store.get(draftKey(storageKey), { onlyIf: etag === undefined ? {} : { etagDoesNotMatch: etag } });
+  if (draft === null || !("body" in draft)) return null;
+  return { storageKey, draft };
+};
+
+const markDraft = async (run: Run, changed: ChangedDraft): Promise<void> => {
+  for (const packDigest of parsedDraft(changed.storageKey, await changed.draft.text()).packs)
+    run.marked.add(packDigest);
+  run.draftEtags.set(changed.storageKey, changed.draft.etag);
+};
+
 export class PackCleanup {
   private run: Run | null = null;
 
@@ -73,6 +101,8 @@ export class PackCleanup {
         marked: new Set(),
         after: undefined,
         again: false,
+        draftEtags: new Map(),
+        unmarkedDrafts: null,
       };
       return ctx.storage.setAlarm(now);
     }
@@ -84,25 +114,43 @@ export class PackCleanup {
       }
       return ctx.storage.setAlarm(now);
     }
+    run.unmarkedDrafts ??= openRequests(ctx.storage);
+    if (run.unmarkedDrafts.length > 0) {
+      for (let read = 0; read < DRAFT_BYTES; ) {
+        const storageKey = run.unmarkedDrafts.pop();
+        if (storageKey === undefined) break;
+        const changed = await changedDraft(store, run.draftEtags, storageKey);
+        if (changed === null) continue;
+        read += changed.draft.size;
+        await markDraft(run, changed);
+      }
+      return ctx.storage.setAlarm(now);
+    }
     const prefix = `${tenantId}/packs/`;
     const listed = await store.list({ prefix, startAfter: run.after, limit: SWEEP_PAGE });
-    await ctx.blockConcurrencyWhile(async () => {
+    const swept = await ctx.blockConcurrencyWhile(async () => {
       for (const input of inputs(ctx.storage)) {
         if (run.known.has(input.snapshot_id)) continue;
         await mark(ctx.storage, store, run.marked, input);
         run.known.add(input.snapshot_id);
       }
-      const open = durableDb(ctx.storage, {}).all<{ storage_key: string }>(
-        query`SELECT storage_key FROM snapshot_requests`,
-      );
-      const drafts = await Promise.all(open.map((request) => snapshotDraft(store, request.storage_key)));
-      for (const draft of drafts) for (const packDigest of draft?.packs ?? []) run.marked.add(packDigest);
+      const changed = (
+        await Promise.all(openRequests(ctx.storage).map((key) => changedDraft(store, run.draftEtags, key)))
+      ).filter((draft) => draft !== null);
+      if (changed.reduce((bytes, { draft }) => bytes + draft.size, 0) > LOCKED_DRAFT_BYTES) {
+        run.unmarkedDrafts = changed.map(({ storageKey }) => storageKey);
+        return false;
+      }
+      for (const draft of changed) await markDraft(run, draft);
       const doomed = listed.objects
         .filter((object) => object.uploaded.getTime() < run.startedAt - PACK_GRACE_MS)
         .filter((object) => !run.marked.has(object.key.slice(prefix.length)))
         .map((object) => object.key);
       if (doomed.length > 0) await store.delete(doomed);
+      return true;
     });
+    if (!swept) return ctx.storage.setAlarm(now);
+    run.unmarkedDrafts = null;
     run.after = listed.objects.at(-1)?.key ?? run.after;
     if (listed.truncated) return ctx.storage.setAlarm(now);
     this.run = null;

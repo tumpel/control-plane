@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
@@ -689,19 +689,28 @@ export class RateLimiter {
   }
 }
 
+type Stored = { body: Uint8Array; uploaded: Date; etag: string };
+
 class R2Object {
   readonly key: string;
   readonly uploaded: Date;
+  readonly size: number;
+  readonly etag: string;
+
+  constructor(key: string, stored: Stored) {
+    this.key = key;
+    this.uploaded = stored.uploaded;
+    this.size = stored.body.byteLength;
+    this.etag = stored.etag;
+  }
+}
+
+class R2ObjectBody extends R2Object {
   private readonly bytes: Uint8Array;
 
-  constructor(key: string, bytes: Uint8Array, uploaded: Date) {
-    this.key = key;
+  constructor(key: string, stored: Stored, bytes: Uint8Array) {
+    super(key, stored);
     this.bytes = bytes;
-    this.uploaded = uploaded;
-  }
-
-  get size(): number {
-    return this.bytes.byteLength;
   }
 
   get body(): ReadableStream<Uint8Array> {
@@ -732,7 +741,7 @@ class R2Object {
 }
 
 export class R2Bucket {
-  private readonly objects = new Map<string, { body: Uint8Array; uploaded: Date }>();
+  private readonly objects = new Map<string, Stored>();
   gets = 0;
   latencyMs = 0;
   failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
@@ -743,21 +752,31 @@ export class R2Bucket {
 
   private async store(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
-    const uploaded = new Date(Date.now());
-    this.objects.set(key, { body, uploaded });
-    return new R2Object(key, body, uploaded);
+    const stored = { body, uploaded: new Date(Date.now()), etag: createHash("md5").update(body).digest("hex") };
+    this.objects.set(key, stored);
+    return new R2Object(key, stored);
   }
 
-  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2Object | null> {
+  get(
+    key: string,
+    options: { range?: { offset: number; length: number }; onlyIf: { etagDoesNotMatch?: string } },
+  ): Promise<R2ObjectBody | R2Object | null>;
+  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2ObjectBody | null>;
+  get(
+    key: string,
+    options?: { range?: { offset: number; length: number }; onlyIf?: { etagDoesNotMatch?: string } },
+  ): Promise<R2ObjectBody | R2Object | null> {
     return awaitingIo(async () => {
       await this.travels();
       this.gets += 1;
       this.fails("get", key);
+      const stored = this.objects.get(key);
+      if (stored !== undefined && stored.etag === options?.onlyIf?.etagDoesNotMatch) return new R2Object(key, stored);
       return this.read(key, options?.range);
     });
   }
 
-  head(key: string): Promise<R2Object | null> {
+  head(key: string): Promise<R2ObjectBody | null> {
     return awaitingIo(async () => {
       this.fails("head", key);
       return this.read(key, undefined);
@@ -769,11 +788,11 @@ export class R2Bucket {
     while (performance.now() < arrives) await new Promise((resolve) => setImmediate(resolve));
   }
 
-  private read(key: string, range: { offset: number; length: number } | undefined): R2Object | null {
+  private read(key: string, range: { offset: number; length: number } | undefined): R2ObjectBody | null {
     const object = this.objects.get(key);
     if (object === undefined) return null;
-    if (range === undefined) return new R2Object(key, object.body, object.uploaded);
-    return new R2Object(key, object.body.subarray(range.offset, range.offset + range.length), object.uploaded);
+    if (range === undefined) return new R2ObjectBody(key, object, object.body);
+    return new R2ObjectBody(key, object, object.body.subarray(range.offset, range.offset + range.length));
   }
 
   private fails(operation: "get" | "head" | "delete", key: string): void {
@@ -792,7 +811,9 @@ export class R2Bucket {
     cursor?: string;
     startAfter?: string;
     limit?: number;
-  }): Promise<{ objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false }> {
+  }): Promise<
+    { objects: R2ObjectBody[]; truncated: true; cursor: string } | { objects: R2ObjectBody[]; truncated: false }
+  > {
     return awaitingIo(async () => this.listed(options));
   }
 
@@ -801,7 +822,7 @@ export class R2Bucket {
     cursor?: string;
     startAfter?: string;
     limit?: number;
-  }): { objects: R2Object[]; truncated: true; cursor: string } | { objects: R2Object[]; truncated: false } {
+  }): { objects: R2ObjectBody[]; truncated: true; cursor: string } | { objects: R2ObjectBody[]; truncated: false } {
     const prefix = options?.prefix ?? "";
     const after = options?.cursor ?? options?.startAfter ?? "";
     const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && key > after).sort();

@@ -155,12 +155,16 @@ export const mergedDraft = (
   };
 };
 
+export const parsedDraft = (storageKey: string, text: string): SnapshotDraft => {
+  const parsed = SnapshotDraftSchema.safeParse(parsedJson(text));
+  if (!parsed.success) throw new Error(`the pack draft of ${storageKey} does not parse: ${issues(parsed.error)}`);
+  return parsed.data;
+};
+
 export const snapshotDraft = async (store: R2Bucket, storageKey: string): Promise<SnapshotDraft | null> => {
   const draft = await store.get(draftKey(storageKey));
   if (draft === null) return null;
-  const parsed = SnapshotDraftSchema.safeParse(parsedJson(await draft.text()));
-  if (!parsed.success) throw new Error(`the pack draft of ${storageKey} does not parse: ${issues(parsed.error)}`);
-  return parsed.data;
+  return parsedDraft(storageKey, await draft.text());
 };
 
 const parsedJson = (text: string): unknown => {
