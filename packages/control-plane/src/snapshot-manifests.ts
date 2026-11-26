@@ -9,7 +9,7 @@ export type ManifestRead<T> =
   | { kind: "Gone"; detail: string }
   | { kind: "Unreadable"; detail: string };
 
-const PackListSchema = z.array(z.string());
+export const PackListSchema = z.array(z.string());
 const EntrySchema = SnapshotManifestSchema.shape.entries.element;
 const ENTRY_FIELDS = ["kind", "path", "mode", "uid", "gid", "mtimeSeconds", "mtimeNanos", "sizeBytes", "target"];
 const LIVE_PAGE = 100;
@@ -351,7 +351,7 @@ export class LivePacks {
         if (gone !== undefined) return gone;
         const unproven = sorted.filter((packDigest) => {
           const hold = held.get(packDigest);
-          return hold !== undefined && !hold.uploaded && hold.count === state.counts.get(packDigest);
+          return hold !== undefined && hold.count === state.counts.get(packDigest);
         });
         const found = await Promise.all(unproven.map((packDigest) => store.head(packKey(tenantId, packDigest))));
         const missing = unproven.find((_, at) => found[at] === null);

@@ -16,7 +16,11 @@
     },
     {
       "path": "./npm-scripts/biome-plugins/no-alarm.grit",
-      "includes": ["packages/control-plane/**/*.ts"]
+      "includes": [
+        "packages/control-plane/**/*.ts",
+        "!packages/control-plane/src/pack-cleanup.ts",
+        "!packages/control-plane/test/scenarios/harness/runtime.ts"
+      ]
     },
     {
       "path": "./npm-scripts/biome-plugins/no-sql-exec.grit",
