@@ -213,7 +213,6 @@ export type Sent =
 
 type SendRefusal = Exclude<Sent, { kind: "Sent" }>;
 
-/** Runs first in the transaction that commits a send; a refusal it answers commits no turn. */
 export type Claim = () => SendRefusal | null;
 
 type Steer = z.infer<typeof SteerSchema>;

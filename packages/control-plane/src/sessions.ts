@@ -43,7 +43,6 @@ import {
   type CredentialHandover,
   type NewSession,
   SESSION_TAG_LIMIT,
-  type Sent,
   type Session,
   type SessionFilter,
   type SessionStart,
