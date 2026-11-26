@@ -113,11 +113,9 @@ import { presenceGraceMs, settingsOf, turnCredentialSeconds } from "./settings";
 import {
   draftKey,
   LivePacks,
-  type ManifestRead,
   mergedDraft,
   packKey,
   packListKey,
-  type SnapshotIndex,
   SnapshotManifests,
   STORE_DELETE_BATCH,
   snapshotDraft,
@@ -2577,7 +2575,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
   private releaseSnapshots(snapshots: { snapshot_id: string; storage_key: string }[]): void {
     for (const snapshot of snapshots) {
       this.ctx.storage.sql.exec("DELETE FROM snapshots WHERE snapshot_id = ?", snapshot.snapshot_id);
-      this.manifests.forget(snapshot.storage_key);
     }
   }
 
@@ -3334,7 +3331,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
   ): Promise<HostReply | null> {
     if (message.type === "SnapshotChunks") return this.snapshotChunks(tenantId, hostId, message);
     if (message.type === "SnapshotPacks") return this.snapshotPacks(tenantId, hostId, message);
-    if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, hostId, message);
+    if (message.type === "RestoreChunks") return this.restoreChunks(tenantId, message);
     if ((message.type === "TurnComplete" || message.type === "TurnFailed") && message.credentialFile !== undefined) {
       const offered = this.offeredTurn(hostId, message);
       if (offered.type === "Refused") return offered;
@@ -3384,28 +3381,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private uploadSecondsLeft(createdAt: number, now: number): number {
     return Math.floor((this.uploadExpiresAt(createdAt) - now) / 1000);
-  }
-
-  private async restorableIndex(tenantId: string, sessionId: string): Promise<ManifestRead<SnapshotIndex> | null> {
-    const sql = this.ctx.storage.sql;
-    const [restorable] = [
-      ...sql
-        .exec<{ storage_key: string }>(
-          "SELECT storage_key FROM snapshots WHERE session_id = ? ORDER BY snapshot_seq DESC LIMIT 1",
-          sessionId,
-        )
-        .toArray(),
-      ...sql
-        .exec<{ storage_key: string }>(
-          `SELECT snapshots.storage_key FROM session_prebuild_layers JOIN prebuild_sessions USING (prebuild_id)
-          JOIN snapshots ON snapshots.session_id = prebuild_sessions.session_id
-          WHERE session_prebuild_layers.session_id = ? ORDER BY snapshots.snapshot_seq DESC LIMIT 1`,
-          sessionId,
-        )
-        .toArray(),
-    ];
-    if (restorable === undefined) return null;
-    return this.manifests.index(this.env.STORE, tenantId, restorable.storage_key);
   }
 
   private snapshotChunks(
@@ -3481,29 +3456,10 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private async restoreChunks(
     tenantId: string,
-    hostId: string,
     message: Extract<ChunkAsk, { type: "RestoreChunks" }>,
   ): Promise<ChunkReply | Refused> {
-    const turn = this.turnRow(message.turnId);
-    const session = turn === null ? null : this.sessionRow(turn.session_id);
-    if (turn === null || session === null || turn.host_id !== hostId) {
-      return refused(`host ${hostId} asked for the chunks of turn ${message.turnId}, which is not offered to it`);
-    }
-    if (!IN_FLIGHT.includes(turn.state)) return refused(`turn ${message.turnId} has ended`);
-    const sql = this.ctx.storage.sql;
-    const [offered] = sql
-      .exec<{ offered_at: number | null }>(
-        "SELECT MAX(created_at) AS offered_at FROM credential_handovers WHERE turn_id = ?",
-        message.turnId,
-      )
-      .toArray();
-    if (offered?.offered_at === null || offered?.offered_at === undefined) {
-      return refused(`host ${hostId} asked for the chunks of turn ${message.turnId}, which was never sent to it`);
-    }
     const now = Date.now();
-    const expiresAt = offered.offered_at + turnCredentialSeconds(settingsOf(this.env)) * 1000;
-    const seconds = Math.floor((expiresAt - now) / 1000);
-    if (seconds < 1) return refused(`the download window for turn ${message.turnId} has expired`);
+    const seconds = turnCredentialSeconds(settingsOf(this.env));
     const held = [...new Set(message.chunks.map((chunk) => chunk.packDigest))].sort();
     const heads = await Promise.all(held.map((packDigest) => this.env.STORE.head(packKey(tenantId, packDigest))));
     const packs = held.flatMap((packDigest, at) => {
@@ -3529,7 +3485,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       turnId: message.turnId,
       part: message.part,
       packs: downloads,
-      downloadExpiresAt: iso(expiresAt),
+      downloadExpiresAt: iso(now + seconds * 1000),
     };
   }
 

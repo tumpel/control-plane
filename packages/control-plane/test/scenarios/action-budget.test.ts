@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
+import { turnCredentialSeconds } from "../../src/settings.ts";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
@@ -125,7 +126,6 @@ const RESULT = '{"type":"result","subtype":"success","is_error":false}';
 
 type Placement = { digest: string; packDigest: string; offset: number; length: number };
 
-const OfferedSnapshotsSchema = z.object({ turnId: z.string(), snapshots: z.array(z.object({})) });
 const RestoreReplySchema = z.object({
   reply: z.object({
     type: z.literal("RestoreDownloads"),
@@ -318,7 +318,7 @@ const seeded = async (t: { after(fn: () => void): void }) => {
   return { world, known, host, sessions };
 };
 
-test("a restore of a 200000-chunk snapshot on a restarted tenant answers each part within the budget", {
+test("a host of the tenant gets the restore URLs of a 200000-chunk snapshot with no offered turn or open window, each part within the budget on a restarted tenant", {
   timeout: 900_000,
 }, async (t) => {
   const world = await World.open({ limits: UNMETERED });
@@ -333,10 +333,7 @@ test("a restore of a 200000-chunk snapshot on a restarted tenant answers each pa
   await releasesBoxes(host);
   const lost = chunks.at(-1)?.packDigest ?? "";
   await world.store.delete(`${TENANT_ID}/packs/${lost}`);
-  const { turnId } = await world.sendTurn(session.sessionId, "restore the large tree");
-  const restoring = OfferedSnapshotsSchema.parse(host.take("TurnOffer"));
-  assert.equal(restoring.turnId, turnId);
-  assert.equal(restoring.snapshots.length, 1);
+  await world.tick(turnCredentialSeconds(world.settings) * 1000);
   await world.restartTenant();
 
   const asked = [[root], ...partsOf(chunks)];
@@ -345,7 +342,7 @@ test("a restore of a 200000-chunk snapshot on a restarted tenant answers each pa
     const input = {
       tenantId: TENANT_ID,
       hostId: host.hostId,
-      message: { type: "RestoreChunks", turnId, part: at + 1, chunks: part },
+      message: { type: "RestoreChunks", turnId: offer.turnId, part: at + 1, chunks: part },
     };
     spent.push(await world.computeMs("hostMessage", input));
     const { reply } = RestoreReplySchema.parse(await world.call("hostMessage", input));

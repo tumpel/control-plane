@@ -11,34 +11,18 @@ import {
   PackUploadsSchema,
   type Placement,
   parts,
-  sha256,
   snapshotAsked,
   TENANT_ID,
   tree,
   uploadsChunks,
 } from "./harness/snapshot-chunks.ts";
-import { type Host, UNMETERED, World } from "./harness/world.ts";
+import type { Host, World } from "./harness/world.ts";
 
 const LARGE = 100_000;
 const ROWS_PER_STORED_SNAPSHOT = 20;
 const ROWS_PER_FORK = 21;
 const CONCURRENT_SESSIONS = 4;
 const CONCURRENT_CHUNKS = 20_000;
-const LARGEST_RESTORABLE = 500_000;
-
-type ManifestsModule = {
-  MAX_INDEX_BYTES: number;
-  SnapshotManifests: new () => {
-    index(
-      store: R2Bucket,
-      tenantId: string,
-      storageKey: string,
-    ): Promise<
-      | { kind: "Read"; value: { bytes: number; find(digest: string): Placement | undefined } }
-      | { kind: "Gone" | "Unreadable"; detail: string }
-    >;
-  };
-};
 
 const RestoreDownloadsSchema = z.object({
   reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
@@ -398,26 +382,6 @@ test("a snapshot that reuses a pack an unstored snapshot was granted but never p
     );
     assert.match(JSON.stringify(snapshots.at(-1)?.outcome), new RegExp(`reuses pack ${packDigest}`));
   });
-});
-
-test("a manifest of 500000 chunks loads into an index within the memory the control plane holds", async () => {
-  const world = await World.open({ limits: UNMETERED });
-  try {
-    const chunks = tree(LARGEST_RESTORABLE, "largest");
-    const storageKey = `${TENANT_ID}/session/snapshots/largest`;
-    await putsRoot(world.store, storageKey, chunks, 0);
-    const { MAX_INDEX_BYTES, SnapshotManifests }: ManifestsModule = await import(
-      new URL("../../src/snapshot-manifests.ts", import.meta.url).href
-    );
-    const read = await new SnapshotManifests().index(world.store, TENANT_ID, storageKey);
-    assert.equal(read.kind, "Read", read.kind === "Read" ? "" : read.detail);
-    if (read.kind !== "Read") return;
-    assert.ok(read.value.bytes <= MAX_INDEX_BYTES, `the index takes ${read.value.bytes} bytes`);
-    const last = chunks.at(-1);
-    assert.deepEqual(last === undefined ? undefined : { ...read.value.find(last.digest) }, last);
-  } finally {
-    await world.close();
-  }
 });
 
 test("a snapshot whose root places its manifest in a pack no part named is not stored, naming the pack", async () => {

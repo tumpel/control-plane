@@ -12,28 +12,15 @@ export type ManifestRead<T> =
 const PackListSchema = z.array(z.string());
 const EntrySchema = SnapshotManifestSchema.shape.entries.element;
 const ENTRY_FIELDS = ["kind", "path", "mode", "uid", "gid", "mtimeSeconds", "mtimeNanos", "sizeBytes", "target"];
-const DIGEST_BYTES = 32;
-const SMALLEST_PLACEMENT_JSON = '{"digest":"","packDigest":"","offset":0,"length":1}'.length + 4 * DIGEST_BYTES;
-const BYTES_PER_PLACEMENT = DIGEST_BYTES + 8 + 4 + 4 + 4;
-const PACK_NAME_BYTES = 128;
 const LIVE_PAGE = 100;
 export const MAX_PACKS_PER_MANIFEST = 16_384;
 export const STORE_DELETE_BATCH = 1000;
-export const MAX_INDEX_BYTES = 32 * 1024 * 1024;
 
 export const packKey = (tenantId: string, packDigest: string): string => `${tenantId}/packs/${packDigest}`;
 
 export const packListKey = (storageKey: string): string => `${storageKey}.packs`;
 
 export const draftKey = (storageKey: string): string => `${storageKey}.draft`;
-
-const placementsOf = (root: Placement[]): number =>
-  Math.floor(root.reduce((total, placement) => total + placement.length, 0) / SMALLEST_PLACEMENT_JSON) + root.length;
-
-const indexBytesFor = (placements: number): number =>
-  placements * BYTES_PER_PLACEMENT + MAX_PACKS_PER_MANIFEST * PACK_NAME_BYTES;
-
-const indexBytesOf = (root: Placement[]): number => indexBytesFor(placementsOf(root));
 
 const issues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -105,12 +92,6 @@ const parsedJson = (text: string): unknown => {
   }
 };
 
-const remember = <T>(cache: Map<string, T>, key: string, value: T): T => {
-  cache.delete(key);
-  cache.set(key, value);
-  return value;
-};
-
 const ranges = (manifest: Placement[]): { packDigest: string; offset: number; length: number }[] => {
   const merged: { packDigest: string; offset: number; length: number }[] = [];
   for (const placement of manifest) {
@@ -124,14 +105,6 @@ const ranges = (manifest: Placement[]): { packDigest: string; offset: number; le
   return merged;
 };
 
-const nibble = (code: number): number => (code <= 57 ? code - 48 : code - 87);
-
-const hexInto = (hex: string, into: Uint8Array, at: number): void => {
-  for (let byte = 0; byte < DIGEST_BYTES; byte++) {
-    into[at + byte] = (nibble(hex.charCodeAt(byte * 2)) << 4) | nibble(hex.charCodeAt(byte * 2 + 1));
-  }
-};
-
 type PlacementSink = { add(placement: Placement): string | undefined };
 
 class PackSink implements PlacementSink {
@@ -139,148 +112,6 @@ class PackSink implements PlacementSink {
 
   add(placement: Placement): undefined {
     this.packs.add(placement.packDigest);
-  }
-}
-
-class IndexSink implements PlacementSink {
-  private readonly digests: Uint8Array;
-  private readonly offsets: Float64Array;
-  private readonly lengths: Uint32Array;
-  private readonly packOf: Uint32Array;
-  private readonly packAt = new Map<string, number>();
-  private count = 0;
-
-  constructor(capacity: number) {
-    this.digests = new Uint8Array(capacity * DIGEST_BYTES);
-    this.offsets = new Float64Array(capacity);
-    this.lengths = new Uint32Array(capacity);
-    this.packOf = new Uint32Array(capacity);
-  }
-
-  add(placement: Placement): string | undefined {
-    if (this.count === this.offsets.length) {
-      return `more chunk placements than ${this.offsets.length}, the most its byte size can hold`;
-    }
-    const pack = this.packAt.get(placement.packDigest) ?? this.packAt.size;
-    if (pack === MAX_PACKS_PER_MANIFEST) return `chunks in more than ${MAX_PACKS_PER_MANIFEST} packs`;
-    this.packAt.set(placement.packDigest, pack);
-    hexInto(placement.digest, this.digests, this.count * DIGEST_BYTES);
-    this.offsets[this.count] = placement.offset;
-    this.lengths[this.count] = placement.length;
-    this.packOf[this.count] = pack;
-    this.count += 1;
-    return undefined;
-  }
-
-  index(): SnapshotIndex {
-    return SnapshotIndex.of(this.digests, [...this.packAt.keys()], this.packOf, this.offsets, this.lengths, this.count);
-  }
-}
-
-export class SnapshotIndex {
-  private readonly digests: Uint8Array;
-  private readonly packs: string[];
-  private readonly packOf: Uint32Array;
-  private readonly offsets: Float64Array;
-  private readonly lengths: Uint32Array;
-  private readonly order: Uint32Array;
-
-  private constructor(
-    digests: Uint8Array,
-    packs: string[],
-    packOf: Uint32Array,
-    offsets: Float64Array,
-    lengths: Uint32Array,
-    order: Uint32Array,
-  ) {
-    this.digests = digests;
-    this.packs = packs;
-    this.packOf = packOf;
-    this.offsets = offsets;
-    this.lengths = lengths;
-    this.order = order;
-  }
-
-  static of(
-    digests: Uint8Array,
-    packs: string[],
-    packOf: Uint32Array,
-    offsets: Float64Array,
-    lengths: Uint32Array,
-    count: number,
-  ): SnapshotIndex {
-    const order = new Uint32Array(count);
-    for (let slot = 0; slot < count; slot++) order[slot] = slot;
-    order.sort((left, right) => SnapshotIndex.compare(digests, left, digests, right * DIGEST_BYTES) || left - right);
-    return new SnapshotIndex(digests, packs, packOf, offsets, lengths, order);
-  }
-
-  private static compare(digests: Uint8Array, slot: number, other: Uint8Array, at: number): number {
-    const start = slot * DIGEST_BYTES;
-    for (let byte = 0; byte < DIGEST_BYTES; byte++) {
-      const difference = (digests[start + byte] as number) - (other[at + byte] as number);
-      if (difference !== 0) return difference;
-    }
-    return 0;
-  }
-
-  get bytes(): number {
-    return (
-      this.digests.byteLength +
-      this.packOf.byteLength +
-      this.offsets.byteLength +
-      this.lengths.byteLength +
-      this.order.byteLength +
-      this.packs.length * PACK_NAME_BYTES
-    );
-  }
-
-  find(digest: string): Placement | undefined {
-    const at = this.first(digest);
-    return at === undefined ? undefined : this.placement(this.order[at] as number, digest);
-  }
-
-  holds(placement: Placement): boolean {
-    const wanted = new Uint8Array(DIGEST_BYTES);
-    hexInto(placement.digest, wanted, 0);
-    const first = this.first(placement.digest);
-    if (first === undefined) return false;
-    for (let at = first; at < this.order.length; at++) {
-      const slot = this.order[at] as number;
-      if (SnapshotIndex.compare(this.digests, slot, wanted, 0) !== 0) return false;
-      if (
-        this.packs[this.packOf[slot] as number] === placement.packDigest &&
-        this.offsets[slot] === placement.offset &&
-        this.lengths[slot] === placement.length
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private placement(slot: number, digest: string): Placement {
-    return {
-      digest,
-      packDigest: this.packs[this.packOf[slot] as number] as string,
-      offset: this.offsets[slot] as number,
-      length: this.lengths[slot] as number,
-    };
-  }
-
-  private first(digest: string): number | undefined {
-    if (!/^[0-9a-f]{64}$/.test(digest)) return undefined;
-    const wanted = new Uint8Array(DIGEST_BYTES);
-    hexInto(digest, wanted, 0);
-    let low = 0;
-    let high = this.order.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (SnapshotIndex.compare(this.digests, this.order[middle] as number, wanted, 0) < 0) low = middle + 1;
-      else high = middle;
-    }
-    if (low >= this.order.length) return undefined;
-    return SnapshotIndex.compare(this.digests, this.order[low] as number, wanted, 0) === 0 ? low : undefined;
   }
 }
 
@@ -340,21 +171,7 @@ class ManifestStream {
 }
 
 export class SnapshotManifests {
-  private readonly indexes = new Map<string, SnapshotIndex>();
-  private readonly loading = new Map<string, Promise<ManifestRead<SnapshotIndex>>>();
   private parsing: Promise<unknown> = Promise.resolve();
-
-  async index(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<SnapshotIndex>> {
-    const held = this.indexes.get(storageKey);
-    if (held !== undefined) return { kind: "Read", value: remember(this.indexes, storageKey, held) };
-    const loading = this.loading.get(storageKey);
-    if (loading !== undefined) return loading;
-    const load = this.oneAtATime(() => this.load(store, tenantId, storageKey)).finally(() =>
-      this.loading.delete(storageKey),
-    );
-    this.loading.set(storageKey, load);
-    return load;
-  }
 
   async packs(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<ReadonlySet<string>>> {
     const listed = await packList(store, storageKey);
@@ -362,11 +179,6 @@ export class SnapshotManifests {
     const read = await this.oneAtATime(async (): Promise<ManifestRead<ReadonlySet<string>>> => {
       const root = await this.root(store, storageKey);
       if (root.kind !== "Read") return root;
-      if (indexBytesOf(root.value) > MAX_INDEX_BYTES) {
-        console.error(
-          `snapshot ${storageKey} has a manifest whose index would pass the ${MAX_INDEX_BYTES} bytes the control plane holds, so no restore or dedup can use it; retention keeps the packs it names`,
-        );
-      }
       const sink = new PackSink();
       const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
       if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
@@ -377,10 +189,6 @@ export class SnapshotManifests {
     return read;
   }
 
-  forget(storageKey: string): void {
-    this.indexes.delete(storageKey);
-  }
-
   private oneAtATime<T>(run: () => Promise<T>): Promise<T> {
     const turn = this.parsing.then(run);
     this.parsing = turn.then(
@@ -388,28 +196,6 @@ export class SnapshotManifests {
       () => undefined,
     );
     return turn;
-  }
-
-  private async load(store: R2Bucket, tenantId: string, storageKey: string): Promise<ManifestRead<SnapshotIndex>> {
-    const root = await this.root(store, storageKey);
-    if (root.kind !== "Read") return root;
-    const needed = indexBytesOf(root.value);
-    if (needed > MAX_INDEX_BYTES) {
-      return {
-        kind: "Unreadable",
-        detail: `the manifest of ${storageKey} would need an index of ${needed} bytes, above the ${MAX_INDEX_BYTES} bytes the control plane holds`,
-      };
-    }
-    let cached = [...this.indexes.values()].reduce((total, index) => total + index.bytes, 0);
-    for (const [key, index] of this.indexes) {
-      if (cached + needed <= MAX_INDEX_BYTES) break;
-      this.indexes.delete(key);
-      cached -= index.bytes;
-    }
-    const sink = new IndexSink(placementsOf(root.value));
-    const streamed = await this.stream(store, tenantId, storageKey, root.value, sink);
-    if (streamed !== undefined) return { kind: "Unreadable", detail: streamed };
-    return { kind: "Read", value: remember(this.indexes, storageKey, sink.index()) };
   }
 
   private async root(store: R2Bucket, storageKey: string): Promise<ManifestRead<Placement[]>> {
