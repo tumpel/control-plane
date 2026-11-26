@@ -29,7 +29,7 @@ import {
   pinnedEntry,
 } from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHostRecords, type Outcome } from "./hosts.ts";
-import { issues, json, noContent, parseBody, problem, type Refused, refuse } from "./http.ts";
+import { issues, json, noContent, type Parsed, parseBody, problem, type Refused, refuse } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
@@ -601,13 +601,12 @@ export const getSession = async (env: Env, caller: Caller, sessionId: string): P
 };
 
 export const listSessions = async (env: Env, caller: Caller, query: SessionListQuery): Promise<Outcome<Session[]>> => {
-  const filter: SessionFilter = {};
+  const filter: SessionFilter = { limit: query.limit };
   if (query.state !== undefined) filter.state = query.state;
   if (query.hostId !== undefined) filter.hostId = query.hostId;
   if (query.lastTurnBefore !== undefined) filter.lastTurnBefore = Date.parse(query.lastTurnBefore);
   if (query.tag !== undefined) filter.tags = query.tag;
   if (query.triggerId !== undefined) filter.triggerId = query.triggerId;
-  if (query.limit !== undefined) filter.limit = query.limit;
   if (query.after !== undefined) filter.after = query.after;
   const { sessions } = await tenantOf(env, caller).call("listSessions", { tenantId: caller.tenantId, filter });
   if (sessions !== null) return ok(sessions);
@@ -619,9 +618,29 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
   });
 };
 
-export const unpaged = (sessions: Session[] | null): Session[] => {
-  if (sessions === null) throw new Error("an unpaged session list came back null, which only a cursor can produce");
-  return sessions;
+const SESSION_PAGE = 50;
+
+export const everySession = async (env: Env, tenantId: string, operation: string): Promise<Parsed<Session[]>> => {
+  const tenant = tenantApi(env.TENANT, tenantId);
+  const sessions: Session[] = [];
+  for (;;) {
+    const after = sessions.at(-1)?.sessionId;
+    const filter: SessionFilter = after === undefined ? { limit: SESSION_PAGE } : { limit: SESSION_PAGE, after };
+    const { sessions: page } = await tenant.call("listSessions", { tenantId, filter });
+    if (page === null) {
+      return {
+        ok: false,
+        response: problem(409, {
+          code: "Conflict",
+          title: "Session deleted during the read",
+          detail: `${operation} read the sessions page by page, and session ${after} was deleted before the next page`,
+          fix: "Run it again",
+        }),
+      };
+    }
+    sessions.push(...page);
+    if (page.length < SESSION_PAGE) return { ok: true, value: sessions };
+  }
 };
 
 export const refusedGoal = (session: Session, send: TurnSend): Refused | null => {

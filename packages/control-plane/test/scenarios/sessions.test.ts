@@ -562,7 +562,7 @@ test("a start naming a model the harness does not run is refused ModelUnsupporte
     problem.detail,
     /^ClaudeCode does not run model gpt-5-codex with ApiKey ANTHROPIC of .*; it runs opus, .*claude-sonnet-5-5/,
   );
-  assert.deepEqual(await getJson("/v1/sessions", SessionSchema.array()), []);
+  assert.deepEqual(await getJson("/v1/sessions?limit=50", SessionSchema.array()), []);
 });
 
 test("a deploy drain refuses new sessions and turns DeployInProgress and counts each host's running turns until they end", async () => {
@@ -1381,7 +1381,7 @@ suite("sessions", () => {
     );
     const completed = await tool("tumpel_turn_get", { turnId }, TurnSchema);
     const got = await tool("tumpel_session_get", { sessionId }, SessionSchema);
-    const [listed] = (await tool("tumpel_session_list", {}, SessionSchema.array())).filter(
+    const [listed] = (await tool("tumpel_session_list", { limit: 50 }, SessionSchema.array())).filter(
       (session) => session.sessionId === sessionId,
     );
     for (const session of [got, listed]) {
@@ -1457,7 +1457,7 @@ suite("sessions", () => {
       (
         await tool(
           "tumpel_session_list",
-          { lastTurnBefore: new Date(lastTurnBefore).toISOString() },
+          { lastTurnBefore: new Date(lastTurnBefore).toISOString(), limit: 50 },
           SessionSchema.array(),
         )
       ).map((session) => session.sessionId);
@@ -1569,7 +1569,9 @@ suite("sessions", () => {
     assert.deepEqual(started.session.tags, ["b", "crew:a"]);
     assert.deepEqual(started.session.startedBy, { kind: "Person", principalId: started.session.principalId });
     const listed = async (tag: string[]) =>
-      (await tool("tumpel_session_list", { tag }, SessionSchema.array())).map((session) => session.sessionId);
+      (await tool("tumpel_session_list", { tag, limit: 50 }, SessionSchema.array())).map(
+        (session) => session.sessionId,
+      );
     assert.deepEqual(await listed(["crew:a", "b"]), [sessionId]);
     assert.deepEqual(await listed(["crew:a", "x"]), []);
 
@@ -2447,7 +2449,7 @@ suite("sessions", () => {
     const { sessionId: _parent, ...issued } = issue;
     const origin = { kind: "Issue", ...issued };
     assert.deepEqual((await tool("tumpel_session_get", { sessionId }, SessionSchema)).origin, origin);
-    const listed = await getJson("/v1/sessions", SessionSchema.array());
+    const listed = await getJson("/v1/sessions?limit=50", SessionSchema.array());
     assert.deepEqual(
       listed.map((session) => [session.sessionId, session.origin]),
       [[sessionId, origin]],
@@ -3065,7 +3067,7 @@ test("a prebuild runs as a turn on a free host, its snapshot is its layer, and t
     { layerDigest: done.status.layerDigest, layerSizeBytes: done.status.layerSizeBytes },
     { layerDigest: createHash("sha256").update(prebuiltRoot).digest("hex"), layerSizeBytes: 4096 },
   );
-  const listed = await getJson("/v1/sessions", SessionSchema.array());
+  const listed = await getJson("/v1/sessions?limit=50", SessionSchema.array());
   assert.ok(listed.every((session) => session.sessionId !== offer.sessionId));
 
   const next = await postJson(

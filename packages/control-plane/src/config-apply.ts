@@ -36,7 +36,7 @@ import type { Env } from "./index.ts";
 import { ownerRequired } from "./members.ts";
 import { type PersonaFileWrite, type StoredFile, sha256Hex } from "./persona-files.ts";
 import { keyPrefixMismatch, unreadableSecretSet } from "./secret-members.ts";
-import { unpaged } from "./sessions.ts";
+import { everySession } from "./sessions.ts";
 import type { ConfigApplied } from "./tenant.ts";
 import { tenantApi } from "./tenant-api.ts";
 import { dropRoute, projectRoute } from "./trigger-routes.ts";
@@ -292,6 +292,8 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
   if (secretSets.kind === "Unreadable") {
     return { ok: false, response: problem(409, unreadableSecretSet(operation, secretSets)) };
   }
+  const sessions = await everySession(env, tenantId, operation);
+  if (!sessions.ok) return sessions;
   return {
     ok: true,
     value: {
@@ -305,7 +307,7 @@ const readLive = async (env: Env, tenantId: string, operation: string): Promise<
       secretSets: secretSets.secretSets,
       pins: effectiveVersions((await api.call("listPins", {})).pins),
       hosts: await listHostRecords(env, tenantId),
-      sessions: unpaged((await api.call("listSessions", { tenantId, filter: {} })).sessions),
+      sessions: sessions.value,
       triggers: (await api.call("listTriggers", { tenantId })).triggers,
     },
   };
