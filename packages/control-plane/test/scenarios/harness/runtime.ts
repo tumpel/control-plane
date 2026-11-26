@@ -3,13 +3,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
 
-declare module "node:sqlite" {
-  interface DatabaseSync {
-    serialize(): Uint8Array;
-    deserialize(data: Uint8Array): void;
-  }
-}
-
 type Row = Record<string, unknown>;
 
 Object.defineProperty(crypto.subtle, "timingSafeEqual", {
@@ -197,7 +190,21 @@ export class SqlStorage {
   }
 }
 
-export type StorageCopy = { sql: Uint8Array; values: [string, unknown][]; alarmAt: number | null };
+export type StorageCopy = { sql: string; values: [string, unknown][]; alarmAt: number | null };
+
+export const copiedDatabase = (path: string): DatabaseSync => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`ATTACH '${path}' AS seeded`);
+  const schema = db
+    .prepare("SELECT type, name, sql FROM seeded.sqlite_schema WHERE sql IS NOT NULL ORDER BY type = 'table' DESC")
+    .all() as { type: string; name: string; sql: string }[];
+  for (const { type, name, sql } of schema) {
+    if (name !== "sqlite_sequence") db.exec(sql);
+    if (type === "table") db.exec(`INSERT INTO main."${name}" SELECT * FROM seeded."${name}"`);
+  }
+  db.exec("DETACH seeded");
+  return db;
+};
 
 export class Storage {
   readonly sql: SqlStorage;
@@ -205,15 +212,14 @@ export class Storage {
   alarmAt: number | null;
 
   constructor(copy?: StorageCopy) {
-    const db = new DatabaseSync(":memory:");
-    if (copy !== undefined) db.deserialize(copy.sql);
-    this.sql = new SqlStorage(db);
+    this.sql = new SqlStorage(copy === undefined ? new DatabaseSync(":memory:") : copiedDatabase(copy.sql));
     this.values = new Map(copy?.values);
     this.alarmAt = copy?.alarmAt ?? null;
   }
 
-  copy(): StorageCopy {
-    return { sql: this.sql.db.serialize(), values: [...this.values], alarmAt: this.alarmAt };
+  copy(path: string): StorageCopy {
+    this.sql.db.exec(`VACUUM INTO '${path}'`);
+    return { sql: path, values: [...this.values], alarmAt: this.alarmAt };
   }
 
   async getAlarm(): Promise<number | null> {

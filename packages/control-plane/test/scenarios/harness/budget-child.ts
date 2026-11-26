@@ -1,9 +1,8 @@
 import { readFileSync } from "node:fs";
 import { register } from "node:module";
-import { DatabaseSync } from "node:sqlite";
 import { deserialize, setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
-import { budgetClock, cpuMs, D1Database, R2Bucket, Runtime, Storage } from "./runtime.ts";
+import { budgetClock, copiedDatabase, cpuMs, D1Database, R2Bucket, Runtime, Storage } from "./runtime.ts";
 import type { BudgetCase, Seeded } from "./world.ts";
 
 register("./hooks.mjs", import.meta.url);
@@ -18,9 +17,11 @@ const { Tenant } = await import(new URL("tenant.ts", source).href);
 const { tenantApi } = await import(new URL("tenant-api.ts", source).href);
 
 const runtime = new Runtime(seeded.now);
-const db = new DatabaseSync(":memory:");
-db.deserialize(seeded.db);
-const env: Record<string, unknown> = { ...seeded.vars, DB: new D1Database(db), STORE: new R2Bucket(seeded.store) };
+const env: Record<string, unknown> = {
+  ...seeded.vars,
+  DB: new D1Database(copiedDatabase(seeded.db)),
+  STORE: new R2Bucket(seeded.store),
+};
 const tenants = runtime.namespace(Tenant, () => env);
 env.TENANT = tenants;
 const { object, ctx } = tenants.open(seeded.tenantId, new Storage(seeded.tenant));

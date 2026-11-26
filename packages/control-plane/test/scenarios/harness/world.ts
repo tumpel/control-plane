@@ -63,7 +63,7 @@ export type Seeded = {
   tenantId: string;
   tenant: StorageCopy;
   store: ReturnType<R2Bucket["copy"]>;
-  db: Uint8Array;
+  db: string;
   vars: Record<string, unknown>;
 };
 const MIGRATIONS = new URL("../../../migrations/", import.meta.url);
@@ -526,15 +526,18 @@ export class World {
         ([name, value]) => typeof value === "string" || name === "TUMPEL_SETTINGS" || name === "TUMPEL_LIMITS",
       ),
     );
+    const directory = mkdtempSync(join(tmpdir(), "budget-"));
+    const centralPath = join(directory, "central.sqlite");
+    this.db.sql.db.exec(`VACUUM INTO '${centralPath}'`);
     const seeded: Seeded = {
       now: Date.now(),
       tenantId: TENANT_ID,
-      tenant: this.tenantStorage(TENANT_ID).copy(),
+      tenant: this.tenantStorage(TENANT_ID).copy(join(directory, "tenant.sqlite")),
       store: this.store.copy(),
-      db: this.db.sql.db.serialize(),
+      db: centralPath,
       vars,
     };
-    const path = join(mkdtempSync(join(tmpdir(), "budget-")), "seeded.bin");
+    const path = join(directory, "seeded.bin");
     writeFileSync(path, serialize(seeded));
     return path;
   }
