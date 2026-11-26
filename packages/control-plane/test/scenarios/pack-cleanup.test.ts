@@ -100,7 +100,8 @@ test("a cleanup run after a release deletes an orphan pack older than an hour, k
   const first = await world.alarmStep();
   assert.notEqual(first, null, "the release starts a run after 10 minutes");
   await world.restartTenant();
-  const steps = await cleanupSteps(world);
+  const steps = world.childCleanupSteps(await world.seeded());
+  await cleanupSteps(world);
 
   assert.ok(steps.length > 0, "the restarted tenant runs a fresh run to its end");
   assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
@@ -495,7 +496,8 @@ for (const packsPerList of [30, 1]) {
       read.push(key);
       return get(key, options);
     });
-    const steps = await cleanupSteps(world);
+    const steps = world.childCleanupSteps(await world.seeded());
+    await cleanupSteps(world);
     assert.ok(!read.includes(`${TENANT_ID}/live-packs.json`), "no cleanup step reads the live pack names");
 
     console.log(`${packsPerList} packs a list: ${steps.length} steps, the slowest ${Math.max(...steps).toFixed(2)} ms`);

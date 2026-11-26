@@ -3,6 +3,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
 
+declare module "node:sqlite" {
+  interface DatabaseSync {
+    serialize(): Uint8Array;
+    deserialize(data: Uint8Array): void;
+  }
+}
+
 type Row = Record<string, unknown>;
 
 Object.defineProperty(crypto.subtle, "timingSafeEqual", {
@@ -190,10 +197,24 @@ export class SqlStorage {
   }
 }
 
+export type StorageCopy = { sql: Uint8Array; values: [string, unknown][]; alarmAt: number | null };
+
 export class Storage {
-  readonly sql = new SqlStorage(new DatabaseSync(":memory:"));
-  private readonly values = new Map<string, unknown>();
-  alarmAt: number | null = null;
+  readonly sql: SqlStorage;
+  private readonly values: Map<string, unknown>;
+  alarmAt: number | null;
+
+  constructor(copy?: StorageCopy) {
+    const db = new DatabaseSync(":memory:");
+    if (copy !== undefined) db.deserialize(copy.sql);
+    this.sql = new SqlStorage(db);
+    this.values = new Map(copy?.values);
+    this.alarmAt = copy?.alarmAt ?? null;
+  }
+
+  copy(): StorageCopy {
+    return { sql: this.sql.db.serialize(), values: [...this.values], alarmAt: this.alarmAt };
+  }
 
   async getAlarm(): Promise<number | null> {
     return this.alarmAt;
@@ -547,6 +568,10 @@ export class Namespace<T extends object> {
     return this.instances.get(name) ?? this.born(name, new DurableObjectState(name));
   }
 
+  open(name: string, storage: Storage): { object: T; ctx: DurableObjectState } {
+    return this.born(name, new DurableObjectState(name, storage));
+  }
+
   private born(name: string, ctx: DurableObjectState): { object: T; ctx: DurableObjectState } {
     const created = { object: this.create(ctx), ctx };
     ctx.object = created.object;
@@ -740,8 +765,30 @@ class R2ObjectBody extends R2Object {
   }
 }
 
+const firstAbove = (sorted: string[], key: string): number => {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if ((sorted[middle] ?? "") <= key) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+};
+
 export class R2Bucket {
-  private readonly objects = new Map<string, Stored>();
+  private readonly objects: Map<string, Stored>;
+  private readonly keys: string[];
+
+  constructor(copy: [string, Stored][] = []) {
+    this.objects = new Map(copy);
+    this.keys = [...this.objects.keys()].sort();
+  }
+
+  copy(): [string, Stored][] {
+    return [...this.objects];
+  }
+
   gets = 0;
   latencyMs = 0;
   failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
@@ -753,6 +800,8 @@ export class R2Bucket {
   private async store(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
     const stored = { body, uploaded: new Date(Date.now()), etag: createHash("md5").update(body).digest("hex") };
+    const at = firstAbove(this.keys, key);
+    if (this.keys[at - 1] !== key) this.keys.splice(at, 0, key);
     this.objects.set(key, stored);
     return new R2Object(key, stored);
   }
@@ -825,11 +874,19 @@ export class R2Bucket {
   }): { objects: R2ObjectBody[]; truncated: true; cursor: string } | { objects: R2ObjectBody[]; truncated: false } {
     const prefix = options?.prefix ?? "";
     const after = options?.cursor ?? options?.startAfter ?? "";
-    const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && key > after).sort();
-    const page = keys.slice(0, options?.limit ?? 1000);
-    const objects = page.flatMap((key) => this.read(key, undefined) ?? []);
-    const last = page.at(-1);
-    if (page.length < keys.length && last !== undefined) return { objects, truncated: true, cursor: last };
+    const limit = options?.limit ?? 1000;
+    const page: string[] = [];
+    for (let at = firstAbove(this.keys, after > prefix ? after : prefix.slice(0, -1)); at < this.keys.length; at++) {
+      const key = this.keys[at] ?? "";
+      if (key < prefix || !this.objects.has(key)) continue;
+      if (!key.startsWith(prefix) || page.length > limit) break;
+      page.push(key);
+    }
+    const truncated = page.length > limit;
+    const listed = page.slice(0, limit);
+    const objects = listed.flatMap((key) => this.read(key, undefined) ?? []);
+    const last = listed.at(-1);
+    if (truncated && last !== undefined) return { objects, truncated: true, cursor: last };
     return { objects, truncated: false };
   }
 }

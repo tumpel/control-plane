@@ -15,6 +15,7 @@ import {
 import { BUDGETS, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
+const CHILD_OPERATIONS = new Set(["listEvents", "listSessions"]);
 
 type Def = { type: string } & Record<string, unknown>;
 type Known = Record<string, unknown>;
@@ -255,7 +256,12 @@ test("a session list page stays inside the budget and reads no more rows as the 
 
   const first = await rowsRead("/v1/sessions?limit=50");
   assert.deepEqual(first.ids, ordered.slice(0, 50));
-  const ms = await world.coldMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } });
+  const pageCase = {
+    kind: "Operation",
+    operation: "listSessions",
+    input: { tenantId: TENANT_ID, filter: { limit: 50 } },
+  } as const;
+  const ms = world.childMs(await world.seeded(), pageCase)[0] ?? Number.POSITIVE_INFINITY;
   console.log(`${ms.toFixed(2)} ms cold, ${first.rows} rows read`);
   assert.ok(ms <= BUDGET_MS, `a page of 50 took ${ms.toFixed(2)} ms`);
 
@@ -267,7 +273,7 @@ test("a session list page stays inside the budget and reads no more rows as the 
   const grown = await rowsRead("/v1/sessions?limit=50");
   assert.deepEqual(grown.ids, first.ids);
   assert.equal(grown.rows, first.rows);
-  const grownMs = await world.coldMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } });
+  const grownMs = world.childMs(await world.seeded(), pageCase)[0] ?? Number.POSITIVE_INFINITY;
   assert.ok(grownMs <= BUDGET_MS, `a page of 50 of 100 took ${grownMs.toFixed(2)} ms`);
 
   const unpagedHttp = await world.fetch(world.owner, "GET", "/v1/sessions");
@@ -414,7 +420,12 @@ test("a cold session list page of 50 on a tenant of 1400 sessions stays inside t
   ]);
   const ordered = [...expected.keys()];
 
-  const ms = await world.coldMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } });
+  const ms =
+    world.childMs(await world.seeded(), {
+      kind: "Operation",
+      operation: "listSessions",
+      input: { tenantId: TENANT_ID, filter: { limit: 50 } },
+    })[0] ?? Number.POSITIVE_INFINITY;
   const page = SessionSchema.array().parse(await read("/v1/sessions?limit=50"));
   console.log(`a cold page of 50 of 1400 sessions took ${ms.toFixed(2)} ms`);
   assert.deepEqual(
@@ -455,7 +466,15 @@ const timed = async (
     failed(error);
     return;
   }
-  const ms = await world.coldMs(name, input).catch((error: unknown) => {
+  const cold = CHILD_OPERATIONS.has(name)
+    ? world
+        .seeded()
+        .then(
+          (seeded) =>
+            world.childMs(seeded, { kind: "Operation", operation: name, input })[0] ?? Number.POSITIVE_INFINITY,
+        )
+    : world.coldMs(name, input);
+  const ms = await cold.catch((error: unknown) => {
     failed(error);
     return null;
   });
@@ -539,10 +558,23 @@ test("every cleanup step, the delete step too, stays within the budget beside 20
   await world.tick(10 * 60_000);
   await world.restartTenant();
 
-  const steps: number[] = [];
-  for (let ms = await world.alarmStep(); ms !== null; ms = await world.alarmStep()) steps.push(ms);
+  const steps = world.childCleanupSteps(await world.seeded());
+  while ((await world.alarmStep()) !== null);
   console.log(`cleanup beside 20 open uploads: ${steps.map((ms) => ms.toFixed(2)).join(", ")} ms`);
   assert.ok(Math.max(...steps) <= BUDGET_MS, `every step stays within ${BUDGET_MS} ms: ${steps.join(", ")}`);
   assert.equal(await world.store.head(orphan), null, "the old orphan goes");
   assert.notEqual(await world.store.head(`${TENANT_ID}/packs/${largest[0]}`), null, "an open upload's old pack stays");
+});
+
+test("a child times a small step under 10 ms while the parent holds a large heap", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const seeded = await world.seeded();
+  const ballast = Array.from({ length: 3_000_000 }, (_, at) => ({ at, text: `ballast ${at}` }));
+
+  const input = { tenantId: TENANT_ID, afterEventId: null, events: [], sessionId: null, triggerId: null };
+  const [ms] = world.childMs(seeded, { kind: "Operation", operation: "listEvents", input });
+
+  console.log(`listEvents in a child beside ${ballast.length} parent objects: ${ms?.toFixed(2)} ms`);
+  assert.ok(ms !== undefined && ms < 10, `the child step took ${ms} ms`);
 });
