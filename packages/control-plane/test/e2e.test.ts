@@ -282,6 +282,14 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
     "For ImageNotReleased, tell the person.",
     "For NoCredential or CredentialExpired, ask the person to fix the credential.",
     "For PoolExhausted, NoHostAvailable, HostDegraded or HostOffline, end the turn and wait for CapacityAvailable if your subscription lists it. Otherwise, move the work onto a session that has room. Never poll.",
+    "Only an Owner creates a trigger that starts sessions. A session may create a trigger targeting itself with sessionId, which sends it one turn and then deletes itself.",
+    "A Foreman waiting on a crew pull request creates targeted triggers after the pull request is pushed: one per thing it waits on,",
+    "plus a pull_request trigger for synchronize and closed, so pushes, merge and close wake it too. Each trigger's prompt names the pull request and the {{field}} values the Foreman needs.",
+    "It then reads the current state once with gh. It ends its turn and never polls.",
+    "When it wakes, it reads the pull request before acting. On a push, it replaces its triggers for the old head with triggers for the new one.",
+    "It creates a new trigger if it still waits, and deletes its other triggers for that pull request once it is done.",
+    "A refused send leaves its trigger armed and is shown in tumpel_events_list, but nothing re-sends it.",
+    "It gives each trigger a unique name, such as wake-<session>-pr-<n>-<event>.",
   ]) {
     assert.ok(instructions.includes(sentence), sentence);
   }
