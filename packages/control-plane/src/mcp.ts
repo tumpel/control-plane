@@ -59,7 +59,6 @@ import {
   SecretSetPathSchema,
   SecretVariableMemberSchema,
   SecretVariableUpdateSchema,
-  SessionListQuerySchema,
   SessionPathSchema,
   SessionStartFromIssueSchema,
   SessionStartSchema,
@@ -90,6 +89,7 @@ import { z } from "zod";
 import manifest from "../package.json";
 import { issues, type Problem, readBoundedJson } from "./http";
 import { MCP_PATH } from "./oauth";
+import { PagedSessionListQuerySchema } from "./sessions";
 
 const MODERN_VERSION = "2026-07-28";
 const LATEST_LEGACY = "2025-11-25";
@@ -782,7 +782,7 @@ export const TOOLS: ToolDefinition[] = [
     "tumpel_session_list",
     "GET",
     "/v1/sessions",
-    SessionListQuerySchema,
+    PagedSessionListQuerySchema,
     "List the tenant's sessions, optionally only those in one state, on one host, carrying every tag in tag, started by the trigger triggerId, or whose latest turn last changed state at or before lastTurnBefore (an ISO 8601 time with offset). Sessions come oldest first; with limit (1 to 50) it returns at most limit of them, and after set to the last sessionId of a page reads the next. A page shorter than limit is the last.",
   ),
   rest(
