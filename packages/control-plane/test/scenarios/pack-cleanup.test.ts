@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { z } from "zod";
-import { MAX_PACKS_PER_MANIFEST } from "../../src/snapshot-manifests.ts";
 import {
   CHUNK_BYTES,
   failsSnapshot,
@@ -19,6 +18,7 @@ import { type Host, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
 const MINUTE_MS = 60_000;
+const LARGEST_DRAFT_PACKS = 16_384;
 
 const RestoreDownloadsSchema = z.object({
   reply: z.object({ type: z.literal("RestoreDownloads"), packs: z.array(z.object({ packDigest: z.string() })) }),
@@ -514,7 +514,7 @@ test("a sweep with 20 open uploads, one naming the most packs a draft holds, kee
   const host = await world.hostOnline("host-1");
   const live = await startsStored(world, host, "the live tree", tree(10, "live"));
   const archived = await startsStored(world, host, "the archived tree", tree(10, "archived"));
-  const largest = Array.from({ length: MAX_PACKS_PER_MANIFEST }, (_, at) => sha256(`open pack ${at}`));
+  const largest = Array.from({ length: LARGEST_DRAFT_PACKS }, (_, at) => sha256(`open pack ${at}`));
   const orphan = packKey(sha256("orphan beside open uploads"));
   await world.store.put(orphan, "pack");
   await world.store.put(packKey(largest[0] ?? ""), "pack");
