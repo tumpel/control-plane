@@ -25,7 +25,7 @@
     "@block65/webcrypto-web-push": "^2.0.0",
     "@streamparser/json": "0.0.26",
     "@tumpel/api": "https://github.com/tumpel/protocol/releases/download/v1.0.0-rc.75/tumpel-api-1.0.0-rc.75.tgz",
-    "@tumpel/pages": "https://github.com/tumpel/dashboard/releases/download/v0.12.0/pages-0.12.0.tgz",
+    "@tumpel/pages": "https://github.com/tumpel/dashboard/releases/download/v0.13.0/pages-0.13.0.tgz",
     "@tumpel/schemas": "https://github.com/tumpel/protocol/releases/download/v1.0.0-rc.75/tumpel-schemas-1.0.0-rc.75.tgz",
     "drizzle-orm": "^0.45.4",
     "uuid": "^14.0.3",
