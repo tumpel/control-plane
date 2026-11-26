@@ -2516,14 +2516,14 @@ suite("sessions", () => {
 
     assert.match(
       await toolRefusal("tumpel_session_start_from_issue", { ...fromIssue, issueNumber: 404 }),
-      /^No such issue: https:\/\/github\.com\/acme\/app\/issues\/404 does not exist/,
+      /^IssueNotFound: No such issue: https:\/\/github\.com\/acme\/app\/issues\/404 does not exist/,
     );
     const missing = await postJson("/v1/sessions/from-issue", { ...fromIssue, issueNumber: 404 }, bearer);
     assert.equal(missing.status, 404);
     assert.equal(ProblemSchema.parse(await missing.json()).code, "IssueNotFound");
     assert.match(
       await toolRefusal("tumpel_session_start_from_issue", { ...fromIssue, issueNumber: 2 }),
-      /^Issue not open: https:\/\/github\.com\/acme\/app\/issues\/2 is a closed issue/,
+      /^IssueNotOpen: Issue not open: https:\/\/github\.com\/acme\/app\/issues\/2 is a closed issue/,
     );
 
     const started = await tool(

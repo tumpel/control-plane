@@ -448,7 +448,7 @@ const planHosts = (desired: ConfigHost[], live: HostRecord[], steps: Step[], pro
   }
 };
 
-const triggerShape = (trigger: ConfigTrigger): string =>
+const triggerShape = (trigger: Pick<ConfigTrigger, "source" | "personaName" | "model" | "prompt">): string =>
   JSON.stringify([
     trigger.source.kind,
     trigger.source.event,
@@ -464,8 +464,17 @@ const planTriggers = (config: TenantConfig, live: Live, steps: Step[], problems:
   if (config.triggers === undefined) return;
   const personas = new Set(config.personas.map((persona) => persona.name));
   const personaNames = new Map(live.personas.map((persona) => [persona.personaId, persona.name]));
-  const byName = new Map(live.triggers.map((trigger) => [trigger.name, trigger]));
+  const untargeted = live.triggers.filter((trigger) => trigger.sessionId === undefined);
+  const targeted = new Map(live.triggers.flatMap((each) => (each.sessionId === undefined ? [] : [[each.name, each]])));
+  const byName = new Map(untargeted.map((trigger) => [trigger.name, trigger]));
   for (const trigger of config.triggers) {
+    const armed = targeted.get(trigger.name);
+    if (armed !== undefined) {
+      problems.push(
+        `trigger ${JSON.stringify(trigger.name)} has the name of targeted trigger ${armed.triggerId}, which waits for session ${armed.sessionId}; give the config trigger another name`,
+      );
+      continue;
+    }
     if (!personas.has(trigger.personaName)) {
       problems.push(
         `trigger ${JSON.stringify(trigger.name)} names persona ${JSON.stringify(trigger.personaName)}, which the config does not hold; add it to personas or name one that is there`,
@@ -483,7 +492,7 @@ const planTriggers = (config: TenantConfig, live: Live, steps: Step[], problems:
     }
   }
   const wanted = new Set(config.triggers.map((trigger) => trigger.name));
-  for (const trigger of live.triggers.filter((each) => !wanted.has(each.name))) {
+  for (const trigger of untargeted.filter((each) => !wanted.has(each.name))) {
     steps.push({ kind: "DeleteTrigger", triggerId: trigger.triggerId, name: trigger.name });
   }
 };

@@ -30,7 +30,7 @@ import {
   TurnSchema,
   type TurnSendSchema,
 } from "@tumpel/schemas";
-import { sql as query } from "drizzle-orm";
+import { eq, inArray, sql as query } from "drizzle-orm";
 import type { z } from "zod";
 import { errorOf } from "./backoff.ts";
 import { boundedTo, turnFailureDetail } from "./bounded-detail.ts";
@@ -57,6 +57,7 @@ import {
 } from "./connector-rows.ts";
 import { accessTokenExpiry } from "./credential-file.ts";
 import { durableDb } from "./db/client.ts";
+import * as tenantSchema from "./db/tenant-schema.ts";
 import { deployDraining, type RunningTurns } from "./deploy-drain";
 import { generateDataKey, seal, unseal } from "./envelope.ts";
 import {
@@ -208,6 +209,10 @@ export type Sent =
   | { kind: "Failed" }
   | { kind: "CredentialRefused"; personaId: string; refusal: CredentialRefusal };
 
+type SendRefusal = Exclude<Sent, { kind: "Sent" }>;
+
+export type Claim = () => SendRefusal | null;
+
 type Steer = z.infer<typeof SteerSchema>;
 type SteerState = Steer["state"];
 export type SteerSent =
@@ -233,7 +238,7 @@ export type Archive =
   | { kind: "NotFound" }
   | { kind: "NotStopped"; state: SessionState };
 
-export type SessionDeleted = { kind: "Deleted" } | Exclude<Archive, { kind: "Archived" }>;
+export type SessionDeleted = { kind: "Deleted"; triggerIds: string[] } | Exclude<Archive, { kind: "Archived" }>;
 
 export type TranscriptCursor = {
   sessionState: SessionState;
@@ -2162,17 +2167,23 @@ export abstract class TenantSessions extends DurableObject<Env> {
       WHERE session_id = ${sessionId} AND start_refusals_in_a_row > 0`);
   }
 
+  private committed(claim: Claim | null, commit: () => TurnRow | SendRefusal): TurnRow | SendRefusal {
+    return this.ctx.storage.transactionSync(() => claim?.() ?? commit());
+  }
+
   private sendWaiting(
     tenantId: string,
     session: SessionRow,
     send: TurnSend,
     caller: TenantInput<"sendTurn">["caller"],
     now: number,
+    claim: Claim | null,
   ): Sent {
-    const turn = this.ctx.storage.transactionSync(() => {
+    const turn = this.committed(claim, () => {
       if (caller.kind === "Turn") this.recordProgress(caller.sessionId);
       return this.newTurn(session.session_id, session.host_id, session.box_id, send, now);
     });
+    if ("kind" in turn) return turn;
     return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
   }
 
@@ -2183,6 +2194,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     caller: TenantInput<"sendTurn">["caller"],
     hosts: HostRecord[],
     now: number,
+    claim: Claim | null = null,
   ): Promise<Sent> {
     const session = this.sessionRow(sessionId);
     if (session === null) return { kind: "NotFound" };
@@ -2195,13 +2207,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const unusable = uses.filter((use) => !use.usable).map((use) => use.name);
     if (unusable.length > 0) return { kind: "ConnectorDisconnected", names: unusable };
     if (await deployDraining(this.env.RELEASES)) return { kind: "Draining" };
-    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now, claim);
     const online =
       !this.staleHosts(now).has(session.host_id) &&
       hosts.some((host) => host.hostId === session.host_id && host.state === "Online");
     if (online && session.state !== "Stopped") {
       const boxId = session.state === "Stopped" ? crypto.randomUUID() : session.box_id;
-      const turn = this.runTurn(session, session.host_id, boxId, send, caller, now);
+      const turn = this.runTurn(session, session.host_id, boxId, send, caller, now, claim);
+      if ("kind" in turn) return turn;
       await this.offer(tenantId, { ...session, box_id: boxId }, turn);
       return { kind: "Sent", turn: toTurn(tenantId, turn, null, NONE_STALE) };
     }
@@ -2222,11 +2235,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const stays = online ? place(hosts.filter((host) => host.hostId === session.host_id)) : null;
     const placement = stays?.kind === "Placed" && stays.evict.length === 0 ? stays : place(hosts);
     if (placement.kind === "Refused") return { kind: "Unplaced", hosts: placement.hosts };
-    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now);
+    if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now, claim);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
-    this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
-    const turn = this.runTurn(session, hostId, boxId, send, caller, now);
+    const turn = this.committed(claim, () => {
+      this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
+      return this.runTurn(session, hostId, boxId, send, caller, now, null);
+    });
+    if ("kind" in turn) return turn;
     await this.offerAfter(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn, placement.evict);
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
@@ -2307,8 +2323,9 @@ export abstract class TenantSessions extends DurableObject<Env> {
     send: TurnSend,
     caller: TenantInput<"sendTurn">["caller"],
     now: number,
-  ): TurnRow {
-    return this.ctx.storage.transactionSync(() => {
+    claim: Claim | null,
+  ): TurnRow | SendRefusal {
+    return this.committed(claim, () => {
       if (caller.kind === "Turn") this.recordProgress(caller.sessionId);
       this.ctx.storage.sql.exec(
         "UPDATE sessions SET state = 'Running', host_id = ?, box_id = ?, updated_at = ? WHERE session_id = ?",
@@ -2550,8 +2567,19 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const [held] = sql.exec("SELECT 1 FROM snapshots WHERE session_id = ? LIMIT 1", sessionId).toArray();
     if (held !== undefined) return { kind: "NotStopped", state: "Archived" };
     await deleteTranscript(this.env.STORE, transcriptPrefix(tenantId, sessionId));
-    sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
-    return { kind: "Deleted" };
+    const db = durableDb(this.ctx.storage, tenantSchema);
+    const triggerIds = db
+      .select({ triggerId: tenantSchema.triggerSessionTargets.triggerId })
+      .from(tenantSchema.triggerSessionTargets)
+      .where(eq(tenantSchema.triggerSessionTargets.sessionId, sessionId))
+      .all()
+      .map((target) => target.triggerId);
+    this.ctx.storage.transactionSync(() => {
+      if (triggerIds.length > 0)
+        db.delete(tenantSchema.triggers).where(inArray(tenantSchema.triggers.triggerId, triggerIds)).run();
+      sql.exec("DELETE FROM sessions WHERE session_id = ?", sessionId);
+    });
+    return { kind: "Deleted", triggerIds };
   }
 
   private async collectSnapshots(tenantId: string, stored: SnapshotRequestRow, now: number): Promise<void> {

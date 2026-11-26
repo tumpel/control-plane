@@ -38,7 +38,7 @@ import { imageNotReleased, releaseUnreadable } from "./releases.ts";
 import { unreadableSecretSet } from "./secret-members.ts";
 import { settingsOf } from "./settings.ts";
 import type { SecretSetRead } from "./tenant.ts";
-import { tenantApi } from "./tenant-api.ts";
+import { type TenantResult, tenantApi } from "./tenant-api.ts";
 import {
   type CredentialHandover,
   type NewSession,
@@ -70,6 +70,7 @@ import {
   type TranscriptLine,
   transcriptPrefix,
 } from "./transcript.ts";
+import { dropRoute } from "./trigger-routes.ts";
 
 export type TranscriptPage = z.infer<typeof TranscriptPageSchema>;
 export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;
@@ -105,7 +106,7 @@ type Accepted<T> = Extract<Outcome<T>, { ok: true }>;
 
 const ok = <T>(value: T): Accepted<T> => ({ ok: true, value });
 
-const sessionNotFound = (sessionId: string): Refused =>
+export const sessionNotFound = (sessionId: string): Refused =>
   refuse(404, {
     code: "NotFound",
     title: "No such session",
@@ -404,7 +405,7 @@ export const placed = <T>(
   return ok(started.started);
 };
 
-type SendFailure =
+export type SendFailure =
   | (Refused & {
       kind:
         | "NotFound"
@@ -705,6 +706,15 @@ const sentReply = async (
     caller: caller.origin,
   });
   if (sent.kind === "Sent") return ok(sent.turn);
+  return sendFailure(sent, sessionId, session, hosts);
+};
+
+export const sendFailure = (
+  sent: Exclude<TenantResult<"sendTurn">["sent"], { kind: "Sent" }>,
+  sessionId: string,
+  session: Session,
+  hosts: HostRecord[],
+): SendFailure => {
   if (sent.kind === "Stranded") return { kind: sent.kind, ...stranded(session, hosts, sent.missingTurnIds) };
   if (sent.kind === "Unplaced") return { kind: sent.kind, ...unplaced(sent.hosts, "send the turn again") };
   if (sent.kind === "Draining") return { kind: sent.kind, ...refuse(503, deployInProgress("send the turn again")) };
@@ -841,7 +851,10 @@ export const deleteSession = async (env: Env, caller: Caller, sessionId: string)
     if (offline !== null) return offline;
   }
   const { deleted } = await tenant.call("deleteSession", { tenantId: caller.tenantId, sessionId });
-  if (deleted.kind === "Deleted") return ok(null);
+  if (deleted.kind === "Deleted") {
+    for (const triggerId of deleted.triggerIds) await dropRoute(env.DB, caller.tenantId, triggerId);
+    return ok(null);
+  }
   if (deleted.kind === "NotFound") return sessionNotFound(sessionId);
   if (deleted.state === "Archived") {
     return refuse(409, {
