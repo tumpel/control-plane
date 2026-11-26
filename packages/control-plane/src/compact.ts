@@ -215,6 +215,7 @@ const COMPACTORS: Record<Harness, Compactor | null> = {
   OpenCode: compactOpenCode,
   PiDev: compactPi,
   MistralAgent: null,
+  Gemini: null,
 };
 
 export const compactorOf = (harness: Harness): Compactor | null => COMPACTORS[harness];
@@ -250,6 +251,7 @@ const SUCCESS_RESULTS: Record<Harness, SuccessResult | null> = {
   OpenCode: (line) => OpenCodeSuccessSchema.safeParse(line).success,
   PiDev: piSucceeded,
   MistralAgent: null,
+  Gemini: null,
 };
 
 export const successResultOf = (harness: Harness): SuccessResult | null => SUCCESS_RESULTS[harness];

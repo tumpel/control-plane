@@ -18,7 +18,7 @@ export type ClaudeSetupMember = z.infer<typeof ClaudeSetupMemberSchema>;
 export interface SetupCredential {
   member: ClaudeSetupMember;
   kind: "SubscriptionToken" | "CredentialFile";
-  provider: "Anthropic" | "OpenAi";
+  provider: "Anthropic" | "OpenAi" | "Google";
   name: string;
 }
 
@@ -35,7 +35,20 @@ export const SETUP_CREDENTIALS: Record<ClaudeSetupHarness, SetupCredential> = {
     provider: "OpenAi",
     name: "Codex",
   },
+  Gemini: {
+    member: ClaudeSetupMemberSchema.enum.GEMINI_OAUTH_CREDS_JSON,
+    kind: "CredentialFile",
+    provider: "Google",
+    name: "Gemini",
+  },
 };
+
+const GEMINI_CODE_SECONDS = 300;
+
+const codeSeconds = (harness: ClaudeSetupHarness, budgets: ClaudeSetupBudgets): number =>
+  harness === "Gemini"
+    ? Math.min(budgets.claudeSetupCodeBudgetSeconds, GEMINI_CODE_SECONDS)
+    : budgets.claudeSetupCodeBudgetSeconds;
 
 export const TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -97,7 +110,7 @@ const timedOut = (
     return {
       kind: "Fail",
       reason: "SetupTimedOut",
-      detail: `no code reached Claude setup ${claudeSetupId} within claudeSetupCodeBudgetSeconds ${budgets.claudeSetupCodeBudgetSeconds} of its sign-in URL; ${START_AGAIN}, sign in at the new URL and submit the code the page shows`,
+      detail: `no code reached Claude setup ${claudeSetupId} within ${codeSeconds(harness, budgets)} seconds of its sign-in URL; ${START_AGAIN}, sign in at the new URL and submit the code the page shows`,
     };
   }
   return { kind: "Fail", reason: "SetupTimedOut", detail: mintTimedOut(claudeSetupId, budgets) };
@@ -119,7 +132,7 @@ export const advance = (
   if (event.kind === "BoxFailed") return { kind: "Fail", reason: event.reason, detail: event.detail };
   if (event.kind === "Url") {
     return state === "Starting"
-      ? { kind: "Advance", state: "AwaitingCode", dueInSeconds: budgets.claudeSetupCodeBudgetSeconds }
+      ? { kind: "Advance", state: "AwaitingCode", dueInSeconds: codeSeconds(harness, budgets) }
       : { kind: "Ignore" };
   }
   if (event.kind === "Code" && harness === "Codex") {
@@ -255,5 +268,5 @@ export const setupOffer = (
   tokenCredential,
   expiresAt: iso(boxEndsAt(row.created_at, budgets)),
   urlSeconds: budgets.claudeSetupUrlBudgetSeconds,
-  codeSeconds: budgets.claudeSetupCodeBudgetSeconds,
+  codeSeconds: codeSeconds(harnessOf(row), budgets),
 });

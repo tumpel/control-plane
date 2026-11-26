@@ -69,6 +69,20 @@ test("a Codex setup takes no code and completes from AwaitingCode once its box s
   }
 });
 
+test("a Gemini setup takes a code as Claude Code does and waits at most 300 seconds for it", () => {
+  const url = { kind: "Url", signInUrl: "https://accounts.google.com/o/oauth2/v2/auth?x=1", userCode: null } as const;
+  const waiting = advance("setup-1", "Gemini", "Starting", url, budgets);
+  assert.deepEqual(waiting, { kind: "Advance", state: "AwaitingCode", dueInSeconds: 300 });
+  const short = advance("setup-1", "Gemini", "Starting", url, { ...budgets, claudeSetupCodeBudgetSeconds: 120 });
+  assert.deepEqual(short, { kind: "Advance", state: "AwaitingCode", dueInSeconds: 120 });
+  const coded = advance("setup-1", "Gemini", "AwaitingCode", { kind: "Code" }, budgets);
+  assert.deepEqual(coded, { kind: "Advance", state: "Minting", dueInSeconds: 130 });
+  assert.equal(advance("setup-1", "Gemini", "AwaitingCode", { kind: "Stored" }, budgets).kind, "Refuse");
+  assert.equal(advance("setup-1", "Gemini", "Minting", { kind: "Stored" }, budgets).kind, "Complete");
+  const late = advance("setup-1", "Gemini", "AwaitingCode", { kind: "Deadline" }, budgets);
+  assert.ok(late.kind === "Fail" && late.reason === "SetupTimedOut");
+});
+
 test("the setup offer carries the box's image, its token URL and credential, and no secret set grant or GitHub token", () => {
   const row: ClaudeSetupRow = {
     claude_setup_id: "setup-1",

@@ -472,7 +472,10 @@ const BOX_IDLE_SECONDS = 15 * 60;
 const IN_FLIGHT = ["Offered", "Running"];
 const PREBUILD_FIX = "Fix what the detail names, then start the prebuild again with rebuild set";
 
-export type TenantHostMessage = Exclude<HostMessage, SupervisorUpdateMessage>;
+export type TenantHostMessage = Exclude<
+  HostMessage,
+  SupervisorUpdateMessage | { type: "SnapshotChunkCheck" | "SnapshotIndexAsk" }
+>;
 export type SessionHostMessage = Exclude<TenantHostMessage, { type: "ClaudeSetupBoxUrl" | "ClaudeSetupBoxFailed" }>;
 type ChunkAsk = Extract<SessionHostMessage, { type: "SnapshotChunks" | "SnapshotPacks" | "RestoreChunks" }>;
 type CloneFailed = Extract<SessionHostMessage, { type: "TurnRepositoryCloneFailed" }>;

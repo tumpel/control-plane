@@ -35,7 +35,7 @@ import {
   WhoamiSchema,
 } from "@tumpel/schemas";
 import { z } from "zod";
-import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "../../src/harness-catalog.ts";
+import { CLAUDE_CODE_VERSION, CODEX_VERSION, GEMINI_VERSION } from "../../src/harness-catalog.ts";
 import type { ReleaseManifest } from "../../src/releases.ts";
 import { steerSettings } from "../../src/steer.ts";
 import { CLAUDE_CODE_AMD64_RELEASE } from "../release-fixture.ts";
@@ -84,6 +84,14 @@ const RELEASE: ReleaseManifest = {
       architecture: "Amd64",
       layerDigest: "7".repeat(64),
       manifestDigest: "8".repeat(64),
+      sizeBytes: 65536,
+    },
+    {
+      harness: "Gemini",
+      harnessVersion: GEMINI_VERSION,
+      architecture: "Amd64",
+      layerDigest: "5".repeat(64),
+      manifestDigest: "6".repeat(64),
       sizeBytes: 65536,
     },
   ],
@@ -1251,6 +1259,98 @@ suite("sessions", () => {
       credentialFile: authFile(Date.parse(refreshedAt) / 1000),
     });
     await until("the secret set holding the rewritten file", keys, (read) => read[0]?.expiresAt === refreshedAt);
+  });
+
+  test("a Gemini sign-in takes a code, stores oauth_creds.json in rows that do not grow with it, and a turn gets it as a file", async () => {
+    const { bearer, host, hostId, tenantId, getJson, github, tool, toolRefusal } = await tenant();
+    const rows = () => world.rowsWritten({ tenantId, token: "" }) + world.db.sql.rowsWritten + world.hostRows(hostId);
+    const credsFile = (bytes: number) =>
+      JSON.stringify({ access_token: "a".repeat(bytes), refresh_token: "gemini-e2e-refresh", expiry_date: 1 });
+    const signIn = async (name: string, value: string) => {
+      const created = await postJson(
+        "/v1/secret-sets",
+        { name, secrets: [{ kind: "Variable", name: "GITHUB_TOKEN", value: github }] },
+        bearer,
+      );
+      assert.equal(created.status, 200, await created.clone().text());
+      const { secretSetId } = SecretSetSchema.parse(await created.json());
+      const before = rows();
+      const started = await postJson("/v1/claude-setups", { secretSetId, harness: "Gemini" }, bearer);
+      assert.equal(started.status, 200, await started.clone().text());
+      const offer = await host.next("ClaudeSetupBoxOffer");
+      assert.equal(offer.codeSeconds, 300);
+      const { claudeSetupId } = offer;
+      const status = () => getJson(`/v1/claude-setups/${claudeSetupId}`, ClaudeSetupSchema);
+      host.send({
+        type: "ClaudeSetupBoxUrl",
+        claudeSetupId,
+        signInUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=x",
+      });
+      const waiting = await until("the setup reading AwaitingCode", status, (s) => s.status.state === "AwaitingCode");
+      assert.ok(waiting.status.state === "AwaitingCode");
+      assert.equal(Date.parse(waiting.status.codeDueAt) - waiting.updatedAt, 300_000);
+      const coded = await postJson(`/v1/claude-setups/${claudeSetupId}/code`, { code: "google-code" }, bearer);
+      assert.equal(coded.status, 200, await coded.clone().text());
+      assert.equal((await host.next("ClaudeSetupBoxCode")).claudeSetupId, claudeSetupId);
+      const stored = await postJson(
+        `/v1/claude-setups/${claudeSetupId}/token`,
+        { tenantId: offer.tenantId, value },
+        { authorization: `Bearer ${offer.tokenCredential}` },
+      );
+      assert.equal(stored.status, 204, await stored.clone().text());
+      const completed = await status();
+      assert.ok(completed.status.state === "Completed");
+      assert.equal(completed.status.memberName, "GEMINI_OAUTH_CREDS_JSON");
+      return { secretSetId, written: rows() - before };
+    };
+    const small = await signIn("Gemini 1 KB", credsFile(1024));
+    const value = credsFile(9 * 1024);
+    const large = await signIn("Gemini 9 KB", value);
+    assert.equal(small.written, 23);
+    assert.equal(large.written, small.written, "a setup writes the same rows whatever the file size");
+
+    const persona = await postJson(
+      "/v1/personas",
+      { name: "Gemini", harness: "Gemini", secretSetId: large.secretSetId, connectorIds: [], files: [] },
+      bearer,
+    );
+    assert.equal(persona.status, 200, await persona.clone().text());
+    const { personaId } = PersonaSchema.parse(await persona.json());
+    const start = { repository: "https://github.com/acme/app.git", personaId, prompt: "hello" };
+    assert.match(
+      await toolRefusal("tumpel_session_start", { ...start, model: "gemini-2.5-pro" }),
+      /it runs auto, pro, flash, flash-lite\./,
+    );
+    await tool("tumpel_session_start", { ...start, model: "flash" }, StartedSessionSchema);
+    const turn = await host.next("TurnOffer");
+    assert.deepEqual(turn.credential.credentialFile, { path: ".gemini/oauth_creds.json", value });
+    for (const fixed of [
+      { name: "GOOGLE_GENAI_USE_GCA", value: "true" },
+      { name: "NO_BROWSER", value: "true" },
+    ]) {
+      assert.ok(
+        turn.credential.variables.some((v) => v.name === fixed.name && v.value === fixed.value),
+        fixed.name,
+      );
+    }
+    host.send({ type: "TurnClaim", turnId: turn.turnId, boxId: turn.boxId });
+    await host.next("TurnClaimed");
+    const beforeWriteBack = world.rowsWritten({ tenantId, token: "" });
+    host.send({
+      type: "TurnComplete",
+      turnId: turn.turnId,
+      lastLineSeq: 0,
+      completedAt: new Date().toISOString(),
+      credentialFile: credsFile(2048),
+    });
+    const turnState = () => world.rowsWritten({ tenantId, token: "" }) - beforeWriteBack;
+    await until(
+      "the turn completing",
+      async () => turnState(),
+      (written) => written > 0,
+    );
+    await world.runtime.settle();
+    assert.equal(turnState(), 19, "the turn end, its write-back included, writes a fixed count");
   });
 
   test("a box whose Claude Code mints no token within the code's mint budget is waited on past that budget and fails SetupTimedOut when its box says so", async () => {
