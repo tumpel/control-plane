@@ -691,7 +691,46 @@ for (const entries of [2_098, 32_768, 65_536]) {
   });
 }
 
-test("the chunk check answers from the previous snapshot's .idx over the channel, refuses 101 digests, holds nothing without an .idx, and a released snapshot's .idx is deleted", async (t) => {
+const NO_INDEX = "the session's previous snapshot has no chunk index, so this snapshot uploads its chunks";
+
+test("a chunk check without the previous snapshot's .idx is refused once, and the snapshot stores with every chunk uploaded", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.online(world.owner, "host-1", { protocolVersion: ChannelProtocol.Version });
+  await world.holdsAgentCredentials();
+  const session = await world.startSession({ prompt: "build a tree", tags: [] });
+  const first = host.takeOffer();
+  await host.claims(first);
+  await host.completes(first);
+  const chunks = tree(250);
+  await storesTree(world, host, session.sessionId, chunks);
+  await releasesBoxes(host);
+  await world.sendTurn(session.sessionId, "change one file");
+  const second = host.takeOffer();
+  await host.claims(second);
+  await host.completes(second);
+  const request = z
+    .object({ snapshotId: z.string(), storageKey: z.string() })
+    .parse(host.received("SnapshotRequest").at(-1));
+
+  let checks = 0;
+  let refusal = "";
+  for (let at = 0; at * 100 < chunks.length && refusal === ""; at++) {
+    checks += 1;
+    const digests = chunks.slice(at * 100, (at + 1) * 100).map((chunk) => chunk.digest);
+    await host
+      .says({ type: "SnapshotChunkCheck", snapshotId: request.snapshotId, check: at + 1, digests })
+      .catch((error: Error) => {
+        refusal = error.message;
+      });
+  }
+  assert.equal(checks, 1);
+  assert.equal(refusal, `the control plane refused SnapshotChunkCheck: ${NO_INDEX}`);
+  await storesTree(world, host, session.sessionId, chunks);
+  assert.equal(storageKeyOf(world, session.sessionId), request.storageKey);
+});
+
+test("the chunk check answers from the previous snapshot's .idx over the channel, refuses 101 digests, a missing or bad .idx, and a released snapshot's .idx is deleted", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await world.online(world.owner, "host-1", { protocolVersion: ChannelProtocol.Version });
@@ -713,10 +752,13 @@ test("the chunk check answers from the previous snapshot's .idx over the channel
     .parse(host.received("SnapshotRequest").at(-1));
   const digests = chunks.map((chunk) => chunk.digest);
 
-  assert.deepEqual(
-    (await host.says({ type: "SnapshotChunkCheck", snapshotId: request.snapshotId, check: 1, digests })).reply,
-    { type: "SnapshotChunkCheckHeld", snapshotId: request.snapshotId, check: 1, held: [] },
-  );
+  await assert.rejects(host.says({ type: "SnapshotChunkCheck", snapshotId: request.snapshotId, check: 1, digests }), {
+    message: `the control plane refused SnapshotChunkCheck: ${NO_INDEX}`,
+  });
+  await world.store.put(`${previous}.idx`, new TextEncoder().encode("TPCL".padEnd(16, "\0")));
+  await assert.rejects(host.says({ type: "SnapshotChunkCheck", snapshotId: request.snapshotId, check: 1, digests }), {
+    message: `the control plane refused SnapshotChunkCheck: ${NO_INDEX}`,
+  });
   await assert.rejects(
     host.says({
       type: "SnapshotChunkCheck",
