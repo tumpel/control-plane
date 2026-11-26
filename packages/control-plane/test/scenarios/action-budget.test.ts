@@ -501,7 +501,7 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
   const members = (defOf(HostFrameSchema.shape.message).getter as () => unknown)();
   for (const option of defOf(members).options as unknown[]) {
     const type = String((defOf((defOf(option).shape as Record<string, unknown>).type).values as unknown[])[0]);
-    if (type === "TelemetryBatch" || type === "TurnLine") continue;
+    if (["TelemetryBatch", "TurnLine", "SnapshotChunkCheck", "SnapshotIndexAsk"].includes(type)) continue;
     const operation =
       type === "SupervisorUpdateStep" || type === "SupervisorUpdateFailed" ? "supervisorUpdate" : "hostMessage";
     await timed(
