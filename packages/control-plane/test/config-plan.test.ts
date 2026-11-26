@@ -510,3 +510,33 @@ test("triggers plan by name: create, keep when only the condition rows reorder, 
     ),
   );
 });
+
+test("a targeted trigger stays out of the plan, and a config trigger of its name fails the plan", () => {
+  const armed = {
+    triggerId: "g2",
+    tenantId: "t1",
+    name: "wake-foreman",
+    source: { kind: "GitHub" as const, event: "status" as const, conditions: [{ field: "sha", values: ["abc"] }] },
+    personaId: "p1",
+    model: "claude-test",
+    prompt: "Checks on {{sha}}",
+    principalId: "u1",
+    createdAt: 1,
+    updatedAt: 1,
+    sessionId: "s1",
+  };
+  const named = {
+    name: "wake-foreman",
+    source: armed.source,
+    personaName: "Default",
+    model: "claude-test",
+    prompt: "Checks on {{sha}}",
+  };
+  assert.deepEqual(planOf(desired(config({ triggers: [] })), steady({ triggers: [armed] })), steps());
+  assert.deepEqual(
+    planOf(desired(config({ triggers: [named] })), steady({ triggers: [armed] })),
+    problems(
+      'trigger "wake-foreman" has the name of targeted trigger g2, which waits for session s1; give the config trigger another name',
+    ),
+  );
+});
