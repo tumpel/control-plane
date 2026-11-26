@@ -3957,14 +3957,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const sorted = checked.packs;
       const previous = this.previousSnapshot(request.session_id);
-      const listed =
-        previous === undefined
-          ? null
-          : await packList(this.env.STORE, previous.storage_key).catch((error: unknown) => ({
-              kind: "Unreadable" as const,
-              detail: errorOf(error).message,
-            }));
-      if (listed?.kind === "Unreadable") return { kind: "Rejected", detail: storageFailed(new Error(listed.detail)) };
+      const listed = previous === undefined ? null : await packList(this.env.STORE, previous.storage_key);
       const named = listed?.kind === "Read" ? listed.value : new Set<string>();
       const unproven = sorted.filter((packDigest) => !checked.reused.has(packDigest) || !named.has(packDigest));
       const found = await Promise.all(

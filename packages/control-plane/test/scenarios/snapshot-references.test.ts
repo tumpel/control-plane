@@ -295,6 +295,25 @@ test("a SnapshotDone reusing a pack object storage no longer holds is refused, t
   assert.deepEqual(await states(world, session.sessionId), ["Failed"]);
 });
 
+test("a corrupt pack list of the previous snapshot does not refuse the next snapshot, which checks its reused packs instead", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  await world.holdsAgentCredentials();
+  const kept = sha256("kept pack");
+  const session = await startsStored(world, host, "the corrupted tree", [kept]);
+  await world.store.put(`${session.storageKey}.packs`, "not a pack list");
+  await world.restartTenant();
+
+  await world.sendTurn(session.sessionId, "change one file");
+  const next = host.takeOffer();
+  await host.claims(next);
+  await host.completes(next);
+  await answers(world, host, snapshotAsked(host, session.sessionId), [], [kept]);
+
+  assert.deepEqual((await states(world, session.sessionId)).at(-1), "Stored");
+});
+
 test("with two open requests, the first store keeps the previous snapshot until the second reuses its pack, stores and restores", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
