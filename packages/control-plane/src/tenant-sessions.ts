@@ -110,6 +110,7 @@ import {
   heldPlacements,
   indexKey,
   LivePacks,
+  MAX_INDEX_BYTES,
   mergedDraft,
   packKey,
   packListKey,
@@ -3438,6 +3439,11 @@ export abstract class TenantSessions extends DurableObject<Env> {
     hostId: string,
     message: Extract<ChunkAsk, { type: "SnapshotIndexAsk" }>,
   ): Promise<ChunkReply | Refused> {
+    if (message.sizeBytes > MAX_INDEX_BYTES) {
+      return refused(
+        `host ${hostId} asked to upload a ${message.sizeBytes}-byte index of snapshot ${message.snapshotId}, above the ${MAX_INDEX_BYTES} of the largest snapshot's index`,
+      );
+    }
     const window = this.snapshotUploadWindow(tenantId, hostId, message.snapshotId);
     if ("type" in window) return window;
     const url = await signerOf(

@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { ChannelProtocol, HostFrameSchema, SessionSchema } from "@tumpel/schemas";
 import { z } from "zod";
 import { turnCredentialSeconds } from "../../src/settings.ts";
+import { MAX_INDEX_BYTES } from "../../src/snapshot-manifests.ts";
 import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
@@ -641,7 +642,7 @@ const storageKeyOf = (world: World, sessionId: string): string =>
         .one(),
     ).storage_key;
 
-for (const entries of [2_098, 32_768]) {
+for (const entries of [2_098, 32_768, 65_536]) {
   test(`a chunk check of 100 digests over a ${entries}-entry .idx gets its 60 held placements from one GET within the budget on a restarted tenant`, {
     timeout: 900_000,
   }, async (t) => {
@@ -724,6 +725,20 @@ test("the chunk check answers from the previous snapshot's .idx over the channel
       digests: streamChunks(101).map((chunk) => chunk.digest),
     }),
     /the control plane refused SnapshotChunkCheck/,
+  );
+  await world.store.put(`${previous}.idx`, new Uint8Array(MAX_INDEX_BYTES + 1));
+  await assert.rejects(
+    host.says({ type: "SnapshotChunkCheck", snapshotId: request.snapshotId, check: 3, digests }),
+    new RegExp(`holds ${MAX_INDEX_BYTES + 1} bytes, above the ${MAX_INDEX_BYTES} of the largest snapshot's index`),
+  );
+  await assert.rejects(
+    host.says({
+      type: "SnapshotIndexAsk",
+      snapshotId: request.snapshotId,
+      sizeBytes: MAX_INDEX_BYTES + 1,
+      digest: "b".repeat(64),
+    }),
+    /the control plane refused SnapshotIndexAsk: .* above the \d+ of the largest snapshot's index/,
   );
   await world.store.put(`${previous}.idx`, indexOf(chunks.slice(0, 1)));
   assert.deepEqual(

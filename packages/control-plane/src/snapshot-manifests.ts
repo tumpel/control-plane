@@ -27,6 +27,13 @@ export const indexKey = (storageKey: string): string => `${storageKey}.idx`;
 const INDEX_HEADER_BYTES = 16;
 const INDEX_PACK_BYTES = 32;
 const INDEX_RECORD_BYTES = 44;
+const LARGEST_SNAPSHOT_BYTES = 32 * 1024 ** 3;
+const SMALLEST_CHUNK_BYTES = 512 * 1024;
+const SMALLEST_CLOSED_PACK_BYTES = 8 * 1024 ** 2;
+export const MAX_INDEX_BYTES =
+  INDEX_HEADER_BYTES +
+  (LARGEST_SNAPSHOT_BYTES / SMALLEST_CLOSED_PACK_BYTES) * INDEX_PACK_BYTES +
+  (LARGEST_SNAPSHOT_BYTES / SMALLEST_CHUNK_BYTES) * INDEX_RECORD_BYTES;
 
 const hexOf = (bytes: Uint8Array): string => {
   let hex = "";
@@ -52,6 +59,12 @@ export const heldPlacements = async (
 ): Promise<ManifestRead<Placement[]>> => {
   const object = await store.get(indexKey(storageKey));
   if (object === null) return { kind: "Read", value: [] };
+  if (object.size > MAX_INDEX_BYTES) {
+    return {
+      kind: "Unreadable",
+      detail: `${indexKey(storageKey)} holds ${object.size} bytes, above the ${MAX_INDEX_BYTES} of the largest snapshot's index`,
+    };
+  }
   const bytes = new Uint8Array(await object.arrayBuffer());
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const magic = new TextDecoder().decode(bytes.subarray(0, 4));
