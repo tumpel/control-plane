@@ -273,7 +273,7 @@ test("a refused snapshot's packs survive a cleanup run, so the box's next snapsh
   );
 });
 
-test("a failure recorded before failures wrote pack lists ends the cleanup run with no deletes and logs its key", async (t) => {
+test("a failure recorded before this change, with a draft and no pack list, has its draft's packs kept by a cleanup run", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
   const host = await world.hostOnline("host-1");
@@ -295,23 +295,50 @@ test("a failure recorded before failures wrote pack lists ends the cleanup run w
   });
   await world.store.put(packKey(held), "pack");
   await failsSnapshot(host, failed.snapshotId);
-  await world.store.delete(`${failed.storageKey}.packs`);
-  const orphan = packKey(sha256("orphan beside an old failure"));
+  assert.equal(await world.store.head(`${failed.storageKey}.packs`), null, "the failure has no pack list");
+  await world.restartTenant();
+  await world.tick(61 * MINUTE_MS);
+  await archives(world, other.sessionId);
+  await world.tick(10 * MINUTE_MS);
+  const steps = await cleanupSteps(world);
+
+  assert.ok(steps.length > 0, "the archive runs a cleanup");
+  assert.notEqual(await world.store.head(packKey(held)), null, "the failure's draft keeps its pack");
+});
+
+test("an idle session whose last snapshot was refused does not stop cleanup: a run deletes an old orphan and keeps the refused snapshot's packs", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  const other = await startsStored(world, host, "another tree", tree(10, "other"));
+  const session = await world.startSession({ prompt: "build the refused tree", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const refused = snapshotAsked(host, session.sessionId);
+  const base = sha256("refused base pack");
+  const chunk = { digest: sha256("refused base chunk"), packDigest: base, offset: 0, length: CHUNK_BYTES };
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: refused.snapshotId,
+    part: 1,
+    packs: [{ packDigest: base, sizeBytes: CHUNK_BYTES }],
+    chunks: [chunk],
+    reusedPackDigests: [],
+  });
+  await world.store.put(packKey(base), "pack");
+  await host.says({ type: "SnapshotDone", snapshotId: refused.snapshotId, uploadedBytes: CHUNK_BYTES, chunkCount: 1 });
+  const orphan = packKey(sha256("orphan beside a refused snapshot"));
   await world.store.put(orphan, "pack");
   await world.restartTenant();
   await world.tick(61 * MINUTE_MS);
   await archives(world, other.sessionId);
   await world.tick(10 * MINUTE_MS);
-  const logged = t.mock.method(console, "error", () => undefined);
   const steps = await cleanupSteps(world);
 
-  assert.ok(steps.length > 0, "the archive starts a cleanup");
-  assert.notEqual(await world.store.head(packKey(held)), null, "the old failure's pack stays");
-  assert.notEqual(await world.store.head(orphan), null, "the run deletes nothing");
-  assert.ok(
-    logged.mock.calls.some((call) => String(call.arguments[0]).includes(failed.storageKey)),
-    "the run logs the failure's key",
-  );
+  assert.ok(steps.length > 0, "the archive runs a cleanup");
+  assert.equal(await world.store.head(orphan), null, "the unrelated old orphan goes");
+  assert.notEqual(await world.store.head(packKey(base)), null, "the refused snapshot's pack stays");
 });
 
 test("a written pack object storage already holds is presigned again and survives a cleanup run", async (t) => {

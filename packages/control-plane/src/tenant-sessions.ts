@@ -1974,23 +1974,21 @@ export abstract class TenantSessions extends DurableObject<Env> {
       .map((row) => row.turn_id);
   }
 
-  private settleSnapshotRequests(session: SessionRow, from: string, to: string, failedAt: string): Promise<void[]> {
+  private settleSnapshotRequests(session: SessionRow, from: string, to: string, failedAt: string): void {
     const requests = this.ctx.storage.sql
       .exec<SnapshotRequestRow>(
         "SELECT snapshot_id, session_id, box_id, turn_id, snapshot_seq, storage_key FROM snapshot_requests WHERE session_id = ?",
         session.session_id,
       )
       .toArray();
-    return Promise.all(
-      requests.map((request) =>
-        this.recordSnapshotFailure(
-          request,
-          "NotAnswered",
-          `host ${from} had not answered a snapshot when the session moved to host ${to}`,
-          failedAt,
-        ),
-      ),
-    );
+    for (const request of requests) {
+      this.recordSnapshotFailure(
+        request,
+        "NotAnswered",
+        `host ${from} had not answered a snapshot when the session moved to host ${to}`,
+        failedAt,
+      );
+    }
   }
 
   private async imageAvailability(harness: string, harnessVersion: string, now: number): Promise<ImageLookup> {
@@ -2242,9 +2240,8 @@ export abstract class TenantSessions extends DurableObject<Env> {
     if (this.inFlightTurns(sessionId).length > 0) return this.sendWaiting(tenantId, session, send, caller, now);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
-    const settled = this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
+    this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const turn = this.runTurn(session, hostId, boxId, send, caller, now);
-    await settled;
     await this.offerAfter(tenantId, { ...session, host_id: hostId, box_id: boxId }, turn, placement.evict);
     if (session.state !== "Stopped") {
       await this.host(session.host_id).send({ type: "BoxDiscard", sessionId, boxId: session.box_id });
@@ -2288,7 +2285,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const from = await this.hostName(tenantId, session.host_id);
     const hostId = placement.host.hostId;
     const boxId = crypto.randomUUID();
-    const settled = this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
+    this.settleSnapshotRequests(session, from, placement.host.name, iso(now));
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec(
@@ -2306,7 +2303,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         turn.turn_id,
       );
     });
-    await settled;
     const moved = { ...session, host_id: hostId, box_id: boxId };
     if (placement.evict.length > 0) return this.evictFirst(tenantId, moved, turn, placement.evict);
     const offer = await this.armOffer(tenantId, moved, turn);
@@ -2489,7 +2485,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       const expired = pending.filter((request) => this.uploadSecondsLeft(request.created_at, now) < 1);
       for (const { created_at: _, ...request } of expired) {
         const detail = `the host had not answered snapshot ${request.snapshot_id} when its upload URLs expired, so stopping the session again gave it up`;
-        await this.recordSnapshotFailure(request, "NotAnswered", detail, iso(now));
+        this.recordSnapshotFailure(request, "NotAnswered", detail, iso(now));
       }
       await this.snapshotOrTeardown(tenantId, session, latest);
       return { kind: "Stopping", session: this.presentSession(tenantId, sessionId) };
@@ -2731,7 +2727,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     now: number,
   ): Promise<void> {
     for (const request of requests) {
-      await this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
+      this.recordSnapshotFailure(request, "BoxNotFound", detail, iso(now));
       await this.snapshotNotStored(tenantId, request, detail, sessionState);
       const session = this.sessionRow(request.session_id);
       if (session === null) continue;
@@ -3339,7 +3335,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       )
       .toArray();
     for (const request of requests) {
-      await this.recordSnapshotFailure(request, "NotAnswered", snapshotDetail, iso(now));
+      this.recordSnapshotFailure(request, "NotAnswered", snapshotDetail, iso(now));
       await this.snapshotNotStored(tenantId, request, snapshotDetail);
       const session = this.sessionRow(request.session_id);
       if (session === null) continue;
@@ -3990,12 +3986,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     });
   }
 
-  private async recordSnapshotFailure(
-    request: SnapshotRequestRow,
-    reason: string,
-    detail: string,
-    failedAt: string,
-  ): Promise<void> {
+  private recordSnapshotFailure(request: SnapshotRequestRow, reason: string, detail: string, failedAt: string): void {
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM snapshot_requests WHERE snapshot_id = ?", request.snapshot_id);
@@ -4013,10 +4004,6 @@ export abstract class TenantSessions extends DurableObject<Env> {
         Date.now(),
       );
     });
-    const draft = await snapshotDraft(this.env.STORE, request.storage_key);
-    if (draft !== null) {
-      await this.env.STORE.put(packListKey(request.storage_key), JSON.stringify([...draft.packs].sort()));
-    }
   }
 
   private async snapshotAnswer(
@@ -4039,7 +4026,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       );
     }
     if (message.type === "SnapshotFailed") {
-      await this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
+      this.recordSnapshotFailure(request, message.reason, message.detail, message.failedAt);
       const detail = `snapshot ${request.snapshot_id} failed ${message.reason}: ${message.detail}`;
       await this.prebuildUnstored(session, detail);
       const boxless = session.state === "Stopping" && message.reason === "BoxNotFound";
@@ -4056,7 +4043,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const outcome = await this.snapshotOutcome(tenantId, hostId, request, message);
     if (outcome.kind === "Answered") return null;
     if (outcome.kind === "Rejected") {
-      await this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
+      this.recordSnapshotFailure(request, "UploadRejected", outcome.detail, iso(Date.now()));
       await this.prebuildUnstored(session, outcome.detail);
       await this.snapshotNotStored(tenantId, request, outcome.detail);
       if (session.state === "Stopping") await this.returnToIdle(tenantId, session.session_id);
