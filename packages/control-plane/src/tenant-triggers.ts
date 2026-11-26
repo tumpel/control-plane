@@ -9,14 +9,17 @@ import {
   TriggerStartRefusalSchema,
   type UpdateTriggerResultSchema,
 } from "@tumpel/schemas";
+import { count, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { boundedTo } from "./bounded-detail.ts";
+import { type DurableDb, durableDb } from "./db/client.ts";
+import * as tenantSchema from "./db/tenant-schema.ts";
 import type { HarnessCatalogEntry } from "./harness-catalog.ts";
 import type { Outcome } from "./hosts.ts";
 import type { Refused } from "./http.ts";
-import { placed } from "./sessions.ts";
+import { placed, sendFailure, sessionNotFound } from "./sessions.ts";
 import { apiOriginOf } from "./settings.ts";
-import type { NewSession } from "./tenant-sessions.ts";
+import type { Claim, NewSession } from "./tenant-sessions.ts";
 import { TenantWebhooks } from "./tenant-webhooks.ts";
 import { conditionRows, conditionsOf } from "./trigger-match.ts";
 
@@ -56,7 +59,7 @@ const TRIGGER_SELECT = `SELECT t.trigger_id, t.name, t.source, t.event, t.person
     FROM (SELECT position, field, value FROM trigger_conditions WHERE trigger_id = t.trigger_id ORDER BY position, value)) AS conditions
   FROM triggers AS t`;
 
-const toTrigger = (tenantId: string, row: TriggerRow): Trigger =>
+const toTrigger = (tenantId: string, row: TriggerRow, sessionId: string | undefined): Trigger =>
   TriggerSchema.parse({
     triggerId: row.trigger_id,
     tenantId,
@@ -68,29 +71,81 @@ const toTrigger = (tenantId: string, row: TriggerRow): Trigger =>
     principalId: row.principal_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    sessionId,
   });
+
+const { sessions, triggerSessionTargets } = tenantSchema;
+
+export const TARGETS_PER_SESSION = 10;
+export const TARGETS_PER_TENANT = 50;
 
 export abstract class TenantTriggers extends TenantWebhooks {
   protected listTriggers(tenantId: string): Trigger[] {
+    const targets = new Map(
+      this.db()
+        .select()
+        .from(triggerSessionTargets)
+        .all()
+        .map((target) => [target.triggerId, target.sessionId]),
+    );
     return this.ctx.storage.sql
       .exec<TriggerRow>(`${TRIGGER_SELECT} ORDER BY t.created_at, t.trigger_id`)
       .toArray()
-      .map((row) => toTrigger(tenantId, row));
+      .map((row) => toTrigger(tenantId, row, targets.get(row.trigger_id)));
   }
 
   protected getTrigger(tenantId: string, triggerId: string): Trigger | null {
     const [row] = this.ctx.storage.sql
       .exec<TriggerRow>(`${TRIGGER_SELECT} WHERE t.trigger_id = ?`, triggerId)
       .toArray();
-    return row === undefined ? null : toTrigger(tenantId, row);
+    if (row === undefined) return null;
+    const target = this.db()
+      .select({ sessionId: triggerSessionTargets.sessionId })
+      .from(triggerSessionTargets)
+      .where(eq(triggerSessionTargets.triggerId, triggerId))
+      .get();
+    return toTrigger(tenantId, row, target?.sessionId);
+  }
+
+  private db(): DurableDb<typeof tenantSchema> {
+    return durableDb(this.ctx.storage, tenantSchema);
   }
 
   protected createTrigger(tenantId: string, create: TriggerCreate, principalId: string, now: number): Created {
     if (!this.personaHeld(create.personaId)) return { kind: "PersonaNotFound" };
+    const { sessionId } = create;
+    if (sessionId !== undefined) {
+      const refused = this.targetRefused(sessionId, create);
+      if (refused !== null) return refused;
+    }
     if (this.triggerNameTaken(create.name, null)) return { kind: "NameTaken" };
     const triggerId = crypto.randomUUID();
-    this.ctx.storage.transactionSync(() => this.insertTrigger(triggerId, create, principalId, now));
+    this.ctx.storage.transactionSync(() => {
+      this.insertTrigger(triggerId, create, principalId, now);
+      if (sessionId !== undefined) this.db().insert(triggerSessionTargets).values({ triggerId, sessionId }).run();
+    });
     return { kind: "Created", trigger: this.presentTrigger(tenantId, triggerId) };
+  }
+
+  private targetRefused(sessionId: string, create: TriggerCreate): Exclude<Created, { kind: "Created" }> | null {
+    const db = this.db();
+    const session = db
+      .select({ state: sessions.state, personaId: sessions.personaId, model: sessions.model })
+      .from(sessions)
+      .where(eq(sessions.sessionId, sessionId))
+      .get();
+    if (session === undefined) return { kind: "NotFound" };
+    if (session.state === "Archived" || session.state === "Failed") return { kind: session.state };
+    if (session.personaId !== create.personaId || session.model !== create.model) {
+      return { kind: "SessionMismatch", personaId: session.personaId, model: session.model };
+    }
+    const held = (where?: ReturnType<typeof eq>): number =>
+      db.select({ held: count() }).from(triggerSessionTargets).where(where).get()?.held ?? 0;
+    if (held(eq(triggerSessionTargets.sessionId, sessionId)) >= TARGETS_PER_SESSION) {
+      return { kind: "LimitReached", scope: "Session" };
+    }
+    if (held() >= TARGETS_PER_TENANT) return { kind: "LimitReached", scope: "Tenant" };
+    return null;
   }
 
   protected updateTrigger(
@@ -102,6 +157,7 @@ export abstract class TenantTriggers extends TenantWebhooks {
   ): Updated {
     const current = this.getTrigger(tenantId, triggerId);
     if (current === null) return { kind: "NotFound" };
+    if (current.sessionId !== undefined) return { kind: "Targeted" };
     if (patch.personaId !== undefined && !this.personaHeld(patch.personaId)) return { kind: "PersonaNotFound" };
     if (patch.name !== undefined && this.triggerNameTaken(patch.name, triggerId)) return { kind: "NameTaken" };
     this.ctx.storage.transactionSync(() => this.replaceTrigger(triggerId, { ...current, ...patch }, principalId, now));
@@ -141,6 +197,8 @@ export abstract class TenantTriggers extends TenantWebhooks {
     const repeated = this.startedFor(triggerId, deliveryId);
     if (repeated !== null) return { kind: "Repeated", sessionId: repeated };
     if (fired.kind === "Refused") return this.refuseStart(origin, fired.refusal, now);
+    if (trigger.sessionId !== undefined)
+      return this.sendTargeted(tenantId, trigger, trigger.sessionId, origin, fired.prompt, now);
     const checked = check(trigger);
     if (!checked.ok) return this.refuseStart(origin, refusalOf(checked), now);
     const entry = checked.value;
@@ -165,6 +223,50 @@ export abstract class TenantTriggers extends TenantWebhooks {
     );
     if (started.ok) return { kind: "Started", started: started.value };
     return this.refuseStart(origin, refusalOf(started), now);
+  }
+
+  private async sendTargeted(
+    tenantId: string,
+    trigger: Trigger,
+    sessionId: string,
+    origin: Origin,
+    prompt: string,
+    now: number,
+  ): Promise<Fired> {
+    let taken = false;
+    const claim: Claim = () => {
+      const session = this.db()
+        .select({ state: sessions.state })
+        .from(sessions)
+        .where(eq(sessions.sessionId, sessionId))
+        .get();
+      if (session === undefined) return { kind: "NotFound" };
+      const { state } = session;
+      if (state === "Archived" || state === "Failed" || state === "Stopping") return { kind: state };
+      taken = !this.deleteTrigger(trigger.triggerId);
+      return taken ? { kind: "NotFound" } : null;
+    };
+    const caller = { kind: "Person" as const, principalId: trigger.principalId };
+    const hosts = await this.hostRecords(tenantId);
+    const sent = await this.sendTurn(tenantId, sessionId, { prompt }, caller, hosts, now, claim);
+    if (sent.kind === "Sent") return { kind: "Sent", sessionId, turnId: sent.turn.turnId };
+    if (taken) return { kind: "NotFound" };
+    const session = await this.readSession(tenantId, sessionId);
+    const refusal = refusalOf(
+      session === null ? sessionNotFound(sessionId) : sendFailure(sent, sessionId, session, hosts),
+    );
+    if (sent.kind !== "NotFound" && sent.kind !== "Archived" && sent.kind !== "Failed") {
+      return this.refuseStart(origin, refusal, now);
+    }
+    const deleted = this.ctx.storage.transactionSync(() => {
+      if (!this.deleteTrigger(trigger.triggerId)) return false;
+      this.appendEvent(
+        { event: "TriggerStartRefused", triggerId: origin.triggerId, deliveryId: origin.deliveryId, refusal },
+        now,
+      );
+      return true;
+    });
+    return deleted ? { kind: "Gone", refusal } : { kind: "NotFound" };
   }
 
   private refuseStart(origin: Origin, refusal: TriggerStartRefusal, now: number): Fired {
