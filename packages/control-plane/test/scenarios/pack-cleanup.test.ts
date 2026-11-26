@@ -126,13 +126,17 @@ test("a snapshot stored during a run keeps the old pack it reuses from the snaps
   await host.claims(second);
   await host.completes(second);
   const request = snapshotAsked(host, kept.sessionId);
+  const manifest = JSON.stringify({ entries: [] });
+  const rootDigest = createHash("sha256").update(manifest).digest("hex");
+  const root = { digest: rootDigest, packDigest: rootDigest, offset: 0, length: Buffer.byteLength(manifest) };
+  await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
   await host.says({
     type: "SnapshotPacks",
     snapshotId: request.snapshotId,
     part: 1,
     packs: [],
     chunks: [],
-    reusedPackDigests: [reused],
+    reusedPackDigests: [reused, rootDigest],
   });
   await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0, chunkCount: 500 });
   assert.equal(await world.store.head(`${kept.storageKey}.packs`), null, "the newer snapshot released the older");

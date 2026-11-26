@@ -86,6 +86,7 @@ import { catalogEntry, GOAL_FOLDS, GOAL_TURN_CAP } from "./harness-catalog";
 import { type HostEntry, type HostRecord, hostOf, listHosts, type OfferSent, withReportedHealth } from "./hosts";
 import type { Env } from "./index";
 import { keyStoreOf } from "./key-store.ts";
+import { PackCleanup } from "./pack-cleanup.ts";
 import { personaFileKey, sha256Hex } from "./persona-files";
 import {
   type BoxSize,
@@ -850,6 +851,14 @@ export abstract class TenantSessions extends DurableObject<Env> {
   }
 
   private readonly manifests = new SnapshotManifests();
+
+  private readonly cleanup = new PackCleanup();
+
+  async alarm(): Promise<void> {
+    const tenantId = this.ctx.id.name;
+    if (tenantId === undefined) throw new Error("the tenant Durable Object cleaning packs has no name");
+    await this.cleanup.step(this.ctx, this.env.STORE, tenantId, Date.now());
+  }
 
   private readonly live = new LivePacks(this.manifests, (after, limit) =>
     this.ctx.storage.sql
@@ -2510,9 +2519,13 @@ export abstract class TenantSessions extends DurableObject<Env> {
     const [restoring] = sql
       .exec(
         `SELECT 1 FROM prebuild_sessions JOIN session_prebuild_layers AS consumer USING (prebuild_id)
-        JOIN turns ON turns.session_id = consumer.session_id
-        WHERE prebuild_sessions.session_id = ? AND turns.state IN (SELECT value FROM json_each(?))
-          AND NOT EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = consumer.session_id) LIMIT 1`,
+        JOIN sessions ON sessions.session_id = consumer.session_id
+        WHERE prebuild_sessions.session_id = ?
+          AND NOT EXISTS (SELECT 1 FROM snapshots WHERE snapshots.session_id = consumer.session_id)
+          AND (sessions.state = 'Idle'
+            OR EXISTS (SELECT 1 FROM snapshot_requests WHERE snapshot_requests.session_id = consumer.session_id)
+            OR EXISTS (SELECT 1 FROM turns WHERE turns.session_id = consumer.session_id
+              AND turns.state IN (SELECT value FROM json_each(?)))) LIMIT 1`,
         sessionId,
         JSON.stringify(IN_FLIGHT),
       )
@@ -2535,6 +2548,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
       sql.exec("DELETE FROM snapshot_failures WHERE session_id = ?", sessionId);
       sql.exec("DELETE FROM snapshot_requests WHERE session_id = ?", sessionId);
     });
+    await this.cleanup.request(this.ctx.storage, now);
     return { kind: "Archived", session: this.presentSession(tenantId, sessionId) };
   }
 
@@ -2569,6 +2583,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
     ]);
     await this.deleteObjects([...this.objectKeys(older), ...this.objectKeys(failed)]);
     this.ctx.storage.transactionSync(() => this.releaseSnapshots(older));
+    if (older.length + failed.length > 0) await this.cleanup.request(this.ctx.storage, now);
     await this.archiveSupersededPrebuilds(tenantId, now);
   }
 

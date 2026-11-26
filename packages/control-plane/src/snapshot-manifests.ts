@@ -9,7 +9,7 @@ export type ManifestRead<T> =
   | { kind: "Gone"; detail: string }
   | { kind: "Unreadable"; detail: string };
 
-const PackListSchema = z.array(z.string());
+export const PackListSchema = z.array(z.string());
 const EntrySchema = SnapshotManifestSchema.shape.entries.element;
 const ENTRY_FIELDS = ["kind", "path", "mode", "uid", "gid", "mtimeSeconds", "mtimeNanos", "sizeBytes", "target"];
 const LIVE_PAGE = 100;
