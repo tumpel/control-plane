@@ -495,7 +495,7 @@ export class World {
     return elapsed;
   }
 
-  async alarm(tenantId: string = TENANT_ID): Promise<number | null> {
+  async alarmStep(tenantId: string = TENANT_ID): Promise<number | null> {
     const { object, ctx } = this.tenants.instance(tenantId);
     const at = ctx.storage.alarmAt;
     if (at === null || at > Date.now()) return null;

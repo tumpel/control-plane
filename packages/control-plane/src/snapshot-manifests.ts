@@ -248,7 +248,7 @@ type LiveState = {
   unreadable: Map<string, string>;
 };
 
-const LivePacksSchema = z.object({
+export const LivePacksSchema = z.object({
   members: z.array(z.string()),
   counts: z.array(z.tuple([z.string(), z.number().int().min(1)])),
   held: z.array(z.tuple([z.string(), z.array(z.tuple([z.string(), z.boolean()]))])).default([]),

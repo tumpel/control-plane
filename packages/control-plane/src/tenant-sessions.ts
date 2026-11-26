@@ -854,7 +854,7 @@ export abstract class TenantSessions extends DurableObject<Env> {
 
   private readonly cleanup = new PackCleanup();
 
-  async alarm(): Promise<void> {
+  protected async cleanPacks(): Promise<void> {
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) throw new Error("the tenant Durable Object cleaning packs has no name");
     await this.cleanup.step(this.ctx, this.env.STORE, tenantId, Date.now());

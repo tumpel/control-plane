@@ -19,9 +19,7 @@
       "includes": [
         "packages/control-plane/**/*.ts",
         "!packages/control-plane/src/pack-cleanup.ts",
-        "!packages/control-plane/src/tenant-sessions.ts",
-        "!packages/control-plane/test/scenarios/harness/runtime.ts",
-        "!packages/control-plane/test/scenarios/harness/world.ts"
+        "!packages/control-plane/test/scenarios/harness/runtime.ts"
       ]
     },
     {

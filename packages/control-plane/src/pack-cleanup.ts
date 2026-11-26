@@ -1,6 +1,6 @@
 import { sql as query } from "drizzle-orm";
 import { durableDb } from "./db/client.ts";
-import { PackListSchema, packListKey } from "./snapshot-manifests.ts";
+import { LivePacksSchema, livePacksKey, PackListSchema, packListKey } from "./snapshot-manifests.ts";
 
 export const CLEANUP_DELAY_MS = 10 * 60_000;
 export const PACK_GRACE_MS = 60 * 60_000;
@@ -26,6 +26,14 @@ const inputs = (storage: DurableObjectStorage): Input[] =>
 const held = (storage: DurableObjectStorage, input: Input): boolean =>
   durableDb(storage, {}).get(query`SELECT 1 FROM snapshots WHERE snapshot_id = ${input.snapshot_id}`) !== undefined;
 
+const markHeld = async (store: R2Bucket, marked: Set<string>, tenantId: string): Promise<void> => {
+  const saved = await store.get(livePacksKey(tenantId));
+  if (saved === null) return;
+  for (const [, packs] of LivePacksSchema.parse(JSON.parse(await saved.text())).held) {
+    for (const [packDigest] of packs) marked.add(packDigest);
+  }
+};
+
 const mark = async (
   storage: DurableObjectStorage,
   store: R2Bucket,
@@ -43,10 +51,7 @@ export class PackCleanup {
   private run: Run | null = null;
 
   async request(storage: DurableObjectStorage, now: number): Promise<void> {
-    if (this.run !== null) {
-      this.run.again = true;
-      return;
-    }
+    if (this.run !== null) this.run.again = true;
     if ((await storage.getAlarm()) === null) await storage.setAlarm(now + CLEANUP_DELAY_MS);
   }
 
@@ -54,12 +59,14 @@ export class PackCleanup {
     const run = this.run;
     if (run === null) {
       const found = inputs(ctx.storage);
+      const marked = new Set<string>();
+      await markHeld(store, marked, tenantId);
       this.run = {
         startedAt: now,
         inputs: found,
         known: new Set(found.map((input) => input.snapshot_id)),
         next: 0,
-        marked: new Set(),
+        marked,
         after: undefined,
         again: false,
       };

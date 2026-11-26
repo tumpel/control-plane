@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { z } from "zod";
 import {
   CHUNK_BYTES,
+  failsSnapshot,
   PackUploadsSchema,
   type Placement,
   parts,
@@ -71,7 +72,7 @@ const archives = (world: World, sessionId: string): Promise<unknown> =>
 
 const cleanupSteps = async (world: World): Promise<number[]> => {
   const steps: number[] = [];
-  for (let ms = await world.alarm(); ms !== null; ms = await world.alarm()) steps.push(ms);
+  for (let ms = await world.alarmStep(); ms !== null; ms = await world.alarmStep()) steps.push(ms);
   return steps;
 };
 
@@ -91,9 +92,9 @@ test("a cleanup run after a release deletes an orphan pack older than an hour, k
 
   await archives(world, released.sessionId);
   await world.restartTenant();
-  assert.equal(await world.alarm(), null, "the run waits 10 minutes for more releases");
+  assert.equal(await world.alarmStep(), null, "the run waits 10 minutes for more releases");
   await world.tick(10 * MINUTE_MS);
-  const first = await world.alarm();
+  const first = await world.alarmStep();
   assert.notEqual(first, null, "the release starts a run after 10 minutes");
   await world.restartTenant();
   const steps = await cleanupSteps(world);
@@ -119,7 +120,7 @@ test("a snapshot stored during a run keeps the old pack it reuses from the snaps
   await world.tick(61 * MINUTE_MS);
   await archives(world, other.sessionId);
   await world.tick(10 * MINUTE_MS);
-  assert.notEqual(await world.alarm(), null, "the archive starts a run");
+  assert.notEqual(await world.alarmStep(), null, "the archive starts a run");
 
   await world.sendTurn(kept.sessionId, "change one file");
   const second = host.takeOffer();
@@ -146,6 +147,69 @@ test("a snapshot stored during a run keeps the old pack it reuses from the snaps
   assert.notEqual(await world.store.head(packKey(reused)), null, "the reused old pack stays");
 });
 
+test("a pack a failed upload still holds survives a cleanup run, and the session's next snapshot reuses it and stores", async (t) => {
+  const world = await World.open({ limits: UNMETERED });
+  t.after(() => world.close());
+  const host = await world.hostOnline("host-1");
+  await world.holdsAgentCredentials();
+  const other = await startsStored(world, host, "another tree", tree(10, "other"));
+  const session = await world.startSession({ prompt: "build the held tree", tags: [] });
+  const offer = host.takeOffer();
+  await host.claims(offer);
+  await host.completes(offer);
+  const failed = snapshotAsked(host, session.sessionId);
+  const held = sha256("held pack");
+  const chunk = { digest: sha256("held chunk"), packDigest: held, offset: 0, length: CHUNK_BYTES };
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: failed.snapshotId,
+    part: 1,
+    packs: [{ packDigest: held, sizeBytes: CHUNK_BYTES }],
+    chunks: [chunk],
+    reusedPackDigests: [],
+  });
+  await world.store.put(packKey(held), "pack");
+  await failsSnapshot(host, failed.snapshotId);
+  await world.tick(61 * MINUTE_MS);
+  await archives(world, other.sessionId);
+  await world.tick(10 * MINUTE_MS);
+  const steps = await cleanupSteps(world);
+  assert.ok(steps.length > 0, "the archive runs a cleanup");
+  assert.notEqual(await world.store.head(packKey(held)), null, "the held pack stays");
+
+  await world.sendTurn(session.sessionId, "change one file");
+  const next = host.takeOffer();
+  await host.claims(next);
+  await host.completes(next);
+  const request = z
+    .object({ snapshotId: z.string(), storageKey: z.string() })
+    .parse(host.received("SnapshotRequest").at(-1));
+  const manifest = JSON.stringify({ entries: [] }, null, 2);
+  const rootDigest = createHash("sha256").update(manifest).digest("hex");
+  const root = { digest: rootDigest, packDigest: rootDigest, offset: 0, length: Buffer.byteLength(manifest) };
+  await host.says({
+    type: "SnapshotPacks",
+    snapshotId: request.snapshotId,
+    part: 1,
+    packs: [{ packDigest: rootDigest, sizeBytes: root.length }],
+    chunks: [root],
+    reusedPackDigests: [held],
+  });
+  await world.store.put(packKey(rootDigest), manifest);
+  await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
+  await host.says({ type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: root.length, chunkCount: 2 });
+
+  const snapshots = SnapshotsSchema.parse(
+    await world.call("listSnapshots", { tenantId: TENANT_ID, sessionId: session.sessionId }),
+  );
+  assert.deepEqual(snapshots.snapshots.map((snapshot) => snapshot.outcome.state).sort(), ["Failed", "Stored"]);
+  assert.notEqual(
+    await world.store.head(packKey(held)),
+    null,
+    "the stored snapshot's reused pack is in object storage",
+  );
+});
+
 test("a pack uploaded again between the sweep's listing and its delete makes the snapshot naming it refuse, never store", async (t) => {
   const world = await World.open({ limits: UNMETERED });
   t.after(() => world.close());
@@ -159,6 +223,9 @@ test("a pack uploaded again between the sweep's listing and its delete makes the
   await host.claims(offer);
   await host.completes(offer);
   const request = snapshotAsked(host, session.sessionId);
+  await archives(world, other.sessionId);
+  await world.tick(10 * MINUTE_MS);
+  assert.notEqual(await world.alarmStep(), null, "the archive starts a run");
   const manifest = JSON.stringify({ entries: [] }, null, 1);
   const rootDigest = createHash("sha256").update(manifest).digest("hex");
   const root = { digest: rootDigest, packDigest: rootDigest, offset: 0, length: Buffer.byteLength(manifest) };
@@ -182,8 +249,6 @@ test("a pack uploaded again between the sweep's listing and its delete makes the
   );
   await world.store.put(packKey(rootDigest), manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
-  await archives(world, other.sessionId);
-  await world.tick(10 * MINUTE_MS);
   const list = world.store.list.bind(world.store);
   t.mock.method(world.store, "list", async (options: Parameters<typeof list>[0]) => {
     const listed = await list(options);

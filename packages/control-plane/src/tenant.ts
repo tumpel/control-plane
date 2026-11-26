@@ -245,6 +245,10 @@ export class Tenant extends TenantConnectors {
     });
   }
 
+  async alarm(): Promise<void> {
+    await this.cleanPacks();
+  }
+
   private async openMeter(): Promise<void> {
     const tenantId = this.ctx.id.name;
     if (tenantId === undefined) return;
