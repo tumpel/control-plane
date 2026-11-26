@@ -17,6 +17,11 @@ Object.defineProperty(crypto.subtle, "timingSafeEqual", {
 });
 
 export const cpuMs = (): number => {
+  if (!process.execArgv.includes("--single-threaded")) {
+    throw new Error(
+      "budget tests read the process CPU clock, so run them with node --single-threaded, as npm test does",
+    );
+  }
   const { user, system } = process.cpuUsage();
   return (user + system) / 1000;
 };
