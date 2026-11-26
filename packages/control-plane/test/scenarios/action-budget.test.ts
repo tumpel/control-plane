@@ -8,8 +8,6 @@ import { TENANT_OPERATIONS } from "../../src/tenant-api.ts";
 import { BUDGETS, type Host, PRINCIPAL_ID, TENANT_ID, UNMETERED, World } from "./harness/world.ts";
 
 const BUDGET_MS = 30;
-const WARM_UPS = 8;
-const RUNS = 5;
 
 type Def = { type: string } & Record<string, unknown>;
 type Known = Record<string, unknown>;
@@ -99,18 +97,6 @@ const generate = (schema: unknown, known: Known, key: string): unknown => {
     default:
       return first([undefined, null, {}, [], "x", 1]);
   }
-};
-
-const median = (values: number[]): number => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
-
-type Timing = { median: number; first: number };
-
-const measured = async (action: () => Promise<number>): Promise<Timing> => {
-  const first = await action();
-  for (let at = 0; at < WARM_UPS; at++) await action();
-  const runs: number[] = [];
-  for (let at = 0; at < RUNS; at++) runs.push(await action());
-  return { median: median(runs), first };
 };
 
 const SESSIONS = 10;
@@ -344,7 +330,7 @@ test("a host of the tenant gets the restore URLs of a 200000-chunk snapshot with
       hostId: host.hostId,
       message: { type: "RestoreChunks", turnId: offer.turnId, part: at + 1, chunks: part },
     };
-    spent.push(await world.computeMs("hostMessage", input));
+    spent.push(await world.coldMs("hostMessage", input));
     const { reply } = RestoreReplySchema.parse(await world.call("hostMessage", input));
     const packs = [...new Set(part.map((chunk) => chunk.packDigest))].filter((packDigest) => packDigest !== lost);
     assert.deepEqual(
@@ -399,9 +385,9 @@ test("a session list page stays inside the budget and reads no more rows as the 
 
   const first = await rowsRead("/v1/sessions?limit=50");
   assert.deepEqual(first.ids, ordered.slice(0, 50));
-  const timing = await measured(() => world.computeMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } }));
-  console.log(`${timing.median.toFixed(2)} ms median, ${timing.first.toFixed(2)} ms first, ${first.rows} rows read`);
-  assert.ok(timing.median <= BUDGET_MS, `a page of 50 took ${timing.median.toFixed(2)} ms`);
+  const ms = await world.coldMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } });
+  console.log(`${ms.toFixed(2)} ms cold, ${first.rows} rows read`);
+  assert.ok(ms <= BUDGET_MS, `a page of 50 took ${ms.toFixed(2)} ms`);
 
   await world.tick(1);
   for (let at = 60; at < 90; at++) {
@@ -411,10 +397,8 @@ test("a session list page stays inside the budget and reads no more rows as the 
   const grown = await rowsRead("/v1/sessions?limit=50");
   assert.deepEqual(grown.ids, first.ids);
   assert.equal(grown.rows, first.rows);
-  const grownTiming = await measured(() =>
-    world.computeMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } }),
-  );
-  assert.ok(grownTiming.median <= BUDGET_MS, `a page of 50 of 100 took ${grownTiming.median.toFixed(2)} ms`);
+  const grownMs = await world.coldMs("listSessions", { tenantId: TENANT_ID, filter: { limit: 50 } });
+  assert.ok(grownMs <= BUDGET_MS, `a page of 50 of 100 took ${grownMs.toFixed(2)} ms`);
 
   const unpagedHttp = await world.fetch(world.owner, "GET", "/v1/sessions");
   assert.equal(unpagedHttp.status, 400);
@@ -488,7 +472,7 @@ test("a session list page stays inside the budget and reads no more rows as the 
 
 const DESTRUCTIVE = /^(delete|archive|forget|revoke|remove|stop|cancel|clear|purge|disconnect|restore)/;
 
-type Result = { label: string; timing: Timing };
+type Result = { label: string; ms: number };
 
 const timed = async (
   world: World,
@@ -506,11 +490,11 @@ const timed = async (
     failed(error);
     return;
   }
-  const timing = await measured(() => world.computeMs(name, input)).catch((error: unknown) => {
+  const ms = await world.coldMs(name, input).catch((error: unknown) => {
     failed(error);
     return null;
   });
-  if (timing !== null) results.push({ label, timing });
+  if (ms !== null) results.push({ label, ms });
 };
 
 test("every Tenant API operation and host frame computes within the 30 ms budget on a loaded tenant", {
@@ -544,13 +528,9 @@ test("every Tenant API operation and host frame computes within the 30 ms budget
       `frame ${type}`,
     );
   }
-  results.sort((a, b) => b.timing.median - a.timing.median);
-  for (const { label, timing } of results) {
-    console.log(
-      `${timing.median.toFixed(2).padStart(8)} ms median  ${timing.first.toFixed(2).padStart(8)} ms first  ${label}`,
-    );
-  }
-  const over = results.filter(({ timing }) => timing.median > BUDGET_MS).map(({ label }) => label);
+  results.sort((a, b) => b.ms - a.ms);
+  for (const { label, ms } of results) console.log(`${ms.toFixed(2).padStart(8)} ms cold  ${label}`);
+  const over = results.filter(({ ms }) => ms > BUDGET_MS).map(({ label, ms }) => `${label}: ${ms.toFixed(2)} ms`);
   assert.deepEqual(over, [], `actions over ${BUDGET_MS} ms of compute`);
   assert.deepEqual(broken, [], `actions the test could not run:\n${broken.join("\n")}`);
 });
@@ -575,8 +555,7 @@ test("a chunk ask after a restart stays inside the budget, whatever the size of 
   await host.completes(second);
   const request = z.object({ snapshotId: z.string() }).parse(host.received("SnapshotRequest").at(-1));
 
-  await world.restartTenant();
-  const ms = await world.computeMs("hostMessage", {
+  const ms = await world.coldMs("hostMessage", {
     tenantId: TENANT_ID,
     hostId: host.hostId,
     message: {
@@ -667,7 +646,6 @@ for (const entries of [2_098, 32_768, 65_536]) {
     const unheld = streamChunks(entries + 40).slice(entries);
     const asked = [...held.slice(0, 30), ...unheld, ...held.slice(30)];
 
-    await world.restartTenant();
     world.store.latencyMs = R2_LATENCY_MS;
     const input = {
       tenantId: TENANT_ID,
@@ -681,7 +659,7 @@ for (const entries of [2_098, 32_768, 65_536]) {
     };
     const gets = world.store.gets;
     const started = performance.now();
-    const cpu = await world.computeMs("hostMessage", input);
+    const cpu = await world.coldMs("hostMessage", input);
     const wall = performance.now() - started;
     assert.equal(world.store.gets - gets, 1, "one GET of the whole .idx");
     console.log(`${entries} entries: ${cpu.toFixed(2)} ms CPU, ${wall.toFixed(2)} ms wall, cold`);

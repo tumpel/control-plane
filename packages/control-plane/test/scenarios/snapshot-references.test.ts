@@ -143,14 +143,12 @@ test("a SnapshotPacks part and a SnapshotDone each stay within the budget on a r
   const written = Array.from({ length: 30 }, (_, pack) => sha256(`measured pack ${pack}`));
   const { message, manifest, root } = snapshotPacks(request, written, [sha256("seeded 0 pack 0")]);
 
-  await world.restartTenant();
-  const packsMs = await world.computeMs("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message });
+  const packsMs = await world.coldMs("hostMessage", { tenantId: TENANT_ID, hostId: host.hostId, message });
   for (const packDigest of written) await world.store.put(packKey(packDigest), "pack");
   await world.store.put(packKey(sha256("seeded 0 pack 0")), "pack");
   await world.store.put(packKey(root.packDigest), manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [root] }));
-  await world.restartTenant();
-  const doneMs = await world.computeMs("hostMessage", {
+  const doneMs = await world.coldMs("hostMessage", {
     tenantId: TENANT_ID,
     hostId: host.hostId,
     message: { type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0, chunkCount: 31 },
@@ -220,9 +218,8 @@ test("a SnapshotDone naming 3000 reused packs and 30 written ones stays within t
   for (const packDigest of written) await world.store.put(packKey(packDigest), "pack");
   await world.store.put(packKey(last.root.packDigest), last.manifest);
   await world.store.put(request.storageKey, JSON.stringify({ manifest: [last.root] }));
-  await world.restartTenant();
   const heads = t.mock.method(world.store, "head");
-  const doneMs = await world.computeMs("hostMessage", {
+  const doneMs = await world.coldMs("hostMessage", {
     tenantId: TENANT_ID,
     hostId: host.hostId,
     message: { type: "SnapshotDone", snapshotId: request.snapshotId, uploadedBytes: 0, chunkCount: 3031 },

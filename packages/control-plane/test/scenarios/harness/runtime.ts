@@ -2,6 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mock } from "node:test";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 
 type Row = Record<string, unknown>;
 
@@ -16,27 +18,35 @@ Object.defineProperty(crypto.subtle, "timingSafeEqual", {
   configurable: true,
 });
 
+setFlagsFromString("--expose-gc");
+export const collectGarbage = runInNewContext("gc") as () => void;
+
+export const cpuMs = (): number => {
+  const { user, system } = process.cpuUsage();
+  return (user + system) / 1000;
+};
+
 export const ioClock = { spentMs: 0, depth: 0 };
 
 const spendingOnIo = <T>(work: () => T): T => {
-  const started = performance.now();
+  const started = cpuMs();
   ioClock.depth += 1;
   try {
     return work();
   } finally {
     ioClock.depth -= 1;
-    if (ioClock.depth === 0) ioClock.spentMs += performance.now() - started;
+    if (ioClock.depth === 0) ioClock.spentMs += cpuMs() - started;
   }
 };
 
 const awaitingIo = async <T>(work: () => Promise<T>): Promise<T> => {
-  const started = performance.now();
+  const started = cpuMs();
   ioClock.depth += 1;
   try {
     return await work();
   } finally {
     ioClock.depth -= 1;
-    if (ioClock.depth === 0) ioClock.spentMs += performance.now() - started;
+    if (ioClock.depth === 0) ioClock.spentMs += cpuMs() - started;
   }
 };
 

@@ -25,6 +25,8 @@ import { TEST_SETTINGS } from "../../timing.ts";
 import { ACCESS_AUDIENCE, AccessStub } from "./access.ts";
 import { GitHubStub, installApp } from "./github.ts";
 import {
+  collectGarbage,
+  cpuMs,
   D1Database,
   flight,
   ioClock,
@@ -484,13 +486,15 @@ export class World {
     return supervisor;
   }
 
-  async computeMs(operation: string, input: unknown): Promise<number> {
+  async coldMs(operation: string, input: unknown): Promise<number> {
+    collectGarbage();
     const spent = ioClock.spentMs;
-    const started = performance.now();
+    const started = cpuMs();
+    this.tenants.restart(TENANT_ID);
     await this.api.call(operation, input).catch((error: unknown) => {
       if (error instanceof Error && /as invalid:/.test(error.message)) throw error;
     });
-    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    const elapsed = cpuMs() - started - (ioClock.spentMs - spent);
     await this.runtime.settle();
     return elapsed;
   }
@@ -501,10 +505,11 @@ export class World {
     if (at === null || at > Date.now()) return null;
     ctx.storage.alarmAt = null;
     await ctx.unblocked();
+    collectGarbage();
     const spent = ioClock.spentMs;
-    const started = performance.now();
+    const started = cpuMs();
     await (object as unknown as { alarm(): Promise<void> }).alarm();
-    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    const elapsed = cpuMs() - started - (ioClock.spentMs - spent);
     await this.runtime.settle();
     return elapsed;
   }
