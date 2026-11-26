@@ -283,7 +283,7 @@ test("a signed-in owner signs up, logs a device in, and is the same principal ov
     "For NoCredential or CredentialExpired, ask the person to fix the credential.",
     "For PoolExhausted, NoHostAvailable, HostDegraded or HostOffline, end the turn and wait for CapacityAvailable if your subscription lists it. Otherwise, move the work onto a session that has room. Never poll.",
     "Only an Owner creates a trigger that starts sessions. A session may create a trigger targeting itself with sessionId, which sends it one turn and then deletes itself.",
-    "A Foreman waiting on a crew pull request creates targeted triggers after the pull request is pushed: one per thing it waits on,",
+    "A Foreman waiting on a crew pull request creates targeted triggers after the pull request is pushed: one per thing it waits on, such as a status with context agent-review and state success, failure or error on the head sha,",
     "plus a pull_request trigger for synchronize and closed, so pushes, merge and close wake it too. Each trigger's prompt names the pull request and the {{field}} values the Foreman needs.",
     "It then reads the current state once with gh. It ends its turn and never polls.",
     "When it wakes, it reads the pull request before acting. On a push, it replaces its triggers for the old head with triggers for the new one.",
