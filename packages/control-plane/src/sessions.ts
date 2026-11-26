@@ -29,7 +29,7 @@ import {
   pinnedEntry,
 } from "./harness-catalog.ts";
 import { type HostRecord, hostOf, listHostRecords, type Outcome } from "./hosts.ts";
-import { issues, json, noContent, parseBody, problem, type Refused, refuse } from "./http.ts";
+import { issues, json, noContent, type Parsed, parseBody, problem, type Refused, refuse } from "./http.ts";
 import { type Caller, whoamiOf } from "./identity.ts";
 import type { Env } from "./index.ts";
 import type { StoredPersona } from "./persona-files.ts";
@@ -620,16 +620,26 @@ export const listSessions = async (env: Env, caller: Caller, query: SessionListQ
 
 const SESSION_PAGE = 50;
 
-export const everySession = async (env: Env, tenantId: string): Promise<Session[]> => {
+export const everySession = async (env: Env, tenantId: string, operation: string): Promise<Parsed<Session[]>> => {
   const tenant = tenantApi(env.TENANT, tenantId);
   const sessions: Session[] = [];
   for (;;) {
     const after = sessions.at(-1)?.sessionId;
     const filter: SessionFilter = after === undefined ? { limit: SESSION_PAGE } : { limit: SESSION_PAGE, after };
     const { sessions: page } = await tenant.call("listSessions", { tenantId, filter });
-    if (page === null) throw new Error(`session ${after} left tenant ${tenantId} while its sessions were paged`);
+    if (page === null) {
+      return {
+        ok: false,
+        response: problem(409, {
+          code: "Conflict",
+          title: "Session deleted during the read",
+          detail: `${operation} read the sessions page by page, and session ${after} was deleted before the next page`,
+          fix: "Run it again",
+        }),
+      };
+    }
     sessions.push(...page);
-    if (page.length < SESSION_PAGE) return sessions;
+    if (page.length < SESSION_PAGE) return { ok: true, value: sessions };
   }
 };
 

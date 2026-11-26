@@ -422,17 +422,13 @@ test("a session list page stays inside the budget and reads no more rows as the 
   assert.equal(paged.length, 100);
   assert.deepEqual(paged, [...ordered, ...added.slice(60).toSorted()]);
 
-  const plan = await world.fetch(
-    world.owner,
-    "POST",
-    "/v1/tenant-config/plan",
-    JSON.stringify({
-      config: { personas: [], secretSets: [], harnessPins: [], hosts: [] },
-      files: [],
-      expiryValues: [],
-      secretValues: [],
-    }),
-  );
+  const emptyPlan = JSON.stringify({
+    config: { personas: [], secretSets: [], harnessPins: [], hosts: [] },
+    files: [],
+    expiryValues: [],
+    secretValues: [],
+  });
+  const plan = await world.fetch(world.owner, "POST", "/v1/tenant-config/plan", emptyPlan);
   assert.equal(plan.status, 422);
   assert.ok(
     z
@@ -441,6 +437,22 @@ test("a session list page stays inside the budget and reads no more rows as the 
       .detail.includes(`still used by session ${paged.join(", ")}, which is neither Failed nor Archived`),
     "a config plan names every session past the first page",
   );
+
+  const tenant = world.tenantSteps() as unknown as {
+    listSessions(tenantId: string, filter: { after?: string }): Promise<unknown>;
+  };
+  const listSessions = tenant.listSessions.bind(tenant);
+  const deleting = t.mock.method(tenant, "listSessions", (tenantId: string, filter: { after?: string }) => {
+    if (filter.after !== undefined) world.tenantSql().exec("DELETE FROM sessions WHERE session_id = ?", filter.after);
+    return listSessions(tenantId, filter);
+  });
+  const gone = await world.fetch(world.owner, "POST", "/v1/tenant-config/plan", emptyPlan);
+  deleting.mock.restore();
+  assert.equal(gone.status, 409);
+  assert.deepEqual(z.object({ detail: z.string(), fix: z.string() }).parse(await gone.json()), {
+    detail: `tenantConfigs.plan read the sessions page by page, and session ${paged[49]} was deleted before the next page`,
+    fix: "Run it again",
+  });
 
   const unknown = await world.fetch(world.owner, "GET", "/v1/sessions?limit=50&after=no-such-session");
   assert.equal(unknown.status, 400);
