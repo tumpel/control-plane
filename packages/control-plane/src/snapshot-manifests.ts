@@ -49,9 +49,9 @@ export const heldPlacements = async (
   store: R2Bucket,
   storageKey: string,
   digests: string[],
-): Promise<ManifestRead<Placement[]>> => {
+): Promise<ManifestRead<Placement[]> | { kind: "NoIndex" } | { kind: "BadHeader"; detail: string }> => {
   const object = await store.get(indexKey(storageKey));
-  if (object === null) return { kind: "Read", value: [] };
+  if (object === null) return { kind: "NoIndex" };
   if (object.size > MAX_INDEX_BYTES) {
     return {
       kind: "Unreadable",
@@ -62,7 +62,7 @@ export const heldPlacements = async (
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const magic = new TextDecoder().decode(bytes.subarray(0, 4));
   if (bytes.byteLength < INDEX_HEADER_BYTES || magic !== "TPIX" || view.getUint32(4, true) !== 1) {
-    return { kind: "Unreadable", detail: `${indexKey(storageKey)} is no version 1 chunk index` };
+    return { kind: "BadHeader", detail: `${indexKey(storageKey)} is no version 1 chunk index` };
   }
   const packs = view.getUint32(8, true);
   const records = view.getUint32(12, true);
