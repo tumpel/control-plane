@@ -16,27 +16,40 @@ Object.defineProperty(crypto.subtle, "timingSafeEqual", {
   configurable: true,
 });
 
+export const budgetClock = (): void => {
+  if (!process.execArgv.includes("--single-threaded")) {
+    throw new Error(
+      "budget tests read the process CPU clock, so run them with node --single-threaded, as npm test does",
+    );
+  }
+};
+
+export const cpuMs = (): number => {
+  const { user, system } = process.cpuUsage();
+  return (user + system) / 1000;
+};
+
 export const ioClock = { spentMs: 0, depth: 0 };
 
 const spendingOnIo = <T>(work: () => T): T => {
-  const started = performance.now();
+  const started = cpuMs();
   ioClock.depth += 1;
   try {
     return work();
   } finally {
     ioClock.depth -= 1;
-    if (ioClock.depth === 0) ioClock.spentMs += performance.now() - started;
+    if (ioClock.depth === 0) ioClock.spentMs += cpuMs() - started;
   }
 };
 
 const awaitingIo = async <T>(work: () => Promise<T>): Promise<T> => {
-  const started = performance.now();
+  const started = cpuMs();
   ioClock.depth += 1;
   try {
     return await work();
   } finally {
     ioClock.depth -= 1;
-    if (ioClock.depth === 0) ioClock.spentMs += performance.now() - started;
+    if (ioClock.depth === 0) ioClock.spentMs += cpuMs() - started;
   }
 };
 
@@ -177,10 +190,37 @@ export class SqlStorage {
   }
 }
 
+export type StorageCopy = { sql: string; values: [string, unknown][]; alarmAt: number | null };
+
+export const copiedDatabase = (path: string): DatabaseSync => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`ATTACH '${path}' AS seeded`);
+  const schema = db
+    .prepare("SELECT type, name, sql FROM seeded.sqlite_schema WHERE sql IS NOT NULL ORDER BY type = 'table' DESC")
+    .all() as { type: string; name: string; sql: string }[];
+  for (const { type, name, sql } of schema) {
+    if (name !== "sqlite_sequence") db.exec(sql);
+    if (type === "table") db.exec(`INSERT INTO main."${name}" SELECT * FROM seeded."${name}"`);
+  }
+  db.exec("DETACH seeded");
+  return db;
+};
+
 export class Storage {
-  readonly sql = new SqlStorage(new DatabaseSync(":memory:"));
-  private readonly values = new Map<string, unknown>();
-  alarmAt: number | null = null;
+  readonly sql: SqlStorage;
+  private readonly values: Map<string, unknown>;
+  alarmAt: number | null;
+
+  constructor(copy?: StorageCopy) {
+    this.sql = new SqlStorage(copy === undefined ? new DatabaseSync(":memory:") : copiedDatabase(copy.sql));
+    this.values = new Map(copy?.values);
+    this.alarmAt = copy?.alarmAt ?? null;
+  }
+
+  copy(path: string): StorageCopy {
+    this.sql.db.exec(`VACUUM INTO '${path}'`);
+    return { sql: path, values: [...this.values], alarmAt: this.alarmAt };
+  }
 
   async getAlarm(): Promise<number | null> {
     return this.alarmAt;
@@ -413,6 +453,7 @@ export class DurableObjectState {
   readonly storage: Storage;
   readonly id: { name: string; toString(): string };
   object: object | null = null;
+  retired = false;
   private readonly pending: Promise<unknown>[] = [];
   private readonly sockets: ServerSocket[] = [];
   private blocking: Promise<unknown> = Promise.resolve();
@@ -521,6 +562,7 @@ export class Namespace<T extends object> {
   restart(name: string): void {
     const held = this.instance(name);
     held.ctx.sever();
+    held.ctx.retired = true;
     this.born(name, new DurableObjectState(name, held.ctx.storage));
   }
 
@@ -530,6 +572,10 @@ export class Namespace<T extends object> {
 
   instance(name: string): { object: T; ctx: DurableObjectState } {
     return this.instances.get(name) ?? this.born(name, new DurableObjectState(name));
+  }
+
+  open(name: string, storage: Storage): { object: T; ctx: DurableObjectState } {
+    return this.born(name, new DurableObjectState(name, storage));
   }
 
   private born(name: string, ctx: DurableObjectState): { object: T; ctx: DurableObjectState } {
@@ -542,7 +588,7 @@ export class Namespace<T extends object> {
 }
 
 export class Runtime {
-  private readonly objects: { object: object; ctx: DurableObjectState }[] = [];
+  private objects: { object: object; ctx: DurableObjectState }[] = [];
 
   constructor(start: number) {
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: start });
@@ -570,6 +616,7 @@ export class Runtime {
 
   async settle(): Promise<void> {
     for (const { ctx } of this.objects) await ctx.settle();
+    this.objects = this.objects.filter(({ ctx }) => !ctx.retired);
   }
 
   async advance(ms: number): Promise<void> {
@@ -724,8 +771,30 @@ class R2ObjectBody extends R2Object {
   }
 }
 
+const firstAbove = (sorted: string[], key: string): number => {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if ((sorted[middle] ?? "") <= key) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+};
+
 export class R2Bucket {
-  private readonly objects = new Map<string, Stored>();
+  private readonly objects: Map<string, Stored>;
+  private readonly keys: string[];
+
+  constructor(copy: [string, Stored][] = []) {
+    this.objects = new Map(copy);
+    this.keys = [...this.objects.keys()].sort();
+  }
+
+  copy(): [string, Stored][] {
+    return [...this.objects];
+  }
+
   gets = 0;
   latencyMs = 0;
   failure: { operation: "get" | "head" | "delete"; prefix: string; error: Error } | null = null;
@@ -737,6 +806,8 @@ export class R2Bucket {
   private async store(key: string, value: string | ArrayBuffer | Uint8Array): Promise<R2Object> {
     const body = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
     const stored = { body, uploaded: new Date(Date.now()), etag: createHash("md5").update(body).digest("hex") };
+    const at = firstAbove(this.keys, key);
+    if (this.keys[at - 1] !== key) this.keys.splice(at, 0, key);
     this.objects.set(key, stored);
     return new R2Object(key, stored);
   }
@@ -809,11 +880,19 @@ export class R2Bucket {
   }): { objects: R2ObjectBody[]; truncated: true; cursor: string } | { objects: R2ObjectBody[]; truncated: false } {
     const prefix = options?.prefix ?? "";
     const after = options?.cursor ?? options?.startAfter ?? "";
-    const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix) && key > after).sort();
-    const page = keys.slice(0, options?.limit ?? 1000);
-    const objects = page.flatMap((key) => this.read(key, undefined) ?? []);
-    const last = page.at(-1);
-    if (page.length < keys.length && last !== undefined) return { objects, truncated: true, cursor: last };
+    const limit = options?.limit ?? 1000;
+    const page: string[] = [];
+    for (let at = firstAbove(this.keys, after > prefix ? after : prefix.slice(0, -1)); at < this.keys.length; at++) {
+      const key = this.keys[at] ?? "";
+      if (key < prefix || !this.objects.has(key)) continue;
+      if (!key.startsWith(prefix) || page.length > limit) break;
+      page.push(key);
+    }
+    const truncated = page.length > limit;
+    const listed = page.slice(0, limit);
+    const objects = listed.flatMap((key) => this.read(key, undefined) ?? []);
+    const last = listed.at(-1);
+    if (truncated && last !== undefined) return { objects, truncated: true, cursor: last };
     return { objects, truncated: false };
   }
 }

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { register } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { mock } from "node:test";
+import { fileURLToPath } from "node:url";
+import { serialize } from "node:v8";
 import {
   DeviceAuthorizationSchema,
   DeviceTokenSchema,
@@ -25,6 +31,8 @@ import { TEST_SETTINGS } from "../../timing.ts";
 import { ACCESS_AUDIENCE, AccessStub } from "./access.ts";
 import { GitHubStub, installApp } from "./github.ts";
 import {
+  budgetClock,
+  cpuMs,
   D1Database,
   flight,
   ioClock,
@@ -35,6 +43,7 @@ import {
   Runtime,
   type SqlStorage,
   type Storage,
+  type StorageCopy,
 } from "./runtime.ts";
 import { type RequestInit, request, ScenarioServer, settle } from "./server.ts";
 import { hostKey, Supervisor, type SupervisorOptions, until } from "./supervisor.ts";
@@ -44,6 +53,19 @@ export type { TurnOffer } from "./supervisor.ts";
 register("./hooks.mjs", import.meta.url);
 
 const SOURCE = new URL("../../../src/", import.meta.url);
+const BUDGET_CHILD = fileURLToPath(new URL("./budget-child.ts", import.meta.url));
+const BUDGET_CACHE = join(tmpdir(), "tumpel-budget-compile-cache");
+
+export type BudgetCase = { kind: "Operation"; operation: string; input: unknown } | { kind: "CleanupRun" };
+
+export type Seeded = {
+  now: number;
+  tenantId: string;
+  tenant: StorageCopy;
+  store: ReturnType<R2Bucket["copy"]>;
+  db: string;
+  vars: Record<string, unknown>;
+};
 const MIGRATIONS = new URL("../../../migrations/", import.meta.url);
 
 type DurableObjectClass = new (ctx: never, env: never) => object;
@@ -484,15 +506,57 @@ export class World {
     return supervisor;
   }
 
-  async computeMs(operation: string, input: unknown): Promise<number> {
+  async coldMs(operation: string, input: unknown): Promise<number> {
+    budgetClock();
     const spent = ioClock.spentMs;
-    const started = performance.now();
+    const started = cpuMs();
+    this.tenants.restart(TENANT_ID);
     await this.api.call(operation, input).catch((error: unknown) => {
       if (error instanceof Error && /as invalid:/.test(error.message)) throw error;
     });
-    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    const elapsed = cpuMs() - started - (ioClock.spentMs - spent);
     await this.runtime.settle();
     return elapsed;
+  }
+
+  async seeded(): Promise<string> {
+    await this.runtime.settle();
+    const vars = Object.fromEntries(
+      Object.entries(this.env).filter(
+        ([name, value]) => typeof value === "string" || name === "TUMPEL_SETTINGS" || name === "TUMPEL_LIMITS",
+      ),
+    );
+    const directory = mkdtempSync(join(tmpdir(), "budget-"));
+    const centralPath = join(directory, "central.sqlite");
+    this.db.sql.db.exec(`VACUUM INTO '${centralPath}'`);
+    const seeded: Seeded = {
+      now: Date.now(),
+      tenantId: TENANT_ID,
+      tenant: this.tenantStorage(TENANT_ID).copy(join(directory, "tenant.sqlite")),
+      store: this.store.copy(),
+      db: centralPath,
+      vars,
+    };
+    const path = join(directory, "seeded.bin");
+    writeFileSync(path, serialize(seeded));
+    return path;
+  }
+
+  childMs(seeded: string, budgetCase: BudgetCase): number[] {
+    const output = execFileSync(
+      process.execPath,
+      ["--single-threaded", BUDGET_CHILD, seeded, JSON.stringify(budgetCase)],
+      {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, NODE_COMPILE_CACHE: BUDGET_CACHE },
+      },
+    );
+    return z.object({ ms: z.array(z.number()) }).parse(JSON.parse(output.trim().split("\n").at(-1) ?? "")).ms;
+  }
+
+  childCleanupSteps(seeded: string): number[] {
+    return this.childMs(seeded, { kind: "CleanupRun" });
   }
 
   async alarmStep(tenantId: string = TENANT_ID): Promise<number | null> {
@@ -501,10 +565,11 @@ export class World {
     if (at === null || at > Date.now()) return null;
     ctx.storage.alarmAt = null;
     await ctx.unblocked();
+    budgetClock();
     const spent = ioClock.spentMs;
-    const started = performance.now();
+    const started = cpuMs();
     await (object as unknown as { alarm(): Promise<void> }).alarm();
-    const elapsed = performance.now() - started - (ioClock.spentMs - spent);
+    const elapsed = cpuMs() - started - (ioClock.spentMs - spent);
     await this.runtime.settle();
     return elapsed;
   }
