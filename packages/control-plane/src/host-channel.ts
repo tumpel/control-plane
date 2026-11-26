@@ -311,9 +311,6 @@ export class HostChannel extends DurableObject<Env> {
   }
 
   private async forward(hostId: string, message: HostMessage): Promise<HostReply | null> {
-    if (message.type === "SnapshotChunkCheck" || message.type === "SnapshotIndexAsk") {
-      return { type: "Refused", reason: `the control plane does not answer ${message.type}` };
-    }
     const tenantId = await this.tenantOf(hostId);
     const tenant = tenantApi(this.env.TENANT, tenantId);
     if (isSupervisorUpdate(message)) {

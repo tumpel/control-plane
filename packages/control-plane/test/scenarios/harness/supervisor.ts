@@ -13,6 +13,8 @@ import { openSocket } from "./server.ts";
 
 const REPLIES = new Set([
   "SnapshotChunksHeld",
+  "SnapshotChunkCheckHeld",
+  "SnapshotIndexUpload",
   "SnapshotPackUploads",
   "RestoreDownloads",
   "TurnClaimed",
