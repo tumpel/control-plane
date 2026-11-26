@@ -1,12 +1,13 @@
 import { sql as query } from "drizzle-orm";
 import { durableDb } from "./db/client.ts";
-import { PackListSchema, packListKey } from "./snapshot-manifests.ts";
+import { PackListSchema, packList, packListKey, snapshotDraft } from "./snapshot-manifests.ts";
 
 export const CLEANUP_DELAY_MS = 10 * 60_000;
 export const PACK_GRACE_MS = 60 * 60_000;
 const MARK_BYTES = 1024 * 1024;
 const MARK_INPUTS = 100;
 const SWEEP_PAGE = 1000;
+const PACK_LIST_ENTRY_BYTES = 67;
 
 type Input = { snapshot_id: string; storage_key: string; stored: number };
 
@@ -27,14 +28,26 @@ const inputs = (storage: DurableObjectStorage): Input[] =>
 const held = (storage: DurableObjectStorage, input: Input): boolean =>
   durableDb(storage, {}).get(query`SELECT 1 FROM snapshots WHERE snapshot_id = ${input.snapshot_id}`) !== undefined;
 
+const failedPackList = async (store: R2Bucket, input: Input): Promise<string[]> => {
+  const listed = await packList(store, input.storage_key);
+  if (listed === null) return [];
+  if (listed.kind !== "Read") throw new Error(listed.detail);
+  return [...listed.value];
+};
+
 const mark = async (
   storage: DurableObjectStorage,
   store: R2Bucket,
   marked: Set<string>,
   input: Input,
 ): Promise<number> => {
+  if (input.stored === 0) {
+    const packs = (await snapshotDraft(store, input.storage_key))?.packs ?? (await failedPackList(store, input));
+    for (const packDigest of packs) marked.add(packDigest);
+    return packs.length * PACK_LIST_ENTRY_BYTES;
+  }
   const listed = await store.get(packListKey(input.storage_key));
-  if (listed === null && (input.stored === 0 || !held(storage, input))) return 0;
+  if (listed === null && !held(storage, input)) return 0;
   if (listed === null) throw new Error(`snapshot ${input.storage_key} is stored but has no pack list to mark`);
   for (const packDigest of PackListSchema.parse(JSON.parse(await listed.text()))) marked.add(packDigest);
   return listed.size;
